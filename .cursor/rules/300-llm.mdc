@@ -1,0 +1,16 @@
+---
+description: forge.llm — provider abstraction, tools, structured output, two-axis fallback, registry.
+globs: ["src/forge/llm/**/*.py", "tests/unit/llm/**/*.py", "tests/vcr/**/*.py"]
+alwaysApply: false
+---
+
+- Public surface is `LLMClient` (in `client.py`) plus re-exports in `__init__.py`. Add new capabilities there, not in provider modules.
+- Every provider call routes through LiteLLM via the `ProviderClient` base. **Never import provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) outside `src/forge/llm/providers/`** — the only escape hatch is the `provider_extras={...}` passthrough on `LLMClient.complete`.
+- New errors raised from this module must subclass `ProviderError` (in `forge.core.errors`). Use `map_litellm_exception()` at the seam — never let raw LiteLLM exceptions bubble out.
+- Pricing and registry edits go in `registry_data.yaml` with the source link in a YAML comment. **Never hard-code pricing or model IDs in Python.**
+- Cache key is provider-agnostic: a hit on `claude-opus-4-7` is valid regardless of which provider route served the original call.
+- Streaming responses are NOT cached.
+- Structured output and tool calling can be combined; when both are requested, structured output is exposed as a single forced tool internally for best fidelity across providers.
+- `run_tool_loop` validates tools against the active model's capabilities before any provider call — consult `registry.get(model).capabilities.tool_calling`.
+- Initial registry scope (per ADR): latest OpenAI, Anthropic, Google foundation models only. New vendors require an ADR.
+- Fallback is two-axis: `ModelFallback(model, providers=[...])` failover within (same model, different provider) + the outer list failover across (different model). Content-filter errors short-circuit the entire chain.

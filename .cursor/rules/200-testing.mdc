@@ -1,0 +1,16 @@
+---
+description: Testing discipline — pytest + asyncio + VCR; cassettes-as-contract; coverage thresholds.
+globs: ["tests/**/*.py", "src/forge/**/*.py"]
+alwaysApply: false
+---
+
+- Every new code path gets a test in the same PR.
+- Unit tests (`tests/unit/`) are fast and offline. Default to mocking at the seam (LiteLLM client, fsspec, etc.).
+- Provider-touching tests use VCR cassettes (`tests/vcr/cassettes/`). Recording requires `RECORD=1` plus live keys; CI replays only.
+- VCR cassettes MUST scrub API keys, AWS signatures, GCP tokens via `before_record_request` filter — leaked credentials must be rotated.
+- Live tests (`@pytest.mark.live`) are env-gated and run only nightly. Never on PR.
+- Coverage thresholds enforced in CI: `src/forge/llm/` ≥ 90 %; `src/forge/core/` & `src/forge/config/` ≥ 85 %.
+- No skipped tests without a tracking issue link in the skip reason.
+- Snapshot tests (`syrupy`) for provider schema serializations — failing snapshots are early-warning signals; re-record intentionally, don't suppress.
+- Pytest markers: `live`, `redis`, `slow`, `integration` — declared in `pyproject.toml`. New markers go there.
+- `asyncio_mode = "auto"` — async tests don't need `@pytest.mark.asyncio`.

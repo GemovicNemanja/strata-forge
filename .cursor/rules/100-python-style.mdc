@@ -1,0 +1,16 @@
+---
+description: Python style — ruff, pyright, naming, docstrings, comments.
+globs: ["src/forge/**/*.py", "tests/**/*.py", "examples/**/*.py", "scripts/**/*.py"]
+alwaysApply: false
+---
+
+- Line length 100. `ruff format` is authoritative — do not reformat manually.
+- pyright strict on `src/forge`. `Any` requires `# pyright: ignore[reportXxx]` with a reason in the comment.
+- Names: `snake_case` for functions / variables / modules; `PascalCase` for classes; `SCREAMING_SNAKE` for constants.
+- Pydantic models follow `XxxConfig`, `XxxRequest`, `XxxResponse`, `XxxError` conventions.
+- Imports sorted by ruff isort. First-party is `forge`. Avoid star re-exports without explicit `__all__`.
+- Docstrings: module-level summary mandatory. Public APIs: a one-line summary; multi-line only when the *why* is non-obvious. Long-form docs live in `docs/modules/<name>.md`.
+- Comments are rare — only when *why* is non-obvious. Never describe *what* (names do that already). Never reference current tasks, PRs, or scaffolding metadata in comments.
+- No emojis in source.
+- `from __future__ import annotations` at the top of modules using generics in signatures.
+- HTTP I/O uses `httpx.AsyncClient` (often via LiteLLM). No sync `requests` / `httpx.Client` in production code paths.

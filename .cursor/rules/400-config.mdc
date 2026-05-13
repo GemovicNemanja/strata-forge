@@ -1,0 +1,12 @@
+---
+description: forge.config — Pydantic Settings root + YAML overlays + .env.
+globs: ["src/forge/config/**/*.py", "configs/**", ".env*"]
+alwaysApply: false
+---
+
+- `Settings` (in `forge.config.settings`) is the single source of truth for runtime configuration. **Do not read env vars directly elsewhere** — go through `forge.config.get_settings()`.
+- Provider configs are Pydantic `BaseSettings` subclasses; one per provider, in `forge.llm.providers.config`.
+- Loading order (lowest → highest precedence): defaults → YAML overlay (`configs/<FORGE_PROFILE>.yaml`) → `.env` → process env → in-code override.
+- `forge doctor` validates settings on every run. When adding a new setting, add a doctor check for it (and a row in `.env.example`).
+- Never log a `Settings` instance directly — it contains secrets. Use the redaction helpers.
+- `get_settings()` is cached for the lifetime of the process; `reset_settings()` exists for tests only.

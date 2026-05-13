@@ -1,0 +1,14 @@
+---
+description: Documentation discipline — ADRs, module guides, READMEs, CLAUDE.md, MDC rules.
+globs: ["docs/**/*.md", "**/CLAUDE.md", "**/README.md", "AGENTS.md", ".cursor/rules/**/*.mdc"]
+alwaysApply: false
+---
+
+- Architectural decisions go into `docs/architecture/adr/NNNN-short-slug.md`. Numbered sequentially, **immutable once merged** — supersede via a new ADR that links back to the old one.
+- ADR template: **Context → Decision → Consequences**. Keep under ~200 lines.
+- Every module has a `docs/modules/<name>.md` kept in sync with its public API — update it in the same PR as the API change.
+- Module READMEs describe what the module does/will do in product terms. **Never reference phase / sub-phase numbers** — those live only in `docs/roadmap.md`.
+- The root `CLAUDE.md` is authoritative for cross-cutting rules. Module-level `CLAUDE.md` files are authoritative for module-specific rules. **When a module rule conflicts with root, fix the conflict** before merging.
+- `AGENTS.md` is a symlink to `CLAUDE.md` — do not turn it into a separate file.
+- `.cursor/rules/*.mdc` files mirror specific sections of `CLAUDE.md` with `globs:` for scoped activation. Keep them brief — defer to `CLAUDE.md` for full rationale.
+- See `CLAUDE.md` §7 for the self-maintenance protocol — when a rule drifts from code, propose the update in the same PR.
