@@ -14,6 +14,16 @@ from forge.llm.messages import (
     UserMessage,
     validate_conversation,
 )
+from forge.llm.providers import (
+    AnthropicConfig,
+    AzureConfig,
+    BedrockConfig,
+    OpenAICompatConfig,
+    OpenAIConfig,
+    ProviderClient,
+    ProviderConfig,
+    VertexConfig,
+)
 from forge.llm.registry import (
     Capabilities,
     Modality,
@@ -36,8 +46,11 @@ from forge.llm.responses import (
 from forge.llm.routing import ModelRoute, resolve
 
 __all__ = [
+    "AnthropicConfig",
     "AnyMessage",
     "AssistantMessage",
+    "AzureConfig",
+    "BedrockConfig",
     "Capabilities",
     "ContentPart",
     "FinishReason",
@@ -46,7 +59,11 @@ __all__ = [
     "Modality",
     "Model",
     "ModelRoute",
+    "OpenAICompatConfig",
+    "OpenAIConfig",
     "Pricing",
+    "ProviderClient",
+    "ProviderConfig",
     "ProviderName",
     "ProviderRoute",
     "Registry",
@@ -61,6 +78,7 @@ __all__ = [
     "Usage",
     "UserMessage",
     "Vendor",
+    "VertexConfig",
     "map_litellm_exception",
     "raise_as_provider_error",
     "registry",
