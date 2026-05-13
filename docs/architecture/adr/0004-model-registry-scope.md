@@ -19,7 +19,7 @@ The initial model registry is scoped to the **latest foundation models from Open
 |---|---|---|
 | Anthropic | Claude Opus 4.7, Sonnet 4.6, Haiku 4.5 | `anthropic`, `bedrock`, `vertex` |
 | OpenAI | GPT-5.5, GPT-5.5 Pro, GPT-5.5 Thinking, GPT-5.5 Instant | `openai`, `azure` |
-| Google | Gemini 3.1 Pro, Gemini 3.1 Flash, Gemini 3.1 Flash Lite | `vertex` |
+| Google | Gemini 3.1 Pro, Gemini 3.1 Flash Lite | `vertex` |
 
 The registry data format (`src/forge/llm/registry_data.yaml`) is general — it does not constrain which models can be added. Adding new vendors (Mistral, Cohere, xAI, Meta open-weight via inference providers, etc.) or older variants requires a new ADR justifying the trade-off and updating this one's status to `Superseded by`.
 

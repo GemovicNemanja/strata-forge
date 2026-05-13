@@ -1,0 +1,247 @@
+# Forge model registry — the curated source of truth for what Forge can call.
+#
+# Scope: latest foundation models from Anthropic, OpenAI, and Google (per
+# docs/architecture/adr/0004-model-registry-scope.md). Adding new vendors
+# requires a superseding ADR.
+#
+# Pricing values are in USD per million tokens. Lines with `# TBD verify`
+# are reasonable estimates pending confirmation against the vendor's
+# public pricing page.
+
+models:
+  # =========================================================================
+  # Anthropic Claude 4.x
+  # =========================================================================
+
+  # Source: platform.claude.com/docs/en/about-claude/models/overview (May 2026)
+  - name: claude-opus-4-7
+    vendor: anthropic
+    tier: flagship
+    context_window: 1000000
+    max_output_tokens: 64000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 5.00
+      output: 25.00
+      cache_read: 0.50
+      cache_write: 6.25
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-opus-4-7
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-opus-4-7
+      - provider: vertex
+        provider_model_id: claude-opus-4-7
+    aliases: [opus, opus-4.7]
+
+  - name: claude-sonnet-4-6
+    vendor: anthropic
+    tier: balanced
+    context_window: 1000000
+    max_output_tokens: 64000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 3.00
+      output: 15.00
+      cache_read: 0.30   # TBD verify (10% of input is Anthropic's standard ratio)
+      cache_write: 3.75  # TBD verify
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-sonnet-4-6
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-sonnet-4-6
+      - provider: vertex
+        provider_model_id: claude-sonnet-4-6
+    aliases: [sonnet, sonnet-4.6]
+
+  - name: claude-haiku-4-5
+    vendor: anthropic
+    tier: fast
+    context_window: 200000
+    max_output_tokens: 32000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 1.00
+      output: 5.00
+      cache_read: 0.10   # TBD verify
+      cache_write: 1.25  # TBD verify
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-haiku-4-5
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-haiku-4-5
+      - provider: vertex
+        provider_model_id: claude-haiku-4-5
+    aliases: [haiku, haiku-4.5]
+
+  # =========================================================================
+  # OpenAI GPT-5.5 family
+  # =========================================================================
+
+  # Source: openai.com/api/pricing (May 2026)
+  - name: gpt-5.5
+    vendor: openai
+    tier: flagship
+    context_window: 400000
+    max_output_tokens: 32000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 5.00
+      output: 30.00
+      cache_read: 0.50
+    routes:
+      - provider: openai
+        provider_model_id: gpt-5.5
+        is_default: true
+      - provider: azure
+        provider_model_id: gpt-5.5
+    aliases: [gpt55]
+
+  - name: gpt-5.5-pro
+    vendor: openai
+    tier: reasoning
+    context_window: 400000
+    max_output_tokens: 32000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 30.00
+      output: 180.00
+      cache_read: 3.00   # TBD verify
+    routes:
+      - provider: openai
+        provider_model_id: gpt-5.5-pro
+        is_default: true
+      - provider: azure
+        provider_model_id: gpt-5.5-pro
+    aliases: [gpt55-pro]
+
+  - name: gpt-5.5-thinking
+    vendor: openai
+    tier: reasoning
+    context_window: 400000
+    max_output_tokens: 32000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    # GPT-5.5 Thinking is the thinking-mode variant of standard 5.5; base
+    # token pricing matches standard, thinking tokens bill at the output rate.
+    pricing_per_million_tokens:
+      input: 5.00
+      output: 30.00
+      cache_read: 0.50
+    routes:
+      - provider: openai
+        provider_model_id: gpt-5.5-thinking
+        is_default: true
+      - provider: azure
+        provider_model_id: gpt-5.5-thinking
+    aliases: [gpt55-thinking]
+
+  - name: gpt-5.5-instant
+    vendor: openai
+    tier: fast
+    context_window: 128000
+    max_output_tokens: 16000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 1.25   # TBD verify
+      output: 10.00 # TBD verify
+      cache_read: 0.125  # TBD verify
+    routes:
+      - provider: openai
+        provider_model_id: gpt-5.5-instant
+        is_default: true
+      - provider: azure
+        provider_model_id: gpt-5.5-instant
+    aliases: [gpt55-instant]
+
+  # =========================================================================
+  # Google Gemini 3.1 family
+  # =========================================================================
+
+  # Source: cloud.google.com/vertex-ai/generative-ai/pricing (May 2026)
+  - name: gemini-3.1-pro
+    vendor: google
+    tier: flagship
+    context_window: 2000000
+    max_output_tokens: 8192
+    modalities: [text, image, audio]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 2.00
+      output: 12.00
+      cache_read: 0.20
+    routes:
+      - provider: vertex
+        provider_model_id: gemini-3.1-pro
+        is_default: true
+    aliases: [gemini-pro, gemini-3-pro]
+
+  - name: gemini-3.1-flash-lite
+    vendor: google
+    tier: fast
+    context_window: 1000000
+    max_output_tokens: 8192
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: false
+    pricing_per_million_tokens:
+      input: 0.10   # TBD verify
+      output: 1.00  # TBD verify
+    routes:
+      - provider: vertex
+        provider_model_id: gemini-3.1-flash-lite
+        is_default: true
+    aliases: [gemini-flash-lite]
