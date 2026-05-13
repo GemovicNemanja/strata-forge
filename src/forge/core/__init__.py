@@ -23,6 +23,7 @@ from forge.core.ids import (
     set_correlation_id,
     uuid7,
 )
+from forge.core.logging import configure_logging, get_logger, traced_span
 from forge.core.retry import DEFAULT_RETRY_ON, retry
 
 __all__ = [
@@ -41,10 +42,13 @@ __all__ = [
     "ProviderTimeoutError",
     "RegistryError",
     "ValidationError",
+    "configure_logging",
     "correlation_id_var",
     "get_correlation_id",
+    "get_logger",
     "new_correlation_id",
     "retry",
     "set_correlation_id",
+    "traced_span",
     "uuid7",
 ]

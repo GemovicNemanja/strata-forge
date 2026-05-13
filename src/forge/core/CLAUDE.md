@@ -18,18 +18,18 @@ Cross-cutting concerns that every module needs: exception hierarchy, retry decor
 The module's `__init__.py` re-exports a curated surface. Treat the following as the supported public API; anything not in `__init__.py` is internal.
 
 - Exception types from `errors.py`: `ForgeError`, `ConfigError`, `ProviderError` + subclasses, `BudgetExceededError`, `ValidationError`, `CacheError`, `RegistryError`, `FallbackExhaustedError`.
-- `@retry` decorator from `retry.py` (async + sync variants).
-- `get_logger`, `bind_trace_id`, `traced_span` from `logging.py`.
+- `@retry` decorator and `DEFAULT_RETRY_ON` from `retry.py` (works for async + sync).
+- `configure_logging`, `get_logger`, `traced_span` from `logging.py`.
 - `BudgetContext` from `budget.py`.
 - `set_seed`, `content_hash`, `env_snapshot` from `repro.py`.
-- `uuid7`, `correlation_id` from `ids.py`.
+- `uuid7`, `new_correlation_id`, `get_correlation_id`, `set_correlation_id`, `correlation_id_var` from `ids.py`.
 - Shared type aliases from `types.py` (e.g. `JSONValue`, `PathLike`).
 
 ## Internal patterns
 
 - Exception classes have no fancy `__init__` — they accept a message and optional structured data (e.g. `ProviderError(message, route=..., status=...)`).
 - `@retry` is tenacity-based; default policy is exponential backoff with jitter; predicates select on `ProviderError` subclasses. The decorator works for both async and sync callables.
-- structlog setup: pretty renderer when stdout is a TTY, JSON renderer otherwise. `trace_id` is a `ContextVar[str | None]` — propagates across `await` without explicit passing.
+- structlog setup: pretty renderer when stdout is a TTY, JSON renderer otherwise. `correlation_id` is a `ContextVar[str | None]` in `ids.py` — `logging.py`'s `_add_correlation_id` processor injects it into every record; it propagates across `await` without explicit passing.
 - `BudgetContext` is an async context manager. Nested budgets share the parent's accumulated spend unless `isolated=True`.
 - `content_hash` hashes a JSON-canonical form (sorted keys, no whitespace) to remain stable across logically-equivalent inputs.
 - `env_snapshot` captures: installed package versions, git SHA (if in a repo), Python version, OS info. Lazy imports for `numpy` / `torch` versions when present.
