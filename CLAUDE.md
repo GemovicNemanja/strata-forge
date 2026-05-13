@@ -152,11 +152,49 @@ Agents that silently ignore stale rules are worse than agents that don't read th
 
 ## 8. Commit and PR conventions
 
-- **Conventional commits** for the subject: `feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`, `ci:`, `perf:`, `build:`. Single line, lowercase, imperative, under 70 chars.
-- **Commit messages describe changes in time-stable terms.** They MUST NOT reference phase / sub-phase numbers, step numbers, or scaffolding metadata — those exist only during construction and become meaningless afterward. Keep the construction process out of the long-term git log.
-- One commit per cohesive unit of work.
-- PR titles follow the same conventional-commit rules as the subject line. PR body has `## Summary`, `## Why`, `## Test plan`.
-- Never `--no-verify`. Never `--force-push` to `main`. Never `--amend` a commit that's been pushed somewhere shared.
+### Conventional Commits — required
+
+Every commit subject MUST follow the Conventional Commits format:
+
+```
+<type>(<optional-scope>): <imperative summary>
+```
+
+The subject is a single line, lowercase, imperative, under 70 characters. `<type>` is one of the values below — anything else is rejected at review.
+
+| Type | Use when… | Example |
+|---|---|---|
+| `feat` | a user-visible feature is added | `feat(llm): add structured-output reprompt fallback` |
+| `fix` | a bug in existing behavior is corrected | `fix(cache): handle Redis timeout without crashing` |
+| `docs` | only documentation changes (READMEs, ADRs, CLAUDE.md, module guides, docstrings) | `docs(rag): document the BM25 retriever options` |
+| `style` | whitespace, formatting, missing semicolons, no code change | `style: apply ruff format to recent edits` |
+| `refactor` | code change that neither fixes a bug nor adds a feature | `refactor(llm): split client.py into client + tool_loop` |
+| `perf` | a measurable performance improvement | `perf(tokens): cache tiktoken encoders across calls` |
+| `test` | adding or correcting tests; no production code change | `test(fallback): cover content-filter short-circuit` |
+| `build` | changes to packaging, dependencies, build backend | `build: bump pydantic to >=2.11` |
+| `ci` | changes to CI configuration or workflows | `ci: add nightly cassette-refresh job` |
+| `chore` | routine housekeeping: tooling, configs, releases, repo plumbing — anything not in the categories above | `chore: prune unused make targets` |
+| `revert` | undo a previous commit; reference the original in the body | `revert: feat(llm) — add structured-output reprompt fallback` |
+
+### Scope (optional)
+
+Use a parenthesized scope when the change is local to one module — usually the module name (`core`, `config`, `llm`, `prompts`, `evals`, `agents`, `rag`, `storage`, `compute`, `training`, `cli`) or a focused sub-area inside it. Omit the scope only when the change spans the whole repo (root tooling, multi-module refactors, cross-cutting docs).
+
+### Body and footer
+
+- Body (optional): wrapped at ~72 chars, explains the *why* and any non-obvious *how*. Bullet points are fine.
+- Reference issues / PRs in a trailer line (`Closes #123`, `Refs PR-456`).
+- Breaking changes go in a `BREAKING CHANGE:` trailer or use the `!` marker (`feat(llm)!: replace LLMClient.complete signature`).
+
+### Time-stable language
+
+**Commit messages describe changes in time-stable terms.** They MUST NOT reference phase numbers, sub-phase numbers, step numbers, plan-file slugs, or any other scaffolding metadata — those exist only during construction and become meaningless afterward. Keep the construction process out of the long-term git log. The same rule applies to PR titles, branch names, and any other long-lived artifact.
+
+### Other rules
+
+- One commit per cohesive unit of work — never bundle unrelated changes for convenience.
+- PR titles follow the same Conventional Commits format as the subject line. PR body has `## Summary`, `## Why`, `## Test plan`.
+- Never `--no-verify`. Never `--force-push` to `main`. Never `--amend` a commit that has been pushed somewhere shared.
 
 ---
 
