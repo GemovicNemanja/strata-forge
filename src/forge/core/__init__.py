@@ -1,5 +1,6 @@
 """Cross-cutting utilities: errors, retry, logging, budget, repro, ids."""
 
+from forge.core.budget import BudgetContext, current_budget
 from forge.core.errors import (
     BudgetExceededError,
     CacheError,
@@ -28,6 +29,7 @@ from forge.core.retry import DEFAULT_RETRY_ON, retry
 
 __all__ = [
     "DEFAULT_RETRY_ON",
+    "BudgetContext",
     "BudgetExceededError",
     "CacheError",
     "ConfigError",
@@ -44,6 +46,7 @@ __all__ = [
     "ValidationError",
     "configure_logging",
     "correlation_id_var",
+    "current_budget",
     "get_correlation_id",
     "get_logger",
     "new_correlation_id",
