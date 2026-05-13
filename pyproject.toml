@@ -120,7 +120,10 @@ known-first-party = ["forge"]
 [tool.pyright]
 include = ["src", "tests"]
 exclude = ["**/__pycache__", ".venv", "build", "dist"]
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.14"
+pythonPlatform = "All"
 typeCheckingMode = "strict"
 strict = ["src/forge"]
 reportMissingTypeStubs = "warning"
