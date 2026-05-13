@@ -160,3 +160,6 @@ exclude_lines = [
     "@(abc\\.)?abstractmethod",
 ]
 show_missing = true
+# Minimum overall line coverage. Per-module thresholds (e.g. llm/ >= 90%) are
+# enforced inside the suite where appropriate.
+fail_under = 85
