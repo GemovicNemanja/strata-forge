@@ -1,0 +1,54 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Caches ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.hypothesis/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- IDE / editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Project ---
+.env
+.env.local
+.env.*.local
+configs/local.yaml
+configs/*.local.yaml
+forge-diagnostic*.ndjson
+*.log
+
+# --- Notebooks (Marimo handles state in-source; ignore exports) ---
+notebooks/*.html
+notebooks/exports/

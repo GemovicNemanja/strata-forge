@@ -1,0 +1,159 @@
+[project]
+name = "ai-forge"
+version = "0.0.1"
+description = "Typed, async-first baseline for AI/LLM experiments across major foundation-model providers."
+requires-python = ">=3.14"
+readme = "README.md"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Nemanja Gemovic", email = "nemanja.gemovic@wonder.so" },
+]
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    "litellm>=1.55",
+    "structlog>=24.4",
+    "tenacity>=9.0",
+    "typer>=0.15",
+    "anyio>=4.6",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "rich>=13.9",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.2"]
+multimodal = ["pillow>=11.0"]
+inspect = ["inspect-ai>=0.3"]
+compute = ["skypilot>=0.7", "asyncssh>=2.18"]
+serving = ["vllm>=0.7"]
+finetuning = [
+    "torch>=2.5",
+    "transformers>=4.46",
+    "trl>=0.13",
+    "peft>=0.13",
+    "datasets>=3.1",
+    "accelerate>=1.1",
+]
+all = [
+    "ai-forge[redis,multimodal,inspect,compute,serving,finetuning]",
+]
+
+[project.scripts]
+forge = "forge.cli.main:app"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forge"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "pytest-recording>=0.13",
+    "hypothesis>=6.115",
+    "syrupy>=4.7",
+    "respx>=0.21",
+    "pre-commit>=4.0",
+]
+
+# ----------------------------- ruff -----------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",  # pycodestyle, pyflakes
+    "I",            # isort
+    "N",            # pep8-naming
+    "UP",           # pyupgrade
+    "B",            # bugbear
+    "A",            # builtin-shadowing
+    "C4",           # comprehensions
+    "PIE",          # misc
+    "SIM",          # simplify
+    "RUF",          # ruff-specific
+    "ASYNC",        # async
+    "S",            # bandit
+    "PT",           # pytest
+    "TID",          # tidy imports
+    "TCH",          # type-checking blocks
+    "PTH",          # use pathlib
+    "ERA",          # eradicate dead code
+]
+ignore = [
+    "E501",  # line length is handled by `ruff format`
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "PT004", "S105", "S106"]
+"examples/**/*.py" = ["S101", "T201"]
+"scripts/**/*.py" = ["S101", "T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["forge"]
+
+# ----------------------------- pyright -----------------------------
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["**/__pycache__", ".venv", "build", "dist"]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+strict = ["src/forge"]
+reportMissingTypeStubs = "warning"
+reportUnknownMemberType = "warning"
+reportUnknownVariableType = "warning"
+reportUnknownArgumentType = "warning"
+
+# ----------------------------- pytest -----------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "live: requires live API keys (skipped by default)",
+    "redis: requires a running Redis instance",
+    "slow: long-running test",
+    "integration: requires the local Docker stack",
+]
+
+# ----------------------------- coverage -----------------------------
+[tool.coverage.run]
+source = ["src/forge"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]
+show_missing = true
