@@ -1,0 +1,47 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # 06:00 UTC daily
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    if: false  # wired in when integration tests + docker stack land
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "integration tests not yet wired"
+
+  eval-gate:
+    name: Eval regression gate
+    runs-on: ubuntu-latest
+    if: false  # wired in alongside forge.evals
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "eval gate not yet wired"
+
+  cassette-refresh:
+    name: VCR cassette refresh
+    runs-on: ubuntu-latest
+    if: false  # wired in when VCR cassettes exist
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "cassette refresh not yet wired"
+
+  security-audit:
+    name: Security audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: Run pip-audit
+        run: uvx pip-audit --strict || true
