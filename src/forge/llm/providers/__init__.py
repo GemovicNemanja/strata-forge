@@ -17,6 +17,7 @@ from forge.llm.providers.config import (
     ProviderConfig,
     VertexConfig,
 )
+from forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
 
 __all__ = [
     "AnthropicConfig",
@@ -24,7 +25,9 @@ __all__ = [
     "BedrockConfig",
     "OpenAICompatConfig",
     "OpenAIConfig",
+    "OpenAIProvider",
     "ProviderClient",
     "ProviderConfig",
     "VertexConfig",
+    "to_openai_tool_schema",
 ]

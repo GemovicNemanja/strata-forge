@@ -20,9 +20,11 @@ from forge.llm.providers import (
     BedrockConfig,
     OpenAICompatConfig,
     OpenAIConfig,
+    OpenAIProvider,
     ProviderClient,
     ProviderConfig,
     VertexConfig,
+    to_openai_tool_schema,
 )
 from forge.llm.registry import (
     Capabilities,
@@ -61,6 +63,7 @@ __all__ = [
     "ModelRoute",
     "OpenAICompatConfig",
     "OpenAIConfig",
+    "OpenAIProvider",
     "Pricing",
     "ProviderClient",
     "ProviderConfig",
@@ -83,5 +86,6 @@ __all__ = [
     "raise_as_provider_error",
     "registry",
     "resolve",
+    "to_openai_tool_schema",
     "validate_conversation",
 ]
