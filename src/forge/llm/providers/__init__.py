@@ -19,6 +19,7 @@ from forge.llm.providers.config import (
     VertexConfig,
 )
 from forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
+from forge.llm.providers.vertex import VertexProvider, to_gemini_tool_schema
 
 __all__ = [
     "AnthropicConfig",
@@ -31,6 +32,8 @@ __all__ = [
     "ProviderClient",
     "ProviderConfig",
     "VertexConfig",
+    "VertexProvider",
     "to_anthropic_tool_schema",
+    "to_gemini_tool_schema",
     "to_openai_tool_schema",
 ]

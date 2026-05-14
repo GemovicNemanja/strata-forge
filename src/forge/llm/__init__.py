@@ -25,7 +25,9 @@ from forge.llm.providers import (
     ProviderClient,
     ProviderConfig,
     VertexConfig,
+    VertexProvider,
     to_anthropic_tool_schema,
+    to_gemini_tool_schema,
     to_openai_tool_schema,
 )
 from forge.llm.registry import (
@@ -85,11 +87,13 @@ __all__ = [
     "UserMessage",
     "Vendor",
     "VertexConfig",
+    "VertexProvider",
     "map_litellm_exception",
     "raise_as_provider_error",
     "registry",
     "resolve",
     "to_anthropic_tool_schema",
+    "to_gemini_tool_schema",
     "to_openai_tool_schema",
     "validate_conversation",
 ]
