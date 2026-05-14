@@ -8,6 +8,7 @@ from environment variables.
 """
 
 from forge.llm.providers.anthropic import AnthropicProvider, to_anthropic_tool_schema
+from forge.llm.providers.azure import AzureProvider
 from forge.llm.providers.base import ProviderClient
 from forge.llm.providers.bedrock import BedrockProvider
 from forge.llm.providers.config import (
@@ -26,6 +27,7 @@ __all__ = [
     "AnthropicConfig",
     "AnthropicProvider",
     "AzureConfig",
+    "AzureProvider",
     "BedrockConfig",
     "BedrockProvider",
     "OpenAICompatConfig",
