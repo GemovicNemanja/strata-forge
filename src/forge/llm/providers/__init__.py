@@ -7,6 +7,7 @@ class lives in ``base.py``; the configs live in ``config.py`` and are read
 from environment variables.
 """
 
+from forge.llm.providers.anthropic import AnthropicProvider, to_anthropic_tool_schema
 from forge.llm.providers.base import ProviderClient
 from forge.llm.providers.config import (
     AnthropicConfig,
@@ -21,6 +22,7 @@ from forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
 
 __all__ = [
     "AnthropicConfig",
+    "AnthropicProvider",
     "AzureConfig",
     "BedrockConfig",
     "OpenAICompatConfig",
@@ -29,5 +31,6 @@ __all__ = [
     "ProviderClient",
     "ProviderConfig",
     "VertexConfig",
+    "to_anthropic_tool_schema",
     "to_openai_tool_schema",
 ]

@@ -16,6 +16,7 @@ from forge.llm.messages import (
 )
 from forge.llm.providers import (
     AnthropicConfig,
+    AnthropicProvider,
     AzureConfig,
     BedrockConfig,
     OpenAICompatConfig,
@@ -24,6 +25,7 @@ from forge.llm.providers import (
     ProviderClient,
     ProviderConfig,
     VertexConfig,
+    to_anthropic_tool_schema,
     to_openai_tool_schema,
 )
 from forge.llm.registry import (
@@ -49,6 +51,7 @@ from forge.llm.routing import ModelRoute, resolve
 
 __all__ = [
     "AnthropicConfig",
+    "AnthropicProvider",
     "AnyMessage",
     "AssistantMessage",
     "AzureConfig",
@@ -86,6 +89,7 @@ __all__ = [
     "raise_as_provider_error",
     "registry",
     "resolve",
+    "to_anthropic_tool_schema",
     "to_openai_tool_schema",
     "validate_conversation",
 ]
