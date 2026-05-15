@@ -57,6 +57,7 @@ from forge.llm.responses import (
 from forge.llm.routing import ModelRoute, resolve
 from forge.llm.streaming import JSONAccumulator, accumulate_text, accumulate_tool_calls
 from forge.llm.tokens import count_tokens
+from forge.llm.tools import Tool, ToolFunc, ToolLoopExceededError, tool
 
 __all__ = [
     "AnthropicConfig",
@@ -92,8 +93,11 @@ __all__ = [
     "SystemMessage",
     "TextPart",
     "Tier",
+    "Tool",
     "ToolCall",
     "ToolCallDelta",
+    "ToolFunc",
+    "ToolLoopExceededError",
     "ToolResultMessage",
     "Usage",
     "UserMessage",
@@ -112,5 +116,6 @@ __all__ = [
     "to_anthropic_tool_schema",
     "to_gemini_tool_schema",
     "to_openai_tool_schema",
+    "tool",
     "validate_conversation",
 ]
