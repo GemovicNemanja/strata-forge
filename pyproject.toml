@@ -72,6 +72,10 @@ dev = [
     "syrupy>=4.7",
     "respx>=0.21",
     "pre-commit>=4.0",
+    # Optional runtime extras pulled into dev so unit tests can exercise
+    # multimodal helpers, the Redis cache backend, etc. without forcing
+    # users to install them in production.
+    "pillow>=11.0",
 ]
 
 # ----------------------------- ruff -----------------------------

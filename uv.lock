@@ -84,6 +84,7 @@ serving = [
 [package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
+    { name = "pillow" },
     { name = "pre-commit" },
     { name = "pyright" },
     { name = "pytest" },
@@ -126,6 +127,7 @@ provides-extras = ["redis", "multimodal", "inspect", "compute", "serving", "fine
 [package.metadata.requires-dev]
 dev = [
     { name = "hypothesis", specifier = ">=6.115" },
+    { name = "pillow", specifier = ">=11.0" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8.3" },

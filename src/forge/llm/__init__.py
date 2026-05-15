@@ -15,6 +15,7 @@ from forge.llm.messages import (
     UserMessage,
     validate_conversation,
 )
+from forge.llm.multimodal import ImageContent, downscale_image
 from forge.llm.providers import (
     AnthropicConfig,
     AnthropicProvider,
@@ -68,6 +69,7 @@ __all__ = [
     "Capabilities",
     "ContentPart",
     "FinishReason",
+    "ImageContent",
     "LLMResponse",
     "Message",
     "Modality",
@@ -98,6 +100,7 @@ __all__ = [
     "VertexProvider",
     "compute_cost",
     "count_tokens",
+    "downscale_image",
     "map_litellm_exception",
     "raise_as_provider_error",
     "registry",
