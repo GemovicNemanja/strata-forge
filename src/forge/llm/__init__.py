@@ -55,6 +55,15 @@ from forge.llm.responses import (
     Usage,
 )
 from forge.llm.routing import ModelRoute, resolve
+from forge.llm.schemas import (
+    StructuredOutputError,
+    make_reprompt_instruction,
+    parse_json_response,
+    pydantic_to_json_schema,
+    to_anthropic_forced_tool_schema,
+    to_gemini_response_schema,
+    to_openai_response_format,
+)
 from forge.llm.streaming import JSONAccumulator, accumulate_text, accumulate_tool_calls
 from forge.llm.tokens import count_tokens
 from forge.llm.tools import Tool, ToolFunc, ToolLoopExceededError, tool
@@ -90,6 +99,7 @@ __all__ = [
     "Registry",
     "ResponseChunk",
     "Role",
+    "StructuredOutputError",
     "SystemMessage",
     "TextPart",
     "Tier",
@@ -109,12 +119,18 @@ __all__ = [
     "compute_cost",
     "count_tokens",
     "downscale_image",
+    "make_reprompt_instruction",
     "map_litellm_exception",
+    "parse_json_response",
+    "pydantic_to_json_schema",
     "raise_as_provider_error",
     "registry",
     "resolve",
+    "to_anthropic_forced_tool_schema",
     "to_anthropic_tool_schema",
+    "to_gemini_response_schema",
     "to_gemini_tool_schema",
+    "to_openai_response_format",
     "to_openai_tool_schema",
     "tool",
     "validate_conversation",
