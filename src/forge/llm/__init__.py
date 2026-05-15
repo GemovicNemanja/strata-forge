@@ -2,6 +2,12 @@
 
 from forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
 from forge.llm.cost import compute_cost
+from forge.llm.diagnostic import (
+    DiagnosticRecord,
+    make_error_field,
+    utcnow_iso,
+    write_diagnostic_record,
+)
 from forge.llm.errors import map_litellm_exception, raise_as_provider_error
 from forge.llm.fallback import (
     FallbackEntry,
@@ -87,6 +93,7 @@ __all__ = [
     "CacheBackend",
     "Capabilities",
     "ContentPart",
+    "DiagnosticRecord",
     "FallbackEntry",
     "FinishReason",
     "ImageContent",
@@ -132,6 +139,7 @@ __all__ = [
     "compute_cost",
     "count_tokens",
     "downscale_image",
+    "make_error_field",
     "make_reprompt_instruction",
     "map_litellm_exception",
     "normalize_fallback_chain",
@@ -148,5 +156,7 @@ __all__ = [
     "to_openai_response_format",
     "to_openai_tool_schema",
     "tool",
+    "utcnow_iso",
     "validate_conversation",
+    "write_diagnostic_record",
 ]
