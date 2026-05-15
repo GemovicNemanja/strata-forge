@@ -55,6 +55,7 @@ from forge.llm.responses import (
     Usage,
 )
 from forge.llm.routing import ModelRoute, resolve
+from forge.llm.streaming import JSONAccumulator, accumulate_text, accumulate_tool_calls
 from forge.llm.tokens import count_tokens
 
 __all__ = [
@@ -70,6 +71,7 @@ __all__ = [
     "ContentPart",
     "FinishReason",
     "ImageContent",
+    "JSONAccumulator",
     "LLMResponse",
     "Message",
     "Modality",
@@ -98,6 +100,8 @@ __all__ = [
     "Vendor",
     "VertexConfig",
     "VertexProvider",
+    "accumulate_text",
+    "accumulate_tool_calls",
     "compute_cost",
     "count_tokens",
     "downscale_image",
