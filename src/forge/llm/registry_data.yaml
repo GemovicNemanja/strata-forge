@@ -56,8 +56,8 @@ models:
     pricing_per_million_tokens:
       input: 3.00
       output: 15.00
-      cache_read: 0.30   # TBD verify (10% of input is Anthropic's standard ratio)
-      cache_write: 3.75  # TBD verify
+      cache_read: 0.30
+      cache_write: 3.75
     routes:
       - provider: anthropic
         provider_model_id: claude-sonnet-4-6
@@ -83,8 +83,8 @@ models:
     pricing_per_million_tokens:
       input: 1.00
       output: 5.00
-      cache_read: 0.10   # TBD verify
-      cache_write: 1.25  # TBD verify
+      cache_read: 0.10
+      cache_write: 1.25
     routes:
       - provider: anthropic
         provider_model_id: claude-haiku-4-5
@@ -139,7 +139,6 @@ models:
     pricing_per_million_tokens:
       input: 30.00
       output: 180.00
-      cache_read: 3.00   # TBD verify
     routes:
       - provider: openai
         provider_model_id: gpt-5.5-pro
