@@ -1,5 +1,6 @@
 """Provider-abstracted async LLM client with tools, structured output, and fallback."""
 
+from forge.llm.cost import compute_cost
 from forge.llm.errors import map_litellm_exception, raise_as_provider_error
 from forge.llm.messages import (
     AnyMessage,
@@ -53,6 +54,7 @@ from forge.llm.responses import (
     Usage,
 )
 from forge.llm.routing import ModelRoute, resolve
+from forge.llm.tokens import count_tokens
 
 __all__ = [
     "AnthropicConfig",
@@ -94,6 +96,8 @@ __all__ = [
     "Vendor",
     "VertexConfig",
     "VertexProvider",
+    "compute_cost",
+    "count_tokens",
     "map_litellm_exception",
     "raise_as_provider_error",
     "registry",
