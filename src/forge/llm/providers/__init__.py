@@ -21,6 +21,7 @@ from forge.llm.providers.config import (
     VertexConfig,
 )
 from forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
+from forge.llm.providers.openai_compat import OpenAICompatProvider
 from forge.llm.providers.vertex import VertexProvider, to_gemini_tool_schema
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "BedrockConfig",
     "BedrockProvider",
     "OpenAICompatConfig",
+    "OpenAICompatProvider",
     "OpenAIConfig",
     "OpenAIProvider",
     "ProviderClient",
