@@ -1,5 +1,6 @@
 """Provider-abstracted async LLM client with tools, structured output, and fallback."""
 
+from forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
 from forge.llm.cost import compute_cost
 from forge.llm.errors import map_litellm_exception, raise_as_provider_error
 from forge.llm.messages import (
@@ -77,10 +78,12 @@ __all__ = [
     "AzureProvider",
     "BedrockConfig",
     "BedrockProvider",
+    "CacheBackend",
     "Capabilities",
     "ContentPart",
     "FinishReason",
     "ImageContent",
+    "InMemoryCache",
     "JSONAccumulator",
     "LLMResponse",
     "Message",
@@ -96,6 +99,7 @@ __all__ = [
     "ProviderConfig",
     "ProviderName",
     "ProviderRoute",
+    "RedisCache",
     "Registry",
     "ResponseChunk",
     "Role",
@@ -116,6 +120,7 @@ __all__ = [
     "VertexProvider",
     "accumulate_text",
     "accumulate_tool_calls",
+    "cache_key",
     "compute_cost",
     "count_tokens",
     "downscale_image",
