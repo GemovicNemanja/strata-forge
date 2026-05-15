@@ -3,6 +3,12 @@
 from forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
 from forge.llm.cost import compute_cost
 from forge.llm.errors import map_litellm_exception, raise_as_provider_error
+from forge.llm.fallback import (
+    FallbackEntry,
+    ModelFallback,
+    normalize_fallback_chain,
+    run_with_fallback,
+)
 from forge.llm.messages import (
     AnyMessage,
     AssistantMessage,
@@ -81,6 +87,7 @@ __all__ = [
     "CacheBackend",
     "Capabilities",
     "ContentPart",
+    "FallbackEntry",
     "FinishReason",
     "ImageContent",
     "InMemoryCache",
@@ -89,6 +96,7 @@ __all__ = [
     "Message",
     "Modality",
     "Model",
+    "ModelFallback",
     "ModelRoute",
     "OpenAICompatConfig",
     "OpenAICompatProvider",
@@ -126,11 +134,13 @@ __all__ = [
     "downscale_image",
     "make_reprompt_instruction",
     "map_litellm_exception",
+    "normalize_fallback_chain",
     "parse_json_response",
     "pydantic_to_json_schema",
     "raise_as_provider_error",
     "registry",
     "resolve",
+    "run_with_fallback",
     "to_anthropic_forced_tool_schema",
     "to_anthropic_tool_schema",
     "to_gemini_response_schema",
