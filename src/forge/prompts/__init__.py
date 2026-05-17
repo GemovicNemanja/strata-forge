@@ -12,6 +12,7 @@ from forge.prompts.registry import (
     PromptRegistry,
     PromptStore,
 )
+from forge.prompts.stores.langfuse import LangfusePromptStore
 from forge.prompts.stores.memory import InMemoryPromptStore
 from forge.prompts.template import (
     SAFE_FILTERS,
@@ -30,6 +31,7 @@ __all__ = [
     "SAFE_FILTERS",
     "CacheHints",
     "InMemoryPromptStore",
+    "LangfusePromptStore",
     "PromptError",
     "PromptNotFoundError",
     "PromptRegistry",

@@ -34,6 +34,7 @@ dependencies = [
 redis = ["redis>=5.2"]
 multimodal = ["pillow>=11.0"]
 inspect = ["inspect-ai>=0.3"]
+langfuse = ["langfuse>=2.50"]
 compute = ["skypilot>=0.7", "asyncssh>=2.18"]
 serving = ["vllm>=0.7"]
 finetuning = [
@@ -45,7 +46,7 @@ finetuning = [
     "accelerate>=1.1",
 ]
 all = [
-    "ai-forge[redis,multimodal,inspect,compute,serving,finetuning]",
+    "ai-forge[redis,multimodal,inspect,compute,serving,finetuning,langfuse]",
 ]
 
 [project.scripts]
