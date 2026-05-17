@@ -1,6 +1,7 @@
 """Provider-abstracted async LLM client with tools, structured output, and fallback."""
 
 from forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
+from forge.llm.client import LLMClient, StructuredResponse
 from forge.llm.cost import compute_cost
 from forge.llm.diagnostic import (
     DiagnosticRecord,
@@ -99,6 +100,7 @@ __all__ = [
     "ImageContent",
     "InMemoryCache",
     "JSONAccumulator",
+    "LLMClient",
     "LLMResponse",
     "Message",
     "Modality",
@@ -119,6 +121,7 @@ __all__ = [
     "ResponseChunk",
     "Role",
     "StructuredOutputError",
+    "StructuredResponse",
     "SystemMessage",
     "TextPart",
     "Tier",
