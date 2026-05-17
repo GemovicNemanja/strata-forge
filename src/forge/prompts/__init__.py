@@ -14,6 +14,10 @@ from forge.prompts.template import (
     PromptValidationError,
     create_sandboxed_environment,
 )
+from forge.prompts.variables import (
+    extract_variables,
+    validate_template_variables,
+)
 
 __all__ = [
     "DEFAULT_MIN_CACHEABLE_TOKENS",
@@ -25,5 +29,7 @@ __all__ = [
     "StableDynamicSplit",
     "create_sandboxed_environment",
     "emit_cache_hints",
+    "extract_variables",
     "is_stable_too_short",
+    "validate_template_variables",
 ]
