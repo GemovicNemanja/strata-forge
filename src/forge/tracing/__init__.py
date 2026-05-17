@@ -11,14 +11,18 @@ from forge.tracing.litellm_callback import (
     install_litellm_callback,
     is_litellm_callback_installed,
 )
+from forge.tracing.score import ScoreValue, score_observation, score_trace
 from forge.tracing.span import traced_span
 
 __all__ = [
     "LITELLM_CALLBACK_NAME",
+    "ScoreValue",
     "get_client",
     "install_litellm_callback",
     "is_litellm_callback_installed",
     "reset_client",
+    "score_observation",
+    "score_trace",
     "traced",
     "traced_span",
 ]
