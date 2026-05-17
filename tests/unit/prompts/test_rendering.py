@@ -115,9 +115,7 @@ class TestEmptySections:
 
     def test_simple_shorthand_renders_user_only(self) -> None:
         # `PromptTemplate.simple` produces a dynamic-only template.
-        template = PromptTemplate.simple(
-            "q", "What is {{ topic }}?", variables=("topic",)
-        )
+        template = PromptTemplate.simple("q", "What is {{ topic }}?", variables=("topic",))
         result = render(template, {"topic": "entropy"})
         assert len(result.messages) == 1
         assert isinstance(result.messages[0], UserMessage)

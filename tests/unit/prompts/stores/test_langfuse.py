@@ -175,9 +175,7 @@ class TestGet:
 
     async def test_get_malformed_body_raises_forge_error(self) -> None:
         client = MagicMock()
-        client.get_prompt.return_value = _fake_prompt(
-            name="x", body="this is not JSON"
-        )
+        client.get_prompt.return_value = _fake_prompt(name="x", body="this is not JSON")
         store = LangfusePromptStore(client=client)
 
         with pytest.raises(ForgeError, match="not the JSON format"):

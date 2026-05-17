@@ -153,9 +153,7 @@ class TestRegistryPut:
     async def test_returns_store_assigned_version(self) -> None:
         store = _mock_store(put="42")
         registry = PromptRegistry(store)
-        version = await registry.put(
-            PromptTemplate(name="x", stable_section=_LONG_STABLE)
-        )
+        version = await registry.put(PromptTemplate(name="x", stable_section=_LONG_STABLE))
         assert version == "42"
 
     async def test_invalid_template_rejected_before_store_call(self) -> None:
@@ -200,8 +198,7 @@ def _warning_logs(
     return [
         r
         for r in records
-        if r.get("log_level") == "warning"
-        and r.get("event") == "prompt.stable_section_too_short"
+        if r.get("log_level") == "warning" and r.get("event") == "prompt.stable_section_too_short"
     ]
 
 
@@ -229,9 +226,7 @@ class TestRegistryLint:
         registry = PromptRegistry(store)
 
         with capture_logs() as records:
-            await registry.put(
-                PromptTemplate(name="long", stable_section=_LONG_STABLE)
-            )
+            await registry.put(PromptTemplate(name="long", stable_section=_LONG_STABLE))
         assert _warning_logs(records) == []
 
     async def test_no_warning_for_simple_shorthand(self) -> None:
@@ -242,8 +237,6 @@ class TestRegistryLint:
 
         with capture_logs() as records:
             await registry.put(
-                PromptTemplate.simple(
-                    "q", "What is {{ topic }}?", variables=("topic",)
-                )
+                PromptTemplate.simple("q", "What is {{ topic }}?", variables=("topic",))
             )
         assert _warning_logs(records) == []

@@ -117,7 +117,9 @@ class TestValidateViolations:
             stable_variables=("x",),
             dynamic_variables=("x",),
         )
-        with pytest.raises(PromptValidationError, match="both stable_variables and dynamic_variables"):
+        with pytest.raises(
+            PromptValidationError, match="both stable_variables and dynamic_variables"
+        ):
             validate_template_variables(t)
 
     def test_undeclared_in_stable_rejected(self) -> None:
@@ -161,7 +163,9 @@ class TestValidateViolations:
             stable_variables=("x",),
             dynamic_variables=("x",),
         )
-        with pytest.raises(PromptValidationError, match="both stable_variables and dynamic_variables"):
+        with pytest.raises(
+            PromptValidationError, match="both stable_variables and dynamic_variables"
+        ):
             validate_template_variables(t)
 
     def test_error_lists_offending_variables(self) -> None:
@@ -189,9 +193,7 @@ class TestValidateViolations:
 
 class TestSimpleTemplates:
     def test_simple_with_declared_variables_passes(self) -> None:
-        t = PromptTemplate.simple(
-            "q", "What is {{ topic }}?", variables=("topic",)
-        )
+        t = PromptTemplate.simple("q", "What is {{ topic }}?", variables=("topic",))
         validate_template_variables(t)
 
     def test_simple_with_undeclared_variable_rejected(self) -> None:

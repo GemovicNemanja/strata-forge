@@ -52,12 +52,8 @@ class TestInMemoryRoundTrip:
 
     async def test_latest_returned_when_version_omitted(self) -> None:
         registry = PromptRegistry(InMemoryPromptStore())
-        await registry.put(
-            PromptTemplate(name="x", stable_section="first", dynamic_section="")
-        )
-        await registry.put(
-            PromptTemplate(name="x", stable_section="second", dynamic_section="")
-        )
+        await registry.put(PromptTemplate(name="x", stable_section="first", dynamic_section=""))
+        await registry.put(PromptTemplate(name="x", stable_section="second", dynamic_section=""))
         retrieved = await registry.get("x")
         assert retrieved.stable_section == "second"
 

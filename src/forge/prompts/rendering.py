@@ -114,10 +114,7 @@ def render(
 
     missing = declared - set(vars_dict)
     if missing:
-        msg = (
-            f"Template {template.name!r} missing variables at render time: "
-            f"{sorted(missing)!r}"
-        )
+        msg = f"Template {template.name!r} missing variables at render time: {sorted(missing)!r}"
         raise ValidationError(msg)
 
     extra = set(vars_dict) - declared
@@ -136,9 +133,7 @@ def render(
     dynamic_text = env.from_string(template.dynamic_section).render(**dynamic_vars)
 
     split = StableDynamicSplit.build(stable_text=stable_text, dynamic_text=dynamic_text)
-    hints = emit_cache_hints(
-        split, model=model, min_cacheable_tokens=min_cacheable_tokens
-    )
+    hints = emit_cache_hints(split, model=model, min_cacheable_tokens=min_cacheable_tokens)
     messages = _to_messages(split)
 
     return RenderedPrompt(messages=messages, cache_hints=hints, split=split)

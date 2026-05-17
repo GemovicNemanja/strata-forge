@@ -36,9 +36,7 @@ class TestExtractVariablesProperties:
         identifiers=st.lists(_identifier, min_size=0, max_size=5, unique=True),
     )
     @settings(max_examples=40, deadline=None)
-    def test_round_trip_against_known_identifiers(
-        self, identifiers: list[str]
-    ) -> None:
+    def test_round_trip_against_known_identifiers(self, identifiers: list[str]) -> None:
         # Build a template body that references every identifier exactly
         # once. `extract_variables` should return that exact set — extras or
         # missing identifiers indicate a parser regression.
@@ -63,9 +61,7 @@ class TestExtractVariablesProperties:
         identifiers=st.lists(_identifier, min_size=1, max_size=5, unique=True),
     )
     @settings(max_examples=30, deadline=None)
-    def test_loop_variable_excluded_from_references(
-        self, identifiers: list[str]
-    ) -> None:
+    def test_loop_variable_excluded_from_references(self, identifiers: list[str]) -> None:
         # `{% for x in xs %}{{ x }}{% endfor %}` references xs but x is
         # loop-bound — only xs counts as a render-time variable.
         loop_var = identifiers[0]
@@ -122,9 +118,7 @@ class TestValidationProperties:
         dynamic=st.lists(_identifier, min_size=1, max_size=3, unique=True),
     )
     @settings(max_examples=30, deadline=None)
-    def test_disjoint_stable_dynamic_passes(
-        self, stable: list[str], dynamic: list[str]
-    ) -> None:
+    def test_disjoint_stable_dynamic_passes(self, stable: list[str], dynamic: list[str]) -> None:
         # When the two declaration sets share no names, validation passes
         # for a template that references each variable in its own section.
         overlapping = set(stable) & set(dynamic)

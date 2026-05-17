@@ -150,10 +150,7 @@ def _compile(source: str, *, location: str) -> None:
     try:
         _ENV.from_string(source)
     except JinjaTemplateSyntaxError as exc:
-        msg = (
-            f"Invalid Jinja syntax in {location}: {exc.message} "
-            f"(line {exc.lineno})"
-        )
+        msg = f"Invalid Jinja syntax in {location}: {exc.message} (line {exc.lineno})"
         raise PromptValidationError(msg) from exc
 
 

@@ -111,9 +111,7 @@ class TestCacheHints:
         assert hints.stable_token_estimate == 512
 
     def test_is_frozen(self) -> None:
-        hints = CacheHints(
-            cache_stable_prefix=False, stable_digest="x", stable_token_estimate=0
-        )
+        hints = CacheHints(cache_stable_prefix=False, stable_digest="x", stable_token_estimate=0)
         with pytest.raises((AttributeError, TypeError)):
             hints.cache_stable_prefix = True  # type: ignore[misc]
 
