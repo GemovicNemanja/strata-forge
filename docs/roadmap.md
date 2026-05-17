@@ -14,8 +14,8 @@ Design rationale that's bigger than a single phase lives in
 |---|---|---|
 | 0 | Foundations | ✅ done |
 | 1 | LLM abstraction (`forge.llm`, `forge.sync`) | ✅ done |
-| 2 | Prompts, tracing, datasets, evals | ⏳ next |
-| 3 | Agents (`forge.agents`) | pending |
+| 2 | Prompts, tracing, datasets, evals | ✅ done |
+| 3 | Agents (`forge.agents`) | ⏳ next |
 | 4 | RAG (`forge.rag`) | pending |
 | 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | pending |
 | 6 | Storage (`forge.storage`) | pending |
@@ -357,7 +357,7 @@ doctor` reports the environment without crashing.
 
 ---
 
-## Phase 2 — Prompts, tracing, datasets, evals ⏳ (next)
+## Phase 2 — Prompts, tracing, datasets, evals ✅
 
 Phase 1 gave us a typed LLM client. Phase 2 makes it useful for
 *experiments*: prompts you can version, traces you can inspect, datasets
@@ -458,7 +458,7 @@ single-system operation. HF Datasets is the standard exchange format
 for training and external consumption, so the bridge is bidirectional
 rather than one-way export.
 
-### 2.4 — `forge.evals`
+### 2.4 — `forge.evals` ✅
 
 Experiment runner over the (model × prompt × dataset × grader) matrix;
 a grader Protocol with deterministic, LLM-judged, pairwise, and

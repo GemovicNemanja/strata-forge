@@ -6,6 +6,12 @@ replay (2.4.3), and reports + CI gate (2.4.4) land in subsequent
 sub-phases.
 """
 
+from forge.evals.ci_gate import (
+    CIGateResult,
+    CIGateThresholds,
+    evaluate_ci_gate,
+    wilson_lower_bound,
+)
 from forge.evals.experiment import (
     Experiment,
     GraderResult,
@@ -35,11 +41,14 @@ from forge.evals.metrics import (
     pass_rate_by_model,
     rouge,
 )
+from forge.evals.reports import render_html, render_markdown
 from forge.evals.runner import PromptRenderer, run_experiment
 from forge.evals.sweeps import sweep, sweep_sampling
 from forge.evals.trace_replay import ReplayOverrides, ReplayResult, replay_trace
 
 __all__ = [
+    "CIGateResult",
+    "CIGateThresholds",
     "EmbedFn",
     "ExactMatch",
     "Experiment",
@@ -61,13 +70,17 @@ __all__ = [
     "Trial",
     "bleu",
     "cosine_similarity",
+    "evaluate_ci_gate",
     "mean_score",
     "pass_rate",
     "pass_rate_by_grader",
     "pass_rate_by_model",
+    "render_html",
+    "render_markdown",
     "replay_trace",
     "rouge",
     "run_experiment",
     "sweep",
     "sweep_sampling",
+    "wilson_lower_bound",
 ]

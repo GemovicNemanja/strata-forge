@@ -79,7 +79,7 @@ Langfuse is the default tracing destination. The LiteLLM Langfuse callback handl
 | Prompt templates + registry | `src/forge/prompts/` ([reference](../modules/prompts.md)) |
 | Langfuse tracing helpers | `src/forge/tracing/` ([reference](../modules/tracing.md)) |
 | Datasets bridge | `src/forge/datasets/` ([reference](../modules/datasets.md)) |
-| Evaluation runner | `src/forge/evals/` |
+| Evaluation runner | `src/forge/evals/` ([reference](../modules/evals.md)) |
 | Agent builder | `src/forge/agents/` |
 | Retrieval-augmented generation | `src/forge/rag/` |
 | Storage backends | `src/forge/storage/` |
