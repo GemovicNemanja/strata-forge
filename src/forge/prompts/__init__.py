@@ -7,6 +7,11 @@ from forge.prompts.cache_aware import (
     emit_cache_hints,
     is_stable_too_short,
 )
+from forge.prompts.registry import (
+    PromptNotFoundError,
+    PromptRegistry,
+    PromptStore,
+)
 from forge.prompts.template import (
     SAFE_FILTERS,
     PromptError,
@@ -24,6 +29,9 @@ __all__ = [
     "SAFE_FILTERS",
     "CacheHints",
     "PromptError",
+    "PromptNotFoundError",
+    "PromptRegistry",
+    "PromptStore",
     "PromptTemplate",
     "PromptValidationError",
     "StableDynamicSplit",
