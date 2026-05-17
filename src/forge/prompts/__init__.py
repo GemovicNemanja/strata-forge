@@ -12,6 +12,7 @@ from forge.prompts.registry import (
     PromptRegistry,
     PromptStore,
 )
+from forge.prompts.stores.memory import InMemoryPromptStore
 from forge.prompts.template import (
     SAFE_FILTERS,
     PromptError,
@@ -28,6 +29,7 @@ __all__ = [
     "DEFAULT_MIN_CACHEABLE_TOKENS",
     "SAFE_FILTERS",
     "CacheHints",
+    "InMemoryPromptStore",
     "PromptError",
     "PromptNotFoundError",
     "PromptRegistry",
