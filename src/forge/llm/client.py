@@ -443,6 +443,11 @@ class LLMClient:
         self._retry_max_wait = retry_max_wait
         self._strict_bad_request = strict_bad_request
 
+    @property
+    def chain(self) -> list[ModelFallback]:
+        """The resolved fallback chain (read-only snapshot)."""
+        return list(self._chain)
+
     # --- Constructors -----------------------------------------------------
 
     @classmethod

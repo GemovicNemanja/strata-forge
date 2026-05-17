@@ -32,7 +32,7 @@ from forge.llm.messages import (
 from forge.llm.tools import ToolLoopExceededError, tool
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     from forge.llm.providers.base import ProviderClient
     from forge.llm.registry import ProviderName
@@ -85,6 +85,12 @@ def mock_litellm(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return mock
 
 
+def _kwargs(mock: AsyncMock) -> Mapping[str, Any]:
+    """Unwrap the most recent call's kwargs, asserting the mock was awaited."""
+    assert mock.await_args is not None, "AsyncMock was never awaited"
+    return mock.await_args.kwargs
+
+
 # Sample Pydantic schemas for structured output.
 class _Summary(BaseModel):
     title: str
@@ -99,13 +105,13 @@ class _Summary(BaseModel):
 class TestConstruction:
     def test_model_only(self) -> None:
         client = LLMClient("claude-opus-4-7")
-        assert len(client._chain) == 1
-        assert client._chain[0].model == "claude-opus-4-7"
-        assert client._chain[0].providers is None
+        assert len(client.chain) == 1
+        assert client.chain[0].model == "claude-opus-4-7"
+        assert client.chain[0].providers is None
 
     def test_model_with_provider(self) -> None:
         client = LLMClient("claude-opus-4-7", provider="bedrock")
-        assert client._chain[0].providers == ("bedrock",)
+        assert client.chain[0].providers == ("bedrock",)
 
     def test_chain_only(self) -> None:
         client = LLMClient(
@@ -114,12 +120,12 @@ class TestConstruction:
                 "gpt-5.5",
             ]
         )
-        assert len(client._chain) == 2
-        assert client._chain[1].model == "gpt-5.5"
+        assert len(client.chain) == 2
+        assert client.chain[1].model == "gpt-5.5"
 
     def test_with_fallbacks_classmethod(self) -> None:
         client = LLMClient.with_fallbacks(["claude-opus-4-7", "gpt-5.5"])
-        assert len(client._chain) == 2
+        assert len(client.chain) == 2
 
     def test_neither_model_nor_chain_raises(self) -> None:
         with pytest.raises(ValueError, match="exactly one"):
@@ -151,14 +157,14 @@ class TestCompleteBasics:
         client = LLMClient("claude-opus-4-7")
         await client.complete([Message.user("hi")])
         assert mock_litellm.await_count == 1
-        kwargs = mock_litellm.await_args.kwargs
+        kwargs = _kwargs(mock_litellm)
         assert kwargs["model"] == "anthropic/claude-opus-4-7"
         assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
 
     async def test_passes_sampling_params(self, mock_litellm: AsyncMock) -> None:
         client = LLMClient("claude-opus-4-7")
         await client.complete([Message.user("hi")], temperature=0.5, max_tokens=100, top_p=0.9)
-        kwargs = mock_litellm.await_args.kwargs
+        kwargs = _kwargs(mock_litellm)
         assert kwargs["temperature"] == 0.5
         assert kwargs["max_tokens"] == 100
         assert kwargs["top_p"] == 0.9
@@ -167,7 +173,7 @@ class TestCompleteBasics:
         client = LLMClient("claude-opus-4-7", provider="bedrock")
         resp = await client.complete([Message.user("hi")])
         assert resp.route.provider == "bedrock"
-        kwargs = mock_litellm.await_args.kwargs
+        kwargs = _kwargs(mock_litellm)
         assert kwargs["model"].startswith("bedrock/")
 
     async def test_provider_extras_passthrough(self, mock_litellm: AsyncMock) -> None:
@@ -176,7 +182,7 @@ class TestCompleteBasics:
             [Message.user("hi")],
             provider_extras={"anthropic": {"thinking": {"budget_tokens": 8000}}},
         )
-        kwargs = mock_litellm.await_args.kwargs
+        kwargs = _kwargs(mock_litellm)
         assert kwargs["thinking"] == {"budget_tokens": 8000}
 
     async def test_unknown_model_raises(self, mock_litellm: AsyncMock) -> None:
@@ -233,9 +239,10 @@ class TestToolCalling:
             }
         )
 
-        with patch.object(
-            _registry, "get", lambda name: synth if name == "claude-opus-4-7" else original
-        ):
+        def _fake_get(name: str) -> Any:
+            return synth if name == "claude-opus-4-7" else original
+
+        with patch.object(_registry, "get", _fake_get):
             client = LLMClient("claude-opus-4-7")
             with pytest.raises(RegistryError, match="does not support tool calling"):
                 await client.complete([Message.user("hi")], tools=[_get_weather])
@@ -264,14 +271,14 @@ class TestToolCalling:
         # Anthropic should get the Anthropic-shaped tool schema.
         client = LLMClient("claude-opus-4-7", provider="anthropic")
         await client.complete([Message.user("hi")], tools=[_get_weather])
-        kwargs = mock_litellm.await_args.kwargs
+        kwargs = _kwargs(mock_litellm)
         assert kwargs["tools"][0]["name"] == "_get_weather"
         assert "input_schema" in kwargs["tools"][0]  # Anthropic shape
 
     async def test_openai_tool_schema_shape(self, mock_litellm: AsyncMock) -> None:
         client = LLMClient("gpt-5.5", provider="openai")
         await client.complete([Message.user("hi")], tools=[_get_weather])
-        kwargs = mock_litellm.await_args.kwargs
+        kwargs = _kwargs(mock_litellm)
         # OpenAI shape: {"type": "function", "function": {...}}
         assert kwargs["tools"][0]["type"] == "function"
         assert "function" in kwargs["tools"][0]
@@ -890,7 +897,7 @@ class TestMultimodal:
                 )
             ]
         )
-        wire = mock_litellm.await_args.kwargs["messages"][0]
+        wire = _kwargs(mock_litellm)["messages"][0]
         # Anthropic shape: content is a list with type "text" + type "image"
         # using {"type": "image", "source": ...}.
         assert isinstance(wire["content"], list)
@@ -913,7 +920,7 @@ class TestMultimodal:
                 )
             ]
         )
-        wire = mock_litellm.await_args.kwargs["messages"][0]
+        wire = _kwargs(mock_litellm)["messages"][0]
         image_part = next((p for p in wire["content"] if p.get("type") == "image_url"), None)
         assert image_part is not None
 
@@ -927,7 +934,7 @@ class TestWireMessages:
     async def test_system_message(self, mock_litellm: AsyncMock) -> None:
         client = LLMClient("claude-opus-4-7")
         await client.complete([Message.system("you are helpful"), Message.user("hi")])
-        wire = mock_litellm.await_args.kwargs["messages"]
+        wire = _kwargs(mock_litellm)["messages"]
         assert wire[0] == {"role": "system", "content": "you are helpful"}
         assert wire[1] == {"role": "user", "content": "hi"}
 
@@ -946,7 +953,7 @@ class TestWireMessages:
             ToolResultMessage(tool_call_id="c1", content="42"),
         ]
         await client.complete(msgs)
-        wire = mock_litellm.await_args.kwargs["messages"]
+        wire = _kwargs(mock_litellm)["messages"]
         # Assistant entry has tool_calls in OpenAI shape.
         assistant_wire = next(w for w in wire if w["role"] == "assistant")
         assert assistant_wire["tool_calls"][0]["function"]["name"] == "f"

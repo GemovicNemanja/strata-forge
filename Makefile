@@ -53,8 +53,7 @@ stack-logs: ## Tail logs from the local dev stack
 eval: ## Run the evaluation suite (Phase 2.4)
 	@echo "[forge] eval suite not yet implemented — lands in Phase 2.4"
 
-refresh-cassettes: ## Refresh VCR cassettes (Phase 1.22)
-	@echo "[forge] cassette refresh not yet implemented — lands in Phase 1.22"
+refresh-cassettes: vcr-record ## Re-record every VCR cassette (alias for `vcr-record`)
 
 sync-langfuse: ## Sync prompts/datasets to Langfuse (Phase 2)
 	@echo "[forge] Langfuse sync not yet implemented — lands in Phase 2"
