@@ -11,6 +11,7 @@ from forge.tracing.litellm_callback import (
     install_litellm_callback,
     is_litellm_callback_installed,
 )
+from forge.tracing.span import traced_span
 
 __all__ = [
     "LITELLM_CALLBACK_NAME",
@@ -19,4 +20,5 @@ __all__ = [
     "is_litellm_callback_installed",
     "reset_client",
     "traced",
+    "traced_span",
 ]
