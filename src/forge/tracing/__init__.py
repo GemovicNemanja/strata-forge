@@ -5,6 +5,7 @@ design and `docs/modules/tracing.md` for the user-facing reference.
 """
 
 from forge.tracing.client import get_client, reset_client
+from forge.tracing.decorator import traced
 from forge.tracing.litellm_callback import (
     LITELLM_CALLBACK_NAME,
     install_litellm_callback,
@@ -17,4 +18,5 @@ __all__ = [
     "install_litellm_callback",
     "is_litellm_callback_installed",
     "reset_client",
+    "traced",
 ]
