@@ -30,12 +30,8 @@ class TestDatasetItem:
         assert item.metadata == {"tier": "easy"}
 
     def test_from_input_derives_content_hash_id(self) -> None:
-        item = DatasetItem.from_input(
-            {"query": "hi"}, expected_output="hello"
-        )
-        expected = content_hash(
-            {"input": {"query": "hi"}, "expected_output": "hello"}
-        )
+        item = DatasetItem.from_input({"query": "hi"}, expected_output="hello")
+        expected = content_hash({"input": {"query": "hi"}, "expected_output": "hello"})
         assert item.id == expected
         assert len(item.id) == 64
 
@@ -130,9 +126,7 @@ class TestDataset:
             ds.name = "other"  # type: ignore[misc]
 
     def test_items_are_tuple_not_list(self) -> None:
-        ds = Dataset(
-            name="x", items=(DatasetItem(id="a", input={"q": "1"}),)
-        )
+        ds = Dataset(name="x", items=(DatasetItem(id="a", input={"q": "1"}),))
         # The tuple type prevents accidental mutation via .append etc.
         assert isinstance(ds.items, tuple)
 

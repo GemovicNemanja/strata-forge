@@ -1,9 +1,15 @@
 """Backend implementations for :class:`forge.datasets.DatasetStore`.
 
-Phase 2.3.1 ships :class:`InMemoryDatasetStore`; the Langfuse backend
-lands in 2.3.2.
+:class:`InMemoryDatasetStore` is dict-backed and the default for
+tests, notebooks, and prototyping. :class:`LangfuseDatasetStore` is
+the Langfuse-backed production store, lazy-importing the
+``[langfuse]`` extra inside its constructor.
 """
 
+from forge.datasets.stores.langfuse import LangfuseDatasetStore
 from forge.datasets.stores.memory import InMemoryDatasetStore
 
-__all__ = ["InMemoryDatasetStore"]
+__all__ = [
+    "InMemoryDatasetStore",
+    "LangfuseDatasetStore",
+]

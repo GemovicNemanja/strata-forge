@@ -106,10 +106,7 @@ class Dataset(BaseModel):
         seen: set[str] = set()
         for index, item in enumerate(self.items):
             if item.id in seen:
-                msg = (
-                    f"Dataset {self.name!r}: duplicate item id {item.id!r} "
-                    f"at position {index}"
-                )
+                msg = f"Dataset {self.name!r}: duplicate item id {item.id!r} at position {index}"
                 raise ValidationError(msg)
             seen.add(item.id)
         return self

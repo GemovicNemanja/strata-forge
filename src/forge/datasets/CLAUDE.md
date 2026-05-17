@@ -40,10 +40,14 @@ The module's `__init__.py` re-exports the supported surface:
 - Data shapes: `DatasetItem`, `Dataset`.
 - Versioning: `dataset_version`, `diff`, `DatasetDelta`.
 - Store interface + error: `DatasetStore`, `DatasetNotFoundError`.
-- Backends: `InMemoryDatasetStore` (Phase 2.3.1); `LangfuseDatasetStore`
-  (Phase 2.3.2).
-- Bridge: `to_hf_dataset` / `from_hf_dataset` (Phase 2.3.2).
-- Synthetic: `self_instruct`, `distill` (Phase 2.3.3).
+- Backends: `InMemoryDatasetStore`, `LangfuseDatasetStore`.
+- HF bridge: `to_hf_dataset`, `from_hf_dataset`.
+- Synthetic-data primitives land alongside the rest of the synthetic
+  helpers (see roadmap).
+
+Lower-level helpers (e.g. `compose_langfuse_name` /
+`decompose_langfuse_name` in the Langfuse store) are exported from
+their own submodule rather than the package root.
 
 Anything raised from this module is a `ForgeError` subclass.
 
@@ -60,10 +64,12 @@ Anything raised from this module is a `ForgeError` subclass.
   invalidate). `dataset_version()` hashes `name + sorted(item.id) +
   metadata` — description is excluded as free-form prose.
 - **Backends own their version scheme.** The in-memory store uses
-  content-hash versions and dedupes on identical content (re-putting
-  the same dataset returns the same version). Langfuse uses whatever
-  Langfuse assigns. The abstract interface treats versions as opaque
-  strings.
+  content-hash versions and dedupes on identical content. The Langfuse
+  store also uses content-hash versions, encoded into the Langfuse
+  dataset name as `{forge_name}__v{version}` — one Langfuse dataset
+  per `(forge_name, version)` pair. Re-putting identical content
+  collides on the composed name and short-circuits as a no-op.
+  The abstract interface treats versions as opaque strings.
 - **`delete` semantics**: unknown name → no-op; known name + unknown
   version → raise `DatasetNotFoundError`. Mirrors the prompts module's
   rule so typos in version strings surface.

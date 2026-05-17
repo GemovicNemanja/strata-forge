@@ -70,6 +70,9 @@ finetuning = [
     { name = "transformers" },
     { name = "trl" },
 ]
+hf = [
+    { name = "datasets" },
+]
 inspect = [
     { name = "inspect-ai" },
 ]
@@ -104,10 +107,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'finetuning'", specifier = ">=1.1" },
-    { name = "ai-forge", extras = ["redis", "multimodal", "inspect", "compute", "serving", "finetuning", "langfuse"], marker = "extra == 'all'" },
+    { name = "ai-forge", extras = ["redis", "multimodal", "inspect", "compute", "serving", "finetuning", "langfuse", "hf"], marker = "extra == 'all'" },
     { name = "anyio", specifier = ">=4.6" },
     { name = "asyncssh", marker = "extra == 'compute'", specifier = ">=2.18" },
     { name = "datasets", marker = "extra == 'finetuning'", specifier = ">=3.1" },
+    { name = "datasets", marker = "extra == 'hf'", specifier = ">=3.1" },
     { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=2.50" },
@@ -129,7 +133,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.15" },
     { name = "vllm", marker = "extra == 'serving'", specifier = ">=0.7" },
 ]
-provides-extras = ["redis", "multimodal", "inspect", "langfuse", "compute", "serving", "finetuning", "all"]
+provides-extras = ["redis", "multimodal", "inspect", "langfuse", "hf", "compute", "serving", "finetuning", "all"]
 
 [package.metadata.requires-dev]
 dev = [
