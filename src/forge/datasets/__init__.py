@@ -11,6 +11,7 @@ from forge.datasets.hf_bridge import from_hf_dataset, to_hf_dataset
 from forge.datasets.schema import Dataset, DatasetItem
 from forge.datasets.store import DatasetNotFoundError, DatasetStore
 from forge.datasets.stores import InMemoryDatasetStore, LangfuseDatasetStore
+from forge.datasets.synthetic import distill, self_instruct
 from forge.datasets.versioning import DatasetDelta, dataset_version, diff
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "LangfuseDatasetStore",
     "dataset_version",
     "diff",
+    "distill",
     "from_hf_dataset",
+    "self_instruct",
     "to_hf_dataset",
 ]
