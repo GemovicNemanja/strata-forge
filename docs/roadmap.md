@@ -374,7 +374,7 @@ on what's already shipped:
    `forge.tracing` (for run provenance).
 4. `forge.evals` — consumes all three.
 
-### 2.1 — `forge.prompts`
+### 2.1 — `forge.prompts` ✅
 
 Jinja2 templating with safe filters; a store-agnostic prompt registry;
 explicit stable-prefix / dynamic-suffix split so provider prompt caching
@@ -402,7 +402,7 @@ orthogonal — it controls whether the stable system+exemplars chunk gets
 flagged for provider-side prompt caching, which can cut cost by an
 order of magnitude on repeated requests.
 
-### 2.2 — `forge.tracing`
+### 2.2 — `forge.tracing` ✅
 
 Langfuse observability layered on top of every other module via the
 LiteLLM Langfuse callback (auto-traces every LLM call when keys are
@@ -430,7 +430,7 @@ every LLM call without `forge.llm` importing anything from
 (`tracing → llm`, never the reverse) so the LLM module stays usable in
 contexts where tracing isn't configured.
 
-### 2.3 — `forge.datasets`
+### 2.3 — `forge.datasets` ✅
 
 Pydantic dataset schema with content-hash IDs; Langfuse Datasets API as
 the canonical store; Hugging Face Datasets as the exchange format;
