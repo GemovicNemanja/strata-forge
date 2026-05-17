@@ -20,6 +20,16 @@ from forge.evals.graders import (
     JSONStructure,
     Regex,
 )
+from forge.evals.metrics import (
+    bleu,
+    mean_score,
+    pass_rate,
+    pass_rate_by_grader,
+    pass_rate_by_model,
+    rouge,
+)
+from forge.evals.runner import PromptRenderer, run_experiment
+from forge.evals.sweeps import sweep, sweep_sampling
 
 __all__ = [
     "ExactMatch",
@@ -29,7 +39,17 @@ __all__ = [
     "JSONField",
     "JSONStructure",
     "Outcome",
+    "PromptRenderer",
     "Regex",
     "SamplingParams",
     "Trial",
+    "bleu",
+    "mean_score",
+    "pass_rate",
+    "pass_rate_by_grader",
+    "pass_rate_by_model",
+    "rouge",
+    "run_experiment",
+    "sweep",
+    "sweep_sampling",
 ]

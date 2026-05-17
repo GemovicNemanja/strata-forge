@@ -36,6 +36,7 @@ multimodal = ["pillow>=11.0"]
 inspect = ["inspect-ai>=0.3"]
 langfuse = ["langfuse>=2.50"]
 hf = ["datasets>=3.1"]
+evals = ["nltk>=3.9", "rouge-score>=0.1.2"]
 compute = ["skypilot>=0.7", "asyncssh>=2.18"]
 serving = ["vllm>=0.7"]
 finetuning = [
@@ -47,7 +48,7 @@ finetuning = [
     "accelerate>=1.1",
 ]
 all = [
-    "ai-forge[redis,multimodal,inspect,compute,serving,finetuning,langfuse,hf]",
+    "ai-forge[redis,multimodal,inspect,compute,serving,finetuning,langfuse,hf,evals]",
 ]
 
 [project.scripts]
