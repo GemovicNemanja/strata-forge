@@ -30,6 +30,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
+    { name = "jinja2" },
     { name = "litellm" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -104,6 +105,7 @@ requires-dist = [
     { name = "asyncssh", marker = "extra == 'compute'", specifier = ">=2.18" },
     { name = "datasets", marker = "extra == 'finetuning'", specifier = ">=3.1" },
     { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "litellm", specifier = ">=1.55" },
     { name = "peft", marker = "extra == 'finetuning'", specifier = ">=0.13" },
     { name = "pillow", marker = "extra == 'multimodal'", specifier = ">=11.0" },
