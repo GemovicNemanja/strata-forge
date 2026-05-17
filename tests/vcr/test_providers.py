@@ -248,9 +248,7 @@ async def test_content_filter(provider: ProviderName) -> None:
     with _vcr().use_cassette(str(cassette)):
         client = LLMClient(_PER_PROVIDER_MODEL[provider], provider=provider)
         with pytest.raises(ProviderContentFilterError):
-            await client.complete(
-                [Message.user("[recorded request that hits the content filter]")]
-            )
+            await client.complete([Message.user("[recorded request that hits the content filter]")])
 
 
 # ---------------------------------------------------------------------------

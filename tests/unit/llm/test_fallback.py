@@ -499,9 +499,7 @@ class TestEdgeCases:
 
     async def test_non_provider_exception_propagates(self) -> None:
         # ValueError isn't a ProviderError — it should bubble out unchanged.
-        call = _make_call(
-            {("claude-opus-4-7", "anthropic"): ValueError("programmer error")}
-        )
+        call = _make_call({("claude-opus-4-7", "anthropic"): ValueError("programmer error")})
         with pytest.raises(ValueError, match="programmer error"):
             await run_with_fallback(["claude-opus-4-7"], call, **_FAST_RETRY)
 
@@ -525,9 +523,7 @@ class TestEdgeCases:
         assert result == "ok"
 
     async def test_causes_carry_route_annotation(self) -> None:
-        call = _make_call(
-            {("claude-opus-4-7", "anthropic"): ProviderRateLimitError("429")}
-        )
+        call = _make_call({("claude-opus-4-7", "anthropic"): ProviderRateLimitError("429")})
         with pytest.raises(FallbackExhaustedError) as info:
             await run_with_fallback(["claude-opus-4-7"], call, **_FAST_RETRY)
         assert info.value.causes[0][0] == "claude-opus-4-7"

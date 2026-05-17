@@ -748,9 +748,7 @@ class TestToolLoop:
             _fake_response(
                 text="",
                 finish_reason="tool_calls",
-                tool_calls=[
-                    {"id": "c1", "name": "_explodes", "arguments": {"x": 1}}
-                ],
+                tool_calls=[{"id": "c1", "name": "_explodes", "arguments": {"x": 1}}],
             ),
             _fake_response(text="recovered"),
         ]
@@ -760,9 +758,7 @@ class TestToolLoop:
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
         client = LLMClient("claude-opus-4-7")
-        resp = await client.run_tool_loop(
-            [Message.user("?")], tools=[_explodes], max_iterations=3
-        )
+        resp = await client.run_tool_loop([Message.user("?")], tools=[_explodes], max_iterations=3)
         assert resp.text == "recovered"
 
     async def test_unknown_tool_marked_as_error(

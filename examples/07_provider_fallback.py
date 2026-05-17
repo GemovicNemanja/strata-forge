@@ -34,9 +34,7 @@ async def _main() -> None:
             ),
         ],
     )
-    response = await client.complete(
-        [Message.user("Reply with the single word 'fallback'.")]
-    )
+    response = await client.complete([Message.user("Reply with the single word 'fallback'.")])
     print(f"--- served by {response.route.provider} ---")
     print_summary(response)
 

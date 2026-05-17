@@ -23,9 +23,7 @@ async def _main() -> None:
         require_env(provider)
 
     client = LLMClient.with_fallbacks(["claude-opus-4-7", "gpt-5.5"])
-    response = await client.complete(
-        [Message.user("Reply with the single word 'fallback'.")]
-    )
+    response = await client.complete([Message.user("Reply with the single word 'fallback'.")])
     print(f"--- served by {response.route.model}@{response.route.provider} ---")
     print_summary(response)
 
