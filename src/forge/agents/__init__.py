@@ -11,6 +11,18 @@ re-exported here for convenience but live in :mod:`forge.llm`.
 """
 
 from forge.agents.agent import Agent, AgentResult
+from forge.agents.tools import (
+    CalculatorArgs,
+    FetchURLArgs,
+    FSReadArgs,
+    SearchBackend,
+    SearchResult,
+    WebSearchArgs,
+    calculator,
+    fetch_url,
+    fs_read_tool,
+    web_search_tool,
+)
 
 # Re-export the forge.llm primitives that agents compose with. Users
 # can build agents without ever importing from forge.llm directly.
@@ -29,11 +41,21 @@ __all__ = [
     "AgentResult",
     "AnyMessage",
     "AssistantMessage",
+    "CalculatorArgs",
+    "FSReadArgs",
+    "FetchURLArgs",
     "Message",
+    "SearchBackend",
+    "SearchResult",
     "SystemMessage",
     "Tool",
     "ToolLoopExceededError",
     "ToolResultMessage",
     "UserMessage",
+    "WebSearchArgs",
+    "calculator",
+    "fetch_url",
+    "fs_read_tool",
     "tool",
+    "web_search_tool",
 ]
