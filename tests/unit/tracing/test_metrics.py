@@ -50,9 +50,7 @@ class TestRecordNumericMetric:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         client = _install_fake_langfuse(monkeypatch)
-        await record_numeric_metric(
-            "latency_ms", 123.4, observation_id="obs-1"
-        )
+        await record_numeric_metric("latency_ms", 123.4, observation_id="obs-1")
 
         kwargs = client.score.call_args.kwargs
         assert kwargs["observation_id"] == "obs-1"
@@ -67,9 +65,7 @@ class TestRecordNumericMetric:
         # Supplying both is allowed — observation_id pinpoints, trace_id
         # is a shortcut so Langfuse doesn't have to resolve it.
         client = _install_fake_langfuse(monkeypatch)
-        await record_numeric_metric(
-            "x", 1.0, trace_id="trace-a", observation_id="obs-1"
-        )
+        await record_numeric_metric("x", 1.0, trace_id="trace-a", observation_id="obs-1")
         kwargs = client.score.call_args.kwargs
         assert kwargs["trace_id"] == "trace-a"
         assert kwargs["observation_id"] == "obs-1"
@@ -135,9 +131,7 @@ class TestRecordNumericMetric:
 class TestRecordCategoricalMetric:
     async def test_attached_to_trace(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = _install_fake_langfuse(monkeypatch)
-        await record_categorical_metric(
-            "model", "claude-opus-4-7", trace_id="trace-abc"
-        )
+        await record_categorical_metric("model", "claude-opus-4-7", trace_id="trace-abc")
 
         kwargs = client.score.call_args.kwargs
         assert kwargs["trace_id"] == "trace-abc"

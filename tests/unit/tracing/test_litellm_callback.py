@@ -91,9 +91,7 @@ class TestInstallConfigured:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Don't trample other callbacks the application has registered.
-        monkeypatch.setattr(
-            litellm, "success_callback", ["custom_a", "custom_b"], raising=False
-        )
+        monkeypatch.setattr(litellm, "success_callback", ["custom_a", "custom_b"], raising=False)
         monkeypatch.setattr(litellm, "failure_callback", ["custom_c"], raising=False)
         _configure_langfuse(monkeypatch)
 
@@ -143,9 +141,7 @@ class TestIsInstalled:
     ) -> None:
         # Half-installed = not installed. We deliberately don't report
         # True for the asymmetric case so the diagnostic isn't misleading.
-        monkeypatch.setattr(
-            litellm, "success_callback", [LITELLM_CALLBACK_NAME], raising=False
-        )
+        monkeypatch.setattr(litellm, "success_callback", [LITELLM_CALLBACK_NAME], raising=False)
         monkeypatch.setattr(litellm, "failure_callback", [], raising=False)
         assert is_litellm_callback_installed() is False
 
@@ -154,9 +150,7 @@ class TestIsInstalled:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(litellm, "success_callback", [], raising=False)
-        monkeypatch.setattr(
-            litellm, "failure_callback", [LITELLM_CALLBACK_NAME], raising=False
-        )
+        monkeypatch.setattr(litellm, "failure_callback", [LITELLM_CALLBACK_NAME], raising=False)
         assert is_litellm_callback_installed() is False
 
     def test_true_when_other_callbacks_also_present(

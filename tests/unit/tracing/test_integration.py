@@ -174,9 +174,7 @@ class TestTracedWithMetric:
         async def my_workflow() -> None:
             current = correlation_id_var.get()
             if current is not None:
-                await record_numeric_metric(
-                    "input_tokens", 123, trace_id=current
-                )
+                await record_numeric_metric("input_tokens", 123, trace_id=current)
 
         await my_workflow()
 
@@ -211,9 +209,7 @@ class TestFullPipeline:
 
             async with traced_span("main-work"):
                 # Record a metric while inside the span.
-                await record_numeric_metric(
-                    "items_processed", 42, trace_id=cid
-                )
+                await record_numeric_metric("items_processed", 42, trace_id=cid)
 
             # Final score on the trace.
             await score_trace(cid, "quality", 4.5)

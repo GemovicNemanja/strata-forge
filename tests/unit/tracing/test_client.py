@@ -137,6 +137,7 @@ class TestResetClient:
     ) -> None:
         _configure_langfuse(monkeypatch)
         constructor = _install_fake_langfuse(monkeypatch)
+
         # Return a fresh instance for each construction so reset_client's
         # effect is observable as identity change.
         def _fresh_client(**_kwargs: Any) -> MagicMock:

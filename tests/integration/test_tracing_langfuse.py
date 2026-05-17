@@ -33,18 +33,13 @@ pytestmark = pytest.mark.integration
 
 def _langfuse_configured() -> bool:
     """True when env vars sufficient for a live Langfuse call are set."""
-    return bool(
-        os.environ.get("LANGFUSE_PUBLIC_KEY")
-        and os.environ.get("LANGFUSE_SECRET_KEY")
-    )
+    return bool(os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"))
 
 
 @pytest.fixture(autouse=True)
 def _skip_unless_configured() -> None:  # pyright: ignore[reportUnusedFunction]
     if not _langfuse_configured():
-        pytest.skip(
-            "Set LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY against `make stack-up` to run."
-        )
+        pytest.skip("Set LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY against `make stack-up` to run.")
 
 
 async def test_traced_call_emits_to_langfuse() -> None:

@@ -50,10 +50,7 @@ async def _main() -> None:
     print(f"  callback install result:   {installed}")
     print(f"  callback registered now:   {is_litellm_callback_installed()}")
     if not installed:
-        print(
-            "  (Langfuse not configured — the call will succeed but no trace "
-            "is recorded.)"
-        )
+        print("  (Langfuse not configured — the call will succeed but no trace is recorded.)")
     print()
 
     client = LLMClient(args.model, provider=args.provider)
