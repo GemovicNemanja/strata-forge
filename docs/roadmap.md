@@ -439,17 +439,17 @@ content-hash version tracking with deltas; synthetic-data primitives
 
 | Sub-phase | Deliverable |
 |---|---|
-| 2.3.1 | Module skeleton + ADR: Langfuse-canonical, HF-exchange |
-| 2.3.2 | `schema.py` — `DatasetItem`, `Dataset` with content-hash IDs |
-| 2.3.3 | `stores/memory.py` — in-memory `DatasetStore` |
-| 2.3.4 | `stores/langfuse.py` — Langfuse Datasets CRUD, lazy import |
-| 2.3.5 | `hf_bridge.py` — bidirectional `datasets.Dataset` conversion, lazy import (`[hf]` extra) |
-| 2.3.6 | `versioning.py` — content-hash versioning + delta computation |
-| 2.3.7 | `synthetic/self_instruct.py` — uses `forge.llm` |
-| 2.3.8 | `synthetic/distillation.py` — teacher-student primitive |
-| 2.3.9 | Tests |
-| 2.3.10 | Examples + `docs/modules/datasets.md` |
-| 2.3.11 | Sign-off |
+| 2.3.1 | Foundation — ADR 0009; `schema.py` (`DatasetItem`, `Dataset` with content-hash IDs); `store.py` (`DatasetStore` ABC + `DatasetNotFoundError`); `versioning.py` (`dataset_version` + `diff` + `DatasetDelta`); `stores/memory.py` (`InMemoryDatasetStore` with content-hash versioning + dedup); module CLAUDE.md + README; unit tests across all four files. |
+| 2.3.2 | External integrations — `stores/langfuse.py` (Langfuse Datasets CRUD behind the `[langfuse]` extra, lazy import, mocked-client tests); `hf_bridge.py` (bidirectional `datasets.Dataset` conversion behind a new `[hf]` extra, lazy import, mocked tests). |
+| 2.3.3 | Synthetic data — `synthetic/self_instruct.py` (using `forge.llm.LLMClient.complete_structured`); `synthetic/distillation.py` (teacher-student primitive); unit tests with mocked `LLMClient`. |
+| 2.3.4 | Closeout — cross-module integration tests, examples 17–19, `docs/modules/datasets.md`, CLAUDE.md + architecture overview link wiring, full sign-off verification matrix. |
+
+The 4-bundle grouping (previously 11 fine-grained sub-phases) trades a
+bit of per-commit granularity for fewer validation cycles. Each bundle
+still has a coherent theme — foundation pieces operate on the schema,
+external integrations share the lazy-import-wrap-an-SDK pattern, the
+synthetic helpers both run on `forge.llm`, and the closeout is the
+standard tests-examples-docs-signoff trio.
 
 **Why Langfuse-canonical with an HF bridge?** Langfuse is where eval
 runs and trace data already live, so keeping the canonical dataset
