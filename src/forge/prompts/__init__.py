@@ -12,6 +12,7 @@ from forge.prompts.registry import (
     PromptRegistry,
     PromptStore,
 )
+from forge.prompts.rendering import RenderedPrompt, render
 from forge.prompts.stores.langfuse import LangfusePromptStore
 from forge.prompts.stores.memory import InMemoryPromptStore
 from forge.prompts.template import (
@@ -38,10 +39,12 @@ __all__ = [
     "PromptStore",
     "PromptTemplate",
     "PromptValidationError",
+    "RenderedPrompt",
     "StableDynamicSplit",
     "create_sandboxed_environment",
     "emit_cache_hints",
     "extract_variables",
     "is_stable_too_short",
+    "render",
     "validate_template_variables",
 ]
