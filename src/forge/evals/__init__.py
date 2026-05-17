@@ -14,11 +14,18 @@ from forge.evals.experiment import (
     Trial,
 )
 from forge.evals.graders import (
+    EmbedFn,
     ExactMatch,
     Grader,
     JSONField,
     JSONStructure,
+    JudgeVerdict,
+    LLMJudge,
+    PairwiseGrader,
+    PairwiseVerdict,
     Regex,
+    SemanticSimilarity,
+    cosine_similarity,
 )
 from forge.evals.metrics import (
     bleu,
@@ -30,24 +37,35 @@ from forge.evals.metrics import (
 )
 from forge.evals.runner import PromptRenderer, run_experiment
 from forge.evals.sweeps import sweep, sweep_sampling
+from forge.evals.trace_replay import ReplayOverrides, ReplayResult, replay_trace
 
 __all__ = [
+    "EmbedFn",
     "ExactMatch",
     "Experiment",
     "Grader",
     "GraderResult",
     "JSONField",
     "JSONStructure",
+    "JudgeVerdict",
+    "LLMJudge",
     "Outcome",
+    "PairwiseGrader",
+    "PairwiseVerdict",
     "PromptRenderer",
     "Regex",
+    "ReplayOverrides",
+    "ReplayResult",
     "SamplingParams",
+    "SemanticSimilarity",
     "Trial",
     "bleu",
+    "cosine_similarity",
     "mean_score",
     "pass_rate",
     "pass_rate_by_grader",
     "pass_rate_by_model",
+    "replay_trace",
     "rouge",
     "run_experiment",
     "sweep",

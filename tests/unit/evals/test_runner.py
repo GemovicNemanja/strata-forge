@@ -12,12 +12,12 @@ from forge.datasets.schema import Dataset, DatasetItem
 from forge.evals.experiment import Experiment, GraderResult, SamplingParams
 from forge.evals.runner import run_experiment
 from forge.llm.messages import UserMessage
-from forge.llm.registry import ProviderName
 from forge.llm.responses import LLMResponse, Usage
 from forge.llm.routing import ModelRoute
 
 if TYPE_CHECKING:
     from forge.llm.messages import AnyMessage
+    from forge.llm.registry import ProviderName
 
 
 def _response(
