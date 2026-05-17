@@ -77,7 +77,7 @@ Langfuse is the default tracing destination. The LiteLLM Langfuse callback handl
 | Runtime configuration | `src/forge/config/` |
 | LLM client + tools + registry | `src/forge/llm/` ([reference](../modules/llm.md)) |
 | Prompt templates + registry | `src/forge/prompts/` ([reference](../modules/prompts.md)) |
-| Langfuse tracing helpers | `src/forge/tracing/` |
+| Langfuse tracing helpers | `src/forge/tracing/` ([reference](../modules/tracing.md)) |
 | Datasets bridge | `src/forge/datasets/` |
 | Evaluation runner | `src/forge/evals/` |
 | Agent builder | `src/forge/agents/` |
