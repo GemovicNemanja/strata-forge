@@ -37,7 +37,7 @@ inspect = ["inspect-ai>=0.3"]
 langfuse = ["langfuse>=2.50"]
 hf = ["datasets>=3.1"]
 evals = ["nltk>=3.9", "rouge-score>=0.1.2"]
-rag = ["qdrant-client>=1.13", "rank-bm25>=0.2.2"]
+rag = ["qdrant-client>=1.13", "rank-bm25>=0.2.2", "cohere>=5.13"]
 compute = ["skypilot>=0.7", "asyncssh>=2.18"]
 serving = ["vllm>=0.7"]
 storage = [

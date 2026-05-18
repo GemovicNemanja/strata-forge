@@ -20,8 +20,8 @@ Design rationale that's bigger than a single phase lives in
 | 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | ✅ done |
 | 6 | Storage (`forge.storage`) | ✅ done |
 | 7 | CLI completion (`forge.cli`) | ✅ done |
-| 8 | DX maturity (notebooks, Docker hardening, examples polish) | ⏳ next |
-| 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | pending |
+| 8 | DX maturity (notebooks, Docker hardening, examples polish) | ✅ done |
+| 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | ⏳ next |
 
 ---
 
@@ -597,14 +597,39 @@ Shared helpers (`run_async`, `error_exit`, store factories)
 live in `src/forge/cli/helpers.py`. Reference doc:
 [`docs/modules/cli.md`](modules/cli.md).
 
-## Phase 8 — DX maturity — next
+## Phase 8 — DX maturity ✅
 
-Polish: extras tuning based on real install pain, Marimo notebook
-templates, Dockerfile hardening for the runtime image, and a once-over
-on every example to make sure it still runs against the post-Phase-1
-public API.
+Three pieces of DX polish landed:
 
-## Phase 9 — Testing maturity — pending
+- An import-only smoke harness sweeps every script under
+  `examples/` via `importlib.util.spec_from_file_location`, so
+  drift between the 33 example files and the current `forge.*`
+  public surface surfaces as a pytest failure. All 33 examples
+  pass and the no-credentials ones (29 — local compute, 30 — SFT
+  config, 31 — serving task, 32 — storage gateway, 33 — HF Hub
+  dry run) were re-run end-to-end.
+- Three Marimo notebook templates under `notebooks/`:
+  `00_chat_starter.py` (LLMClient with model dropdown + prompt +
+  temperature slider), `01_eval_iterate.py` (inline dataset +
+  multi-model selector + run_experiment + outcomes table), and
+  `02_rag_prototype.py` (inline docs through
+  RecursiveChunker + InMemoryVectorStore + DenseRetriever via
+  RAGPipeline). Marimo is in the `[dev]` dependency group; a
+  matching pytest smoke harness imports each notebook to catch
+  API drift.
+- Dockerfile reworked into a two-stage build: the builder stage
+  carries `build-essential` and the toolchain; the runtime stage
+  is `python:3.14-slim` plus CA certs and a non-root `forge`
+  user (uid 1000). uv is pinned to a release tag (no
+  `:latest`), uv install layers use BuildKit cache mounts, and
+  the runtime image carries a `forge --help` HEALTHCHECK.
+- Extras audit: added `cohere>=5.13` to `[rag]` so
+  `CohereReranker` matches its documented install hint.
+  `sentence-transformers` is deliberately left out of `[rag]`
+  (it would pull `torch`); users install it themselves when
+  they want `CrossEncoderReranker`.
+
+## Phase 9 — Testing maturity — next
 
 The test infrastructure itself: a nightly CI job that re-records VCR
 cassettes against live providers to catch upstream wire-format drift,
