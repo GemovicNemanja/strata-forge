@@ -11,6 +11,15 @@ re-exported here for convenience but live in :mod:`forge.llm`.
 """
 
 from forge.agents.agent import Agent, AgentResult
+from forge.agents.memory import (
+    ConversationMemory,
+    EmbedFn,
+    EpisodicMemory,
+    InMemoryVectorStore,
+    VectorItem,
+    VectorSearchResult,
+    VectorStore,
+)
 from forge.agents.tools import (
     CalculatorArgs,
     FetchURLArgs,
@@ -42,8 +51,12 @@ __all__ = [
     "AnyMessage",
     "AssistantMessage",
     "CalculatorArgs",
+    "ConversationMemory",
+    "EmbedFn",
+    "EpisodicMemory",
     "FSReadArgs",
     "FetchURLArgs",
+    "InMemoryVectorStore",
     "Message",
     "SearchBackend",
     "SearchResult",
@@ -52,6 +65,9 @@ __all__ = [
     "ToolLoopExceededError",
     "ToolResultMessage",
     "UserMessage",
+    "VectorItem",
+    "VectorSearchResult",
+    "VectorStore",
     "WebSearchArgs",
     "calculator",
     "fetch_url",
