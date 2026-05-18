@@ -17,8 +17,8 @@ Design rationale that's bigger than a single phase lives in
 | 2 | Prompts, tracing, datasets, evals | ✅ done |
 | 3 | Agents (`forge.agents`) | ✅ done |
 | 4 | RAG (`forge.rag`) | ✅ done |
-| 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | ⏳ next |
-| 6 | Storage (`forge.storage`) | pending |
+| 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | ✅ done |
+| 6 | Storage (`forge.storage`) | ⏳ next |
 | 7 | CLI completion (`forge.cli`) | pending |
 | 8 | DX maturity (notebooks, Docker hardening, examples polish) | pending |
 | 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | pending |
@@ -514,22 +514,33 @@ token, semantic); retrieval (dense, BM25, hybrid via RRF); rerankers
 (Cohere API + a local cross-encoder); document loaders (text + URL); a
 composable pipeline class that wires these together.
 
-## Phase 5 — Remote compute, inference, training — pending
+## Phase 5 — Remote compute, inference, training ✅
 
-Three modules tightly coupled:
+`forge.compute` ships typed `Task` / `Job` / `Status` shapes,
+a `Backend` Protocol with three implementations (`LocalBackend`,
+`SSHBackend`, `SkyPilotBackend`), a concurrency-bounded
+`BatchInferenceRunner`, and serving-task builders for
+vLLM / TGI / SGLang plus a `serving_endpoint` async context
+manager that launches + health-checks + cleans up the server
+around an OpenAI-compatible `LLMClient` session. The SSH and
+SkyPilot backends lazy-import their SDKs behind the `[compute]`
+extra; `LocalBackend`, batch inference, and the serving task
+builders have no extra requirements. Reference doc:
+[`docs/modules/compute.md`](modules/compute.md).
 
-- `forge.compute` — SkyPilot orchestration via `sky.api.sdk`, an
-  `asyncssh`-based SSH backend for ad-hoc runs, YAML task templates
-  (SFT, DPO, vLLM/TGI/SGLang serve, eval), async batch inference.
-- `forge.compute.inference` (sub-package) — vLLM / TGI / SGLang
-  endpoints via the OpenAI-compatible provider, async batch with
-  concurrency control, vision-input helpers.
-- `forge.training` — TRL `SFTTrainer`, preference tuning
-  (DPO/ORPO/KTO/GRPO), PEFT (LoRA/QLoRA), chat-template formatting,
-  sequence packing. Trainer entry-point scripts ship to remote runners
-  via `forge.compute`.
+`forge.training` ships fine-tuning primitives: `SFTConfig` /
+`SFTRunner` over TRL `SFTTrainer`; `DPOConfig` / `ORPOConfig` /
+`KTOConfig` / `GRPOConfig` dispatched through `PreferenceRunner`;
+`LoRAConfig` / `QLoRAConfig` PEFT wrappers with QLoRA's
+bitsandbytes config builder; chat-template formatting
+(`apply_chat_template`, `conversation_to_dicts`) and greedy
+first-fit sequence packing (`pack_sequences`). All heavy deps
+(`torch`, `transformers`, `trl`, `peft`, `datasets`,
+`accelerate`) sit behind the `[finetuning]` extra and are
+lazy-imported inside the runners' `train` methods. Reference
+doc: [`docs/modules/training.md`](modules/training.md).
 
-## Phase 6 — Storage (`forge.storage`) — pending
+## Phase 6 — Storage (`forge.storage`) — next
 
 `fsspec` gateway with local / S3 / GCS / Azure Blob / Hugging Face Hub
 backends; HF Hub model push/pull helpers; dataset handling on HF Hub

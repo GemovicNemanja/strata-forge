@@ -20,6 +20,14 @@ from forge.compute.backends import (
 )
 from forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from forge.compute.job import Job, JobState, JobStatus
+from forge.compute.serving import (
+    ServingEndpoint,
+    build_sglang_task,
+    build_tgi_task,
+    build_vllm_task,
+    serving_endpoint,
+    wait_for_endpoint,
+)
 from forge.compute.task import ResourceSpec, Task
 
 __all__ = [
@@ -32,6 +40,12 @@ __all__ = [
     "LocalBackend",
     "ResourceSpec",
     "SSHBackend",
+    "ServingEndpoint",
     "SkyPilotBackend",
     "Task",
+    "build_sglang_task",
+    "build_tgi_task",
+    "build_vllm_task",
+    "serving_endpoint",
+    "wait_for_endpoint",
 ]

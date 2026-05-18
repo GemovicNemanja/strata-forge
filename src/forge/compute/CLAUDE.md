@@ -18,19 +18,23 @@ for the task-as-data + Protocol design rationale.
   ``failed``, ``cancelled``).
 - :class:`Backend` Protocol — async ``submit`` / ``status`` /
   ``logs`` / ``cancel`` / ``cleanup``.
-- :class:`LocalBackend` — in-process subprocess implementation
-  (5.1). SSH + SkyPilot backends arrive in Phase 5.2; a batch
-  inference runner that consumes them lands alongside.
+- :class:`LocalBackend`, :class:`SSHBackend`,
+  :class:`SkyPilotBackend` — three concrete backends.
+- :class:`BatchInferenceRunner` — concurrency-bounded async
+  fan-out over a shared :class:`LLMClient`.
+- Serving task builders: :func:`build_vllm_task`,
+  :func:`build_tgi_task`, :func:`build_sglang_task` plus the
+  :func:`serving_endpoint` async context manager.
 
 ## Boundaries
 
-- **Owns:** ``task.py``, ``job.py``, ``backends/`` (local now;
-  ssh / skypilot in 5.2), ``batch.py`` (5.2), helper YAML /
+- **Owns:** ``task.py``, ``job.py``, ``backends/`` (local +
+  ssh + skypilot), ``batch.py``, ``serving.py``, helper YAML /
   lifecycle utilities.
 - **Imports from inside ``forge``:** :mod:`forge.core` (errors,
   ids), :mod:`forge.config` (settings — backends pick up host /
-  credentials from there). May import :mod:`forge.llm` for the
-  batch inference runner (5.2).
+  credentials from there), :mod:`forge.llm` (for the batch
+  inference runner's :class:`LLMClient` type).
 - **Does NOT import** :mod:`forge.tracing`, :mod:`forge.agents`,
   :mod:`forge.evals`, :mod:`forge.rag`, :mod:`forge.datasets`,
   :mod:`forge.training`. The dependency arrow points downward —
@@ -48,8 +52,14 @@ The module's ``__init__.py`` re-exports:
 - Data shapes: :class:`Task`, :class:`ResourceSpec`,
   :class:`Job`, :class:`JobStatus`, :data:`JobState`.
 - Protocol: :class:`Backend`.
-- Backend implementations: :class:`LocalBackend` (5.1);
-  :class:`SSHBackend`, :class:`SkyPilotBackend` (5.2).
+- Backend implementations: :class:`LocalBackend`,
+  :class:`SSHBackend`, :class:`SkyPilotBackend`.
+- Batch inference: :class:`BatchInferenceRunner`,
+  :class:`BatchInferenceResult`.
+- Serving helpers: :func:`build_vllm_task`,
+  :func:`build_tgi_task`, :func:`build_sglang_task`,
+  :func:`serving_endpoint`, :func:`wait_for_endpoint`,
+  :class:`ServingEndpoint`.
 
 Errors raised from this module are :class:`ForgeError` subclasses
 or :class:`ValueError` for input validation.
