@@ -1,9 +1,5 @@
 """Agent builder, built-in tools, memory, and multi-agent patterns.
 
-The 3.1 surface is just the single-agent runtime — :class:`Agent` and
-:class:`AgentResult`. Built-in tools (Phase 3.2), memory (Phase 3.3),
-and multi-agent patterns (Phase 3.4) land in subsequent sub-phases.
-
 Per ADR 0011, this module is a thin composition layer over
 :mod:`forge.llm`; the tool calling primitives — :class:`Tool`,
 :func:`tool`, the message types, and the multi-turn tool loop — are
@@ -19,6 +15,12 @@ from forge.agents.memory import (
     VectorItem,
     VectorSearchResult,
     VectorStore,
+)
+from forge.agents.multi_agent import (
+    CritiqueVerdict,
+    RouterChoice,
+    critic_refiner_run,
+    handoff,
 )
 from forge.agents.tools import (
     CalculatorArgs,
@@ -52,12 +54,14 @@ __all__ = [
     "AssistantMessage",
     "CalculatorArgs",
     "ConversationMemory",
+    "CritiqueVerdict",
     "EmbedFn",
     "EpisodicMemory",
     "FSReadArgs",
     "FetchURLArgs",
     "InMemoryVectorStore",
     "Message",
+    "RouterChoice",
     "SearchBackend",
     "SearchResult",
     "SystemMessage",
@@ -70,8 +74,10 @@ __all__ = [
     "VectorStore",
     "WebSearchArgs",
     "calculator",
+    "critic_refiner_run",
     "fetch_url",
     "fs_read_tool",
+    "handoff",
     "tool",
     "web_search_tool",
 ]

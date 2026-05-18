@@ -15,8 +15,8 @@ Design rationale that's bigger than a single phase lives in
 | 0 | Foundations | ✅ done |
 | 1 | LLM abstraction (`forge.llm`, `forge.sync`) | ✅ done |
 | 2 | Prompts, tracing, datasets, evals | ✅ done |
-| 3 | Agents (`forge.agents`) | ⏳ next |
-| 4 | RAG (`forge.rag`) | pending |
+| 3 | Agents (`forge.agents`) | ✅ done |
+| 4 | RAG (`forge.rag`) | ⏳ next |
 | 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | pending |
 | 6 | Storage (`forge.storage`) | pending |
 | 7 | CLI completion (`forge.cli`) | pending |
@@ -496,7 +496,7 @@ silently doubling the per-experiment spend.
 
 ---
 
-## Phase 3 — Agents (`forge.agents`) — pending
+## Phase 3 — Agents (`forge.agents`) ✅
 
 PydanticAI-backed agent builder, built-in tools (web_search, fs_read,
 fetch_url, calculator), `ConversationMemory` + vector-backed
