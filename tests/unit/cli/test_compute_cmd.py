@@ -174,3 +174,37 @@ class TestList:
         assert result.exit_code == 0
         assert "job-123" in result.output
         assert "hello" in result.output
+
+
+class TestBackendFactory:
+    def test_local_backend(self) -> None:
+        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from forge.compute.backends.local import LocalBackend
+
+        backend = _make_backend("local", {})
+        assert isinstance(backend, LocalBackend)
+
+    def test_ssh_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from forge.compute.backends.ssh import SSHBackend
+
+        # SSHBackend requires either a connection or host+username; we
+        # pass a sentinel connection object to skip the asyncssh import.
+        sentinel = object()
+        backend = _make_backend("ssh", {"connection": sentinel})
+        assert isinstance(backend, SSHBackend)
+
+    def test_skypilot_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from forge.compute.backends.skypilot import SkyPilotBackend
+
+        backend = _make_backend("skypilot", {"client": object()})
+        assert isinstance(backend, SkyPilotBackend)
+
+    def test_unknown_backend(self) -> None:
+        import typer
+
+        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+
+        with pytest.raises(typer.Exit):
+            _make_backend("nope", {})

@@ -1,10 +1,7 @@
 """Typer entry point for the ``forge`` CLI.
 
-Subcommands that have already landed (``doctor``, ``chat``,
-``prompts``, ``datasets``) attach as real Typer apps; those still
-in flight print a clear stub message and exit non-zero so that
-wiring mistakes (e.g. accidentally invoking ``forge train`` in
-CI) fail loudly.
+Every Forge module's CLI surface attaches here. There are no
+stub commands left.
 """
 
 from __future__ import annotations
@@ -18,6 +15,8 @@ from forge.cli.doctor import doctor
 from forge.cli.eval_cmd import app as eval_app
 from forge.cli.experiments import app as experiments_app
 from forge.cli.prompts import app as prompts_app
+from forge.cli.serve import app as serve_app
+from forge.cli.train import app as train_app
 
 __all__ = ["app"]
 
@@ -37,30 +36,8 @@ app.add_typer(datasets_app, name="datasets")
 app.add_typer(eval_app, name="eval")
 app.add_typer(experiments_app, name="experiments")
 app.add_typer(compute_app, name="compute")
-
-
-def _stub(name: str, lands_with: str) -> None:
-    """Print a deferred-command notice and exit non-zero."""
-    typer.echo(f"[forge] `{name}` is not yet implemented — lands with the {lands_with} module.")
-    raise typer.Exit(code=1)
-
-
-@app.command(name="train")
-def train_cmd() -> None:
-    """Fine-tune a model."""
-    _stub("train", "training")
-
-
-@app.command(name="serve")
-def serve_cmd() -> None:
-    """Serve inference."""
-    _stub("serve", "compute")
-
-
-@app.command(name="compute")
-def compute_cmd() -> None:
-    """Manage remote compute (SkyPilot / SSH)."""
-    _stub("compute", "compute")
+app.add_typer(train_app, name="train")
+app.add_typer(serve_app, name="serve")
 
 
 if __name__ == "__main__":  # pragma: no cover

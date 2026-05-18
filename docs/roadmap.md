@@ -19,8 +19,8 @@ Design rationale that's bigger than a single phase lives in
 | 4 | RAG (`forge.rag`) | ✅ done |
 | 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | ✅ done |
 | 6 | Storage (`forge.storage`) | ✅ done |
-| 7 | CLI completion (`forge.cli`) | ⏳ next |
-| 8 | DX maturity (notebooks, Docker hardening, examples polish) | pending |
+| 7 | CLI completion (`forge.cli`) | ✅ done |
+| 8 | DX maturity (notebooks, Docker hardening, examples polish) | ⏳ next |
 | 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | pending |
 
 ---
@@ -562,13 +562,42 @@ heavy deps (`fsspec`, `s3fs`, `gcsfs`, `adlfs`,
 `import forge.storage` succeeds without it. Reference doc:
 [`docs/modules/storage.md`](modules/storage.md).
 
-## Phase 7 — CLI completion (`forge.cli`) — next
+## Phase 7 — CLI completion (`forge.cli`) ✅
 
-The remaining CLI subcommands beyond `doctor`: `chat`, `eval`,
-`experiments`, `prompts`, `datasets`, `train`, `serve`, `compute`. Each
-is a thin Typer wrapper over the module it represents.
+Every Forge module with a useful operator workflow now surfaces
+a `forge` subcommand:
 
-## Phase 8 — DX maturity — pending
+- `forge chat` — one-shot or interactive REPL against an
+  `LLMClient` with optional `--provider`, `--system`,
+  `--temperature`, `--max-tokens`.
+- `forge prompts list/show/render` — wraps `PromptRegistry`,
+  parses `--vars` as JSON, renders via
+  `forge.prompts.rendering.render`.
+- `forge datasets list/show/head` — wraps `DatasetStore`;
+  `head` prints first N items as JSON with a truncation count.
+- `forge eval run/list/show` — runs a quick single-model eval
+  with `exact_match` / `regex:` graders, writes markdown to
+  `~/.forge/experiments/<name>.md`.
+- `forge experiments list/show/delete` — mirror group over the
+  same report directory.
+- `forge compute submit/status/logs/cancel/cleanup/list` over
+  any of `local`, `ssh`, `skypilot`; persists Job + backend
+  state to `~/.forge/jobs/<id>.json` so subsequent commands
+  reconstruct the right backend automatically.
+- `forge train sft/dpo` — wraps `SFTRunner` and the DPO branch
+  of `PreferenceRunner`; supports `--adapter none/lora/qlora`
+  with `--adapter-rank`; heavy ML deps lazy-imported behind
+  `[finetuning]`.
+- `forge serve vllm/tgi/sglang` — builds the corresponding
+  `forge.compute.serving` task; default `--submit none` prints
+  YAML, `--submit local` runs it on `LocalBackend` and hands
+  off monitoring to `forge compute`.
+
+Shared helpers (`run_async`, `error_exit`, store factories)
+live in `src/forge/cli/helpers.py`. Reference doc:
+[`docs/modules/cli.md`](modules/cli.md).
+
+## Phase 8 — DX maturity — next
 
 Polish: extras tuning based on real install pain, Marimo notebook
 templates, Dockerfile hardening for the runtime image, and a once-over

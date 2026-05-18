@@ -48,7 +48,7 @@ def _state_path(job_id: str) -> Path:
     return _STATE_DIR / f"{job_id}.json"
 
 
-def _save_job(job: Job, backend_name: str, backend_kwargs: dict[str, Any]) -> Path:
+def save_job(job: Job, backend_name: str, backend_kwargs: dict[str, Any]) -> Path:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = _state_path(job.id)
     payload = {
@@ -173,7 +173,7 @@ async def _submit(task_file: Path, backend_name: str, backend_kwargs: dict[str, 
     except Exception as exc:
         error_exit(f"submit failed: {exc}")
 
-    path = _save_job(job, backend_name, backend_kwargs)
+    path = save_job(job, backend_name, backend_kwargs)
     console = Console()
     console.print(f"[bold green]submitted[/] {job.id}")
     console.print(f"  task:     {job.task_name}")

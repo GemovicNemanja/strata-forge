@@ -112,3 +112,29 @@ class TestOneShot:
             ],
         )
         assert result.exit_code == 0
+
+
+class TestInteractiveLoop:
+    def test_two_turns_then_blank_exits(self, fake_llm: dict[str, Any]) -> None:
+        # Two prompts followed by a blank line — the loop should run twice
+        # and then exit cleanly. CliRunner pipes stdin into Console.input.
+        result = runner.invoke(
+            app,
+            ["chat", "--model", "claude-opus-4-7"],
+            input="hi\nanother turn\n\n",
+        )
+        assert result.exit_code == 0
+        assert "hello from forge" in result.output
+        # Two assistant turns emitted.
+        assert result.output.count("hello from forge") >= 2
+
+    def test_blank_first_line_exits_immediately(self, fake_llm: dict[str, Any]) -> None:
+        result = runner.invoke(app, ["chat", "--model", "claude-opus-4-7"], input="\n")
+        assert result.exit_code == 0
+        assert "exit" in result.output
+
+    def test_eof_exits(self, fake_llm: dict[str, Any]) -> None:
+        # Empty input → EOFError on the first Console.input call.
+        result = runner.invoke(app, ["chat", "--model", "claude-opus-4-7"], input="")
+        assert result.exit_code == 0
+        assert "exit" in result.output
