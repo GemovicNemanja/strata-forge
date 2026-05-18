@@ -16,8 +16,8 @@ Design rationale that's bigger than a single phase lives in
 | 1 | LLM abstraction (`forge.llm`, `forge.sync`) | ✅ done |
 | 2 | Prompts, tracing, datasets, evals | ✅ done |
 | 3 | Agents (`forge.agents`) | ✅ done |
-| 4 | RAG (`forge.rag`) | ⏳ next |
-| 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | pending |
+| 4 | RAG (`forge.rag`) | ✅ done |
+| 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | ⏳ next |
 | 6 | Storage (`forge.storage`) | pending |
 | 7 | CLI completion (`forge.cli`) | pending |
 | 8 | DX maturity (notebooks, Docker hardening, examples polish) | pending |
@@ -507,7 +507,7 @@ support is the natural addition here too: an adapter that exposes
 existing `Tool` instances over MCP and consumes external MCP tools as
 `Tool`s.
 
-## Phase 4 — RAG (`forge.rag`) — pending
+## Phase 4 — RAG (`forge.rag`) ✅
 
 Embedder built on `forge.llm`; Qdrant vector store; chunkers (recursive,
 token, semantic); retrieval (dense, BM25, hybrid via RRF); rerankers
