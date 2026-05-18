@@ -1,15 +1,20 @@
 """Typer entry point for the ``forge`` CLI.
 
-Every Phase 0+1 subcommand lives here. Subcommands that haven't been
-implemented yet print a clear stub message and exit non-zero so that wiring
-mistakes (e.g. accidentally invoking ``forge train`` in CI) fail loudly.
+Subcommands that have already landed (``doctor``, ``chat``,
+``prompts``, ``datasets``) attach as real Typer apps; those still
+in flight print a clear stub message and exit non-zero so that
+wiring mistakes (e.g. accidentally invoking ``forge train`` in
+CI) fail loudly.
 """
 
 from __future__ import annotations
 
 import typer
 
+from forge.cli.chat import chat
+from forge.cli.datasets import app as datasets_app
 from forge.cli.doctor import doctor
+from forge.cli.prompts import app as prompts_app
 
 __all__ = ["app"]
 
@@ -23,18 +28,15 @@ app = typer.Typer(
 
 
 app.command(name="doctor")(doctor)
+app.command(name="chat")(chat)
+app.add_typer(prompts_app, name="prompts")
+app.add_typer(datasets_app, name="datasets")
 
 
 def _stub(name: str, lands_with: str) -> None:
     """Print a deferred-command notice and exit non-zero."""
     typer.echo(f"[forge] `{name}` is not yet implemented — lands with the {lands_with} module.")
     raise typer.Exit(code=1)
-
-
-@app.command(name="chat")
-def chat_cmd() -> None:
-    """Interactive chat with a configured LLM."""
-    _stub("chat", "LLM")
 
 
 @app.command(name="eval")
@@ -47,18 +49,6 @@ def eval_cmd() -> None:
 def experiments_cmd() -> None:
     """Manage experiment runs."""
     _stub("experiments", "evals")
-
-
-@app.command(name="prompts")
-def prompts_cmd() -> None:
-    """Manage the prompt registry."""
-    _stub("prompts", "prompts")
-
-
-@app.command(name="datasets")
-def datasets_cmd() -> None:
-    """Manage datasets."""
-    _stub("datasets", "datasets")
 
 
 @app.command(name="train")

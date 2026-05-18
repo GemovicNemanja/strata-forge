@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.main` — Typer skeleton + stub subcommands."""
+"""Unit tests for `forge.cli.main` — top-level Typer wiring."""
 
 from __future__ import annotations
 
@@ -10,12 +10,18 @@ from forge.cli.main import app
 runner = CliRunner()
 
 
-STUB_COMMANDS: tuple[str, ...] = (
+# Commands that are real subcommands (apps with their own subcommands or callables).
+LIVE_COMMANDS: tuple[str, ...] = (
+    "doctor",
     "chat",
-    "eval",
-    "experiments",
     "prompts",
     "datasets",
+)
+
+# Subcommands still printed as stubs by main.py.
+STUB_COMMANDS: tuple[str, ...] = (
+    "eval",
+    "experiments",
     "train",
     "serve",
     "compute",
@@ -26,8 +32,7 @@ class TestRoot:
     def test_help_lists_every_command(self) -> None:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        # Every command — stubs plus `doctor` — must show in help.
-        for cmd in (*STUB_COMMANDS, "doctor"):
+        for cmd in (*LIVE_COMMANDS, *STUB_COMMANDS):
             assert cmd in result.output
 
     def test_no_args_shows_help(self) -> None:
@@ -51,6 +56,5 @@ class TestStubs:
         assert cmd in result.output
 
     def test_stub_message_names_target_module(self) -> None:
-        # `train` should mention the training module so operators know where it lands.
         result = runner.invoke(app, ["train"])
         assert "training" in result.output
