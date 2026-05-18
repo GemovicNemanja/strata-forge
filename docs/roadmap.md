@@ -18,8 +18,8 @@ Design rationale that's bigger than a single phase lives in
 | 3 | Agents (`forge.agents`) | ✅ done |
 | 4 | RAG (`forge.rag`) | ✅ done |
 | 5 | Remote compute + inference + training (`forge.compute`, `forge.training`) | ✅ done |
-| 6 | Storage (`forge.storage`) | ⏳ next |
-| 7 | CLI completion (`forge.cli`) | pending |
+| 6 | Storage (`forge.storage`) | ✅ done |
+| 7 | CLI completion (`forge.cli`) | ⏳ next |
 | 8 | DX maturity (notebooks, Docker hardening, examples polish) | pending |
 | 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | pending |
 
@@ -540,13 +540,29 @@ first-fit sequence packing (`pack_sequences`). All heavy deps
 lazy-imported inside the runners' `train` methods. Reference
 doc: [`docs/modules/training.md`](modules/training.md).
 
-## Phase 6 — Storage (`forge.storage`) — next
+## Phase 6 — Storage (`forge.storage`) ✅
 
-`fsspec` gateway with local / S3 / GCS / Azure Blob / Hugging Face Hub
-backends; HF Hub model push/pull helpers; dataset handling on HF Hub
-and S3; presigned-URL utilities.
+`forge.storage` ships two cooperating clients. `StorageGateway`
+is an async fsspec wrapper covering read / write / list /
+copy / move / delete across local, S3, GCS, Azure Blob, HTTP, and
+any other fsspec-compatible target; URL → protocol auto-detection,
+per-protocol option forwarding, filesystem caching, same-protocol
+native copy/move plus cross-protocol byte streaming, and an
+explicit `NotImplementedError` on cross-protocol recursive copy
+so callers reach for vendor-native tooling on big transfers.
 
-## Phase 7 — CLI completion (`forge.cli`) — pending
+`HFHubClient` is the async wrapper over `huggingface_hub.HfApi`
+with repo lifecycle (create / delete / list), single-file
+download/upload, whole-repo snapshot download/upload, and
+convenience push/pull wrappers for both models and datasets;
+every method exposes an `extras={}` passthrough so the full
+HfApi surface stays reachable. Both clients lazy-import the
+heavy deps (`fsspec`, `s3fs`, `gcsfs`, `adlfs`,
+`huggingface_hub`) behind the new `[storage]` extra, so
+`import forge.storage` succeeds without it. Reference doc:
+[`docs/modules/storage.md`](modules/storage.md).
+
+## Phase 7 — CLI completion (`forge.cli`) — next
 
 The remaining CLI subcommands beyond `doctor`: `chat`, `eval`,
 `experiments`, `prompts`, `datasets`, `train`, `serve`, `compute`. Each
