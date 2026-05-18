@@ -1,27 +1,37 @@
 """Remote compute orchestration.
 
-The 5.1 foundation ships the typed shapes (:class:`Task`,
-:class:`ResourceSpec`, :class:`Job`, :class:`JobStatus`), the
-:class:`Backend` Protocol, a YAML task loader, and an in-process
-:class:`LocalBackend`. SSH + SkyPilot backends and the batch
-inference runner land in Phase 5.2; training in Phase 5.3;
-serving + sign-off in Phase 5.4.
+The module ships typed shapes (:class:`Task`, :class:`ResourceSpec`,
+:class:`Job`, :class:`JobStatus`), a :class:`Backend` Protocol, a
+YAML task loader, three concrete backends (:class:`LocalBackend`,
+:class:`SSHBackend`, :class:`SkyPilotBackend`), and a
+:class:`BatchInferenceRunner` that fans many prompts out across a
+shared :class:`LLMClient` with bounded concurrency.
 
-The heavier production backends are lazy-imported behind the
-``[compute]`` extra (``asyncssh``, ``skypilot``); the local
-backend has no optional deps.
+The :class:`SSHBackend` and :class:`SkyPilotBackend` lazy-import
+their SDKs behind the ``[compute]`` extra; the local backend and
+the batch runner are dep-free.
 """
 
-from forge.compute.backends import Backend, LocalBackend
+from forge.compute.backends import (
+    Backend,
+    LocalBackend,
+    SkyPilotBackend,
+    SSHBackend,
+)
+from forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from forge.compute.job import Job, JobState, JobStatus
 from forge.compute.task import ResourceSpec, Task
 
 __all__ = [
     "Backend",
+    "BatchInferenceResult",
+    "BatchInferenceRunner",
     "Job",
     "JobState",
     "JobStatus",
     "LocalBackend",
     "ResourceSpec",
+    "SSHBackend",
+    "SkyPilotBackend",
     "Task",
 ]
