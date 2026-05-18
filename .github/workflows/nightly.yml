@@ -28,10 +28,84 @@ jobs:
   cassette-refresh:
     name: VCR cassette refresh
     runs-on: ubuntu-latest
-    if: false  # wired in when VCR cassettes exist
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - run: echo "cassette refresh not yet wired"
+        with:
+          # Need history + write token so we can push a refresh branch.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if provider secrets are absent
+        id: gate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          if [[ -z "${OPENAI_API_KEY}" && -z "${ANTHROPIC_API_KEY}" \
+                && -z "${GOOGLE_APPLICATION_CREDENTIALS}" \
+                && -z "${AZURE_OPENAI_API_KEY}" && -z "${AWS_ACCESS_KEY_ID}" ]]; then
+            echo "no provider credentials configured — skipping cassette refresh"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: astral-sh/setup-uv@v3
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          enable-cache: true
+
+      - if: steps.gate.outputs.skip != 'true'
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - if: steps.gate.outputs.skip != 'true'
+        run: uv sync --frozen
+
+      - name: Re-record cassettes
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          RECORD: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+        run: |
+          # Delete existing cassettes so record_mode=once re-records them.
+          find tests/vcr/cassettes -name '*.yaml' -delete || true
+          uv run pytest tests/vcr -x
+
+      - name: Open PR if cassettes changed
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -z "$(git status --porcelain tests/vcr/cassettes)" ]]; then
+            echo "cassettes unchanged — nothing to push"
+            exit 0
+          fi
+          BRANCH="cassette-refresh-$(date -u +%Y%m%dT%H%M%SZ)"
+          git config user.name "forge-nightly[bot]"
+          git config user.email "forge-nightly@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add tests/vcr/cassettes
+          git commit -m "chore: refresh VCR cassettes from nightly"
+          git push --set-upstream origin "$BRANCH"
+          gh pr create \
+            --title "chore: refresh VCR cassettes from nightly" \
+            --body "Auto-recorded against live providers by the nightly cassette refresh job." \
+            --label "automated,cassettes"
 
   security-audit:
     name: Security audit (pip-audit)
@@ -43,5 +117,7 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ env.PYTHON_VERSION }}
       - run: uv sync --frozen
-      - name: Run pip-audit
-        run: uvx pip-audit --strict || true
+      - name: Run pip-audit (strict)
+        # Fail on any vulnerability — the nightly is the right place
+        # to learn about new CVEs without breaking PR-time CI.
+        run: uvx pip-audit --strict
