@@ -16,15 +16,15 @@ LIVE_COMMANDS: tuple[str, ...] = (
     "chat",
     "prompts",
     "datasets",
+    "eval",
+    "experiments",
+    "compute",
 )
 
 # Subcommands still printed as stubs by main.py.
 STUB_COMMANDS: tuple[str, ...] = (
-    "eval",
-    "experiments",
     "train",
     "serve",
-    "compute",
 )
 
 

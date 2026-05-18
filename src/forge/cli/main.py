@@ -12,8 +12,11 @@ from __future__ import annotations
 import typer
 
 from forge.cli.chat import chat
+from forge.cli.compute import app as compute_app
 from forge.cli.datasets import app as datasets_app
 from forge.cli.doctor import doctor
+from forge.cli.eval_cmd import app as eval_app
+from forge.cli.experiments import app as experiments_app
 from forge.cli.prompts import app as prompts_app
 
 __all__ = ["app"]
@@ -31,24 +34,15 @@ app.command(name="doctor")(doctor)
 app.command(name="chat")(chat)
 app.add_typer(prompts_app, name="prompts")
 app.add_typer(datasets_app, name="datasets")
+app.add_typer(eval_app, name="eval")
+app.add_typer(experiments_app, name="experiments")
+app.add_typer(compute_app, name="compute")
 
 
 def _stub(name: str, lands_with: str) -> None:
     """Print a deferred-command notice and exit non-zero."""
     typer.echo(f"[forge] `{name}` is not yet implemented — lands with the {lands_with} module.")
     raise typer.Exit(code=1)
-
-
-@app.command(name="eval")
-def eval_cmd() -> None:
-    """Run an evaluation suite."""
-    _stub("eval", "evals")
-
-
-@app.command(name="experiments")
-def experiments_cmd() -> None:
-    """Manage experiment runs."""
-    _stub("experiments", "evals")
 
 
 @app.command(name="train")

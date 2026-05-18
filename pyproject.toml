@@ -132,6 +132,10 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["forge"]
 
+[tool.ruff.lint.flake8-bugbear]
+# Typer's Option/Argument are the documented way to declare CLI params.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
 # ----------------------------- pyright -----------------------------
 [tool.pyright]
 include = ["src", "tests"]
