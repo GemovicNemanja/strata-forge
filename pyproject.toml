@@ -40,6 +40,13 @@ evals = ["nltk>=3.9", "rouge-score>=0.1.2"]
 rag = ["qdrant-client>=1.13", "rank-bm25>=0.2.2"]
 compute = ["skypilot>=0.7", "asyncssh>=2.18"]
 serving = ["vllm>=0.7"]
+storage = [
+    "fsspec>=2024.10",
+    "s3fs>=2024.10",
+    "gcsfs>=2024.10",
+    "adlfs>=2024.7",
+    "huggingface_hub>=0.27",
+]
 finetuning = [
     "torch>=2.5",
     "transformers>=4.46",
@@ -49,7 +56,7 @@ finetuning = [
     "accelerate>=1.1",
 ]
 all = [
-    "ai-forge[redis,multimodal,inspect,compute,serving,finetuning,langfuse,hf,evals,rag]",
+    "ai-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag]",
 ]
 
 [project.scripts]
