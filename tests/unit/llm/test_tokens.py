@@ -99,23 +99,17 @@ class TestHypothesisProperties:
         if not s:
             assert count_tokens(s) == 0
 
-    # Note: a stricter "concatenation is subadditive" property (`count(a+b)
-    # <= count(a) + count(b)`) is intuitive but NOT strictly true for BPE
-    # tokenizers. Counterexample found in practice: `count("  ")` = 1,
-    # `count("aaaaaa")` = 2, but `count("  aaaaaa")` = 4 — leading whitespace
-    # changes how the following text tokenizes. So we don't assert it.
-
-    @settings(max_examples=40, deadline=None)
-    @given(
-        a=st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", min_size=1, max_size=80),
-        b=st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", min_size=1, max_size=80),
-    )
-    def test_concatenation_is_at_least_as_many_as_each_part(self, a: str, b: str) -> None:
-        # Appending text never reduces the token count below either piece
-        # taken alone — boundary merges shrink the total but can't shrink
-        # past a single part's count.
-        ca = count_tokens(a)
-        cb = count_tokens(b)
-        cab = count_tokens(a + b)
-        assert cab >= ca
-        assert cab >= cb
+    # Note: BPE tokenizers do not satisfy any clean concatenation
+    # invariant against ``count_tokens``. Both subadditivity
+    # (``count(a+b) <= count(a) + count(b)``) and either lower bound
+    # (``count(a+b) >= count(a)``) fail in practice. Counterexamples
+    # found by hypothesis:
+    # - ``count("tree") = 1``, ``count("true") = 1``, but
+    #   ``count("treetrue") = 4`` (the join leaves no whitespace, so
+    #   the BPE merge table reaches for byte-level fallbacks).
+    # - ``count("a") = 1``, ``count("mecb") = 3``, but
+    #   ``count("amecb") = 2`` (a longer prefix match across the join
+    #   collapses the trailing tokens).
+    # The only robust invariant is non-negativity, which is trivial.
+    # We keep the empty-string and non-negativity tests above and
+    # rely on snapshot tests + provider-reported usage for the rest.

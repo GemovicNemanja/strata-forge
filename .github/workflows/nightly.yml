@@ -20,10 +20,35 @@ jobs:
   eval-gate:
     name: Eval regression gate
     runs-on: ubuntu-latest
-    if: false  # wired in alongside forge.evals
     steps:
       - uses: actions/checkout@v4
-      - run: echo "eval gate not yet wired"
+      - name: Skip when no Anthropic key (gate's default model)
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [[ -z "${ANTHROPIC_API_KEY}" ]]; then
+            echo "ANTHROPIC_API_KEY not set — skipping eval gate"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@v3
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          enable-cache: true
+      - if: steps.gate.outputs.skip != 'true'
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - if: steps.gate.outputs.skip != 'true'
+        run: uv sync --frozen
+      - name: Run canonical eval gate
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # `--model` defaults to claude-haiku-4-5. Override via
+        # `workflow_dispatch` inputs if needed; the committed
+        # thresholds live in scripts/run_eval_gate.py.
+        run: uv run python scripts/run_eval_gate.py
 
   cassette-refresh:
     name: VCR cassette refresh
