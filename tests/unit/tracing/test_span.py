@@ -24,7 +24,11 @@ def _install_fake_langfuse(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client_mock = MagicMock(name="lf-client")
     span_mock = MagicMock(name="lf-span")
     span_mock.id = "span-fake"
-    client_mock.span.return_value = span_mock
+    client_mock.start_observation.return_value = span_mock
+    # v4 SDK replaced `client.span(...)` with `client.start_observation(
+    # as_type="span")`. Alias the old name to the new mock so existing
+    # `client.span.call_args` assertions keep working.
+    client_mock.span = client_mock.start_observation
 
     fake_module.Langfuse = MagicMock(return_value=client_mock)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langfuse", fake_module)
@@ -100,7 +104,11 @@ class TestTraceLinkage:
         try:
             async with traced_span("inner"):
                 pass
-            assert client.span.call_args.kwargs["trace_id"] == "trace-outer"
+            # v4 SDK: trace linkage rides in `trace_context={"trace_id": ...}`
+            # instead of a top-level kwarg.
+            assert client.span.call_args.kwargs["trace_context"] == {
+                "trace_id": "trace-outer",
+            }
         finally:
             correlation_id_var.reset(token)
 
@@ -113,7 +121,9 @@ class TestTraceLinkage:
         async with traced_span("orphan"):
             pass
         kwargs = client.span.call_args.kwargs
-        assert "trace_id" not in kwargs
+        # Without a trace_id we omit trace_context entirely; the v4 SDK
+        # then opens a new top-level trace for the span.
+        assert "trace_context" not in kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +317,6 @@ class TestMultipleSpans:
         # All three spans were ended.
         for s in spans:
             s.end.assert_called_once()
-        # All three were linked to the same trace.
+        # All three were linked to the same trace via trace_context.
         for call in client.span.call_args_list:
-            assert call.kwargs["trace_id"] == "trace-outer"
+            assert call.kwargs["trace_context"] == {"trace_id": "trace-outer"}

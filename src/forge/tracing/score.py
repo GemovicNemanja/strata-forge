@@ -73,8 +73,9 @@ async def score_trace(
     if data_type is not None:
         kwargs["data_type"] = data_type
 
+    # Langfuse SDK v4 renamed `score` → `create_score`.
     with contextlib.suppress(Exception):
-        client.score(**kwargs)
+        client.create_score(**kwargs)
 
 
 async def score_observation(
@@ -109,5 +110,6 @@ async def score_observation(
     if data_type is not None:
         kwargs["data_type"] = data_type
 
+    # Langfuse SDK v4 renamed `score` → `create_score`.
     with contextlib.suppress(Exception):
-        client.score(**kwargs)
+        client.create_score(**kwargs)

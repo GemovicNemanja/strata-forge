@@ -45,14 +45,37 @@ def _install_fake_langfuse(
     trace_mock = MagicMock(name="lf-trace")
     trace_mock.id = trace_id
     trace_mock.trace_id = trace_id
-    client_mock.start_observation.return_value = trace_mock
-    # Back-compat alias for tests still inspecting `client.trace`.
-    client_mock.trace = client_mock.start_observation
 
     span_mock = MagicMock(name="lf-span")
     span_mock.id = span_id
     span_mock.trace_id = trace_id
-    client_mock.span.return_value = span_mock
+
+    # v4 SDK: both root traces and child spans flow through
+    # start_observation. Distinguish them by trace_context presence so
+    # the back-compat aliases below (client.trace / client.span) still
+    # hand out the right MagicMock to assertions.
+    def _start_observation(**kwargs: object) -> MagicMock:
+        return span_mock if "trace_context" in kwargs else trace_mock
+
+    client_mock.start_observation.side_effect = _start_observation
+
+    # Separate proxies so assertions like `client.trace.assert_called_once()`
+    # and `client.span.assert_called_once()` count just one kind of call.
+    trace_proxy = MagicMock(name="lf-trace-proxy", return_value=trace_mock)
+    span_proxy = MagicMock(name="lf-span-proxy", return_value=span_mock)
+
+    def _route_call(**kwargs: object) -> MagicMock:
+        if "trace_context" in kwargs:
+            span_proxy(**kwargs)
+            return span_mock
+        trace_proxy(**kwargs)
+        return trace_mock
+
+    client_mock.start_observation.side_effect = _route_call
+    client_mock.trace = trace_proxy
+    client_mock.span = span_proxy
+    # v4 SDK renamed `score` → `create_score`; alias for back-compat.
+    client_mock.score = client_mock.create_score
 
     fake_module.Langfuse = MagicMock(return_value=client_mock)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langfuse", fake_module)
@@ -82,7 +105,10 @@ class TestTracedWithSpan:
 
         client.trace.assert_called_once()
         client.span.assert_called_once()
-        assert client.span.call_args.kwargs["trace_id"] == "trace-A"
+        # v4 SDK: trace linkage lives in trace_context, not a top-level kwarg.
+        assert client.span.call_args.kwargs["trace_context"] == {
+            "trace_id": "trace-A",
+        }
 
     async def test_sequential_spans_share_trace(
         self,
@@ -103,7 +129,7 @@ class TestTracedWithSpan:
 
         assert client.span.call_count == 3
         for call in client.span.call_args_list:
-            assert call.kwargs["trace_id"] == "trace-B"
+            assert call.kwargs["trace_context"] == {"trace_id": "trace-B"}
 
     async def test_exception_in_span_propagates_through_traced(
         self,

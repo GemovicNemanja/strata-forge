@@ -93,8 +93,9 @@ async def record_numeric_metric(
     if comment is not None:
         kwargs["comment"] = comment
 
+    # Langfuse SDK v4 renamed `score` → `create_score`.
     with contextlib.suppress(Exception):
-        client.score(**kwargs)
+        client.create_score(**kwargs)
 
 
 async def record_categorical_metric(
@@ -132,5 +133,6 @@ async def record_categorical_metric(
     if comment is not None:
         kwargs["comment"] = comment
 
+    # Langfuse SDK v4 renamed `score` → `create_score`.
     with contextlib.suppress(Exception):
-        client.score(**kwargs)
+        client.create_score(**kwargs)

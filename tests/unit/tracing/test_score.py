@@ -20,6 +20,9 @@ def _install_fake_langfuse(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
     fake_module = types.ModuleType("langfuse")
     client_mock = MagicMock(name="lf-client")
+    # v4 SDK renamed `score` → `create_score`. Alias the old name to the
+    # new mock so existing `client.score.call_args` assertions keep working.
+    client_mock.score = client_mock.create_score
 
     fake_module.Langfuse = MagicMock(return_value=client_mock)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langfuse", fake_module)

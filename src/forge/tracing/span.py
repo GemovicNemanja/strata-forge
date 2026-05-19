@@ -43,16 +43,22 @@ def _create_span(
     trace_id: str | None,
     metadata: dict[str, Any] | None,
 ) -> Any:
-    """Create a Langfuse span; return ``None`` on any error.
+    """Create a Langfuse span via the v4 ``start_observation`` API.
 
     Span creation failure must not break the wrapped block. We swallow
     the exception and the caller falls through to the no-trace path.
+    Trace linkage uses ``trace_context={"trace_id": ...}`` rather than
+    a top-level kwarg, per the v4 SDK.
     """
-    kwargs: dict[str, Any] = {"name": name, "metadata": metadata or {}}
+    kwargs: dict[str, Any] = {
+        "name": name,
+        "as_type": "span",
+        "metadata": metadata or {},
+    }
     if trace_id is not None:
-        kwargs["trace_id"] = trace_id
+        kwargs["trace_context"] = {"trace_id": trace_id}
     try:
-        return client.span(**kwargs)
+        return client.start_observation(**kwargs)
     except Exception:
         return None
 
