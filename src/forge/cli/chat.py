@@ -93,7 +93,9 @@ async def _run_chat(
     _registry_module: Any = __import__("forge.llm.registry", fromlist=["registry"])
     _registry: Any = _registry_module.registry
     try:
-        _registry.resolve(model)
+        # Registry.get(name) raises RegistryError for unknown logical
+        # models (including alias misses).
+        _registry.get(model)
     except Exception as exc:
         error_exit(f"unknown model {model!r}: {exc}")
 

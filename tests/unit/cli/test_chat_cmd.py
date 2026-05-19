@@ -48,7 +48,7 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     # Make every model resolve cleanly. The `registry` name on the
     # forge.llm package shadows the submodule, so target sys.modules.
     fake_registry = MagicMock()
-    fake_registry.resolve = MagicMock(return_value=None)
+    fake_registry.get = MagicMock(return_value=None)
     registry_module = sys.modules["forge.llm.registry"]
     monkeypatch.setattr(registry_module, "registry", fake_registry)
 
@@ -75,7 +75,7 @@ class TestOneShot:
 
     def test_unknown_model_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_registry = MagicMock()
-        fake_registry.resolve = MagicMock(side_effect=Exception("nope"))
+        fake_registry.get = MagicMock(side_effect=Exception("nope"))
         registry_module = sys.modules["forge.llm.registry"]
         monkeypatch.setattr(registry_module, "registry", fake_registry)
 
