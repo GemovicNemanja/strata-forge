@@ -102,6 +102,13 @@ class LangfusePromptStore(PromptStore):
         public_key: str | None = None,
         secret_key: str | None = None,
     ) -> None:
+        # Hold the credentials separately so list_names() can call the
+        # REST endpoint directly — the v4 Langfuse SDK dropped the
+        # `client.api.prompts.list()` proxy that earlier versions
+        # exposed, but the underlying HTTP endpoint is still there.
+        self._host = host
+        self._public_key = public_key
+        self._secret_key = secret_key
         if client is not None:
             self._client: Any = client
             return
@@ -125,10 +132,18 @@ class LangfusePromptStore(PromptStore):
         self._client = Langfuse(**kwargs)  # pyright: ignore[reportUnknownVariableType]
 
     async def get(self, name: str, version: str | None = None) -> PromptTemplate:
-        """Fetch a prompt, returning the latest version when ``version`` is None."""
+        """Fetch a prompt, returning the latest version when ``version`` is None.
+
+        Langfuse ``get_prompt(name)`` with no kwargs defaults to
+        ``label="production"`` — but new prompts only carry the
+        ``"latest"`` label until an operator promotes them. We default
+        to ``label="latest"`` so the registry round-trips its own
+        writes; callers who want production-tagged prompts pass the
+        version explicitly.
+        """
         try:
             if version is None:
-                prompt = self._client.get_prompt(name)
+                prompt = self._client.get_prompt(name, label="latest")
             else:
                 prompt = self._client.get_prompt(name, version=int(version))
         except Exception as exc:
@@ -160,7 +175,7 @@ class LangfusePromptStore(PromptStore):
         a missing version still raises :class:`PromptNotFoundError`.
         """
         try:
-            latest = self._client.get_prompt(name)
+            latest = self._client.get_prompt(name, label="latest")
         except Exception as exc:
             msg = f"Template {name!r} not in Langfuse"
             raise PromptNotFoundError(msg, name=name) from exc
@@ -170,18 +185,50 @@ class LangfusePromptStore(PromptStore):
     async def list_names(self) -> list[str]:
         """Best-effort listing of every distinct prompt name in the project.
 
-        Walks Langfuse's prompt-list pagination. The Langfuse SDK
-        surface for this varies between major versions; if the call
-        fails we surface it as :class:`ForgeError` rather than
-        swallowing.
+        Langfuse SDK v4 dropped the ``client.api.prompts.list()`` proxy,
+        so we go to the REST endpoint directly. Auth uses the same
+        public/secret-key pair the SDK uses. Falls back to env vars when
+        the operator constructed the store without explicit credentials.
         """
+        import os
+
+        import httpx
+
+        host = self._host or os.environ.get("LANGFUSE_HOST")
+        public_key = self._public_key or os.environ.get("LANGFUSE_PUBLIC_KEY")
+        secret_key = self._secret_key or os.environ.get("LANGFUSE_SECRET_KEY")
+        if not host or not public_key or not secret_key:
+            msg = (
+                "LangfusePromptStore.list_names needs host + keys; "
+                "set LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY "
+                "or pass them to the constructor."
+            )
+            raise ForgeError(msg)
+        names: set[str] = set()
+        page = 1
         try:
-            page = self._client.api.prompts.list()
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                while True:
+                    resp = await client.get(
+                        f"{host.rstrip('/')}/api/public/v2/prompts",
+                        auth=(public_key, secret_key),
+                        params={"page": page, "limit": 100},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    items: Any = data.get("data") or []
+                    for item in items:
+                        name = item.get("name")
+                        if name:
+                            names.add(name)
+                    meta: Any = data.get("meta") or {}
+                    total_pages: Any = meta.get("totalPages", 1)
+                    if page >= int(total_pages):
+                        break
+                    page += 1
         except Exception as exc:
             msg = f"Langfuse list_names failed: {exc}"
             raise ForgeError(msg) from exc
-        items: Any = getattr(page, "data", None) or []
-        names: set[str] = {item.name for item in items}
         return sorted(names)
 
     async def delete(self, name: str, version: str | None = None) -> None:

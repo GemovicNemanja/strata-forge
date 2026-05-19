@@ -137,7 +137,9 @@ class TestGet:
 
         result = await store.get("greet")
 
-        client.get_prompt.assert_called_once_with("greet")
+        # Defaults to label="latest" so the store round-trips its own
+        # writes (new prompts only carry "latest" until promoted).
+        client.get_prompt.assert_called_once_with("greet", label="latest")
         assert isinstance(result, PromptTemplate)
         assert result.name == "greet"
         assert result.stable_section == "You are helpful."
@@ -281,52 +283,108 @@ class TestVersions:
 # ---------------------------------------------------------------------------
 
 
+class _FakeAsyncClient:
+    """Drop-in for httpx.AsyncClient that returns scripted responses."""
+
+    def __init__(self, responses: list[dict[str, Any]] | Exception) -> None:
+        self._responses = responses
+
+    async def __aenter__(self) -> _FakeAsyncClient:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        return None
+
+    async def get(self, *_args: Any, **_kwargs: Any) -> MagicMock:
+        if isinstance(self._responses, Exception):
+            raise self._responses
+        payload = self._responses.pop(0)
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = payload
+        return resp
+
+
 class TestListNames:
-    async def test_returns_sorted_unique_names(self) -> None:
-        client = MagicMock()
-        page = MagicMock()
-        page.data = [
-            MagicMock(name="zeta"),
-            MagicMock(name="alpha"),
-            MagicMock(name="mu"),
-            MagicMock(name="alpha"),  # duplicate
-        ]
-        # MagicMock's `name=` kwarg sets the magic mock's display name, not
-        # an attribute, so we override explicitly.
-        for p, n in zip(page.data, ("zeta", "alpha", "mu", "alpha"), strict=True):
-            p.name = n
-        client.api.prompts.list.return_value = page
-        store = LangfusePromptStore(client=client)
+    # The v4 SDK dropped client.api.prompts.list, so list_names hits the
+    # REST endpoint directly. Tests mock httpx.AsyncClient; the store
+    # needs explicit host/public_key/secret_key to skip the env-var
+    # fallback.
 
-        result = await store.list_names()
-        assert result == ["alpha", "mu", "zeta"]
+    @staticmethod
+    def _store_with_creds() -> LangfusePromptStore:
+        return LangfusePromptStore(
+            client=MagicMock(),
+            host="http://test",
+            public_key="pk-test",
+            secret_key="sk-test",
+        )
 
-    async def test_empty_listing(self) -> None:
-        client = MagicMock()
-        page = MagicMock()
-        page.data = []
-        client.api.prompts.list.return_value = page
-        store = LangfusePromptStore(client=client)
+    @staticmethod
+    def _patch_httpx(
+        monkeypatch: pytest.MonkeyPatch,
+        responses: list[dict[str, Any]] | Exception,
+    ) -> None:
+        import httpx
 
+        def _make_client(*_args: Any, **_kwargs: Any) -> _FakeAsyncClient:
+            return _FakeAsyncClient(responses)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _make_client)
+
+    async def test_returns_sorted_unique_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        page = {
+            "data": [
+                {"name": "zeta"},
+                {"name": "alpha"},
+                {"name": "mu"},
+                {"name": "alpha"},  # duplicate
+            ],
+            "meta": {"totalPages": 1},
+        }
+        self._patch_httpx(monkeypatch, [page])
+        store = self._store_with_creds()
+        assert await store.list_names() == ["alpha", "mu", "zeta"]
+
+    async def test_empty_listing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_httpx(monkeypatch, [{"data": [], "meta": {"totalPages": 1}}])
+        store = self._store_with_creds()
         assert await store.list_names() == []
 
-    async def test_listing_failure_raises_forge_error(self) -> None:
-        client = MagicMock()
-        client.api.prompts.list.side_effect = RuntimeError("server unhappy")
-        store = LangfusePromptStore(client=client)
-
+    async def test_listing_failure_raises_forge_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_httpx(monkeypatch, RuntimeError("server unhappy"))
+        store = self._store_with_creds()
         with pytest.raises(ForgeError, match="list_names failed"):
             await store.list_names()
 
-    async def test_handles_missing_data_attribute(self) -> None:
-        # If the Langfuse SDK page object doesn't expose `data` (different
-        # SDK version), the store treats it as empty rather than crashing.
-        client = MagicMock()
-        page = MagicMock(spec=[])  # no attributes
-        client.api.prompts.list.return_value = page
-        store = LangfusePromptStore(client=client)
+    async def test_missing_credentials_raises_forge_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No env credentials, no constructor args → ForgeError surfaces
+        # the misconfiguration instead of dispatching an unauthenticated
+        # REST call.
+        for var in ("LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        store = LangfusePromptStore(client=MagicMock())
+        with pytest.raises(ForgeError, match="LANGFUSE_HOST"):
+            await store.list_names()
 
-        assert await store.list_names() == []
+    async def test_paginates_through_multiple_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        responses = [
+            {
+                "data": [{"name": "alpha"}, {"name": "beta"}],
+                "meta": {"totalPages": 2},
+            },
+            {
+                "data": [{"name": "gamma"}],
+                "meta": {"totalPages": 2},
+            },
+        ]
+        self._patch_httpx(monkeypatch, responses)
+        store = self._store_with_creds()
+        assert await store.list_names() == ["alpha", "beta", "gamma"]
 
 
 # ---------------------------------------------------------------------------
