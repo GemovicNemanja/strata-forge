@@ -62,9 +62,7 @@ def _safe_create_trace(
     """
     try:
         metadata = {"tags": tags} if tags else None
-        return client.start_observation(
-            name=name, as_type="span", metadata=metadata
-        )
+        return client.start_observation(name=name, as_type="span", metadata=metadata)
     except Exception:
         return None
 

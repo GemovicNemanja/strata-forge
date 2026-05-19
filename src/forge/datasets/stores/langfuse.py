@@ -20,6 +20,7 @@ when a user actually constructs the store without the extra.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 from forge.datasets.schema import Dataset, DatasetItem
@@ -34,6 +35,15 @@ __all__ = [
 ]
 
 VERSION_SEPARATOR = "__v"
+
+
+@dataclass(frozen=True)
+class _DatasetSummary:
+    """Lightweight stand-in for the SDK dataset object the REST list
+    endpoint replaces. Only the fields this module reads are kept."""
+
+    name: str
+    created_at: str
 
 
 def compose_langfuse_name(forge_name: str, version: str) -> str:
@@ -68,6 +78,12 @@ class LangfuseDatasetStore(DatasetStore):
     def __init__(self, *, client: Any | None = None) -> None:
         self._explicit_client = client
         self._cached_client: Any | None = None
+        # Captured during _build_client so list/delete can hit the
+        # Langfuse REST API directly — v4 dropped the `client.api`
+        # proxy that earlier SDKs exposed for dataset listing.
+        self._host: str | None = None
+        self._public_key: str | None = None
+        self._secret_key: str | None = None
 
     def _get_client(self) -> Any:
         if self._explicit_client is not None:
@@ -77,8 +93,7 @@ class LangfuseDatasetStore(DatasetStore):
         self._cached_client = self._build_client()
         return self._cached_client
 
-    @staticmethod
-    def _build_client() -> Any:
+    def _build_client(self) -> Any:
         from forge.config import get_settings
 
         config = get_settings().langfuse
@@ -102,31 +117,76 @@ class LangfuseDatasetStore(DatasetStore):
         if config.public_key is None or config.secret_key is None:  # pragma: no cover
             msg = "Langfuse keys missing despite enabled=True"
             raise RuntimeError(msg)
+        self._host = config.host
+        self._public_key = config.public_key.get_secret_value()
+        self._secret_key = config.secret_key.get_secret_value()
         return Langfuse(  # pyright: ignore[reportUnknownVariableType]
-            host=config.host,
-            public_key=config.public_key.get_secret_value(),
-            secret_key=config.secret_key.get_secret_value(),
+            host=self._host,
+            public_key=self._public_key,
+            secret_key=self._secret_key,
         )
 
-    async def _list_langfuse_datasets(self) -> list[Any]:
-        """Return every Langfuse dataset object (across pagination)."""
-        client = self._get_client()
+    def _rest_credentials(self) -> tuple[str, str, str]:
+        """Resolve (host, public_key, secret_key) for REST calls.
 
-        def _fetch() -> list[Any]:
-            collected: list[Any] = []
-            page = 1
+        Falls back to env vars when the store was constructed with an
+        explicit client and the credentials weren't captured.
+        """
+        import os
+
+        # Trigger client build (and credential capture) when needed.
+        if self._explicit_client is None and self._cached_client is None:
+            self._get_client()
+        host = self._host or os.environ.get("LANGFUSE_HOST")
+        public_key = self._public_key or os.environ.get("LANGFUSE_PUBLIC_KEY")
+        secret_key = self._secret_key or os.environ.get("LANGFUSE_SECRET_KEY")
+        if not host or not public_key or not secret_key:
+            msg = (
+                "LangfuseDatasetStore needs host + keys for list/delete; "
+                "set LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY "
+                "or construct without an explicit client so they are loaded "
+                "from forge settings."
+            )
+            raise RuntimeError(msg)
+        return host, public_key, secret_key
+
+    async def _list_langfuse_datasets(self) -> list[Any]:
+        """Return every Langfuse dataset name across pagination.
+
+        v4 dropped ``client.api.datasets.list``; we use the REST
+        endpoint directly. Returned items are minimal dicts with the
+        fields this module reads (``name``, ``createdAt``) — the older
+        in-tree code used SDK objects with ``getattr``, so a simple
+        dict shape is compatible.
+        """
+        import httpx
+
+        host, public_key, secret_key = self._rest_credentials()
+        collected: list[Any] = []
+        page = 1
+        async with httpx.AsyncClient(timeout=15.0) as http:
             while True:
-                resp = client.api.datasets.list(page=page, limit=100)
-                data = list(getattr(resp, "data", []) or [])
-                collected.extend(data)
-                meta = getattr(resp, "meta", None)
-                total_pages = getattr(meta, "total_pages", None) if meta else None
-                if total_pages is None or page >= total_pages:
+                resp = await http.get(
+                    f"{host.rstrip('/')}/api/public/v2/datasets",
+                    auth=(public_key, secret_key),
+                    params={"page": page, "limit": 100},
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                data: Any = payload.get("data") or []
+                for item in data:
+                    collected.append(
+                        _DatasetSummary(
+                            name=str(item.get("name", "")),
+                            created_at=str(item.get("createdAt") or ""),
+                        )
+                    )
+                meta: Any = payload.get("meta") or {}
+                total_pages: Any = meta.get("totalPages", 1)
+                if page >= int(total_pages):
                     break
                 page += 1
-            return collected
-
-        return await asyncio.to_thread(_fetch)
+        return collected
 
     async def _list_versions_newest_first(self, name: str) -> list[str]:
         datasets = await self._list_langfuse_datasets()
@@ -230,6 +290,8 @@ class LangfuseDatasetStore(DatasetStore):
         return sorted(names)
 
     async def delete(self, name: str, version: str | None = None) -> None:
+        import httpx
+
         existing = await self._list_versions_newest_first(name)
         if not existing:
             return
@@ -240,10 +302,15 @@ class LangfuseDatasetStore(DatasetStore):
                 msg = f"Version {version!r} of dataset {name!r} not in Langfuse"
                 raise DatasetNotFoundError(msg, name=name, version=version)
             targets = [version]
-        client = self._get_client()
-
-        def _delete_all() -> None:
+        host, public_key, secret_key = self._rest_credentials()
+        async with httpx.AsyncClient(timeout=15.0) as http:
             for v in targets:
-                client.api.datasets.delete(dataset_name=compose_langfuse_name(name, v))
-
-        await asyncio.to_thread(_delete_all)
+                composed = compose_langfuse_name(name, v)
+                resp = await http.delete(
+                    f"{host.rstrip('/')}/api/public/v2/datasets/{composed}",
+                    auth=(public_key, secret_key),
+                )
+                # Treat 404 as already gone; otherwise raise.
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
