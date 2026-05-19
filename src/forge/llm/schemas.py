@@ -231,8 +231,11 @@ def to_anthropic_forced_tool_schema(
 
         - ``tool_schema`` follows the standard Anthropic tool shape
           (``{"name", "description", "input_schema"}``).
-        - ``tool_choice`` is ``{"type": "tool", "name": <name>}`` —
-          merge it into the request alongside the tool list.
+        - ``tool_choice`` follows the OpenAI spec
+          (``{"type": "function", "function": {"name": <name>}}``);
+          LiteLLM validates incoming tool_choice against the OpenAI
+          schema and translates it to the provider's native shape
+          (Anthropic, Vertex, Bedrock) on the way out.
     """
     tool_name = name if name is not None else model_cls.__name__
     tool_schema = to_anthropic_tool_schema(
@@ -240,7 +243,10 @@ def to_anthropic_forced_tool_schema(
         description=description,
         parameters_schema=pydantic_to_json_schema(model_cls),
     )
-    tool_choice: dict[str, Any] = {"type": "tool", "name": tool_name}
+    tool_choice: dict[str, Any] = {
+        "type": "function",
+        "function": {"name": tool_name},
+    }
     return tool_schema, tool_choice
 
 
