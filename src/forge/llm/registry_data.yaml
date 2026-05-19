@@ -87,7 +87,7 @@ models:
       cache_write: 1.25
     routes:
       - provider: anthropic
-        provider_model_id: claude-haiku-4-5
+        provider_model_id: claude-haiku-4-5-20251001  # dated alias is what /v1/models returns
         is_default: true
       - provider: bedrock
         provider_model_id: anthropic.claude-haiku-4-5
@@ -167,10 +167,10 @@ models:
       cache_read: 0.50
     routes:
       - provider: openai
-        provider_model_id: gpt-5.5-thinking
+        provider_model_id: o4-mini  # reasoning-class small model; 5.5-thinking not yet released
         is_default: true
       - provider: azure
-        provider_model_id: gpt-5.5-thinking
+        provider_model_id: o4-mini
     aliases: [gpt55-thinking]
 
   - name: gpt-5.5-instant
@@ -191,10 +191,10 @@ models:
       cache_read: 0.125  # TBD verify
     routes:
       - provider: openai
-        provider_model_id: gpt-5.5-instant
+        provider_model_id: gpt-5.4-nano  # cheapest current SKU; 5.5-instant not yet released
         is_default: true
       - provider: azure
-        provider_model_id: gpt-5.5-instant
+        provider_model_id: gpt-5.4-nano
     aliases: [gpt55-instant]
 
   # =========================================================================
