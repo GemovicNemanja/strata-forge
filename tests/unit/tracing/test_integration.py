@@ -44,10 +44,14 @@ def _install_fake_langfuse(
 
     trace_mock = MagicMock(name="lf-trace")
     trace_mock.id = trace_id
-    client_mock.trace.return_value = trace_mock
+    trace_mock.trace_id = trace_id
+    client_mock.start_observation.return_value = trace_mock
+    # Back-compat alias for tests still inspecting `client.trace`.
+    client_mock.trace = client_mock.start_observation
 
     span_mock = MagicMock(name="lf-span")
     span_mock.id = span_id
+    span_mock.trace_id = trace_id
     client_mock.span.return_value = span_mock
 
     fake_module.Langfuse = MagicMock(return_value=client_mock)  # type: ignore[attr-defined]
@@ -223,7 +227,8 @@ class TestFullPipeline:
         client.trace.assert_called_once()
         trace_kwargs = client.trace.call_args.kwargs
         assert trace_kwargs["name"] == "full-workflow"
-        assert trace_kwargs["tags"] == ["v1", "test"]
+        # v4 SDK: tags ride inside `metadata={'tags': [...]}`.
+        assert trace_kwargs["metadata"] == {"tags": ["v1", "test"]}
 
         # Two spans opened.
         assert client.span.call_count == 2

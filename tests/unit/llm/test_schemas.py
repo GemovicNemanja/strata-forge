@@ -166,7 +166,8 @@ class TestAnthropicForcedToolSchema:
         tool, choice = to_anthropic_forced_tool_schema(_Summary)
         assert tool["name"] == "_Summary"
         assert tool["input_schema"]["type"] == "object"
-        assert choice == {"type": "tool", "name": "_Summary"}
+        # OpenAI-spec tool_choice; LiteLLM translates to Anthropic on dispatch.
+        assert choice == {"type": "function", "function": {"name": "_Summary"}}
 
     def test_default_description_present(self) -> None:
         tool, _ = to_anthropic_forced_tool_schema(_Summary)
@@ -175,7 +176,7 @@ class TestAnthropicForcedToolSchema:
     def test_custom_name(self) -> None:
         tool, choice = to_anthropic_forced_tool_schema(_Summary, name="emit_summary")
         assert tool["name"] == "emit_summary"
-        assert choice["name"] == "emit_summary"
+        assert choice["function"]["name"] == "emit_summary"
 
     def test_custom_description(self) -> None:
         tool, _ = to_anthropic_forced_tool_schema(_Summary, description="my desc")

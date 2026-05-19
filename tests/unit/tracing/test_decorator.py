@@ -21,9 +21,11 @@ def _install_fake_langfuse(
 ) -> MagicMock:
     """Inject a fake `langfuse` module and return the Langfuse constructor mock.
 
-    The constructor returns a client mock whose `trace()` method returns
-    an object with `.id` and `.update`. Tests can introspect calls via
-    the returned mock.
+    The constructor returns a client mock whose `start_observation()`
+    method returns an object with `.id`, `.trace_id`, `.update`, and
+    `.end`. A back-compat ``client.trace`` alias points at the same
+    underlying mock so older test assertions continue to work after
+    the v4 SDK migration.
     """
     monkeypatch.setenv("LANGFUSE_HOST", "http://test")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
@@ -33,7 +35,10 @@ def _install_fake_langfuse(
     client_mock = MagicMock(name="lf-client")
     trace_mock = MagicMock(name="lf-trace")
     trace_mock.id = trace_id
-    client_mock.trace.return_value = trace_mock
+    trace_mock.trace_id = trace_id
+    client_mock.start_observation.return_value = trace_mock
+    # Back-compat alias so existing tests reading `.trace` keep working.
+    client_mock.trace = client_mock.start_observation
 
     fake_module.Langfuse = MagicMock(return_value=client_mock)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langfuse", fake_module)
@@ -128,7 +133,9 @@ class TestParameterizedForm:
 
         my_function()
         kwargs = client.trace.call_args.kwargs
-        assert kwargs["tags"] == ["alpha", "experiment-3"]
+        # v4 SDK: tags ride in `metadata={'tags': [...]}` rather than a
+        # dedicated kwarg, because start_observation has no tags parameter.
+        assert kwargs["metadata"] == {"tags": ["alpha", "experiment-3"]}
 
     def test_empty_tags_when_omitted(
         self,
@@ -142,7 +149,10 @@ class TestParameterizedForm:
 
         my_function()
         kwargs = client.trace.call_args.kwargs
-        assert kwargs["tags"] == []
+        # When no tags are supplied, the decorator drops the metadata
+        # kwarg entirely (sends `metadata=None`) instead of an empty
+        # tag list, since start_observation accepts `metadata: Any | None`.
+        assert kwargs.get("metadata") is None
 
 
 # ---------------------------------------------------------------------------

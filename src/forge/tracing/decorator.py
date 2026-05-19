@@ -47,28 +47,53 @@ def _safe_create_trace(
     name: str,
     tags: list[str] | None,
 ) -> Any:
-    """Create a trace, returning ``None`` on any error.
+    """Create a trace via Langfuse v4 ``start_observation``.
+
+    Langfuse SDK v4 removed the legacy ``client.trace(...)`` shortcut
+    in favor of ``start_observation`` (OpenTelemetry under the hood).
+    Tags now ride in ``metadata`` rather than a dedicated kwarg.
+
+    Returns ``None`` on any error — see the swallow-and-degrade
+    contract documented in the original implementation.
 
     Langfuse SDK errors (network blip, schema mismatch, etc.) must not
     break the wrapped function. We swallow them here and the wrapper
     falls back to no-trace mode for that call.
     """
     try:
-        return client.trace(name=name, tags=tags or [])
+        metadata = {"tags": tags} if tags else None
+        return client.start_observation(
+            name=name, as_type="span", metadata=metadata
+        )
     except Exception:
         return None
 
 
 def _safe_update_trace(trace: Any, **fields: Any) -> None:
-    """Apply ``fields`` to ``trace`` via ``trace.update``; swallow errors.
-
-    The defensive ``trace is None`` short-circuit guards against future
-    callers; current call sites always pass a non-None trace.
-    """
+    """Apply ``fields`` to ``trace`` via ``trace.update``; swallow errors."""
     if trace is None:  # pragma: no cover — defensive guard
         return
     with contextlib.suppress(Exception):
         trace.update(**fields)
+
+
+def _safe_end_trace(trace: Any) -> None:
+    """End a v4 span and flush so the trace lands before the process exits.
+
+    Langfuse v4 buffers via OpenTelemetry; without an explicit flush a
+    short-lived process (CLI tool, example script) drops the trace on
+    exit. Flushing once per call is wasteful but safe; the alternative
+    is an atexit hook on the cached client, which races with worker
+    shutdown in async loops.
+    """
+    if trace is None:
+        return
+    with contextlib.suppress(Exception):
+        trace.end()
+    with contextlib.suppress(Exception):
+        client = get_client()
+        if client is not None:
+            client.flush()
 
 
 @overload
@@ -121,7 +146,9 @@ def traced[**P, R](
                 if trace is None:
                     return await func(*args, **kwargs)
 
-                token = set_correlation_id(getattr(trace, "id", None))
+                token = set_correlation_id(
+                    getattr(trace, "trace_id", None) or getattr(trace, "id", None)
+                )
                 try:
                     result = await func(*args, **kwargs)
                 except Exception as exc:
@@ -131,9 +158,11 @@ def traced[**P, R](
                         level="ERROR",
                     )
                     raise
+                else:
+                    _safe_update_trace(trace, output={"status": "ok"})
                 finally:
                     correlation_id_var.reset(token)
-                _safe_update_trace(trace, output={"status": "ok"})
+                    _safe_end_trace(trace)
                 return result
 
             return async_wrapper  # type: ignore[return-value]
@@ -148,7 +177,9 @@ def traced[**P, R](
             if trace is None:
                 return func(*args, **kwargs)
 
-            token = set_correlation_id(getattr(trace, "id", None))
+            token = set_correlation_id(
+                getattr(trace, "trace_id", None) or getattr(trace, "id", None)
+            )
             try:
                 result = func(*args, **kwargs)
             except Exception as exc:
@@ -158,9 +189,11 @@ def traced[**P, R](
                     level="ERROR",
                 )
                 raise
+            else:
+                _safe_update_trace(trace, output={"status": "ok"})
             finally:
                 correlation_id_var.reset(token)
-            _safe_update_trace(trace, output={"status": "ok"})
+                _safe_end_trace(trace)
             return result
 
         return sync_wrapper
