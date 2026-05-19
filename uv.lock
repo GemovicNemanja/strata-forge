@@ -71,6 +71,7 @@ all = [
     { name = "accelerate" },
     { name = "adlfs" },
     { name = "asyncssh" },
+    { name = "boto3" },
     { name = "cohere" },
     { name = "datasets" },
     { name = "fsspec" },
@@ -91,6 +92,9 @@ all = [
     { name = "transformers" },
     { name = "trl" },
     { name = "vllm" },
+]
+bedrock = [
+    { name = "boto3" },
 ]
 compute = [
     { name = "asyncssh" },
@@ -159,9 +163,10 @@ dev = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'finetuning'", specifier = ">=1.1" },
     { name = "adlfs", marker = "extra == 'storage'", specifier = ">=2024.7" },
-    { name = "ai-forge", extras = ["redis", "multimodal", "inspect", "compute", "serving", "storage", "finetuning", "langfuse", "hf", "evals", "rag"], marker = "extra == 'all'" },
+    { name = "ai-forge", extras = ["redis", "multimodal", "inspect", "compute", "serving", "storage", "finetuning", "langfuse", "hf", "evals", "rag", "bedrock"], marker = "extra == 'all'" },
     { name = "anyio", specifier = ">=4.6" },
     { name = "asyncssh", marker = "extra == 'compute'", specifier = ">=2.18" },
+    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.35" },
     { name = "cohere", marker = "extra == 'rag'", specifier = ">=5.13" },
     { name = "datasets", marker = "extra == 'finetuning'", specifier = ">=3.1" },
     { name = "datasets", marker = "extra == 'hf'", specifier = ">=3.1" },
@@ -194,7 +199,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.15" },
     { name = "vllm", marker = "extra == 'serving'", specifier = ">=0.7" },
 ]
-provides-extras = ["redis", "multimodal", "inspect", "langfuse", "hf", "evals", "rag", "compute", "serving", "storage", "finetuning", "all"]
+provides-extras = ["redis", "multimodal", "inspect", "langfuse", "hf", "evals", "rag", "compute", "serving", "bedrock", "storage", "finetuning", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -520,6 +525,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/14/ad/3d9661c710febb8957dd685fdb3e5a861aa0ac918eda3031365ce45789e2/blake3-1.0.8-cp314-cp314t-musllinux_1_1_x86_64.whl", hash = "sha256:ab4e1dea4fa857944944db78e8f20d99ee2e16b2dea5a14f514fb0607753ac83", size = 553264, upload-time = "2025-10-14T06:47:13.317Z" },
     { url = "https://files.pythonhosted.org/packages/11/55/e332a5b49edf377d0690e95951cca21a00c568f6e37315f9749efee52617/blake3-1.0.8-cp314-cp314t-win32.whl", hash = "sha256:67f1bc11bf59464ef092488c707b13dd4e872db36e25c453dfb6e0c7498df9f1", size = 228116, upload-time = "2025-10-14T06:47:14.516Z" },
     { url = "https://files.pythonhosted.org/packages/b0/5c/dbd00727a3dd165d7e0e8af40e630cd7e45d77b525a3218afaff8a87358e/blake3-1.0.8-cp314-cp314t-win_amd64.whl", hash = "sha256:421b99cdf1ff2d1bf703bc56c454f4b286fce68454dd8711abbcb5a0df90c19a", size = 215133, upload-time = "2025-10-14T06:47:16.069Z" },
+]
+
+[[package]]
+name = "boto3"
+version = "1.40.61"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/f9/6ef8feb52c3cce5ec3967a535a6114b57ac7949fd166b0f3090c2b06e4e5/boto3-1.40.61.tar.gz", hash = "sha256:d6c56277251adf6c2bdd25249feae625abe4966831676689ff23b4694dea5b12", size = 111535, upload-time = "2025-10-28T19:26:57.247Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/61/24/3bf865b07d15fea85b63504856e137029b6acbc73762496064219cdb265d/boto3-1.40.61-py3-none-any.whl", hash = "sha256:6b9c57b2a922b5d8c17766e29ed792586a818098efe84def27c8f582b33f898c", size = 139321, upload-time = "2025-10-28T19:26:55.007Z" },
 ]
 
 [[package]]
@@ -3929,6 +3948,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fa/be/392c8c5e0da9bfa139e41084690dd49a5e3e931099f78f52d3f6070105c6/s3fs-2026.2.0.tar.gz", hash = "sha256:91cb2a9f76e35643b76eeac3f47a6165172bb3def671f76b9111c8dd5779a2ac", size = 84152, upload-time = "2026-02-05T21:57:57.968Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/57/e1/64c264db50b68de8a438b60ceeb921b2f22da3ebb7ad6255150225d0beac/s3fs-2026.2.0-py3-none-any.whl", hash = "sha256:65198835b86b1d5771112b0085d1da52a6ede36508b1aaa6cae2aedc765dfe10", size = 31328, upload-time = "2026-02-05T21:57:56.532Z" },
+]
+
+[[package]]
+name = "s3transfer"
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/74/8d69dcb7a9efe8baa2046891735e5dfe433ad558ae23d9e3c14c633d1d58/s3transfer-0.14.0.tar.gz", hash = "sha256:eff12264e7c8b4985074ccce27a3b38a485bb7f7422cc8046fee9be4983e4125", size = 151547, upload-time = "2025-09-09T19:23:31.089Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/f0/ae7ca09223a81a1d890b2557186ea015f6e0502e9b8cb8e1813f1d8cfa4e/s3transfer-0.14.0-py3-none-any.whl", hash = "sha256:ea3b790c7077558ed1f02a3072fb3cb992bbbd253392f4b6e9e8976941c7d456", size = 85712, upload-time = "2025-09-09T19:23:30.041Z" },
 ]
 
 [[package]]
