@@ -199,15 +199,19 @@ class QdrantVectorStore:
             err = f"top_k must be >= 1; got {top_k}"
             raise ValueError(err)
         await self._ensure_collection()
-        hits = await self._get_client().search(
+        # qdrant-client v1.16+ removed `.search()`; `.query_points()` is
+        # the replacement. The query vector moves from `query_vector=` to
+        # `query=`, and the response is a QueryResponse whose `.points`
+        # field holds the same ScoredPoint list the old API returned.
+        response = await self._get_client().query_points(
             collection_name=self._collection_name,
-            query_vector=list(embedding),
+            query=list(embedding),
             limit=top_k,
             with_payload=True,
             with_vectors=True,
         )
         results: list[VectorSearchResult] = []
-        for hit in hits:
+        for hit in response.points:
             payload = dict(hit.payload or {})
             vector = list(hit.vector) if hit.vector is not None else []
             results.append(

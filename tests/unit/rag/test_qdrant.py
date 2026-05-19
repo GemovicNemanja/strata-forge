@@ -44,6 +44,13 @@ class FakeSearchHit:
     vector: list[float] | None = None
 
 
+@dataclass
+class FakeQueryResponse:
+    """Mirrors qdrant-client's QueryResponse (returned by query_points)."""
+
+    points: list[FakeSearchHit] = field(default_factory=list)
+
+
 class FakeAsyncQdrantClient:
     def __init__(self, **kwargs: Any) -> None:
         self.init_kwargs = kwargs
@@ -71,21 +78,23 @@ class FakeAsyncQdrantClient:
             bucket[p.id] = p
         self.upsert_calls.append((collection_name, list(points)))
 
-    async def search(
+    async def query_points(
         self,
         *,
         collection_name: str,
-        query_vector: list[float],
+        query: list[float],
         limit: int,
         with_payload: bool = True,
         with_vectors: bool = True,
-    ) -> list[FakeSearchHit]:
-        # Trivial similarity: rank by dot-product with query_vector.
+    ) -> FakeQueryResponse:
+        # Trivial similarity: rank by dot-product with the query vector.
+        # Mirrors qdrant-client v1.16+ where `search()` was replaced by
+        # `query_points()` returning a QueryResponse with `.points`.
         del with_payload, with_vectors
         bucket = self.points.get(collection_name, {})
         scored: list[FakeSearchHit] = []
         for point in bucket.values():
-            score = sum(a * b for a, b in zip(point.vector, query_vector, strict=False))
+            score = sum(a * b for a, b in zip(point.vector, query, strict=False))
             scored.append(
                 FakeSearchHit(
                     id=point.id,
@@ -95,7 +104,7 @@ class FakeAsyncQdrantClient:
                 )
             )
         scored.sort(key=lambda hit: hit.score, reverse=True)
-        return scored[:limit]
+        return FakeQueryResponse(points=scored[:limit])
 
     async def delete(self, *, collection_name: str, points_selector: FakePointIdsList) -> None:
         bucket = self.points.setdefault(collection_name, {})
