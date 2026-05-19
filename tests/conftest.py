@@ -56,6 +56,37 @@ _FORGE_ENV_VARS: tuple[str, ...] = (
 )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _disable_dotenv_during_tests() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Stop sub-config `BaseSettings` instances from reading the dev `.env`.
+
+    Each sub-config declares ``env_file=".env"`` in its
+    ``SettingsConfigDict`` so live runs pick up dotenv values. During
+    tests that would silently pull the developer's local credentials
+    into config sub-models, breaking tests that expect documented
+    defaults. We swap the module-level ``_ENV_FILE`` to ``None`` for the
+    duration of the session.
+    """
+    from forge.config import settings as settings_mod
+
+    original = settings_mod._ENV_FILE  # pyright: ignore[reportPrivateUsage]
+    settings_mod._ENV_FILE = None  # pyright: ignore[reportPrivateUsage]
+    # Re-bind the model_config on every sub-config so the change takes
+    # effect (Pydantic snapshots the dict at class-definition time).
+    for cls_name in (
+        "LangfuseConfig",
+        "RedisConfig",
+        "QdrantConfig",
+        "StorageConfig",
+        "LoggingConfig",
+        "DiagnosticConfig",
+    ):
+        cls = getattr(settings_mod, cls_name)
+        cls.model_config = {**cls.model_config, "env_file": None}
+    yield
+    settings_mod._ENV_FILE = original  # pyright: ignore[reportPrivateUsage]
+
+
 @pytest.fixture(autouse=True)
 def reset_settings_cache() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
     """Clear the Settings cache before and after every test.

@@ -41,11 +41,16 @@ __all__ = [
 # Sub-models — one per concern, each loading its own env vars.
 # ---------------------------------------------------------------------------
 
+# Every sub-config is its own BaseSettings instance, so each one needs
+# env_file=".env" to pick up dotenv values; the root Settings's env_file
+# only governs the root's own fields.
+_ENV_FILE = ".env"
+
 
 class LangfuseConfig(BaseSettings):
     """Langfuse observability backend. Tracing is configured here."""
 
-    model_config = SettingsConfigDict(env_prefix="LANGFUSE_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LANGFUSE_", env_file=_ENV_FILE, extra="ignore")
 
     host: str = "http://localhost:3000"
     public_key: SecretStr | None = None
@@ -60,7 +65,7 @@ class LangfuseConfig(BaseSettings):
 class RedisConfig(BaseSettings):
     """Redis cache backend. Opt-in via ``[redis]`` extra."""
 
-    model_config = SettingsConfigDict(env_prefix="REDIS_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="REDIS_", env_file=_ENV_FILE, extra="ignore")
 
     url: str = "redis://localhost:6379/0"
 
@@ -68,7 +73,7 @@ class RedisConfig(BaseSettings):
 class QdrantConfig(BaseSettings):
     """Qdrant vector store. Used by the RAG module."""
 
-    model_config = SettingsConfigDict(env_prefix="QDRANT_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="QDRANT_", env_file=_ENV_FILE, extra="ignore")
 
     url: str = "http://localhost:6333"
     api_key: SecretStr | None = None
@@ -77,7 +82,9 @@ class QdrantConfig(BaseSettings):
 class StorageConfig(BaseSettings):
     """fsspec gateway defaults."""
 
-    model_config = SettingsConfigDict(env_prefix="FORGE_STORAGE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="FORGE_STORAGE_", env_file=_ENV_FILE, extra="ignore"
+    )
 
     default_backend: Literal["local", "s3", "gcs", "azure", "hf"] = "local"
 
@@ -85,7 +92,7 @@ class StorageConfig(BaseSettings):
 class LoggingConfig(BaseSettings):
     """structlog rendering and verbosity."""
 
-    model_config = SettingsConfigDict(env_prefix="FORGE_LOG_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="FORGE_LOG_", env_file=_ENV_FILE, extra="ignore")
 
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     format: Literal["auto", "pretty", "json"] = "auto"
@@ -94,7 +101,9 @@ class LoggingConfig(BaseSettings):
 class DiagnosticConfig(BaseSettings):
     """NDJSON diagnostic dump of every completed LLM call."""
 
-    model_config = SettingsConfigDict(env_prefix="FORGE_DIAGNOSTIC_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="FORGE_DIAGNOSTIC_", env_file=_ENV_FILE, extra="ignore"
+    )
 
     enabled: bool = False
     path: str = "./forge-diagnostic.ndjson"
