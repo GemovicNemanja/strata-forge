@@ -28,6 +28,14 @@ class TestList:
         assert result.exit_code == 0
         assert "no saved experiments" in result.output
 
+    def test_directory_exists_but_no_files(self, isolated_reports: Path) -> None:
+        # Directory present, no markdown files — exercises the second
+        # "empty" branch separately from the directory-missing branch.
+        isolated_reports.mkdir(parents=True, exist_ok=True)
+        result = runner.invoke(app, ["experiments", "list"])
+        assert result.exit_code == 0
+        assert "no saved experiments" in result.output
+
     def test_lists_reports(self, isolated_reports: Path) -> None:
         isolated_reports.mkdir(parents=True, exist_ok=True)
         (isolated_reports / "alpha.md").write_text("# alpha\n")

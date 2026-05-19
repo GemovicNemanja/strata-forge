@@ -92,7 +92,6 @@ async def _show(name: str, version: str | None) -> None:
         template = await registry.get(name, version=version)
     except PromptNotFoundError as exc:
         error_exit(str(exc))
-        return
 
     console = Console()
     console.print(f"[bold]{template.name}[/]")
@@ -120,10 +119,8 @@ async def _render(name: str, variables_json: str | None, version: str | None) ->
             parsed = json.loads(variables_json)
         except json.JSONDecodeError as exc:
             error_exit(f"--vars must be valid JSON: {exc}")
-            return
         if not isinstance(parsed, dict):
             error_exit("--vars must decode to a JSON object")
-            return
         variables = dict(parsed)  # type: ignore[arg-type]
 
     store = prompt_store_from_settings()
@@ -132,7 +129,6 @@ async def _render(name: str, variables_json: str | None, version: str | None) ->
         template = await registry.get(name, version=version)
     except PromptNotFoundError as exc:
         error_exit(str(exc))
-        return
 
     rendered = render(template, variables)
     console = Console()

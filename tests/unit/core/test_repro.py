@@ -28,6 +28,61 @@ class TestSetSeed:
         set_seed(0)
         set_seed(2**31 - 1)
 
+    def test_seeds_numpy_when_available(self, monkeypatch: object) -> None:
+        # sys.modules-injected fake numpy proves the branch fires when
+        # the optional dep is present, without requiring numpy itself.
+        import types
+
+        seeded: dict[str, int | None] = {"value": None}
+
+        def _seed(v: int) -> None:
+            seeded["value"] = v
+
+        fake_random = types.SimpleNamespace(seed=_seed)
+        fake_numpy = types.ModuleType("numpy")
+        fake_numpy.random = fake_random  # type: ignore[attr-defined]
+        monkeypatch.setitem(  # type: ignore[attr-defined]
+            sys.modules, "numpy", fake_numpy
+        )
+        set_seed(7)
+        assert seeded["value"] == 7
+
+    def test_seeds_torch_when_available(self, monkeypatch: object) -> None:
+        # Injects a fake torch with a CUDA branch exercised + a CUDA-less
+        # branch via two separate calls.
+        import types
+
+        events: list[tuple[str, int]] = []
+
+        class _Cuda:
+            def __init__(self, available: bool) -> None:
+                self._available = available
+
+            def is_available(self) -> bool:
+                return self._available
+
+            def manual_seed_all(self, v: int) -> None:
+                events.append(("cuda_seed", v))
+
+        # First pass: CUDA available — exercises lines 72-73.
+        fake_torch = types.ModuleType("torch")
+        fake_torch.manual_seed = lambda v: events.append(("torch_seed", v))  # type: ignore[attr-defined]
+        fake_torch.cuda = _Cuda(available=True)  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)  # type: ignore[attr-defined]
+        set_seed(11)
+        assert ("torch_seed", 11) in events
+        assert ("cuda_seed", 11) in events
+
+        # Second pass: CUDA absent — exercises the False branch of line 72.
+        events.clear()
+        fake_torch_cpu = types.ModuleType("torch")
+        fake_torch_cpu.manual_seed = lambda v: events.append(("torch_seed", v))  # type: ignore[attr-defined]
+        fake_torch_cpu.cuda = _Cuda(available=False)  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "torch", fake_torch_cpu)  # type: ignore[attr-defined]
+        set_seed(13)
+        assert ("torch_seed", 13) in events
+        assert not any(e[0] == "cuda_seed" for e in events)
+
 
 class TestContentHash:
     def test_returns_64_char_hex(self) -> None:

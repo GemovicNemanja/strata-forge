@@ -171,6 +171,12 @@ class TestListShow:
         assert result.exit_code == 0
         assert "no saved experiments" in result.output
 
+    def test_list_directory_exists_but_no_files(self, isolated_reports: Path) -> None:
+        isolated_reports.mkdir(parents=True, exist_ok=True)
+        result = runner.invoke(app, ["eval", "list"])
+        assert result.exit_code == 0
+        assert "no saved experiments" in result.output
+
     def test_list_after_write(self, isolated_reports: Path) -> None:
         isolated_reports.mkdir(parents=True, exist_ok=True)
         (isolated_reports / "alpha.md").write_text("# alpha\n")

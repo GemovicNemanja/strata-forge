@@ -163,6 +163,12 @@ class TestList:
         assert result.exit_code == 0
         assert "no saved jobs" in result.output
 
+    def test_directory_exists_but_no_files(self, isolated_state: Path) -> None:
+        isolated_state.mkdir(parents=True, exist_ok=True)
+        result = runner.invoke(app, ["compute", "list"])
+        assert result.exit_code == 0
+        assert "no saved jobs" in result.output
+
     def test_lists_saved_jobs(
         self,
         isolated_state: Path,

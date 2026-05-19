@@ -82,7 +82,6 @@ async def _show(name: str, version: str | None) -> None:
         dataset = await store.get(name, version=version)
     except DatasetNotFoundError as exc:
         error_exit(str(exc))
-        return
 
     console = Console()
     console.print(f"[bold]{dataset.name}[/]")
@@ -101,7 +100,6 @@ async def _head(name: str, n: int, version: str | None) -> None:
         dataset = await store.get(name, version=version)
     except DatasetNotFoundError as exc:
         error_exit(str(exc))
-        return
 
     console = Console()
     for i, item in enumerate(dataset.items[:n]):

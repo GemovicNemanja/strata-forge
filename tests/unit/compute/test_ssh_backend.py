@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -373,3 +374,85 @@ class TestSettingsBackedConnection:
         # Subsequent calls return the cached connection.
         conn2 = await backend._get_connection()  # type: ignore[attr-defined]
         assert conn2 is conn
+
+    async def test_connect_forwards_client_keys_and_passphrase(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Exercise the `client_keys` and `passphrase` branches in _get_connection.
+        captured: dict[str, Any] = {}
+
+        async def _fake_connect(**kwargs: Any) -> _FakeSSHConnection:
+            captured.update(kwargs)
+            return _FakeSSHConnection()
+
+        fake_module = types.ModuleType("asyncssh")
+        fake_module.connect = _fake_connect  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "asyncssh", fake_module)
+
+        backend = SSHBackend(
+            host="h",
+            username="u",
+            client_keys=["/k1", "/k2"],
+            passphrase="hunter2",
+        )
+        await backend._get_connection()  # type: ignore[attr-defined]
+        assert captured["client_keys"] == ["/k1", "/k2"]
+        assert captured["passphrase"] == "hunter2"
+
+
+class TestJobMetadataErrors:
+    async def test_status_rejects_job_without_pid(self, backend: SSHBackend) -> None:
+        from forge.compute.job import Job
+
+        bogus = Job(
+            id="x",
+            backend="ssh",
+            task_name="t",
+            metadata={"remote_workdir": ".forge-compute/x"},  # no pid
+        )
+        with pytest.raises(ValueError, match="missing pid"):
+            await backend.status(bogus)
+
+    async def test_status_handles_unparseable_submitted_at(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        from forge.compute.job import Job
+
+        # Manually build a job with a broken submitted_at; status should still work.
+        fake_connection.queue(_FakeProcessResult(stdout="RUNNING\n"))
+        job = Job(
+            id="abc",
+            backend="ssh",
+            task_name="t",
+            metadata={
+                "remote_workdir": ".forge-compute/abc",
+                "pid": "100",
+                "submitted_at": "not-an-isoformat",
+            },
+        )
+        status = await backend.status(job)
+        assert status.state == "running"
+        # Unparseable submitted_at falls back to None — line 226-227 path.
+        assert status.started_at is None
+
+
+class TestClose:
+    async def test_close_with_no_explicit_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Backend constructed with host/username (so it owns the connection)
+        # — close() must invoke close + wait_closed on the cached connection.
+        fake_conn = _FakeSSHConnection()
+        fake_module = types.ModuleType("asyncssh")
+        fake_module.connect = AsyncMock(return_value=fake_conn)  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "asyncssh", fake_module)
+
+        backend = SSHBackend(host="h", username="u")
+        await backend._get_connection()  # type: ignore[attr-defined]
+        await backend.close()
+        assert fake_conn.closed is True
+
+    async def test_close_with_explicit_connection_is_noop(self) -> None:
+        # Connection passed by the caller — close() must not touch it.
+        conn = _FakeSSHConnection()
+        backend = SSHBackend(connection=conn)
+        await backend.close()
+        assert conn.closed is False

@@ -180,6 +180,47 @@ class TestCancel:
         # Succeeded jobs stay succeeded after a no-op cancel.
         assert status.state == "succeeded"
 
+    async def test_cancel_before_process_spawned(self) -> None:
+        # Race window: the runner coroutine is scheduled but hasn't yet
+        # called create_subprocess_exec. The cancel path should mark the
+        # job cancelled without crashing.
+        from forge.compute.backends.local import _JobState  # pyright: ignore[reportPrivateUsage]
+        from forge.compute.job import Job
+
+        backend = LocalBackend()
+        job_id = "synth-cancel-1"
+        # Inject a job state with no process — simulates the race.
+        state = _JobState()
+        backend._jobs[job_id] = state  # pyright: ignore[reportPrivateUsage]
+        job = Job(id=job_id, backend="local", task_name="t")
+        await backend.cancel(job)
+        assert state.cancelled is True
+
+    async def test_cancel_sigkill_after_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Force wait_for to time out so the SIGKILL branch runs.
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="sleep", run="sleep 30"))
+        for _ in range(50):
+            if (await backend.status(job)).state == "running":
+                break
+            await asyncio.sleep(0.05)
+
+        import asyncio as _asyncio
+
+        original_wait_for = _asyncio.wait_for
+
+        async def _fake_wait_for(awaitable: object, timeout: float) -> object:  # noqa: ASYNC109
+            del timeout
+            # First call (from cancel) times out; the inner cancel of the
+            # awaitable + kill path then runs.
+            raise TimeoutError
+
+        monkeypatch.setattr(_asyncio, "wait_for", _fake_wait_for)
+        await backend.cancel(job)
+        monkeypatch.setattr(_asyncio, "wait_for", original_wait_for)
+        await _wait_until_terminal(backend, job)
+        assert (await backend.status(job)).state == "cancelled"
+
 
 class TestCleanup:
     async def test_cleanup_removes_job_state(self) -> None:
@@ -197,6 +238,41 @@ class TestCleanup:
         await _wait_until_terminal(backend, job)
         await backend.cleanup(job)
         await backend.cleanup(job)  # second call must not raise
+
+    async def test_cleanup_kills_lingering_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Cleanup mid-run with a process that doesn't honor SIGTERM in
+        # time — exercises the wait_for/timeout → kill fallback.
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="sleep", run="sleep 30"))
+        for _ in range(50):
+            if (await backend.status(job)).state == "running":
+                break
+            await asyncio.sleep(0.05)
+
+        import asyncio as _asyncio
+
+        async def _fake_wait_for(awaitable: object, timeout: float) -> object:  # noqa: ASYNC109
+            del timeout
+            raise TimeoutError
+
+        monkeypatch.setattr(_asyncio, "wait_for", _fake_wait_for)
+        await backend.cleanup(job)
+        # Job is gone from the state dict.
+        with pytest.raises(ValueError, match="unknown"):
+            await backend.status(job)
+
+    async def test_runner_handles_spawn_exception(self) -> None:
+        # An unreadable workdir makes create_subprocess_exec raise;
+        # the runner must capture the exception and mark the job failed.
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(name="bad-wd", run="echo hi", workdir="/proc/self/nonexistent/x")
+        )
+        await _wait_until_terminal(backend, job)
+        status = await backend.status(job)
+        assert status.state == "failed"
+        logs = await backend.logs(job)
+        assert "local backend exception" in logs
 
     async def test_status_unknown_job_raises(self) -> None:
         backend = LocalBackend()

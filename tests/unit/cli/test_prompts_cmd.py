@@ -65,6 +65,25 @@ class TestPromptsShow:
         # dynamic_variables list rendered.
         assert "passage" in result.output
 
+    def test_show_template_with_stable_variables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Cover the stable_variables rendering branch in prompts.show.
+        import asyncio
+
+        store = InMemoryPromptStore()
+        template = PromptTemplate(
+            name="parametric-system",
+            stable_section="You are a {{ persona }}.",
+            dynamic_section="Answer: {{ question }}",
+            stable_variables=("persona",),
+            dynamic_variables=("question",),
+        )
+        asyncio.run(store.put(template))
+        monkeypatch.setattr("forge.cli.prompts.prompt_store_from_settings", lambda: store)
+        result = runner.invoke(app, ["prompts", "show", "parametric-system"])
+        assert result.exit_code == 0
+        assert "stable_variables" in result.output
+        assert "persona" in result.output
+
     def test_show_missing_template_exits_nonzero(self, empty_store: InMemoryPromptStore) -> None:
         result = runner.invoke(app, ["prompts", "show", "no-such-thing"])
         assert result.exit_code != 0
