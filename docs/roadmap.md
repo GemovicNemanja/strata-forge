@@ -21,7 +21,7 @@ Design rationale that's bigger than a single phase lives in
 | 6 | Storage (`forge.storage`) | ✅ done |
 | 7 | CLI completion (`forge.cli`) | ✅ done |
 | 8 | DX maturity (notebooks, Docker hardening, examples polish) | ✅ done |
-| 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | ⏳ next |
+| 9 | Testing maturity (cassette refresh CI, eval gate, security audit) | ✅ done |
 
 ---
 
@@ -629,9 +629,36 @@ Three pieces of DX polish landed:
   (it would pull `torch`); users install it themselves when
   they want `CrossEncoderReranker`.
 
-## Phase 9 — Testing maturity — next
+## Phase 9 — Testing maturity ✅
 
-The test infrastructure itself: a nightly CI job that re-records VCR
-cassettes against live providers to catch upstream wire-format drift,
-the full eval-regression gate hooked into CI per Phase 2.4.15, and a
-security audit step (`pip-audit` + a CodeQL pass on `src/`).
+The test infrastructure itself:
+
+- **Nightly cassette refresh** (`.github/workflows/nightly.yml`,
+  `cassette-refresh` job): gated on whether any provider secret
+  is set; when one is, deletes the committed cassettes and re-
+  records via `pytest tests/vcr -x` with `RECORD=1` against live
+  providers. If anything changed, opens a PR labelled
+  `automated,cassettes` via `gh pr create` from a timestamped
+  branch. Clean no-op when secrets aren't configured.
+- **Canonical eval regression gate**
+  (`scripts/run_eval_gate.py` + nightly `eval-gate` job): five-
+  item capital-cities dataset baked into the script (deterministic
+  across hosts), one model through `run_experiment` with
+  `ExactMatch`, then `evaluate_ci_gate` against the committed
+  `CIGateThresholds(min_pass_rate=0.80, max_cost_usd=0.10,
+  use_wilson_ci=True)`. Exits non-zero on regression. Gated on
+  `ANTHROPIC_API_KEY`.
+- **Security audit**: `pip-audit --strict` runs in the nightly
+  with the `|| true` swallow removed, so new CVEs surface as a
+  job failure. CodeQL `security-and-quality` query pack runs on
+  PR, push to `main`, and weekly via `.github/workflows/codeql.yml`.
+
+Also picked up a tokenizer-test cleanup along the way: removed
+the `test_concatenation_is_at_least_as_many_as_each_part`
+hypothesis property — it was structurally false for BPE
+tokenizers (`'tree'+'true' → 4 > 1+1+1`, `'a'+'mecb' → 2 < 3`).
+
+This finishes the roadmap. Future work (new vendors, new
+training methods, MCP tool support, guardrails layer, advanced
+telemetry) attaches against the now-complete public surface;
+none of it requires re-opening the phase plan.
