@@ -25,6 +25,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
     "DiagnosticConfig",
+    "HuggingFaceConfig",
     "LangfuseConfig",
     "LoggingConfig",
     "ProvidersConfig",
@@ -77,6 +78,20 @@ class QdrantConfig(BaseSettings):
 
     url: str = "http://localhost:6333"
     api_key: SecretStr | None = None
+
+
+class HuggingFaceConfig(BaseSettings):
+    """Hugging Face Hub credentials.
+
+    Field names match the env vars the ``huggingface_hub`` library
+    consults natively, so settings and the SDK's own fallback agree on
+    the same source.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="HF_", env_file=_ENV_FILE, extra="ignore")
+
+    token: SecretStr | None = None
+    endpoint: str | None = None
 
 
 class StorageConfig(BaseSettings):
@@ -149,6 +164,7 @@ class Settings(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    huggingface: HuggingFaceConfig = Field(default_factory=HuggingFaceConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     diagnostic: DiagnosticConfig = Field(default_factory=DiagnosticConfig)
 

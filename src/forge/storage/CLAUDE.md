@@ -96,11 +96,13 @@ a shape we can't make sense of), or :class:`NotImplementedError`
 - **Windows drive paths** (``C:\foo``) are detected via single-
   letter scheme and routed to the ``file`` protocol; multi-letter
   schemes like ``s3://`` are protocols.
-- **HFHubClient stores the token as-is.** No env-var fallback
-  inside the class itself — callers should plumb the token from
-  :mod:`forge.config` if they want env-driven auth. The
-  underlying ``huggingface_hub`` library does its own env
-  fallback when no token is provided to its API.
+- **HFHubClient resolves the token in three layers.** When
+  ``token=`` is passed explicitly it wins. Otherwise the client
+  falls back to :class:`forge.config.HuggingFaceConfig` (which
+  reads ``HF_TOKEN`` from env or ``.env``), and finally to
+  ``huggingface_hub``'s own resolver (env var or cached login).
+  The fallback runs lazily inside ``_api`` so importing
+  :mod:`forge.storage` stays free of side effects.
 - **Use ``[storage]`` for any cloud backend.** ``fsspec`` itself
   is tiny, but the protocol-specific packages (``s3fs``,
   ``gcsfs``, ``adlfs``) are not. The extra brings them all.

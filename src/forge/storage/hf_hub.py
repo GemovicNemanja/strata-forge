@@ -39,10 +39,14 @@ class HFHubClient:
     """Async wrapper around ``huggingface_hub.HfApi``.
 
     Args:
-        token: Hugging Face access token. When ``None``, reads
-            from the ``HF_TOKEN`` env var (or the cached login).
-        endpoint: Custom Hub endpoint URL. Default is the public
-            ``https://huggingface.co``.
+        token: Hugging Face access token. When ``None``, falls back
+            to :class:`forge.config.HuggingFaceConfig` (which reads
+            ``HF_TOKEN`` from the environment or ``.env``), then to
+            the ``huggingface_hub`` library's own resolution (env
+            var or cached login).
+        endpoint: Custom Hub endpoint URL. When ``None``, falls back
+            to :class:`forge.config.HuggingFaceConfig` (``HF_ENDPOINT``).
+            Default is the public ``https://huggingface.co``.
         api: Optional pre-built ``HfApi`` instance — useful for
             tests and for sharing one API client across many
             calls. When set, ``token`` / ``endpoint`` are ignored.
@@ -60,6 +64,32 @@ class HFHubClient:
         self._explicit_api = api
         self._api_cached: Any | None = None
 
+    def _resolve_token_and_endpoint(self) -> tuple[str | None, str | None]:
+        """Apply forge.config fallback for any kwarg left as ``None``.
+
+        Settings are loaded lazily so importing :mod:`forge.storage`
+        stays free of side effects, and so tests can construct the
+        client without configuring the settings singleton.
+        """
+        token = self._token
+        endpoint = self._endpoint
+        if token is None or endpoint is None:
+            try:
+                from forge.config import get_settings
+
+                cfg = get_settings().huggingface
+            except Exception:
+                # Settings load failures (missing .env, validation errors,
+                # etc.) must not break a caller that passed an explicit
+                # token or doesn't need auth (public read).
+                cfg = None
+            if cfg is not None:
+                if token is None and cfg.token is not None:
+                    token = cfg.token.get_secret_value()
+                if endpoint is None and cfg.endpoint is not None:
+                    endpoint = cfg.endpoint
+        return token, endpoint
+
     def _import_hf(self) -> Any:
         try:
             return __import__("huggingface_hub")
@@ -76,11 +106,12 @@ class HFHubClient:
         if self._api_cached is not None:
             return self._api_cached
         hf_mod = self._import_hf()
+        token, endpoint = self._resolve_token_and_endpoint()
         kwargs: dict[str, Any] = {}
-        if self._token is not None:
-            kwargs["token"] = self._token
-        if self._endpoint is not None:
-            kwargs["endpoint"] = self._endpoint
+        if token is not None:
+            kwargs["token"] = token
+        if endpoint is not None:
+            kwargs["endpoint"] = endpoint
         self._api_cached = hf_mod.HfApi(**kwargs)
         return self._api_cached
 
@@ -169,10 +200,11 @@ class HFHubClient:
             kwargs["local_dir"] = str(local_dir)
         if revision is not None:
             kwargs["revision"] = revision
-        if self._token is not None:
-            kwargs["token"] = self._token
-        if self._endpoint is not None:
-            kwargs["endpoint"] = self._endpoint
+        token, endpoint = self._resolve_token_and_endpoint()
+        if token is not None:
+            kwargs["token"] = token
+        if endpoint is not None:
+            kwargs["endpoint"] = endpoint
         if extras:
             kwargs.update(extras)
         path: Any = await asyncio.to_thread(hf_mod.hf_hub_download, **kwargs)
@@ -232,10 +264,11 @@ class HFHubClient:
             kwargs["allow_patterns"] = list(allow_patterns)
         if ignore_patterns is not None:
             kwargs["ignore_patterns"] = list(ignore_patterns)
-        if self._token is not None:
-            kwargs["token"] = self._token
-        if self._endpoint is not None:
-            kwargs["endpoint"] = self._endpoint
+        token, endpoint = self._resolve_token_and_endpoint()
+        if token is not None:
+            kwargs["token"] = token
+        if endpoint is not None:
+            kwargs["endpoint"] = endpoint
         if extras:
             kwargs.update(extras)
         path: Any = await asyncio.to_thread(hf_mod.snapshot_download, **kwargs)
