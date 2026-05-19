@@ -34,33 +34,40 @@ from forge.evals.runner import run_experiment
 from forge.llm.client import LLMClient
 
 
+_CAPITALS: tuple[tuple[str, str, str], ...] = (
+    ("fr", "France", "Paris"),
+    ("jp", "Japan", "Tokyo"),
+    ("de", "Germany", "Berlin"),
+    ("au", "Australia", "Canberra"),
+    ("ca", "Canada", "Ottawa"),
+    ("it", "Italy", "Rome"),
+    ("es", "Spain", "Madrid"),
+    ("pt", "Portugal", "Lisbon"),
+    ("gr", "Greece", "Athens"),
+    ("eg", "Egypt", "Cairo"),
+    ("ke", "Kenya", "Nairobi"),
+    ("ng", "Nigeria", "Abuja"),
+    ("za", "South Africa", "Pretoria"),
+    ("in", "India", "Delhi"),
+    ("th", "Thailand", "Bangkok"),
+    ("vn", "Vietnam", "Hanoi"),
+    ("kr", "South Korea", "Seoul"),
+    ("ru", "Russia", "Moscow"),
+    ("ie", "Ireland", "Dublin"),
+    ("pl", "Poland", "Warsaw"),
+)
+
+
 def _build_dataset() -> Dataset:
-    items = (
+    # Sample size is set so a perfect model clears the 0.80 Wilson lower
+    # bound: at n=20, k=20 → wilson95 ≈ 0.84.
+    items = tuple(
         DatasetItem(
-            id="cap-fr",
-            input={"question": "What is the capital of France? Answer with one word."},
-            expected_output="Paris",
-        ),
-        DatasetItem(
-            id="cap-jp",
-            input={"question": "What is the capital of Japan? Answer with one word."},
-            expected_output="Tokyo",
-        ),
-        DatasetItem(
-            id="cap-de",
-            input={"question": "What is the capital of Germany? Answer with one word."},
-            expected_output="Berlin",
-        ),
-        DatasetItem(
-            id="cap-au",
-            input={"question": "What is the capital of Australia? Answer with one word."},
-            expected_output="Canberra",
-        ),
-        DatasetItem(
-            id="cap-ca",
-            input={"question": "What is the capital of Canada? Answer with one word."},
-            expected_output="Ottawa",
-        ),
+            id=f"cap-{code}",
+            input={"question": f"What is the capital of {country}? Answer with one word."},
+            expected_output=capital,
+        )
+        for code, country, capital in _CAPITALS
     )
     return Dataset(name="eval-gate-capitals", items=items)
 
