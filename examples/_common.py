@@ -14,6 +14,17 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
+# Load `.env` (if present) into os.environ before any provider check
+# runs. The examples are end-to-end scripts; users expect their
+# repo-root .env to be picked up the same way `forge doctor` and the
+# CLI do via forge.config.settings.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover — python-dotenv is a core dep
+    pass
+
 if TYPE_CHECKING:
     from forge.llm.responses import LLMResponse
 
