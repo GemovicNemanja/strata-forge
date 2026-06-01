@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from forge.training.progress import attach as _attach_progress
+
 if TYPE_CHECKING:
     from forge.training.peft import LoRAConfig, QLoRAConfig
 
@@ -66,6 +68,11 @@ class SFTConfig(BaseModel):
         seed: PRNG seed; forwarded to ``transformers.set_seed``.
         extra_trainer_args: Verbatim passthrough to TRL's
             ``SFTConfig``.
+        progress_jsonl: When set, the runner attaches a callback that
+            writes one :class:`forge.training.progress.ProgressEvent` per
+            training event to this path (for an orchestrator to tail). The
+            ``FORGE_PROGRESS_PATH`` env var is used as a fallback. Not a TRL
+            knob — it never reaches ``to_trl_kwargs``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -87,6 +94,7 @@ class SFTConfig(BaseModel):
     save_steps: int = Field(default=0, ge=0)
     seed: int = 42
     extra_trainer_args: dict[str, Any] = Field(default_factory=dict)
+    progress_jsonl: str | None = None
 
     def to_trl_kwargs(self) -> dict[str, Any]:
         """Render this config as kwargs for TRL's ``SFTConfig``."""
@@ -170,7 +178,7 @@ class SFTRunner:
         except ImportError as exc:
             msg = (
                 "The [finetuning] extra is required for SFTRunner. "
-                "Install it with: pip install 'ai-forge[finetuning]'."
+                "Install it with: pip install 'strata-forge[finetuning]'."
             )
             raise ImportError(msg) from exc
         return transformers_mod, trl_mod, datasets_mod
@@ -212,7 +220,9 @@ class SFTRunner:
             trainer_kwargs["eval_dataset"] = eval_dataset
         if self._peft_config is not None:
             trainer_kwargs["peft_config"] = self._peft_config.to_peft_config()
-        return trl_mod.SFTTrainer(**trainer_kwargs)
+        trainer = trl_mod.SFTTrainer(**trainer_kwargs)
+        _attach_progress(trainer, self._config.progress_jsonl)
+        return trainer
 
     def train(
         self,

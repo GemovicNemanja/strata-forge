@@ -61,6 +61,9 @@ def sft_cmd(
     adapter: AdapterName = typer.Option("none", "--adapter", help="PEFT adapter shape."),
     adapter_rank: int = typer.Option(16, "--adapter-rank", min=1, help="LoRA/QLoRA rank."),
     seed: int = typer.Option(42, "--seed"),
+    progress_jsonl: Path | None = typer.Option(
+        None, "--progress-jsonl", help="Write JSONL progress events here (for orchestration)."
+    ),
 ) -> None:
     """Run a supervised fine-tuning job."""
     run_async(
@@ -78,6 +81,7 @@ def sft_cmd(
             adapter=adapter,
             adapter_rank=adapter_rank,
             seed=seed,
+            progress_jsonl=progress_jsonl,
         )
     )
 
@@ -103,6 +107,9 @@ def dpo_cmd(
     adapter: AdapterName = typer.Option("none", "--adapter"),
     adapter_rank: int = typer.Option(16, "--adapter-rank", min=1),
     seed: int = typer.Option(42, "--seed"),
+    progress_jsonl: Path | None = typer.Option(
+        None, "--progress-jsonl", help="Write JSONL progress events here (for orchestration)."
+    ),
 ) -> None:
     """Run a Direct Preference Optimization job."""
     run_async(
@@ -122,6 +129,7 @@ def dpo_cmd(
             adapter=adapter,
             adapter_rank=adapter_rank,
             seed=seed,
+            progress_jsonl=progress_jsonl,
         )
     )
 
@@ -168,6 +176,7 @@ async def _run_sft(
     adapter: AdapterName,
     adapter_rank: int,
     seed: int,
+    progress_jsonl: Path | None,
 ) -> None:
     from forge.training.sft import SFTConfig, SFTRunner
 
@@ -184,6 +193,7 @@ async def _run_sft(
         precision=precision,
         max_seq_length=max_seq_length,
         seed=seed,
+        progress_jsonl=str(progress_jsonl) if progress_jsonl else None,
     )
 
     console = Console()
@@ -218,6 +228,7 @@ async def _run_dpo(
     adapter: AdapterName,
     adapter_rank: int,
     seed: int,
+    progress_jsonl: Path | None,
 ) -> None:
     from forge.training.preference import DPOConfig, PreferenceRunner
 
@@ -236,6 +247,7 @@ async def _run_dpo(
         max_length=max_length,
         max_prompt_length=max_prompt_length,
         seed=seed,
+        progress_jsonl=str(progress_jsonl) if progress_jsonl else None,
     )
 
     console = Console()

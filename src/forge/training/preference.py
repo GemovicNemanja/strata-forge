@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from forge.training.progress import attach as _attach_progress
+
 if TYPE_CHECKING:
     from forge.training.peft import LoRAConfig, QLoRAConfig
 
@@ -52,6 +54,9 @@ class _BasePreferenceConfig(BaseModel):
     save_steps: int = Field(default=0, ge=0)
     seed: int = 42
     extra_trainer_args: dict[str, Any] = Field(default_factory=dict)
+    progress_jsonl: str | None = None
+    """When set, write live progress events to this JSONL path (env fallback:
+    ``FORGE_PROGRESS_PATH``). Not a TRL knob — never reaches ``to_trl_kwargs``."""
 
     def _base_trl_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -234,7 +239,7 @@ class PreferenceRunner:
         except ImportError as exc:
             msg = (
                 "The [finetuning] extra is required for PreferenceRunner. "
-                "Install it with: pip install 'ai-forge[finetuning]'."
+                "Install it with: pip install 'strata-forge[finetuning]'."
             )
             raise ImportError(msg) from exc
         return transformers_mod, trl_mod
@@ -288,7 +293,9 @@ class PreferenceRunner:
                 )
                 raise ValueError(err)
             trainer_kwargs["reward_funcs"] = reward_funcs
-        return trainer_cls(**trainer_kwargs)
+        trainer = trainer_cls(**trainer_kwargs)
+        _attach_progress(trainer, self._config.progress_jsonl)
+        return trainer
 
     def train(
         self,

@@ -33,18 +33,25 @@ from forge.training.preference import (
     PreferenceRunner,
     PreferenceRunResult,
 )
+from forge.training.progress import (
+    JsonlProgressWriter,
+    ProgressEvent,
+    trainer_callback,
+)
 from forge.training.sft import SFTConfig, SFTRunner, SFTRunResult
 
 __all__ = [
     "AnyPreferenceConfig",
     "DPOConfig",
     "GRPOConfig",
+    "JsonlProgressWriter",
     "KTOConfig",
     "LoRAConfig",
     "ORPOConfig",
     "PackedSequence",
     "PreferenceRunResult",
     "PreferenceRunner",
+    "ProgressEvent",
     "QLoRAConfig",
     "SFTConfig",
     "SFTRunResult",
@@ -53,4 +60,5 @@ __all__ = [
     "conversation_to_dicts",
     "conversation_to_text",
     "pack_sequences",
+    "trainer_callback",
 ]
