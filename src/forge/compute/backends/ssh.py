@@ -104,7 +104,7 @@ class SSHBackend:
         except ImportError as exc:
             msg = (
                 "The [compute] extra is required for SSHBackend. "
-                "Install it with: pip install 'ai-forge[compute]'."
+                "Install it with: pip install 'strata-forge[compute]'."
             )
             raise ImportError(msg) from exc
         kwargs: dict[str, Any] = {

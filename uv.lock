@@ -49,175 +49,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ai-forge"
-version = "0.0.1"
-source = { editable = "." }
-dependencies = [
-    { name = "anyio" },
-    { name = "jinja2" },
-    { name = "litellm" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "structlog" },
-    { name = "tenacity" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "accelerate" },
-    { name = "adlfs" },
-    { name = "asyncssh" },
-    { name = "boto3" },
-    { name = "cohere" },
-    { name = "datasets" },
-    { name = "fsspec" },
-    { name = "gcsfs" },
-    { name = "huggingface-hub" },
-    { name = "inspect-ai" },
-    { name = "langfuse" },
-    { name = "nltk" },
-    { name = "peft" },
-    { name = "pillow" },
-    { name = "qdrant-client" },
-    { name = "rank-bm25" },
-    { name = "redis" },
-    { name = "rouge-score" },
-    { name = "s3fs" },
-    { name = "skypilot" },
-    { name = "torch" },
-    { name = "transformers" },
-    { name = "trl" },
-    { name = "vllm" },
-]
-bedrock = [
-    { name = "boto3" },
-]
-compute = [
-    { name = "asyncssh" },
-    { name = "skypilot" },
-]
-evals = [
-    { name = "nltk" },
-    { name = "rouge-score" },
-]
-finetuning = [
-    { name = "accelerate" },
-    { name = "datasets" },
-    { name = "peft" },
-    { name = "torch" },
-    { name = "transformers" },
-    { name = "trl" },
-]
-hf = [
-    { name = "datasets" },
-]
-inspect = [
-    { name = "inspect-ai" },
-]
-langfuse = [
-    { name = "langfuse" },
-]
-multimodal = [
-    { name = "pillow" },
-]
-rag = [
-    { name = "cohere" },
-    { name = "qdrant-client" },
-    { name = "rank-bm25" },
-]
-redis = [
-    { name = "redis" },
-]
-serving = [
-    { name = "vllm" },
-]
-storage = [
-    { name = "adlfs" },
-    { name = "fsspec" },
-    { name = "gcsfs" },
-    { name = "huggingface-hub" },
-    { name = "s3fs" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "hypothesis" },
-    { name = "marimo" },
-    { name = "pillow" },
-    { name = "pre-commit" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-recording" },
-    { name = "respx" },
-    { name = "ruff" },
-    { name = "syrupy" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'finetuning'", specifier = ">=1.1" },
-    { name = "adlfs", marker = "extra == 'storage'", specifier = ">=2024.7" },
-    { name = "ai-forge", extras = ["redis", "multimodal", "inspect", "compute", "serving", "storage", "finetuning", "langfuse", "hf", "evals", "rag", "bedrock"], marker = "extra == 'all'" },
-    { name = "anyio", specifier = ">=4.6" },
-    { name = "asyncssh", marker = "extra == 'compute'", specifier = ">=2.18" },
-    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.35" },
-    { name = "cohere", marker = "extra == 'rag'", specifier = ">=5.13" },
-    { name = "datasets", marker = "extra == 'finetuning'", specifier = ">=3.1" },
-    { name = "datasets", marker = "extra == 'hf'", specifier = ">=3.1" },
-    { name = "fsspec", marker = "extra == 'storage'", specifier = ">=2024.10" },
-    { name = "gcsfs", marker = "extra == 'storage'", specifier = ">=2024.10" },
-    { name = "huggingface-hub", marker = "extra == 'storage'", specifier = ">=0.27" },
-    { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=2.50" },
-    { name = "litellm", specifier = ">=1.55" },
-    { name = "nltk", marker = "extra == 'evals'", specifier = ">=3.9" },
-    { name = "peft", marker = "extra == 'finetuning'", specifier = ">=0.13" },
-    { name = "pillow", marker = "extra == 'multimodal'", specifier = ">=11.0" },
-    { name = "pydantic", specifier = ">=2.10" },
-    { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "qdrant-client", marker = "extra == 'rag'", specifier = ">=1.13" },
-    { name = "rank-bm25", marker = "extra == 'rag'", specifier = ">=0.2.2" },
-    { name = "redis", marker = "extra == 'redis'", specifier = ">=5.2" },
-    { name = "rich", specifier = ">=13.9" },
-    { name = "rouge-score", marker = "extra == 'evals'", specifier = ">=0.1.2" },
-    { name = "s3fs", marker = "extra == 'storage'", specifier = ">=2024.10" },
-    { name = "skypilot", marker = "extra == 'compute'", specifier = ">=0.7" },
-    { name = "structlog", specifier = ">=24.4" },
-    { name = "tenacity", specifier = ">=9.0" },
-    { name = "torch", marker = "extra == 'finetuning'", specifier = ">=2.5" },
-    { name = "transformers", marker = "extra == 'finetuning'", specifier = ">=4.46" },
-    { name = "trl", marker = "extra == 'finetuning'", specifier = ">=0.13" },
-    { name = "typer", specifier = ">=0.15" },
-    { name = "vllm", marker = "extra == 'serving'", specifier = ">=0.7" },
-]
-provides-extras = ["redis", "multimodal", "inspect", "langfuse", "hf", "evals", "rag", "compute", "serving", "bedrock", "storage", "finetuning", "all"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6.115" },
-    { name = "marimo", specifier = ">=0.10" },
-    { name = "pillow", specifier = ">=11.0" },
-    { name = "pre-commit", specifier = ">=4.0" },
-    { name = "pyright", specifier = ">=1.1.390" },
-    { name = "pytest", specifier = ">=8.3" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "pytest-cov", specifier = ">=6.0" },
-    { name = "pytest-recording", specifier = ">=0.13" },
-    { name = "respx", specifier = ">=0.21" },
-    { name = "ruff", specifier = ">=0.8" },
-    { name = "syrupy", specifier = ">=4.7" },
-]
-
-[[package]]
 name = "aiobotocore"
 version = "2.25.1"
 source = { registry = "https://pypi.org/simple" }
@@ -4176,6 +4007,175 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c4/68/79977123bb7be889ad680d79a40f339082c1978b5cfcf62c2d8d196873ac/starlette-0.52.1.tar.gz", hash = "sha256:834edd1b0a23167694292e94f597773bc3f89f362be6effee198165a35d62933", size = 2653702, upload-time = "2026-01-18T13:34:11.062Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl", hash = "sha256:0029d43eb3d273bc4f83a08720b4912ea4b071087a3b48db01b7c839f7954d74", size = 74272, upload-time = "2026-01-18T13:34:09.188Z" },
+]
+
+[[package]]
+name = "strata-forge"
+version = "0.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "anyio" },
+    { name = "jinja2" },
+    { name = "litellm" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "structlog" },
+    { name = "tenacity" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "accelerate" },
+    { name = "adlfs" },
+    { name = "asyncssh" },
+    { name = "boto3" },
+    { name = "cohere" },
+    { name = "datasets" },
+    { name = "fsspec" },
+    { name = "gcsfs" },
+    { name = "huggingface-hub" },
+    { name = "inspect-ai" },
+    { name = "langfuse" },
+    { name = "nltk" },
+    { name = "peft" },
+    { name = "pillow" },
+    { name = "qdrant-client" },
+    { name = "rank-bm25" },
+    { name = "redis" },
+    { name = "rouge-score" },
+    { name = "s3fs" },
+    { name = "skypilot" },
+    { name = "torch" },
+    { name = "transformers" },
+    { name = "trl" },
+    { name = "vllm" },
+]
+bedrock = [
+    { name = "boto3" },
+]
+compute = [
+    { name = "asyncssh" },
+    { name = "skypilot" },
+]
+evals = [
+    { name = "nltk" },
+    { name = "rouge-score" },
+]
+finetuning = [
+    { name = "accelerate" },
+    { name = "datasets" },
+    { name = "peft" },
+    { name = "torch" },
+    { name = "transformers" },
+    { name = "trl" },
+]
+hf = [
+    { name = "datasets" },
+]
+inspect = [
+    { name = "inspect-ai" },
+]
+langfuse = [
+    { name = "langfuse" },
+]
+multimodal = [
+    { name = "pillow" },
+]
+rag = [
+    { name = "cohere" },
+    { name = "qdrant-client" },
+    { name = "rank-bm25" },
+]
+redis = [
+    { name = "redis" },
+]
+serving = [
+    { name = "vllm" },
+]
+storage = [
+    { name = "adlfs" },
+    { name = "fsspec" },
+    { name = "gcsfs" },
+    { name = "huggingface-hub" },
+    { name = "s3fs" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "hypothesis" },
+    { name = "marimo" },
+    { name = "pillow" },
+    { name = "pre-commit" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-recording" },
+    { name = "respx" },
+    { name = "ruff" },
+    { name = "syrupy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'finetuning'", specifier = ">=1.1" },
+    { name = "adlfs", marker = "extra == 'storage'", specifier = ">=2024.7" },
+    { name = "anyio", specifier = ">=4.6" },
+    { name = "asyncssh", marker = "extra == 'compute'", specifier = ">=2.18" },
+    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.35" },
+    { name = "cohere", marker = "extra == 'rag'", specifier = ">=5.13" },
+    { name = "datasets", marker = "extra == 'finetuning'", specifier = ">=3.1" },
+    { name = "datasets", marker = "extra == 'hf'", specifier = ">=3.1" },
+    { name = "fsspec", marker = "extra == 'storage'", specifier = ">=2024.10" },
+    { name = "gcsfs", marker = "extra == 'storage'", specifier = ">=2024.10" },
+    { name = "huggingface-hub", marker = "extra == 'storage'", specifier = ">=0.27" },
+    { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=2.50" },
+    { name = "litellm", specifier = ">=1.55" },
+    { name = "nltk", marker = "extra == 'evals'", specifier = ">=3.9" },
+    { name = "peft", marker = "extra == 'finetuning'", specifier = ">=0.13" },
+    { name = "pillow", marker = "extra == 'multimodal'", specifier = ">=11.0" },
+    { name = "pydantic", specifier = ">=2.10" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "qdrant-client", marker = "extra == 'rag'", specifier = ">=1.13" },
+    { name = "rank-bm25", marker = "extra == 'rag'", specifier = ">=0.2.2" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=5.2" },
+    { name = "rich", specifier = ">=13.9" },
+    { name = "rouge-score", marker = "extra == 'evals'", specifier = ">=0.1.2" },
+    { name = "s3fs", marker = "extra == 'storage'", specifier = ">=2024.10" },
+    { name = "skypilot", marker = "extra == 'compute'", specifier = ">=0.7" },
+    { name = "strata-forge", extras = ["redis", "multimodal", "inspect", "compute", "serving", "storage", "finetuning", "langfuse", "hf", "evals", "rag", "bedrock"], marker = "extra == 'all'" },
+    { name = "structlog", specifier = ">=24.4" },
+    { name = "tenacity", specifier = ">=9.0" },
+    { name = "torch", marker = "extra == 'finetuning'", specifier = ">=2.5" },
+    { name = "transformers", marker = "extra == 'finetuning'", specifier = ">=4.46" },
+    { name = "trl", marker = "extra == 'finetuning'", specifier = ">=0.13" },
+    { name = "typer", specifier = ">=0.15" },
+    { name = "vllm", marker = "extra == 'serving'", specifier = ">=0.7" },
+]
+provides-extras = ["redis", "multimodal", "inspect", "langfuse", "hf", "evals", "rag", "compute", "serving", "bedrock", "storage", "finetuning", "all"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6.115" },
+    { name = "marimo", specifier = ">=0.10" },
+    { name = "pillow", specifier = ">=11.0" },
+    { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pyright", specifier = ">=1.1.390" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "pytest-recording", specifier = ">=0.13" },
+    { name = "respx", specifier = ">=0.21" },
+    { name = "ruff", specifier = ">=0.8" },
+    { name = "syrupy", specifier = ">=4.7" },
 ]
 
 [[package]]

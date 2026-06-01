@@ -94,7 +94,7 @@ class StorageGateway:
         except ImportError as exc:
             msg = (
                 "The [storage] extra is required for StorageGateway. "
-                "Install it with: pip install 'ai-forge[storage]'."
+                "Install it with: pip install 'strata-forge[storage]'."
             )
             raise ImportError(msg) from exc
 

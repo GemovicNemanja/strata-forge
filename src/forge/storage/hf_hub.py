@@ -96,7 +96,7 @@ class HFHubClient:
         except ImportError as exc:
             msg = (
                 "The [storage] extra is required for HFHubClient. "
-                "Install it with: pip install 'ai-forge[storage]'."
+                "Install it with: pip install 'strata-forge[storage]'."
             )
             raise ImportError(msg) from exc
 

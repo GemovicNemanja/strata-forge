@@ -88,7 +88,7 @@ def _build_langfuse_client(client: Any | None) -> Any:
     except ImportError as exc:
         msg = (
             "The [langfuse] extra is required for trace replay. "
-            "Install it with: pip install 'ai-forge[langfuse]'."
+            "Install it with: pip install 'strata-forge[langfuse]'."
         )
         raise ImportError(msg) from exc
     if config.public_key is None or config.secret_key is None:  # pragma: no cover

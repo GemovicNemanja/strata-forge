@@ -1,15 +1,15 @@
 [project]
-name = "ai-forge"
+name = "strata-forge"
 version = "0.0.1"
 description = "Typed, async-first baseline for AI/LLM experiments across major foundation-model providers."
 requires-python = ">=3.14"
 readme = "README.md"
-license = { text = "Proprietary" }
+license = { file = "LICENSE" }
 authors = [
     { name = "Nemanja Gemovic", email = "nemanja.gemovic@wonder.so" },
 ]
 classifiers = [
-    "License :: Other/Proprietary License",
+    "License :: Free for non-commercial use",
     "Private :: Do Not Upload",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.14",
@@ -57,11 +57,13 @@ finetuning = [
     "accelerate>=1.1",
 ]
 all = [
-    "ai-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag,bedrock]",
+    "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag,bedrock]",
 ]
 
 [project.scripts]
 forge = "forge.cli.main:app"
+# Alias under the new distribution name; `forge` stays the canonical CLI.
+strata-forge = "forge.cli.main:app"
 
 [build-system]
 requires = ["hatchling>=1.27"]

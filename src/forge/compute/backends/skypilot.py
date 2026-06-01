@@ -93,7 +93,7 @@ class SkyPilotBackend:
             except ImportError as exc:
                 msg = (
                     "The [compute] extra is required for SkyPilotBackend. "
-                    "Install it with: pip install 'ai-forge[compute]'."
+                    "Install it with: pip install 'strata-forge[compute]'."
                 )
                 raise ImportError(msg) from exc
         return self._client

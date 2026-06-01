@@ -1,4 +1,4 @@
-"""Pydantic Settings root for ai-forge runtime configuration.
+"""Pydantic Settings root for strata-forge runtime configuration.
 
 ``Settings`` is the single source of truth for runtime configuration. Every
 other module reads it through :func:`get_settings` rather than touching
@@ -140,7 +140,7 @@ class ProvidersConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    """Root configuration for ai-forge.
+    """Root configuration for strata-forge.
 
     Sub-models read env vars with their own prefixes; the root model only
     owns project-wide knobs (``profile``) and aggregates the sub-models via

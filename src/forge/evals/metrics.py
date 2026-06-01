@@ -102,7 +102,7 @@ def pass_rate_by_grader(outcomes: Sequence[Outcome]) -> dict[str, float]:
 def _missing_evals_extra(metric: str) -> ImportError:
     msg = (
         f"The [evals] extra is required for {metric}. "
-        f"Install it with: pip install 'ai-forge[evals]'."
+        f"Install it with: pip install 'strata-forge[evals]'."
     )
     return ImportError(msg)
 

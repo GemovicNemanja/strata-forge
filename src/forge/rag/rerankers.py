@@ -100,7 +100,7 @@ class CohereReranker:
             except ImportError as exc:
                 msg = (
                     "The [rag] extra is required for CohereReranker. "
-                    "Install it with: pip install 'ai-forge[rag]'."
+                    "Install it with: pip install 'strata-forge[rag]'."
                 )
                 raise ImportError(msg) from exc
             kwargs: dict[str, Any] = {}

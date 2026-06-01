@@ -119,7 +119,7 @@ class LangfusePromptStore(PromptStore):
         except ImportError as exc:
             msg = (
                 "LangfusePromptStore requires the [langfuse] extra. "
-                "Install with `pip install ai-forge[langfuse]`."
+                "Install with `pip install strata-forge[langfuse]`."
             )
             raise ImportError(msg) from exc
         kwargs: dict[str, Any] = {}

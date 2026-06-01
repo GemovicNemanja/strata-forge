@@ -33,7 +33,7 @@ def _import_datasets() -> Any:
         import datasets as _datasets  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         msg = (
-            "The [hf] extra is required for hf_bridge. Install it with: pip install 'ai-forge[hf]'."
+            "The [hf] extra is required for hf_bridge. Install it with: pip install 'strata-forge[hf]'."
         )
         raise ImportError(msg) from exc
     return _datasets

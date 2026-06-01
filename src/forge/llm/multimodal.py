@@ -140,14 +140,14 @@ def downscale_image(
 
     Raises:
         ImportError: When Pillow is not installed. Install it via
-            ``pip install ai-forge[multimodal]``.
+            ``pip install strata-forge[multimodal]``.
     """
     try:
         import io
 
         from PIL import Image
     except ImportError as exc:
-        msg = "downscale_image requires Pillow; install via `pip install ai-forge[multimodal]`."
+        msg = "downscale_image requires Pillow; install via `pip install strata-forge[multimodal]`."
         raise ImportError(msg) from exc
 
     image = Image.open(io.BytesIO(data))

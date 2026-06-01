@@ -119,7 +119,7 @@ class QdrantVectorStore:
         except ImportError as exc:
             msg = (
                 "The [rag] extra is required for QdrantVectorStore. "
-                "Install it with: pip install 'ai-forge[rag]'."
+                "Install it with: pip install 'strata-forge[rag]'."
             )
             raise ImportError(msg) from exc
         return qdrant_mod.AsyncQdrantClient(**self._connect_kwargs)

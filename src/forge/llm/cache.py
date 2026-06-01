@@ -189,7 +189,7 @@ class RedisCache(CacheBackend):
         except ImportError as exc:
             msg = (
                 "RedisCache requires the `[redis]` extra. "
-                "Install with `pip install ai-forge[redis]`."
+                "Install with `pip install strata-forge[redis]`."
             )
             raise ImportError(msg) from exc
         # Typed as Any since the redis-py async client has dynamic command

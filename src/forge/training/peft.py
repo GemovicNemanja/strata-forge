@@ -68,7 +68,7 @@ class LoRAConfig(BaseModel):
         except ImportError as exc:
             msg = (
                 "The [finetuning] extra is required for LoRAConfig.to_peft_config. "
-                "Install it with: pip install 'ai-forge[finetuning]'."
+                "Install it with: pip install 'strata-forge[finetuning]'."
             )
             raise ImportError(msg) from exc
         kwargs: dict[str, Any] = {
@@ -118,7 +118,7 @@ class QLoRAConfig(BaseModel):
         except ImportError as exc:
             msg = (
                 "The [finetuning] extra is required for QLoRAConfig.to_bnb_config. "
-                "Install it with: pip install 'ai-forge[finetuning]'."
+                "Install it with: pip install 'strata-forge[finetuning]'."
             )
             raise ImportError(msg) from exc
         try:
@@ -126,7 +126,7 @@ class QLoRAConfig(BaseModel):
         except ImportError as exc:
             msg = (
                 "The [finetuning] extra is required for QLoRAConfig.to_bnb_config. "
-                "Install it with: pip install 'ai-forge[finetuning]'."
+                "Install it with: pip install 'strata-forge[finetuning]'."
             )
             raise ImportError(msg) from exc
         dtype = getattr(torch_mod, self.bnb_4bit_compute_dtype)
