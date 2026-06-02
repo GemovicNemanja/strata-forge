@@ -186,6 +186,34 @@ class TestSFT:
         )
         assert result.exit_code != 0
 
+    def test_dataset_file_bypasses_the_store(
+        self,
+        empty_store: InMemoryDatasetStore,
+        fake_sft_runner: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        # The store is empty, so this only succeeds by loading the shipped file.
+        ds_file = tmp_path / "dataset.json"
+        ds_file.write_text(_make_dataset().model_dump_json(), encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "train",
+                "sft",
+                "--model",
+                "gpt2",
+                "--dataset",
+                "sft-pack",
+                "--dataset-file",
+                str(ds_file),
+                "--output-dir",
+                str(tmp_path / "out"),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        trained = fake_sft_runner["trained_with"]
+        assert [item.id for item in trained.items] == ["item-0", "item-1"]
+
 
 class TestDPO:
     def test_runs_with_defaults(

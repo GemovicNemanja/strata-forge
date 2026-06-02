@@ -2,10 +2,12 @@
 
 The subcommands are thin wrappers over :class:`SFTRunner` and
 :class:`PreferenceRunner` (DPO method). Forge resolves the
-dataset from the configured :class:`DatasetStore`; everything
-else flows from CLI flags. Heavy ML deps (``torch``,
-``transformers``, ``trl``, ``peft``, ``datasets``) lazy-import
-inside the runners.
+dataset from the configured :class:`DatasetStore` by name, or —
+with ``--dataset-file`` — from a serialized :class:`Dataset` JSON
+file an orchestrator shipped to the worker (so a remote box needs
+no store access). Everything else flows from CLI flags. Heavy ML
+deps (``torch``, ``transformers``, ``trl``, ``peft``,
+``datasets``) lazy-import inside the runners.
 
 For GRPO / ORPO / KTO or full hyperparameter control, drop into
 Python and use :mod:`forge.training` directly — the CLI covers
@@ -14,6 +16,7 @@ the day-to-day SFT + DPO path, not the entire surface.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path  # noqa: TC003 — typer evaluates annotations at runtime
 from typing import Any, Literal
 
@@ -50,6 +53,12 @@ def sft_cmd(
     dataset_version: str | None = typer.Option(
         None, "--dataset-version", help="Pin a specific dataset version."
     ),
+    dataset_file: Path | None = typer.Option(
+        None,
+        "--dataset-file",
+        help="Load the dataset from a serialized Dataset JSON file instead of the store "
+        "(used by orchestration to ship a dataset to a remote worker).",
+    ),
     epochs: float = typer.Option(1.0, "--epochs", help="Training epochs."),
     batch_size: int = typer.Option(1, "--batch-size", min=1, help="Per-device batch size."),
     grad_accum: int = typer.Option(8, "--grad-accum", min=1, help="Gradient accumulation steps."),
@@ -72,6 +81,7 @@ def sft_cmd(
             dataset_name=dataset,
             output_dir=output_dir,
             dataset_version=dataset_version,
+            dataset_file=dataset_file,
             epochs=epochs,
             batch_size=batch_size,
             grad_accum=grad_accum,
@@ -96,6 +106,12 @@ def dpo_cmd(
     dataset_version: str | None = typer.Option(
         None, "--dataset-version", help="Pin a specific dataset version."
     ),
+    dataset_file: Path | None = typer.Option(
+        None,
+        "--dataset-file",
+        help="Load the dataset from a serialized Dataset JSON file instead of the store "
+        "(used by orchestration to ship a dataset to a remote worker).",
+    ),
     beta: float = typer.Option(0.1, "--beta", help="DPO beta."),
     epochs: float = typer.Option(1.0, "--epochs", help="Training epochs."),
     batch_size: int = typer.Option(1, "--batch-size", min=1),
@@ -118,6 +134,7 @@ def dpo_cmd(
             dataset_name=dataset,
             output_dir=output_dir,
             dataset_version=dataset_version,
+            dataset_file=dataset_file,
             beta=beta,
             epochs=epochs,
             batch_size=batch_size,
@@ -151,7 +168,16 @@ def _build_peft(adapter: str, rank: int) -> Any:
     error_exit(f"unknown adapter {adapter!r}")
 
 
-async def _resolve_dataset(name: str, version: str | None) -> Any:
+async def _resolve_dataset(name: str, version: str | None, dataset_file: Path | None) -> Any:
+    if dataset_file is not None:
+        from forge.datasets import Dataset
+
+        try:
+            text = await asyncio.to_thread(dataset_file.read_text, encoding="utf-8")
+            return Dataset.model_validate_json(text)
+        except (OSError, ValueError) as exc:
+            error_exit(f"could not load --dataset-file {dataset_file}: {exc}")
+
     from forge.datasets.store import DatasetNotFoundError
 
     store = dataset_store_from_settings()
@@ -167,6 +193,7 @@ async def _run_sft(
     dataset_name: str,
     output_dir: Path,
     dataset_version: str | None,
+    dataset_file: Path | None,
     epochs: float,
     batch_size: int,
     grad_accum: int,
@@ -180,7 +207,7 @@ async def _run_sft(
 ) -> None:
     from forge.training.sft import SFTConfig, SFTRunner
 
-    dataset = await _resolve_dataset(dataset_name, dataset_version)
+    dataset = await _resolve_dataset(dataset_name, dataset_version, dataset_file)
     peft_cfg = _build_peft(adapter, adapter_rank)
 
     config = SFTConfig(
@@ -217,6 +244,7 @@ async def _run_dpo(
     dataset_name: str,
     output_dir: Path,
     dataset_version: str | None,
+    dataset_file: Path | None,
     beta: float,
     epochs: float,
     batch_size: int,
@@ -232,7 +260,7 @@ async def _run_dpo(
 ) -> None:
     from forge.training.preference import DPOConfig, PreferenceRunner
 
-    dataset = await _resolve_dataset(dataset_name, dataset_version)
+    dataset = await _resolve_dataset(dataset_name, dataset_version, dataset_file)
     peft_cfg = _build_peft(adapter, adapter_rank)
 
     config = DPOConfig(
