@@ -95,7 +95,32 @@ class TestGetClientConfigured:
             host="http://test-langfuse",
             public_key="pk-test",
             secret_key="sk-test",
+            environment=None,
         )
+
+    def test_passes_tracing_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # `LANGFUSE_TRACING_ENVIRONMENT` (the SDK's own var) flows through
+        # `LangfuseConfig.tracing_environment` to the client constructor so traces
+        # are grouped by deployment environment.
+        _configure_langfuse(monkeypatch)
+        monkeypatch.setenv("LANGFUSE_TRACING_ENVIRONMENT", "production")
+        constructor = _install_fake_langfuse(monkeypatch)
+        get_client()
+        assert constructor.call_args.kwargs["environment"] == "production"
+
+    def test_environment_defaults_to_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Unset → None passed, so the SDK keeps its built-in "default" environment.
+        _configure_langfuse(monkeypatch)
+        monkeypatch.delenv("LANGFUSE_TRACING_ENVIRONMENT", raising=False)
+        constructor = _install_fake_langfuse(monkeypatch)
+        get_client()
+        assert constructor.call_args.kwargs["environment"] is None
 
     def test_returns_cached_singleton(
         self,

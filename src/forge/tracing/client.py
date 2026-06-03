@@ -53,6 +53,10 @@ def _build_client() -> Any:
         host=config.host,
         public_key=config.public_key.get_secret_value(),
         secret_key=config.secret_key.get_secret_value(),
+        # Tags every trace with the deployment environment (prod vs dev). `None`
+        # lets the SDK fall back to its native `LANGFUSE_TRACING_ENVIRONMENT` read
+        # (→ "default"); a configured value wins.
+        environment=config.tracing_environment,
     )
 
 

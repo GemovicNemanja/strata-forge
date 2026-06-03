@@ -80,6 +80,13 @@ class TestEnvOverrides:
         # secret key missing → not enabled
         assert LangfuseConfig().enabled is False
 
+    def test_langfuse_tracing_environment_default_is_none(self) -> None:
+        assert LangfuseConfig().tracing_environment is None
+
+    def test_langfuse_tracing_environment_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LANGFUSE_TRACING_ENVIRONMENT", "production")
+        assert LangfuseConfig().tracing_environment == "production"
+
     def test_redis_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("REDIS_URL", "redis://prod-cache:6379/3")
         assert RedisConfig().url == "redis://prod-cache:6379/3"

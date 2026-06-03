@@ -35,6 +35,7 @@ _FORGE_ENV_VARS: tuple[str, ...] = (
     "LANGFUSE_HOST",
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_TRACING_ENVIRONMENT",
     # Redis
     "REDIS_URL",
     # Qdrant

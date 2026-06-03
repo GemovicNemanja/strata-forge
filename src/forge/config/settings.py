@@ -56,6 +56,12 @@ class LangfuseConfig(BaseSettings):
     host: str = "http://localhost:3000"
     public_key: SecretStr | None = None
     secret_key: SecretStr | None = None
+    # Environment label stamped on every trace (e.g. "production" / "development")
+    # so traces from different deployments stay separable in the Langfuse UI. The
+    # field name maps to `LANGFUSE_TRACING_ENVIRONMENT` (env_prefix `LANGFUSE_`),
+    # which is also the Langfuse SDK's own native var, so the two agree on one
+    # source. `None` leaves the SDK on its built-in "default" environment.
+    tracing_environment: str | None = None
 
     @property
     def enabled(self) -> bool:
