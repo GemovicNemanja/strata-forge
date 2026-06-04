@@ -194,7 +194,17 @@ Use a parenthesized scope when the change is local to one module — usually the
 
 - One commit per cohesive unit of work — never bundle unrelated changes for convenience.
 - PR titles follow the same Conventional Commits format as the subject line. PR body has `## Summary`, `## Why`, `## Test plan`.
-- Never `--no-verify`. Never `--force-push` to `main`. Never `--amend` a commit that has been pushed somewhere shared.
+- Never `--no-verify`. Never `--force-push` to `main` or `dev`. Never `--amend` a commit that has been pushed somewhere shared.
+
+### Branching and deployment
+
+A three-tier flow — **every** change follows it; never commit directly to `dev` or `main`:
+
+1. **Topic branch** off `dev`, named `<type>/<short-title>` (same `<type>` vocabulary as commits) — e.g. `feat/streaming-tool-loop`. One cohesive unit of work per branch.
+2. **Merge into `dev`** (via PR) when done. `dev` is the persistent integration branch.
+3. **Merge `dev` into `main`** once integrated.
+
+forge is a library, not a service, so it has no deploy of its own — but its branches feed the sibling **strata-server**'s deploys: the server's **staging** (`strata-server` `dev`) bundles forge **`dev`**, and the server's **production** (`strata-server` `main`) bundles forge **`main`**. So promote a forge change to `main` only once the server staging that consumes forge `dev` looks good, and keep forge `dev` green — it gates the whole staging chain.
 
 ---
 
