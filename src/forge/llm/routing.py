@@ -63,8 +63,23 @@ def resolve(
         RegistryError: ``model`` (or its alias) is not in the registry, or
             the requested ``provider`` is not a supported route for it. The
             error's ``reason`` tag is ``unknown_model`` or
-            ``unsupported_route`` respectively.
+            ``unsupported_route`` respectively. The ``openai_compat`` provider
+            is exempt: its model ids are operator-specific and intentionally
+            absent from the curated registry.
     """
+    # OpenAI-compatible endpoints (vLLM / TGI / SGLang, but also OpenRouter,
+    # Groq, the Gemini OpenAI-compat endpoint, local Ollama, ...) carry
+    # operator-specific model ids that the curated registry does not — and by
+    # design should not — track. When the caller pins ``openai_compat`` they
+    # supply the provider's own model id directly, so route it through as-is
+    # rather than consulting the registry (which would raise ``unknown_model``).
+    if provider == "openai_compat":
+        return ModelRoute(
+            model=model,
+            provider="openai_compat",
+            provider_model_id=model,
+        )
+
     reg = registry if registry is not None else _global_registry
     entry = reg.get(model)  # raises RegistryError(reason="unknown_model")
 

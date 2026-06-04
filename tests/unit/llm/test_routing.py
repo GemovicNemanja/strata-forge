@@ -188,6 +188,33 @@ class TestResolveUnknownModel:
         assert exc.value.reason == "unknown_model"
 
 
+class TestResolveOpenAICompatBypass:
+    """``openai_compat`` routes pass the model id straight through, no registry."""
+
+    def test_unregistered_id_routes_through(self) -> None:
+        route = resolve("meta-llama/llama-3.1-8b-instruct:free", provider="openai_compat")
+        assert route.model == "meta-llama/llama-3.1-8b-instruct:free"
+        assert route.provider == "openai_compat"
+        assert route.provider_model_id == "meta-llama/llama-3.1-8b-instruct:free"
+
+    def test_bypass_ignores_registry_entirely(self) -> None:
+        # Even with an empty registry (no models), the bypass still resolves.
+        reg = Registry([])
+        route = resolve("any/model-id", provider="openai_compat", registry=reg)
+        assert route.provider == "openai_compat"
+        assert route.provider_model_id == "any/model-id"
+
+    def test_preserves_ids_with_slashes_and_tags(self) -> None:
+        route = resolve("openai/gpt-oss-20b", provider="openai_compat")
+        assert route.provider_model_id == "openai/gpt-oss-20b"
+
+    def test_registered_name_without_pin_is_unaffected(self) -> None:
+        # The bypass is keyed on the provider pin only; default resolution of a
+        # registered model is unchanged.
+        route = resolve("claude-opus-4-7")
+        assert route.provider == "anthropic"
+
+
 class TestResolveAgainstGlobalRegistry:
     """A handful of smoke tests against the real registry singleton."""
 
