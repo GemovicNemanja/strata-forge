@@ -26,9 +26,10 @@ from forge.llm.messages import (
 from forge.llm.responses import LLMResponse  # noqa: TC001 — Pydantic needs runtime resolution
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from forge.llm.client import LLMClient
+    from forge.llm.loop_events import LoopEvent
     from forge.llm.registry import ProviderName
     from forge.llm.tools import Tool
 
@@ -211,6 +212,42 @@ class Agent:
             messages=tuple(messages),
             final_response=response,
         )
+
+    async def run_streaming(
+        self,
+        user_input: str | Sequence[AnyMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        provider_extras: Mapping[ProviderName, Mapping[str, Any]] | None = None,
+    ) -> AsyncIterator[LoopEvent]:
+        """Stream the agent's tool-use loop as typed events.
+
+        Builds the message list (system prompt + ``user_input``) like
+        :meth:`run`, then delegates to
+        :meth:`LLMClient.stream_tool_loop` with the agent's tools and
+        ``max_iterations``, yielding each
+        :data:`~forge.llm.loop_events.LoopEvent` as it arrives. When the
+        agent has NO tools, the loop degenerates to a single streamed turn
+        (one ``IterationStart``, its ``TextDelta``s, and a terminal
+        ``Done``).
+
+        This is a true async generator — iterate it directly
+        (``async for event in agent.run_streaming(...)``). There is no
+        streaming variant of :meth:`run_structured`.
+        """
+        messages = self._build_messages(user_input)
+        async for event in self._client.stream_tool_loop(
+            messages,
+            tools=self._tools,
+            max_iterations=self._max_iterations,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            provider_extras=provider_extras,
+        ):
+            yield event
 
     async def run_structured(
         self,

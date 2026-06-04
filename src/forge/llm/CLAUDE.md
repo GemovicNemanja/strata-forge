@@ -8,7 +8,7 @@ Provider-abstracted async LLM client built on LiteLLM ([ADR 0001](../../../docs/
 
 ## Boundaries
 
-- **Owns:** `client.py`, `messages.py`, `responses.py`, `schemas.py`, `tools.py`, `multimodal.py`, `streaming.py`, `tokens.py`, `cost.py`, `cache.py`, `fallback.py`, `routing.py`, `errors.py`, `registry.py`, `registry_data.yaml`, `diagnostic.py`, `providers/`.
+- **Owns:** `client.py`, `messages.py`, `responses.py`, `loop_events.py`, `schemas.py`, `tools.py`, `multimodal.py`, `streaming.py`, `tokens.py`, `cost.py`, `cache.py`, `fallback.py`, `routing.py`, `errors.py`, `registry.py`, `registry_data.yaml`, `diagnostic.py`, `providers/`.
 - **Imports from inside `forge`:** `forge.core`, `forge.config`. Nothing higher.
 - **Imports of provider SDKs** (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`): ONLY inside `src/forge/llm/providers/`. Everywhere else uses `LLMClient` or the `provider_extras` passthrough.
 - **Does NOT:** manage prompts, store datasets, run evaluations, build agents, perform retrieval, orchestrate remote compute.
@@ -22,6 +22,7 @@ The module's `__init__.py` re-exports a curated surface:
 - Response types: `LLMResponse`, `ResponseChunk`, `ToolCall`, `FinishReason`.
 - `ModelFallback` — explicit two-axis fallback entry.
 - `Tool`, `@tool` — tool calling primitives.
+- Streaming tool loop: `LLMClient.stream_tool_loop` + the `LoopEvent` union (`IterationStart`, `TextDelta`, `ToolCallStarted`, `ToolResult`, `Done`, `LoopError`) from `loop_events.py` ([ADR 0014](../../../docs/architecture/adr/0014-streaming-tool-loop-event-protocol.md)).
 - `ImageContent` — multimodal image input.
 - Errors: anything raised from this module is a `ProviderError` subclass or another `ForgeError` subclass.
 

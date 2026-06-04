@@ -8,7 +8,17 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from forge.agents import Agent, AgentResult, AssistantMessage, SystemMessage, UserMessage, tool
+from forge.agents import (
+    Agent,
+    AgentResult,
+    AssistantMessage,
+    Done,
+    IterationStart,
+    SystemMessage,
+    TextDelta,
+    UserMessage,
+    tool,
+)
 from forge.llm.responses import LLMResponse, Usage
 from forge.llm.routing import ModelRoute
 
@@ -369,3 +379,87 @@ class TestRunStructured:
         await agent.run_structured("hi", output_schema=_Output, max_reprompt_attempts=5)
         kwargs = client.complete_structured.call_args.kwargs
         assert kwargs["max_reprompt_attempts"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Streaming runtime
+# ---------------------------------------------------------------------------
+
+
+def _agen(events: list[Any]) -> Any:
+    async def _gen() -> Any:
+        for event in events:
+            yield event
+
+    return _gen()
+
+
+def _fake_stream_loop(events: list[Any]) -> tuple[Any, dict[str, Any]]:
+    """Stand-in for ``LLMClient.stream_tool_loop`` that records its call.
+
+    Returns the callable plus the dict it records (messages + kwargs) into.
+    Unlike an ``AsyncMock``, this returns an async generator directly (the
+    real ``stream_tool_loop`` is an async generator, iterated without an
+    intervening ``await``).
+    """
+    recorded: dict[str, Any] = {}
+
+    def _loop(
+        messages: Any,
+        *,
+        tools: Any,
+        max_iterations: int,
+        temperature: Any = None,
+        max_tokens: Any = None,
+        top_p: Any = None,
+        provider_extras: Any = None,
+    ) -> Any:
+        recorded.update(
+            messages=messages,
+            tools=tools,
+            max_iterations=max_iterations,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            provider_extras=provider_extras,
+        )
+        return _agen(events)
+
+    return _loop, recorded
+
+
+class TestAgentRunStreaming:
+    async def test_no_tools_emits_text_and_done_with_system_prompt(self) -> None:
+        client = _client()
+        loop, recorded = _fake_stream_loop(
+            [
+                IterationStart(index=0),
+                TextDelta(text="hi", iteration=0),
+                Done(finish_reason="stop"),
+            ]
+        )
+        client.stream_tool_loop = loop
+        agent = Agent("a", client=client, system_prompt="SYS")
+
+        events = [event async for event in agent.run_streaming("hello")]
+
+        assert isinstance(events[0], IterationStart)
+        assert any(isinstance(e, TextDelta) for e in events)
+        assert isinstance(events[-1], Done)
+        # The system prompt is prepended; a tool-less agent forwards no tools.
+        assert isinstance(recorded["messages"][0], SystemMessage)
+        assert recorded["messages"][0].content == "SYS"
+        assert recorded["tools"] == ()
+
+    async def test_delegates_with_agent_tools_and_max_iterations(self) -> None:
+        client = _client()
+        loop, recorded = _fake_stream_loop([Done(finish_reason="stop")])
+        client.stream_tool_loop = loop
+        agent = Agent("a", client=client, tools=[_dummy_tool], max_iterations=5)
+
+        events = [event async for event in agent.run_streaming("go", temperature=0.2)]
+
+        assert recorded["tools"] == (_dummy_tool,)
+        assert recorded["max_iterations"] == 5
+        assert recorded["temperature"] == 0.2
+        assert isinstance(events[-1], Done)

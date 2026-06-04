@@ -25,12 +25,13 @@ from forge.core.errors import ValidationError
 from forge.llm.messages import ToolCall
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterable
 
-    from forge.llm.responses import ResponseChunk
+    from forge.llm.responses import ResponseChunk, ToolCallDelta
 
 __all__ = [
     "JSONAccumulator",
+    "StreamingToolCallAccumulator",
     "accumulate_text",
     "accumulate_tool_calls",
 ]
@@ -64,35 +65,16 @@ async def accumulate_text(chunks: AsyncIterator[ResponseChunk]) -> str:
     return "".join(parts)
 
 
-async def accumulate_tool_calls(
-    chunks: AsyncIterator[ResponseChunk],
-) -> list[ToolCall]:
-    """Rebuild complete :class:`ToolCall` instances from streamed deltas.
+def _finalize_buffers(buffers: dict[int, _ToolCallBuffer]) -> list[ToolCall]:
+    """Rebuild complete :class:`ToolCall`s from accumulated buffers.
 
-    Streaming providers send each tool call as a sequence of
-    :class:`ToolCallDelta` updates keyed by ``index``. The first delta for
-    a given index carries the call's ``id`` and ``name``; later deltas
-    typically only carry ``arguments_delta`` fragments that concatenate
-    into a JSON-encoded argument object. This helper buffers those
-    fragments, parses the final JSON, and returns one :class:`ToolCall`
-    per index in ascending order.
+    Calls are returned one per ``index`` in ascending order.
 
     Raises:
         ValidationError: When a call's ``id`` or ``name`` never arrived,
-            or when its accumulated arguments aren't valid JSON.
+            or when its accumulated arguments aren't valid JSON resolving
+            to an object.
     """
-    buffers: dict[int, _ToolCallBuffer] = {}
-
-    async for chunk in chunks:
-        for delta in chunk.delta_tool_calls:
-            buf = buffers.setdefault(delta.index, _ToolCallBuffer())
-            if delta.id is not None:
-                buf.id = delta.id
-            if delta.name is not None:
-                buf.name = delta.name
-            if delta.arguments_delta:
-                buf.arguments_text += delta.arguments_delta
-
     result: list[ToolCall] = []
     for index in sorted(buffers):
         buf = buffers[index]
@@ -122,8 +104,76 @@ async def accumulate_tool_calls(
         else:
             arguments = {}
         result.append(ToolCall(id=buf.id, name=buf.name, arguments=arguments))
-
     return result
+
+
+class StreamingToolCallAccumulator:
+    """Incrementally rebuild :class:`ToolCall`s from streamed deltas.
+
+    Unlike :func:`accumulate_tool_calls`, which consumes an entire stream
+    in one call, this lets a caller feed each chunk's
+    :class:`ToolCallDelta` fragments in via :meth:`add` while doing other
+    work between chunks (e.g. yielding text deltas to a UI), then rebuild
+    the whole calls at an iteration boundary via :meth:`finalize`. The
+    multi-turn streaming tool loop in :mod:`forge.llm.client`
+    (``LLMClient.stream_tool_loop``) is the primary consumer.
+    """
+
+    def __init__(self) -> None:
+        self._buffers: dict[int, _ToolCallBuffer] = {}
+
+    def add(self, deltas: Iterable[ToolCallDelta]) -> None:
+        """Fold one chunk's tool-call deltas into the per-index buffers.
+
+        The first delta for an ``index`` carries the call's ``id`` and
+        ``name``; later deltas append ``arguments_delta`` fragments.
+        """
+        for delta in deltas:
+            buf = self._buffers.setdefault(delta.index, _ToolCallBuffer())
+            if delta.id is not None:
+                buf.id = delta.id
+            if delta.name is not None:
+                buf.name = delta.name
+            if delta.arguments_delta:
+                buf.arguments_text += delta.arguments_delta
+
+    @property
+    def has_calls(self) -> bool:
+        """Whether any tool-call deltas have been accumulated so far."""
+        return bool(self._buffers)
+
+    def finalize(self) -> list[ToolCall]:
+        """Rebuild the complete tool calls, one per index in ascending order.
+
+        Raises:
+            ValidationError: When a call's ``id`` or ``name`` never
+                arrived, or its accumulated arguments aren't valid JSON
+                resolving to an object.
+        """
+        return _finalize_buffers(self._buffers)
+
+
+async def accumulate_tool_calls(
+    chunks: AsyncIterator[ResponseChunk],
+) -> list[ToolCall]:
+    """Rebuild complete :class:`ToolCall` instances from streamed deltas.
+
+    Streaming providers send each tool call as a sequence of
+    :class:`ToolCallDelta` updates keyed by ``index``. The first delta for
+    a given index carries the call's ``id`` and ``name``; later deltas
+    typically only carry ``arguments_delta`` fragments that concatenate
+    into a JSON-encoded argument object. This helper buffers those
+    fragments, parses the final JSON, and returns one :class:`ToolCall`
+    per index in ascending order.
+
+    Raises:
+        ValidationError: When a call's ``id`` or ``name`` never arrived,
+            or when its accumulated arguments aren't valid JSON.
+    """
+    accumulator = StreamingToolCallAccumulator()
+    async for chunk in chunks:
+        accumulator.add(chunk.delta_tool_calls)
+    return accumulator.finalize()
 
 
 # ---------------------------------------------------------------------------

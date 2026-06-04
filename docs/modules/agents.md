@@ -13,7 +13,8 @@ Integration points:
   dispatches through `LLMClient.run_tool_loop` when tools are
   present and `LLMClient.complete` when not.
   `Agent.run_structured(output_schema=)` uses
-  `LLMClient.complete_structured`.
+  `LLMClient.complete_structured`. `Agent.run_streaming()` yields
+  the tool loop as a live stream of typed `LoopEvent`s.
 - **Built-in tools:** `calculator`, `fetch_url` (ready-to-use
   instances); `fs_read_tool(allowed_dirs=)`,
   `web_search_tool(backend=)` (factories needing caller config).
@@ -89,6 +90,9 @@ class Agent:
     ) -> None: ...
 
     async def run(self, user_input: str | Sequence[AnyMessage], **kw) -> AgentResult: ...
+    async def run_streaming(
+        self, user_input: str | Sequence[AnyMessage], **kw,
+    ) -> AsyncIterator[LoopEvent]: ...
     async def run_structured(
         self, user_input, *, output_schema: type[M], **kw,
     ) -> AgentResult: ...
@@ -117,6 +121,21 @@ messages from inside `run_tool_loop` are not included here —
 visibility, install the LiteLLM Langfuse callback via
 `forge.tracing.install_litellm_callback()` or set
 `FORGE_DIAGNOSTIC=1` for the NDJSON dump.
+
+For *live* visibility, use `Agent.run_streaming()` — the streaming
+counterpart that yields typed `LoopEvent`s (`IterationStart` /
+`TextDelta` / `ToolCallStarted` / `ToolResult` / `Done` / `LoopError`)
+as the conversation unfolds, surfacing the intermediate tool calls and
+results that `run()` collapses into a final answer. It delegates to
+[`LLMClient.stream_tool_loop`](llm.md#streaming-tool-loop) with the
+agent's tools and `max_iterations`; a tool-less agent degenerates to a
+single streamed turn. There is no streaming variant of
+`run_structured`.
+
+```python
+async for event in agent.run_streaming("Weather in Tokyo?"):
+    ...  # match on the event type — see the llm.md streaming-tool-loop table
+```
 
 ---
 

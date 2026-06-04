@@ -13,7 +13,7 @@ inline. The implementation lives under `src/forge/llm/`; module-specific
 agent rules live in [`src/forge/llm/CLAUDE.md`](../../src/forge/llm/CLAUDE.md).
 
 > **TL;DR.** Build an `LLMClient`, call `complete` / `stream` /
-> `complete_structured` / `run_tool_loop`. Configure provider-level and
+> `complete_structured` / `run_tool_loop` / `stream_tool_loop`. Configure provider-level and
 > model-level fallback with `with_fallbacks`. Wrap call sites in a
 > `BudgetContext` for cost ceilings. Use the `[redis]` extra if you want
 > the cache to outlive a single process.
@@ -136,11 +136,15 @@ Methods:
 | `complete_structured(messages, *, schema, ...)` | `StructuredResponse[M]` | no | no |
 | `stream(messages, *, ...)` | `AsyncIterator[ResponseChunk]` | yes | yes |
 | `run_tool_loop(messages, *, tools, max_iterations=8, ...)` | `LLMResponse` | no (per attempt) | no |
+| `stream_tool_loop(messages, *, tools, max_iterations=8, ...)` | `AsyncIterator[LoopEvent]` | yes | yes |
 
-All four methods validate the conversation (every `ToolResultMessage`
+All methods validate the conversation (every `ToolResultMessage`
 references a prior `ToolCall.id`) before dispatching, and surface
 provider errors as `ProviderError` subclasses — never raw LiteLLM
-exceptions.
+exceptions. The one exception to the *raise* convention is
+`stream_tool_loop`: an in-stream provider error becomes a terminal
+`LoopError` event rather than a raised exception (see
+[Streaming tool loop](#streaming-tool-loop)).
 
 ### Messages and content parts
 
@@ -459,6 +463,10 @@ for the common postprocessing patterns:
 - `accumulate_tool_calls(chunks)` → the assembled `list[ToolCall]`
   (validates that every tool call has an id, a name, and JSON-object
   arguments).
+- `StreamingToolCallAccumulator` — the incremental form: feed each
+  chunk's `delta_tool_calls` via `add(...)` while doing other work, then
+  `finalize()` to rebuild the `list[ToolCall]` at an iteration boundary.
+  Backs `stream_tool_loop`.
 - `JSONAccumulator` — feed `delta_text` fragments, then `parse()` when
   the buffer is a complete JSON value.
 
@@ -466,6 +474,70 @@ Streaming **bypasses cache and fallback** — a stream midway through
 can't be cleanly transferred to a new provider. Use the async API
 directly (sync wrappers buffer the whole stream before yielding, by
 necessity).
+
+### Streaming tool loop
+
+`stream_tool_loop` is the streaming counterpart of `run_tool_loop`: it
+drives the same multi-turn tool-use conversation, but instead of
+buffering it into one final `LLMResponse`, it yields a flat stream of
+typed `LoopEvent`s as the conversation unfolds — so a UI can show the
+model's tool use live.
+
+```python
+from forge.llm import (
+    LLMClient, Message, IterationStart, TextDelta,
+    ToolCallStarted, ToolResult, Done, LoopError,
+)
+
+client = LLMClient("claude-opus-4-7")
+async for event in client.stream_tool_loop(
+    [Message.user("Weather in Tokyo, then convert to Fahrenheit.")],
+    tools=[get_weather, celsius_to_fahrenheit],
+):
+    match event:
+        case TextDelta(text=t):              print(t, end="")
+        case ToolCallStarted(name=n):        ...   # tool about to run
+        case ToolResult(name=n, is_error=e): ...   # tool returned
+        case Done(finish_reason=r):          ...   # success, terminal
+        case LoopError(message=m):           ...   # failure, terminal
+```
+
+The event union lives in `forge.llm.loop_events`; every event carries a
+`type` literal (the discriminator):
+
+| Event | Emitted | Fields |
+|---|---|---|
+| `IterationStart` | at the top of each iteration | `index` (0-based) |
+| `TextDelta` | per assistant text fragment | `text`, `iteration` |
+| `ToolCallStarted` | once per call, after its args are fully assembled | `id`, `name`, `arguments`, `iteration` |
+| `ToolResult` | once per result, after the tool returns | `id`, `name`, `content`, `is_error`, `iteration` |
+| `Done` | terminal — model exited tool-use mode | `finish_reason`, `usage` |
+| `LoopError` | terminal — the loop could not complete | `message`, `error_type`, `exceeded_max_iterations` |
+
+Every run ends with **exactly one** terminal event. The tool-result
+feedback semantics mirror `run_tool_loop`: an unregistered tool, or a
+tool that raises, becomes an `is_error` result fed back to the model,
+never an exception out of the loop. An empty `tools` sequence degenerates
+to a single streamed turn (one `IterationStart`, its `TextDelta`s, a
+`Done`).
+
+Two things distinguish it from `run_tool_loop`:
+
+- **It is a true async generator** — iterate it directly
+  (`async for event in client.stream_tool_loop(...)`); do **not** `await`
+  the call first, unlike `stream`.
+- **Raise vs emit.** Pre-flight failures — a bad `max_iterations`, or a
+  capability-gate violation — *raise* synchronously, matching
+  `run_tool_loop`. Failures that occur once events are already flowing —
+  a provider/transport error, a malformed streamed tool call, or the
+  iteration cap — surface as a terminal `LoopError` (with
+  `exceeded_max_iterations=True` for the cap), so an in-flight stream
+  always ends cleanly rather than raising mid-iteration.
+
+`usage` on `Done` is the final iteration's usage only — not a sum across
+iterations; cumulative accounting is the caller's job via tracing. See
+[ADR 0014](../architecture/adr/0014-streaming-tool-loop-event-protocol.md)
+for the event-protocol rationale.
 
 ---
 

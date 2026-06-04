@@ -16,6 +16,15 @@ from forge.llm.fallback import (
     normalize_fallback_chain,
     run_with_fallback,
 )
+from forge.llm.loop_events import (
+    Done,
+    IterationStart,
+    LoopError,
+    LoopEvent,
+    TextDelta,
+    ToolCallStarted,
+    ToolResult,
+)
 from forge.llm.messages import (
     AnyMessage,
     AssistantMessage,
@@ -78,7 +87,12 @@ from forge.llm.schemas import (
     to_gemini_response_schema,
     to_openai_response_format,
 )
-from forge.llm.streaming import JSONAccumulator, accumulate_text, accumulate_tool_calls
+from forge.llm.streaming import (
+    JSONAccumulator,
+    StreamingToolCallAccumulator,
+    accumulate_text,
+    accumulate_tool_calls,
+)
 from forge.llm.tokens import count_tokens
 from forge.llm.tools import Tool, ToolFunc, ToolLoopExceededError, tool
 
@@ -95,13 +109,17 @@ __all__ = [
     "Capabilities",
     "ContentPart",
     "DiagnosticRecord",
+    "Done",
     "FallbackEntry",
     "FinishReason",
     "ImageContent",
     "InMemoryCache",
+    "IterationStart",
     "JSONAccumulator",
     "LLMClient",
     "LLMResponse",
+    "LoopError",
+    "LoopEvent",
     "Message",
     "Modality",
     "Model",
@@ -120,16 +138,20 @@ __all__ = [
     "Registry",
     "ResponseChunk",
     "Role",
+    "StreamingToolCallAccumulator",
     "StructuredOutputError",
     "StructuredResponse",
     "SystemMessage",
+    "TextDelta",
     "TextPart",
     "Tier",
     "Tool",
     "ToolCall",
     "ToolCallDelta",
+    "ToolCallStarted",
     "ToolFunc",
     "ToolLoopExceededError",
+    "ToolResult",
     "ToolResultMessage",
     "Usage",
     "UserMessage",

@@ -19,10 +19,19 @@ from forge.core.errors import (
     BudgetExceededError,
     ProviderRateLimitError,
     RegistryError,
+    ValidationError,
 )
 from forge.llm.cache import InMemoryCache
 from forge.llm.client import LLMClient, StructuredResponse
 from forge.llm.fallback import ModelFallback
+from forge.llm.loop_events import (
+    Done,
+    IterationStart,
+    LoopError,
+    TextDelta,
+    ToolCallStarted,
+    ToolResult,
+)
 from forge.llm.messages import (
     AssistantMessage,
     Message,
@@ -806,6 +815,449 @@ class TestToolLoop:
         with pytest.raises(ToolLoopExceededError) as info:
             await client.run_tool_loop([Message.user("?")], tools=[_get_weather], max_iterations=2)
         assert info.value.max_iterations == 2
+
+
+# ---------------------------------------------------------------------------
+# Streaming tool loop
+# ---------------------------------------------------------------------------
+
+
+def _stream_text(
+    text: str,
+    *,
+    finish_reason: str | None = None,
+    usage: Any = None,
+) -> types.SimpleNamespace:
+    """A streamed text chunk in LiteLLM's delta shape."""
+    return types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(
+                delta=types.SimpleNamespace(content=text, tool_calls=None),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=usage,
+    )
+
+
+def _stream_tool(
+    index: int,
+    *,
+    id: str | None = None,  # noqa: A002 — mirrors the wire field name
+    name: str | None = None,
+    args: str = "",
+    finish_reason: str | None = None,
+) -> types.SimpleNamespace:
+    """A streamed tool-call delta chunk in LiteLLM's delta shape."""
+    return types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(
+                delta=types.SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        types.SimpleNamespace(
+                            index=index,
+                            id=id,
+                            function=types.SimpleNamespace(name=name, arguments=args),
+                        )
+                    ],
+                ),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=_usage_ns() if finish_reason is not None else None,
+    )
+
+
+def _usage_ns(prompt: int = 5, completion: int = 3) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+        prompt_tokens_details=types.SimpleNamespace(cached_tokens=0),
+    )
+
+
+def _streaming_acompletion(*turns: list[Any]) -> AsyncMock:
+    """Mock `litellm.acompletion` to yield one canned chunk stream per call.
+
+    Each positional arg is the list of raw chunk namespaces for one
+    ``stream()`` turn (i.e. one loop iteration). Calls beyond the supplied
+    turns raise ``IndexError`` so an over-iterating loop fails loudly.
+    """
+    queue = [list(turn) for turn in turns]
+
+    async def _fake(**_kwargs: Any) -> Any:
+        chunks = queue.pop(0)
+
+        async def _gen() -> AsyncIterator[Any]:
+            for chunk in chunks:
+                yield chunk
+
+        return _gen()
+
+    return AsyncMock(side_effect=_fake)
+
+
+async def _collect(events: AsyncIterator[Any]) -> list[Any]:
+    return [event async for event in events]
+
+
+class TestStreamToolLoop:
+    async def test_no_tool_use_emits_text_then_done(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [_stream_text("hel"), _stream_text("lo", finish_reason="stop")],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("hi")], tools=[_get_weather]))
+        assert isinstance(events[0], IterationStart)
+        assert events[0].index == 0
+        assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "hello"
+        assert isinstance(events[-1], Done)
+        assert events[-1].finish_reason == "stop"
+        assert not any(isinstance(e, (ToolCallStarted, ToolResult)) for e in events)
+
+    async def test_single_tool_then_text_full_event_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(0, id="c1", name="_get_weather", args='{"location":'),
+                    _stream_tool(0, args=' "Tokyo"}', finish_reason="tool_calls"),
+                ],
+                [_stream_text("It's sunny.", finish_reason="stop")],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("weather?")], tools=[_get_weather])
+        )
+        assert [type(e).__name__ for e in events] == [
+            "IterationStart",
+            "ToolCallStarted",
+            "ToolResult",
+            "IterationStart",
+            "TextDelta",
+            "Done",
+        ]
+        call = events[1]
+        assert call.id == "c1"
+        assert call.name == "_get_weather"
+        assert call.arguments == {"location": "Tokyo"}
+        assert call.iteration == 0
+        result = events[2]
+        assert result.id == "c1"
+        assert result.is_error is False
+        assert result.iteration == 0
+        assert "Tokyo" in result.content  # the stringified tool return
+        assert events[3].index == 1
+        assert events[-1].finish_reason == "stop"
+
+    async def test_streamed_args_assembled_whole_not_partial(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(0, id="c1", name="_get_weather", args='{"loc'),
+                    _stream_tool(0, args='ation": "T'),
+                    _stream_tool(0, args='okyo"}', finish_reason="tool_calls"),
+                ],
+                [_stream_text("done", finish_reason="stop")],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("?")], tools=[_get_weather]))
+        starts = [e for e in events if isinstance(e, ToolCallStarted)]
+        assert len(starts) == 1
+        assert starts[0].arguments == {"location": "Tokyo"}
+
+    async def test_tool_exception_becomes_error_tool_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(
+                        0, id="c1", name="_explodes", args='{"x": 1}', finish_reason="tool_calls"
+                    )
+                ],
+                [_stream_text("recovered", finish_reason="stop")],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("?")], tools=[_explodes]))
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.is_error is True
+        assert "RuntimeError" in result.content
+        assert "oops at 1" in result.content
+        assert isinstance(events[-1], Done)
+
+    async def test_unknown_tool_emits_error_tool_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(
+                        0, id="c1", name="missing_tool", args="{}", finish_reason="tool_calls"
+                    )
+                ],
+                [_stream_text("oops", finish_reason="stop")],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("?")], tools=[_get_weather]))
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.is_error is True
+        assert "is not registered" in result.content
+        assert isinstance(events[-1], Done)
+
+    async def test_max_iterations_zero_raises_value_error(self) -> None:
+        client = LLMClient("claude-opus-4-7")
+        with pytest.raises(ValueError, match=">= 1"):
+            await _collect(
+                client.stream_tool_loop(
+                    [Message.user("hi")], tools=[_get_weather], max_iterations=0
+                )
+            )
+
+    async def test_loop_exhausted_emits_terminal_loop_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _tool_turn() -> list[Any]:
+            return [
+                _stream_tool(
+                    0,
+                    id="c1",
+                    name="_get_weather",
+                    args='{"location": "X"}',
+                    finish_reason="tool_calls",
+                )
+            ]
+
+        monkeypatch.setattr(
+            "litellm.acompletion", _streaming_acompletion(_tool_turn(), _tool_turn())
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("?")], tools=[_get_weather], max_iterations=2)
+        )
+        assert isinstance(events[-1], LoopError)
+        assert events[-1].exceeded_max_iterations is True
+        assert events[-1].error_type == "ToolLoopExceededError"
+        assert not any(isinstance(e, Done) for e in events)
+        # Exactly one IterationStart per allowed iteration, indices 0..N-1.
+        starts = [e for e in events if isinstance(e, IterationStart)]
+        assert [s.index for s in starts] == [0, 1]
+
+    async def test_provider_error_mid_stream_emits_loop_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from litellm.exceptions import RateLimitError as LLRateLimitError
+
+        async def _fake(**_kwargs: Any) -> Any:
+            async def _gen() -> AsyncIterator[Any]:
+                raise LLRateLimitError(message="429", model="x", llm_provider="anthropic")
+                yield None  # pragma: no cover
+
+            return _gen()
+
+        monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("hi")], tools=[_get_weather]))
+        assert isinstance(events[0], IterationStart)
+        assert isinstance(events[-1], LoopError)
+        assert events[-1].error_type == "ProviderRateLimitError"
+        assert events[-1].exceeded_max_iterations is False
+
+    async def test_malformed_streamed_tool_call_emits_loop_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(
+                        0,
+                        id="c1",
+                        name="_get_weather",
+                        args='{"unclosed":',
+                        finish_reason="tool_calls",
+                    )
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("?")], tools=[_get_weather]))
+        assert isinstance(events[-1], LoopError)
+        assert events[-1].error_type == "ValidationError"
+        assert not any(isinstance(e, ToolCallStarted) for e in events)
+
+    async def test_sampling_and_extras_forwarded_each_iteration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: list[Mapping[str, Any]] = []
+        queue = [
+            [
+                _stream_tool(
+                    0,
+                    id="c1",
+                    name="_get_weather",
+                    args='{"location": "X"}',
+                    finish_reason="tool_calls",
+                )
+            ],
+            [_stream_text("done", finish_reason="stop")],
+        ]
+
+        async def _fake(**kwargs: Any) -> Any:
+            captured.append(kwargs)
+            chunks = queue.pop(0)
+
+            async def _gen() -> AsyncIterator[Any]:
+                for chunk in chunks:
+                    yield chunk
+
+            return _gen()
+
+        monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
+        client = LLMClient("claude-opus-4-7")
+        await _collect(
+            client.stream_tool_loop(
+                [Message.user("?")],
+                tools=[_get_weather],
+                temperature=0.3,
+                max_tokens=50,
+                top_p=0.9,
+                provider_extras={"anthropic": {"foo": "bar"}},
+            )
+        )
+        assert len(captured) == 2
+        for kwargs in captured:
+            assert kwargs["temperature"] == 0.3
+            assert kwargs["max_tokens"] == 50
+            assert kwargs["top_p"] == 0.9
+            assert kwargs["foo"] == "bar"
+
+    async def test_capability_gate_raises_before_streaming(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import patch
+
+        from forge.llm.registry import registry as _registry
+
+        original = _registry.get("claude-opus-4-7")
+        synth = original.model_copy(
+            update={
+                "capabilities": original.capabilities.model_copy(update={"tool_calling": False})
+            }
+        )
+
+        def _fake_get(name: str) -> Any:
+            return synth if name == "claude-opus-4-7" else original
+
+        mock = AsyncMock()
+        monkeypatch.setattr("litellm.acompletion", mock)
+        with patch.object(_registry, "get", _fake_get):
+            client = LLMClient("claude-opus-4-7")
+            with pytest.raises(RegistryError, match="does not support tool calling"):
+                await _collect(client.stream_tool_loop([Message.user("hi")], tools=[_get_weather]))
+        assert mock.await_count == 0
+
+    async def test_invalid_conversation_raises_before_streaming(self) -> None:
+        # A tool-result message with no matching prior tool call is invalid;
+        # it must raise pre-flight, before any event (or any provider call).
+        client = LLMClient("claude-opus-4-7")
+        bad = [ToolResultMessage(tool_call_id="nope", content="x")]
+        with pytest.raises(ValidationError, match="unknown tool_call_id"):
+            await _collect(client.stream_tool_loop(bad, tools=[_get_weather]))
+
+    async def test_multiple_tool_calls_in_one_iteration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Two calls arrive in a single tool-use turn (distinct indices); both
+        # are assembled, invoked in ascending-index order, and fed back.
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(0, id="c1", name="_get_weather", args='{"location": "Tokyo"}'),
+                    _stream_tool(
+                        1,
+                        id="c2",
+                        name="_get_weather",
+                        args='{"location": "Paris"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+                [_stream_text("both done", finish_reason="stop")],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("?")], tools=[_get_weather]))
+        assert [type(e).__name__ for e in events] == [
+            "IterationStart",
+            "ToolCallStarted",
+            "ToolResult",
+            "ToolCallStarted",
+            "ToolResult",
+            "IterationStart",
+            "TextDelta",
+            "Done",
+        ]
+        starts = [e for e in events if isinstance(e, ToolCallStarted)]
+        assert [s.id for s in starts] == ["c1", "c2"]  # ascending index order
+        assert starts[0].arguments == {"location": "Tokyo"}
+        assert starts[1].arguments == {"location": "Paris"}
+        results = [e for e in events if isinstance(e, ToolResult)]
+        assert "Tokyo" in results[0].content
+        assert "Paris" in results[1].content
+        assert all(not r.is_error for r in results)
+
+    async def test_empty_tools_degenerates_to_single_turn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: list[Mapping[str, Any]] = []
+
+        async def _fake(**kwargs: Any) -> Any:
+            captured.append(kwargs)
+
+            async def _gen() -> AsyncIterator[Any]:
+                yield _stream_text("hi", finish_reason="stop")
+
+            return _gen()
+
+        monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(client.stream_tool_loop([Message.user("hi")], tools=[]))
+        assert [type(e).__name__ for e in events] == ["IterationStart", "TextDelta", "Done"]
+        # One turn only, and the provider was never handed a `tools` payload
+        # (empty tools collapse to `None`, not an empty list).
+        assert len(captured) == 1
+        assert "tools" not in captured[0]
 
 
 # ---------------------------------------------------------------------------

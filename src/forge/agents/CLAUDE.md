@@ -14,6 +14,8 @@ for the rationale.
   ``.run(user_input)`` dispatches through
   :meth:`LLMClient.run_tool_loop` (when tools are present) or
   :meth:`LLMClient.complete` (when not).
+  ``.run_streaming(user_input)`` yields the tool loop as live
+  :data:`LoopEvent`s via :meth:`LLMClient.stream_tool_loop`.
 - :class:`AgentResult` — the output shape: text + input messages
   + raw :class:`LLMResponse` (so callers see Forge-canonical
   accounting fields, not an agent-specific wrapper).
@@ -60,6 +62,11 @@ The module's ``__init__.py`` re-exports:
   :class:`UserMessage`, :class:`AssistantMessage`,
   :class:`ToolResultMessage`, :class:`Message`, :class:`Tool`,
   :class:`ToolLoopExceededError`, :func:`tool`.
+- Streaming-loop events forwarded from :mod:`forge.llm`:
+  :data:`LoopEvent` and its members (:class:`IterationStart`,
+  :class:`TextDelta`, :class:`ToolCallStarted`,
+  :class:`ToolResult`, :class:`Done`, :class:`LoopError`) —
+  yielded by :meth:`Agent.run_streaming`.
 
 Errors raised from this module are :class:`ForgeError` subclasses.
 The agent itself raises:
@@ -90,10 +97,13 @@ The agent itself raises:
 - **Intermediate tool calls are not captured in
   AgentResult.messages.** :meth:`LLMClient.run_tool_loop`
   returns only the final response; the iteration trace stays
-  inside the method. Callers that need it consult Langfuse
-  (when :mod:`forge.tracing` is wired in via
+  inside the method. Callers that need it post-hoc consult
+  Langfuse (when :mod:`forge.tracing` is wired in via
   ``install_litellm_callback``) or the
-  ``FORGE_DIAGNOSTIC`` NDJSON dump.
+  ``FORGE_DIAGNOSTIC`` NDJSON dump; callers that need it *live*
+  use :meth:`Agent.run_streaming`, which surfaces every
+  iteration's calls and results as :data:`LoopEvent`s without a
+  second loop implementation.
 
 ## Test expectations
 

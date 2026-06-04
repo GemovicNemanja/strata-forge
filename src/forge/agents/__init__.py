@@ -37,6 +37,15 @@ from forge.agents.tools import (
 
 # Re-export the forge.llm primitives that agents compose with. Users
 # can build agents without ever importing from forge.llm directly.
+from forge.llm.loop_events import (
+    Done,
+    IterationStart,
+    LoopError,
+    LoopEvent,
+    TextDelta,
+    ToolCallStarted,
+    ToolResult,
+)
 from forge.llm.messages import (
     AnyMessage,
     AssistantMessage,
@@ -55,18 +64,25 @@ __all__ = [
     "CalculatorArgs",
     "ConversationMemory",
     "CritiqueVerdict",
+    "Done",
     "EmbedFn",
     "EpisodicMemory",
     "FSReadArgs",
     "FetchURLArgs",
     "InMemoryVectorStore",
+    "IterationStart",
+    "LoopError",
+    "LoopEvent",
     "Message",
     "RouterChoice",
     "SearchBackend",
     "SearchResult",
     "SystemMessage",
+    "TextDelta",
     "Tool",
+    "ToolCallStarted",
     "ToolLoopExceededError",
+    "ToolResult",
     "ToolResultMessage",
     "UserMessage",
     "VectorItem",

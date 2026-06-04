@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from pydantic import BaseModel
 
 from forge.core.budget import current_budget
-from forge.core.errors import RegistryError
+from forge.core.errors import RegistryError, ValidationError
 from forge.core.ids import get_correlation_id
 from forge.llm.cache import cache_key as compute_cache_key
 from forge.llm.cost import compute_cost
@@ -51,6 +51,14 @@ from forge.llm.fallback import (
     ModelFallback,
     normalize_fallback_chain,
     run_with_fallback,
+)
+from forge.llm.loop_events import (
+    Done,
+    IterationStart,
+    LoopError,
+    TextDelta,
+    ToolCallStarted,
+    ToolResult,
 )
 from forge.llm.messages import (
     AssistantMessage,
@@ -80,6 +88,7 @@ from forge.llm.schemas import (
     to_gemini_response_schema,
     to_openai_response_format,
 )
+from forge.llm.streaming import StreamingToolCallAccumulator
 from forge.llm.tools import Tool, ToolLoopExceededError
 
 if TYPE_CHECKING:
@@ -87,6 +96,7 @@ if TYPE_CHECKING:
 
     from forge.llm.cache import CacheBackend
     from forge.llm.fallback import FallbackEntry
+    from forge.llm.loop_events import LoopEvent
     from forge.llm.messages import AnyMessage, ContentPart, TextPart
     from forge.llm.responses import FinishReason
 
@@ -750,6 +760,173 @@ class LLMClient:
             f"Tool loop did not terminate within {max_iterations} iterations",
             max_iterations=max_iterations,
             iterations=max_iterations,
+        )
+
+    async def stream_tool_loop(
+        self,
+        messages: Sequence[AnyMessage],
+        *,
+        tools: Sequence[Tool],
+        max_iterations: int = 8,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        provider_extras: Mapping[ProviderName, Mapping[str, Any]] | None = None,
+    ) -> AsyncIterator[LoopEvent]:
+        """Stream a multi-turn tool-use loop as typed events.
+
+        The streaming counterpart of :meth:`run_tool_loop`: instead of
+        buffering the whole loop into one final :class:`LLMResponse`, it
+        yields a flat stream of :data:`~forge.llm.loop_events.LoopEvent`
+        as the conversation unfolds — an :class:`IterationStart` per turn,
+        :class:`TextDelta` for assistant text, :class:`ToolCallStarted`
+        and :class:`ToolResult` per tool round-trip, and exactly one
+        terminal :class:`Done` (success) or :class:`LoopError` (failure).
+
+        Each iteration streams one model turn via :meth:`stream`,
+        accumulating the streamed tool-call deltas; when the turn finishes
+        in tool-use, every call is invoked (validated against its tool's
+        Pydantic model), the assistant + tool-result messages are appended
+        to the conversation, and the loop continues. The tool-result
+        feedback semantics mirror :meth:`run_tool_loop` exactly: an
+        unregistered tool, or a tool that raises, becomes an ``is_error``
+        result fed back to the model rather than an exception out of the
+        loop.
+
+        Unlike :meth:`stream`, this is a true async generator — iterate it
+        directly (``async for event in client.stream_tool_loop(...)``); do
+        NOT ``await`` the call first.
+
+        Raise-vs-emit policy:
+
+        - ``max_iterations < 1`` raises :exc:`ValueError`, an invalid
+          conversation raises :exc:`ValidationError`, and a
+          capability-gate violation raises :exc:`RegistryError`, BEFORE
+          any event is yielded (pre-flight, matching ``run_tool_loop``).
+        - A provider/transport error mid-stream, or a malformed streamed
+          tool call, surfaces as a terminal :class:`LoopError` event (not
+          a raised exception), so an in-flight event stream always ends
+          cleanly with one terminal event.
+        - Exhausting ``max_iterations`` surfaces as a terminal
+          :class:`LoopError` with ``exceeded_max_iterations=True`` — the
+          streaming analogue of ``run_tool_loop``'s
+          :exc:`ToolLoopExceededError`.
+
+        An empty ``tools`` sequence degenerates to a single streamed turn:
+        one ``IterationStart``, its ``TextDelta``s, and a terminal
+        ``Done``.
+        """
+        if max_iterations < 1:
+            err = f"max_iterations must be >= 1, got {max_iterations}"
+            raise ValueError(err)
+        # Validate the input conversation pre-flight so a malformed input
+        # raises before any event is yielded — `stream()` re-validates the
+        # (always well-formed) grown history each iteration.
+        validate_conversation(list(messages))
+        tool_list = list(tools)
+        self._check_tool_capability(tool_list)
+
+        tools_by_name: dict[str, Tool] = {t.name: t for t in tool_list}
+        # An empty tool set means a plain stream — never hand the provider a
+        # `tools=[]` payload it might reject.
+        stream_tools: Sequence[Tool] | None = tool_list or None
+        history: list[AnyMessage] = list(messages)
+
+        for iteration in range(max_iterations):
+            yield IterationStart(index=iteration)
+
+            accumulator = StreamingToolCallAccumulator()
+            text_parts: list[str] = []
+            finish_reason: FinishReason | None = None
+            usage: Usage | None = None
+            try:
+                async for chunk in await self.stream(
+                    history,
+                    tools=stream_tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    provider_extras=provider_extras,
+                ):
+                    if chunk.delta_text:
+                        text_parts.append(chunk.delta_text)
+                        yield TextDelta(text=chunk.delta_text, iteration=iteration)
+                    if chunk.delta_tool_calls:
+                        accumulator.add(chunk.delta_tool_calls)
+                    if chunk.finish_reason is not None:
+                        finish_reason = chunk.finish_reason
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+            except Exception as exc:
+                # A provider/transport error mid-stream is surfaced as a
+                # terminal event so the in-flight event stream ends cleanly,
+                # rather than raised out of the generator.
+                yield LoopError(message=str(exc), error_type=type(exc).__name__)
+                return
+
+            if finish_reason != "tool_use" or not accumulator.has_calls:
+                yield Done(finish_reason=finish_reason or "stop", usage=usage)
+                return
+
+            try:
+                calls = accumulator.finalize()
+            except ValidationError as exc:
+                yield LoopError(message=str(exc), error_type=type(exc).__name__)
+                return
+
+            history.append(AssistantMessage(content="".join(text_parts) or None, tool_calls=calls))
+            for call in calls:
+                yield ToolCallStarted(
+                    id=call.id,
+                    name=call.name,
+                    arguments=call.arguments,
+                    iteration=iteration,
+                )
+                tool_obj = tools_by_name.get(call.name)
+                if tool_obj is None:
+                    content = f"Tool {call.name!r} is not registered"
+                    history.append(
+                        ToolResultMessage(tool_call_id=call.id, content=content, is_error=True)
+                    )
+                    yield ToolResult(
+                        id=call.id,
+                        name=call.name,
+                        content=content,
+                        is_error=True,
+                        iteration=iteration,
+                    )
+                    continue
+                try:
+                    result = await tool_obj.invoke(call.arguments)
+                except Exception as exc:
+                    # A tool that raises is fed back to the model as an error
+                    # result (mirrors run_tool_loop), not raised out of the loop.
+                    content = f"{type(exc).__name__}: {exc}"
+                    history.append(
+                        ToolResultMessage(tool_call_id=call.id, content=content, is_error=True)
+                    )
+                    yield ToolResult(
+                        id=call.id,
+                        name=call.name,
+                        content=content,
+                        is_error=True,
+                        iteration=iteration,
+                    )
+                    continue
+                content = _stringify_tool_result(result)
+                history.append(ToolResultMessage(tool_call_id=call.id, content=content))
+                yield ToolResult(
+                    id=call.id,
+                    name=call.name,
+                    content=content,
+                    is_error=False,
+                    iteration=iteration,
+                )
+
+        yield LoopError(
+            message=f"Tool loop did not terminate within {max_iterations} iterations",
+            error_type="ToolLoopExceededError",
+            exceeded_max_iterations=True,
         )
 
     # --- Internals --------------------------------------------------------
