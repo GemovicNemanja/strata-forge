@@ -121,6 +121,7 @@ client = LLMClient(
     retry_initial_wait=1.0,
     retry_max_wait=30.0,
     strict_bad_request=False,
+    require_tool_support=False,  # raise pre-flight for unconfirmable tool models
 )
 ```
 
@@ -407,6 +408,16 @@ If you pass `tools=` to a model whose registry entry has
 `RegistryError(reason="capability_missing")` **before** any HTTP
 happens. No silent fallback to "the model will probably ignore it."
 
+An `openai_compat` / OpenRouter model is **not** in the curated registry
+(its ids are operator-specific — [ADR 0004]), so its tool-calling
+capability can't be confirmed. By default such a model is let through and
+the provider decides at call time. Pass `require_tool_support=True` to the
+`LLMClient` constructor to instead raise
+`RegistryError(reason="capability_unknown")` pre-flight for any
+unconfirmable model — letting a caller (e.g. a server driving an agent
+loop) cleanly degrade to a tool-less path rather than hit an opaque
+provider rejection mid-stream.
+
 ### Provider serialization
 
 `Tool.to_openai_schema()`, `to_anthropic_schema()`, `to_gemini_schema()`
@@ -649,6 +660,13 @@ Anthropic or Bedrock route.
 You passed `tools=` to a model whose `capabilities.tool_calling = False`
 in the registry. No model in the current registry actually trips this
 gate, but tightening capabilities later will surface it here.
+
+**`RegistryError: Tool support for model '...' cannot be confirmed`.**
+You constructed the client with `require_tool_support=True` and passed
+`tools=` to an `openai_compat` / OpenRouter model the registry doesn't
+track (`reason="capability_unknown"`). Either drop `require_tool_support`
+(let the provider decide), or route to a model whose tool-calling
+capability is known.
 
 **`FallbackExhaustedError` after only one attempt.**
 Either you're passing a single-entry chain whose only provider raised a

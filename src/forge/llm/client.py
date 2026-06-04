@@ -414,6 +414,15 @@ class LLMClient:
         strict_bad_request: When ``True``, a
             :exc:`ProviderBadRequestError` aborts the fallback chain
             immediately. Default ``False``: advance to the next provider.
+        require_tool_support: When ``True``, passing ``tools=`` to a model
+            whose tool-calling capability can't be confirmed from the
+            registry — i.e. an ``openai_compat`` / OpenRouter id, which the
+            curated registry intentionally doesn't track (ADR 0004) —
+            raises :exc:`RegistryError` (``reason="capability_unknown"``)
+            pre-flight. Default ``False``: let it through and let the
+            provider decide at call time. Lets a caller (e.g. a server
+            running an agent loop) cleanly degrade to a tool-less path
+            instead of hitting an opaque provider rejection mid-stream.
     """
 
     def __init__(
@@ -428,6 +437,7 @@ class LLMClient:
         retry_initial_wait: float = 1.0,
         retry_max_wait: float = 30.0,
         strict_bad_request: bool = False,
+        require_tool_support: bool = False,
     ) -> None:
         if (model is None) == (chain is None):
             err = "LLMClient: pass exactly one of `model` or `chain`"
@@ -452,6 +462,7 @@ class LLMClient:
         self._retry_initial_wait = retry_initial_wait
         self._retry_max_wait = retry_max_wait
         self._strict_bad_request = strict_bad_request
+        self._require_tool_support = require_tool_support
 
     @property
     def chain(self) -> list[ModelFallback]:
@@ -938,7 +949,23 @@ class LLMClient:
             try:
                 model_entry = registry.get(entry.model)
             except RegistryError:
-                # Unknown models surface during fallback; skip here.
+                # The model isn't in the curated registry — typically an
+                # openai_compat / OpenRouter id, whose tool-calling capability
+                # Forge intentionally doesn't track (ADR 0004). By default we
+                # let it through (the provider decides at call time, and an
+                # unknown model also surfaces during fallback). With
+                # require_tool_support the caller wants a clean pre-flight
+                # signal instead of an opaque provider rejection mid-call.
+                if self._require_tool_support:
+                    err = (
+                        f"Tool support for model {entry.model!r} cannot be confirmed "
+                        "— it is not in the registry (e.g. an openai_compat/OpenRouter "
+                        "model). Construct the client with require_tool_support=False "
+                        "to send tools anyway."
+                    )
+                    raise RegistryError(
+                        err, model=entry.model, reason="capability_unknown"
+                    ) from None
                 continue
             if not model_entry.capabilities.tool_calling:
                 err = f"Model {entry.model!r} does not support tool calling per the registry"

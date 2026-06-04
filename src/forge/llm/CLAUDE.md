@@ -35,7 +35,7 @@ The `forge.sync` namespace re-exports `complete`, `stream`, `complete_structured
 - `routing.py` resolves `(logical_model, optional_provider)` → concrete `ModelRoute(provider, provider_model_id)`. Aliases are resolved before lookup.
 - Cache keys are **provider-agnostic**: a hit on `claude-opus-4-7` is valid regardless of which provider served the original call. Cache key = SHA256(canonical(logical model, messages, sampling params, response_format, tool schemas hash, provider_extras hash)). Streaming responses are NOT cached.
 - Fallback: provider-level (inner) within a `ModelFallback`; model-level (outer) across entries. See ADR 0005 for the advance/abort rules per error class.
-- Tool capability gate: requesting tools against a model whose registry entry has `capabilities.tool_calling = false` raises `RegistryError` **before** any provider call.
+- Tool capability gate: requesting tools against a model whose registry entry has `capabilities.tool_calling = false` raises `RegistryError` **before** any provider call. An `openai_compat`/OpenRouter model isn't in the registry, so it's let through by default; construct the client with `require_tool_support=True` to instead raise `RegistryError(reason="capability_unknown")` pre-flight for such unconfirmable models.
 - Diagnostic dump: when `FORGE_DIAGNOSTIC=1`, every completed call (including each iteration of a tool loop) appends a JSON record to `${FORGE_DIAGNOSTIC_PATH:-./forge-diagnostic.ndjson}`. Independent of Langfuse.
 
 ## Test expectations

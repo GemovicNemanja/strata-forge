@@ -293,6 +293,58 @@ class TestToolCalling:
         assert "function" in kwargs["tools"][0]
 
 
+class TestRequireToolSupport:
+    """The opt-in capability gate for unconfirmable (openai_compat) models."""
+
+    async def test_strict_gate_raises_on_unconfirmable_model(
+        self,
+        mock_litellm: AsyncMock,
+    ) -> None:
+        # An openai_compat / OpenRouter model is absent from the curated
+        # registry, so its tool-calling capability can't be confirmed. With
+        # require_tool_support the gate raises a clean pre-flight error
+        # instead of letting the provider reject it opaquely mid-call.
+        client = LLMClient(
+            "some/unknown-model", provider="openai_compat", require_tool_support=True
+        )
+        with pytest.raises(RegistryError, match="cannot be confirmed") as info:
+            await client.complete([Message.user("hi")], tools=[_get_weather])
+        assert info.value.reason == "capability_unknown"
+        assert mock_litellm.await_count == 0
+
+    async def test_strict_gate_applies_to_stream_tool_loop(self) -> None:
+        client = LLMClient(
+            "some/unknown-model", provider="openai_compat", require_tool_support=True
+        )
+        with pytest.raises(RegistryError, match="cannot be confirmed"):
+            await _collect(client.stream_tool_loop([Message.user("hi")], tools=[_get_weather]))
+
+    async def test_lenient_by_default_does_not_block_unconfirmable_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Default require_tool_support=False: the gate is permissive — the
+        # call proceeds past it and succeeds. (Cost is stubbed because the
+        # untracked model has no registry pricing, which is orthogonal to the
+        # capability gate under test.)
+        monkeypatch.setattr(
+            "litellm.acompletion", AsyncMock(return_value=_fake_response(text="ok"))
+        )
+        monkeypatch.setattr("forge.llm.client.compute_cost", lambda *_a, **_k: 0.0)
+        client = LLMClient("some/unknown-model", provider="openai_compat")
+        resp = await client.complete([Message.user("hi")], tools=[_get_weather])
+        assert resp.text == "ok"
+
+    async def test_known_capable_model_passes_strict_gate(
+        self,
+        mock_litellm: AsyncMock,
+    ) -> None:
+        # A registry model that supports tools is unaffected by strict mode.
+        client = LLMClient("claude-opus-4-7", require_tool_support=True)
+        resp = await client.complete([Message.user("hi")], tools=[_get_weather])
+        assert resp.text == "hello"
+
+
 # ---------------------------------------------------------------------------
 # Cache integration
 # ---------------------------------------------------------------------------
