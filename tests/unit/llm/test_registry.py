@@ -296,6 +296,7 @@ class TestLoader:
 class TestGlobalRegistry:
     EXPECTED_MODEL_NAMES: frozenset[str] = frozenset(
         {
+            "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-haiku-4-5",
@@ -316,7 +317,7 @@ class TestGlobalRegistry:
         assert actual == self.EXPECTED_MODEL_NAMES
 
     def test_anthropic_models_have_three_routes(self) -> None:
-        for name in ("claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"):
+        for name in ("claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"):
             model = global_registry.get(name)
             providers = {r.provider for r in model.routes}
             assert providers == {"anthropic", "bedrock", "vertex"}

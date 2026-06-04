@@ -14,6 +14,33 @@ models:
   # =========================================================================
 
   # Source: platform.claude.com/docs/en/about-claude/models/overview (May 2026)
+  - name: claude-opus-4-8
+    vendor: anthropic
+    tier: flagship
+    context_window: 1000000
+    max_output_tokens: 64000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 5.00
+      output: 25.00
+      cache_read: 0.50
+      cache_write: 6.25
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-opus-4-8
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-opus-4-8
+      - provider: vertex
+        provider_model_id: claude-opus-4-8
+    aliases: [opus-4.8]
+
   - name: claude-opus-4-7
     vendor: anthropic
     tier: flagship
