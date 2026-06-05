@@ -33,7 +33,6 @@ from forge.evals.graders.exact import ExactMatch
 from forge.evals.runner import run_experiment
 from forge.llm.client import LLMClient
 
-
 _CAPITALS: tuple[tuple[str, str, str], ...] = (
     ("fr", "France", "Paris"),
     ("jp", "Japan", "Tokyo"),

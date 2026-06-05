@@ -132,6 +132,8 @@ ignore = [
 "tests/**/*.py" = ["S101", "PT004", "S105", "S106", "S107"]
 "examples/**/*.py" = ["S101", "T201"]
 "scripts/**/*.py" = ["S101", "T201"]
+# marimo notebooks: a cell's trailing bare expression is its rendered output.
+"notebooks/**/*.py" = ["B018"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["forge"]

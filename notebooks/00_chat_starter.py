@@ -44,9 +44,7 @@ def _(mo):
         value="claude-haiku-4-5",
         label="model",
     )
-    prompt_input = mo.ui.text_area(
-        value="Explain Forge in one sentence.", label="prompt", rows=4
-    )
+    prompt_input = mo.ui.text_area(value="Explain Forge in one sentence.", label="prompt", rows=4)
     temperature_input = mo.ui.slider(0.0, 1.5, step=0.1, value=0.7, label="temp")
     return model_input, prompt_input, temperature_input
 
