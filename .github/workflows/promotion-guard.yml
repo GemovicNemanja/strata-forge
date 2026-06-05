@@ -1,0 +1,35 @@
+name: promotion guard
+
+# Enforces the one rule GitHub can't express natively: only `dev` may be merged into `main`.
+#
+# This is a required status check. It fails any pull request targeting `main` whose source branch
+# isn't `dev`, so a topic branch can never be promoted straight to production. Pair it with branch
+# protection on `main` (require a PR, require this check, block direct pushes, no admin bypass) — see
+# DEPLOYMENT.md. Without the protection the check still runs but nothing forces a green result.
+#
+# `pull_request_target` runs the workflow definition from the BASE branch (`main`), not from the PR's
+# head, so a PR can't disable the guard by editing this file in its own diff. The job reads only the
+# head ref name (no untrusted checkout), so the elevated trigger carries no code-execution risk.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  source-must-be-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the PR source to be dev
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "PR into main from: '$HEAD_REF'"
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::Only 'dev' may be merged into 'main' (this PR is from '$HEAD_REF'). Promote via dev -> main."
+            exit 1
+          fi
+          echo "OK: source branch is dev."
