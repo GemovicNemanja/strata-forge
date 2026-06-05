@@ -330,7 +330,11 @@ class TestRequireToolSupport:
         monkeypatch.setattr(
             "litellm.acompletion", AsyncMock(return_value=_fake_response(text="ok"))
         )
-        monkeypatch.setattr("forge.llm.client.compute_cost", lambda *_a, **_k: 0.0)
+
+        def _zero_cost(*_a: object, **_k: object) -> float:
+            return 0.0
+
+        monkeypatch.setattr("forge.llm.client.compute_cost", _zero_cost)
         client = LLMClient("some/unknown-model", provider="openai_compat")
         resp = await client.complete([Message.user("hi")], tools=[_get_weather])
         assert resp.text == "ok"

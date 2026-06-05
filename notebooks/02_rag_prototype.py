@@ -56,9 +56,7 @@ def _():
 
 @app.cell
 def _(mo):
-    query_input = mo.ui.text(
-        value="Why does Mars look red?", label="query"
-    )
+    query_input = mo.ui.text(value="Why does Mars look red?", label="query")
     top_k_input = mo.ui.slider(1, 5, step=1, value=3, label="top_k")
     return query_input, top_k_input
 
@@ -85,9 +83,7 @@ async def _(documents, query_input, top_k_input):
         ),
     )
 
-    docs = [
-        {"id": doc_id, "text": text} for doc_id, text in documents.items()
-    ]
+    docs = [{"id": doc_id, "text": text} for doc_id, text in documents.items()]
     n_chunks = await pipeline.ingest(docs)
     results = await pipeline.query(query_input.value, top_k=top_k_input.value)
     return n_chunks, results
