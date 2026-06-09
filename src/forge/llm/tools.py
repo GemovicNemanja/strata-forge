@@ -33,7 +33,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 __all__ = [
+    "AnyTool",
     "Tool",
+    "ToolDeclaration",
     "ToolFunc",
     "ToolLoopExceededError",
     "to_anthropic_tool_schema",
@@ -123,6 +125,52 @@ class Tool:
             msg = f"Tool {self.name!r} received invalid arguments: {exc}"
             raise ValidationError(msg) from exc
         return await self.fn(validated)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDeclaration:
+    """A tool the model may call but forge cannot execute.
+
+    A declaration carries everything the provider needs to offer the tool
+    to the model — name, description, and a raw JSON-Schema ``parameters``
+    object — but no function. It exists for callers whose tools execute
+    out-of-band (e.g. a server streaming to a browser that performs the
+    action): in ``LLMClient.stream_tool_loop``, a call targeting a
+    declaration suspends the run with a terminal
+    :class:`~forge.llm.loop_events.PendingToolCalls` event instead of
+    being invoked; the caller executes it elsewhere and resumes the loop
+    with the grown conversation.
+
+    ``parameters`` is passed through to the provider verbatim — forge does
+    not validate JSON-Schema semantics (a malformed schema surfaces as a
+    provider error at call time).
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+    def parameters_schema(self) -> dict[str, Any]:
+        """Return the raw JSON Schema for this tool's args (verbatim)."""
+        return self.parameters
+
+    def to_openai_schema(self) -> dict[str, Any]:
+        """OpenAI-format tool descriptor."""
+        return to_openai_tool_schema(self.name, self.description, self.parameters_schema())
+
+    def to_anthropic_schema(self) -> dict[str, Any]:
+        """Anthropic-format tool descriptor."""
+        return to_anthropic_tool_schema(self.name, self.description, self.parameters_schema())
+
+    def to_gemini_schema(self) -> dict[str, Any]:
+        """Gemini-format tool (function-declaration) descriptor."""
+        return to_gemini_tool_schema(self.name, self.description, self.parameters_schema())
+
+
+# Anything acceptable in a `tools=` sequence: executable tools and
+# declaration-only tools share the schema-serialization surface, so provider
+# dispatch treats them uniformly; only the tool loop distinguishes them.
+type AnyTool = Tool | ToolDeclaration
 
 
 # ---------------------------------------------------------------------------

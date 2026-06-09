@@ -56,6 +56,7 @@ from forge.llm.loop_events import (
     Done,
     IterationStart,
     LoopError,
+    PendingToolCalls,
     TextDelta,
     ToolCallStarted,
     ToolResult,
@@ -89,7 +90,7 @@ from forge.llm.schemas import (
     to_openai_response_format,
 )
 from forge.llm.streaming import StreamingToolCallAccumulator
-from forge.llm.tools import Tool, ToolLoopExceededError
+from forge.llm.tools import AnyTool, Tool, ToolDeclaration, ToolLoopExceededError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -222,7 +223,7 @@ def _message_to_wire(msg: AnyMessage, provider: ProviderName) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _tools_for_provider(tools: Sequence[Tool], provider: ProviderName) -> list[dict[str, Any]]:
+def _tools_for_provider(tools: Sequence[AnyTool], provider: ProviderName) -> list[dict[str, Any]]:
     if provider == "anthropic" or provider == "bedrock":
         return [t.to_anthropic_schema() for t in tools]
     if provider == "vertex":
@@ -489,7 +490,7 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         top_p: float | None = None,
-        tools: Sequence[Tool] | None = None,
+        tools: Sequence[AnyTool] | None = None,
         response_format: dict[str, Any] | None = None,
         provider_extras: Mapping[ProviderName, Mapping[str, Any]] | None = None,
     ) -> LLMResponse:
@@ -639,7 +640,7 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         top_p: float | None = None,
-        tools: Sequence[Tool] | None = None,
+        tools: Sequence[AnyTool] | None = None,
         provider_extras: Mapping[ProviderName, Mapping[str, Any]] | None = None,
     ) -> AsyncIterator[ResponseChunk]:
         """Stream completion chunks from the head entry of the chain.
@@ -709,6 +710,11 @@ class LLMClient:
              tool's Pydantic model), append the assistant + tool-result
              messages to the conversation, and loop.
 
+        Accepts executable :class:`Tool`\\ s only — a
+        :class:`~forge.llm.tools.ToolDeclaration` has no function to
+        invoke and belongs to :meth:`stream_tool_loop`, which can suspend
+        on it.
+
         Raises:
             ToolLoopExceededError: When ``max_iterations`` is hit without
                 the model exiting tool-use mode.
@@ -777,7 +783,7 @@ class LLMClient:
         self,
         messages: Sequence[AnyMessage],
         *,
-        tools: Sequence[Tool],
+        tools: Sequence[AnyTool],
         max_iterations: int = 8,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -792,7 +798,9 @@ class LLMClient:
         as the conversation unfolds — an :class:`IterationStart` per turn,
         :class:`TextDelta` for assistant text, :class:`ToolCallStarted`
         and :class:`ToolResult` per tool round-trip, and exactly one
-        terminal :class:`Done` (success) or :class:`LoopError` (failure).
+        terminal :class:`Done` (success), :class:`PendingToolCalls`
+        (suspension on caller-executed tools), or :class:`LoopError`
+        (failure).
 
         Each iteration streams one model turn via :meth:`stream`,
         accumulating the streamed tool-call deltas; when the turn finishes
@@ -804,6 +812,19 @@ class LLMClient:
         result fed back to the model rather than an exception out of the
         loop.
 
+        ``tools`` may mix executable :class:`Tool`\\ s with
+        :class:`~forge.llm.tools.ToolDeclaration`\\ s — tools the caller
+        executes out-of-band. When a turn requests at least one
+        declaration-targeted call, the executable calls of that turn are
+        invoked first (in model call order, with their ``ToolResult``
+        events), then the run suspends with a terminal
+        :class:`PendingToolCalls` carrying the unexecuted calls and the
+        conversation delta appended this run. To resume, execute the
+        pending calls and re-invoke ``stream_tool_loop`` with
+        ``input + event.messages + one ToolResultMessage per pending
+        call``; pass the remaining budget (``max_iterations -
+        event.iterations_used``) to keep the cap meaningful across runs.
+
         Unlike :meth:`stream`, this is a true async generator — iterate it
         directly (``async for event in client.stream_tool_loop(...)``); do
         NOT ``await`` the call first.
@@ -811,9 +832,10 @@ class LLMClient:
         Raise-vs-emit policy:
 
         - ``max_iterations < 1`` raises :exc:`ValueError`, an invalid
-          conversation raises :exc:`ValidationError`, and a
-          capability-gate violation raises :exc:`RegistryError`, BEFORE
-          any event is yielded (pre-flight, matching ``run_tool_loop``).
+          conversation or a duplicate tool name across ``tools`` raises
+          :exc:`ValidationError`, and a capability-gate violation raises
+          :exc:`RegistryError`, BEFORE any event is yielded (pre-flight,
+          matching ``run_tool_loop``).
         - A provider/transport error mid-stream, or a malformed streamed
           tool call, surfaces as a terminal :class:`LoopError` event (not
           a raised exception), so an in-flight event stream always ends
@@ -837,11 +859,25 @@ class LLMClient:
         tool_list = list(tools)
         self._check_tool_capability(tool_list)
 
-        tools_by_name: dict[str, Tool] = {t.name: t for t in tool_list}
+        # A name shared between any two entries is fatal pre-flight: with
+        # declarations in the mix it would make execute-vs-suspend ambiguous
+        # (and a silent last-wins shadow was never meaningful).
+        names: set[str] = set()
+        for t in tool_list:
+            if t.name in names:
+                err = f"Duplicate tool name {t.name!r} in tools"
+                raise ValidationError(err)
+            names.add(t.name)
+
+        executable: dict[str, Tool] = {t.name: t for t in tool_list if isinstance(t, Tool)}
+        declared: set[str] = {t.name for t in tool_list if isinstance(t, ToolDeclaration)}
         # An empty tool set means a plain stream — never hand the provider a
         # `tools=[]` payload it might reject.
-        stream_tools: Sequence[Tool] | None = tool_list or None
+        stream_tools: Sequence[AnyTool] | None = tool_list or None
         history: list[AnyMessage] = list(messages)
+        # Everything appended past this point is the resumption delta carried
+        # by a PendingToolCalls suspension.
+        base_len = len(history)
 
         for iteration in range(max_iterations):
             yield IterationStart(index=iteration)
@@ -886,6 +922,7 @@ class LLMClient:
                 return
 
             history.append(AssistantMessage(content="".join(text_parts) or None, tool_calls=calls))
+            pending_calls: list[ToolCall] = []
             for call in calls:
                 yield ToolCallStarted(
                     id=call.id,
@@ -893,7 +930,12 @@ class LLMClient:
                     arguments=call.arguments,
                     iteration=iteration,
                 )
-                tool_obj = tools_by_name.get(call.name)
+                if call.name in declared:
+                    # A declaration-targeted call suspends the run; no result
+                    # is appended — the caller supplies it on resume.
+                    pending_calls.append(call)
+                    continue
+                tool_obj = executable.get(call.name)
                 if tool_obj is None:
                     content = f"Tool {call.name!r} is not registered"
                     history.append(
@@ -934,6 +976,19 @@ class LLMClient:
                     iteration=iteration,
                 )
 
+            if pending_calls:
+                # The delta past base_len is assistant turns + tool results by
+                # construction; cast narrows what the type system can't see.
+                delta = cast("list[AssistantMessage | ToolResultMessage]", history[base_len:])
+                yield PendingToolCalls(
+                    calls=pending_calls,
+                    messages=delta,
+                    iteration=iteration,
+                    iterations_used=iteration + 1,
+                    usage=usage,
+                )
+                return
+
         yield LoopError(
             message=f"Tool loop did not terminate within {max_iterations} iterations",
             error_type="ToolLoopExceededError",
@@ -942,7 +997,7 @@ class LLMClient:
 
     # --- Internals --------------------------------------------------------
 
-    def _check_tool_capability(self, tools: Sequence[Tool] | None) -> None:
+    def _check_tool_capability(self, tools: Sequence[AnyTool] | None) -> None:
         if not tools:
             return
         for entry in self._chain:
@@ -979,7 +1034,7 @@ class LLMClient:
         temperature: float | None,
         max_tokens: int | None,
         top_p: float | None,
-        tools: Sequence[Tool] | None,
+        tools: Sequence[AnyTool] | None,
         response_format: dict[str, Any] | None,
         provider_extras: Mapping[ProviderName, Mapping[str, Any]] | None,
     ) -> LLMResponse:

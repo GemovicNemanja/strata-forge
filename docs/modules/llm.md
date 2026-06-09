@@ -422,7 +422,10 @@ provider rejection mid-stream.
 
 `Tool.to_openai_schema()`, `to_anthropic_schema()`, `to_gemini_schema()`
 return the three native wire shapes. `LLMClient` picks the right one for
-the resolved route automatically.
+the resolved route automatically. `ToolDeclaration` (a declaration-only
+tool with a raw JSON-Schema `parameters` dict and no function — see
+[Streaming tool loop](#streaming-tool-loop)) exposes the same three
+methods, so `tools=` accepts any mix of the two (`AnyTool`).
 
 [ADR 0006]: ../architecture/adr/0006-tool-calling-as-llm-primitive.md
 
@@ -522,6 +525,7 @@ The event union lives in `forge.llm.loop_events`; every event carries a
 | `TextDelta` | per assistant text fragment | `text`, `iteration` |
 | `ToolCallStarted` | once per call, after its args are fully assembled | `id`, `name`, `arguments`, `iteration` |
 | `ToolResult` | once per result, after the tool returns | `id`, `name`, `content`, `is_error`, `iteration` |
+| `PendingToolCalls` | terminal — the model called declaration-only tools | `calls`, `messages`, `iteration`, `iterations_used`, `usage` |
 | `Done` | terminal — model exited tool-use mode | `finish_reason`, `usage` |
 | `LoopError` | terminal — the loop could not complete | `message`, `error_type`, `exceeded_max_iterations` |
 
@@ -537,18 +541,74 @@ Two things distinguish it from `run_tool_loop`:
 - **It is a true async generator** — iterate it directly
   (`async for event in client.stream_tool_loop(...)`); do **not** `await`
   the call first, unlike `stream`.
-- **Raise vs emit.** Pre-flight failures — a bad `max_iterations`, or a
-  capability-gate violation — *raise* synchronously, matching
-  `run_tool_loop`. Failures that occur once events are already flowing —
-  a provider/transport error, a malformed streamed tool call, or the
-  iteration cap — surface as a terminal `LoopError` (with
-  `exceeded_max_iterations=True` for the cap), so an in-flight stream
-  always ends cleanly rather than raising mid-iteration.
+- **Raise vs emit.** Pre-flight failures — a bad `max_iterations`, a
+  duplicate tool name across `tools`, or a capability-gate violation —
+  *raise* synchronously, matching `run_tool_loop`. Failures that occur
+  once events are already flowing — a provider/transport error, a
+  malformed streamed tool call, or the iteration cap — surface as a
+  terminal `LoopError` (with `exceeded_max_iterations=True` for the cap),
+  so an in-flight stream always ends cleanly rather than raising
+  mid-iteration.
 
 `usage` on `Done` is the final iteration's usage only — not a sum across
 iterations; cumulative accounting is the caller's job via tracing. See
 [ADR 0014](../architecture/adr/0014-streaming-tool-loop-event-protocol.md)
 for the event-protocol rationale.
+
+#### Caller-executed tools (suspension)
+
+`tools=` may mix executable `Tool`s with `ToolDeclaration`s — tools the
+caller executes out-of-band (e.g. a server streaming the loop to a
+browser that performs the action):
+
+```python
+from forge.llm import ToolDeclaration
+
+load_model = ToolDeclaration(
+    name="load_model",
+    description="Load a model in the caller's app.",
+    parameters={
+        "type": "object",
+        "properties": {"repo_id": {"type": "string"}},
+        "required": ["repo_id"],
+    },
+)
+```
+
+A declaration carries a raw JSON-Schema `parameters` dict (passed to the
+provider verbatim — forge does not validate JSON-Schema semantics, and
+unlike `Tool` there is no Pydantic argument validation on the way back).
+When a turn requests at least one declaration-targeted call, the turn's
+executable calls are invoked first (in model call order, with their
+`ToolResult` events), then the run suspends with a terminal
+`PendingToolCalls`:
+
+- `calls` — the unexecuted declaration-targeted calls, in model order.
+- `messages` — the conversation **delta** appended this run (assistant
+  turns + executed tool results), i.e. everything after the input.
+- `iterations_used` — turns consumed (`iteration + 1`), for cross-run
+  budgeting.
+
+Resume by executing the pending calls and re-invoking the loop with the
+grown conversation — there is no separate resume API:
+
+```python
+resumed = [
+    *original_input,
+    *pending.messages,
+    Message.tool_result(call.id, result_text),  # one per pending call
+]
+async for event in client.stream_tool_loop(
+    resumed,
+    tools=same_tools,
+    max_iterations=budget - pending.iterations_used,
+):
+    ...
+```
+
+A suspension on the last budgeted iteration is a suspension, not an
+`exceeded_max_iterations` error — the turn completed. See
+[ADR 0015](../architecture/adr/0015-client-executed-tools-suspend-the-streaming-loop.md).
 
 ---
 

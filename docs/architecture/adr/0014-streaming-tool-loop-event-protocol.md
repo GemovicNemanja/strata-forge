@@ -4,6 +4,7 @@
 **Date:** Addition of `LLMClient.stream_tool_loop`
 **Supersedes:** —
 **Superseded by:** —
+**Amended by:** [ADR 0015](0015-client-executed-tools-suspend-the-streaming-loop.md) — the terminal-event contract gains a third terminal event, `PendingToolCalls` (suspension on caller-executed `ToolDeclaration`s)
 
 ## Context
 
