@@ -40,50 +40,22 @@ class FakeLangfuseDatasetItem:
     metadata: dict[str, Any] | None = None
 
 
-@dataclass
-class FakeListMeta:
-    total_pages: int = 1
-
-
-@dataclass
-class FakeListResponse:
-    data: list[FakeLangfuseDataset]
-    meta: FakeListMeta = field(default_factory=FakeListMeta)
-
-
-class FakeDatasetsAPI:
-    """Sub-API at `langfuse_client.api.datasets`."""
-
-    def __init__(self, parent: FakeLangfuseClient) -> None:
-        self._parent = parent
-        self.delete_calls: list[str] = []
-
-    def list(self, page: int = 1, limit: int = 100) -> FakeListResponse:
-        page_size = max(1, limit)
-        start = (page - 1) * page_size
-        end = start + page_size
-        items = self._parent.dataset_list[start:end]
-        total = (len(self._parent.dataset_list) + page_size - 1) // page_size or 1
-        return FakeListResponse(data=items, meta=FakeListMeta(total_pages=total))
-
-    def delete(self, dataset_name: str) -> None:
-        self.delete_calls.append(dataset_name)
-        self._parent.datasets.pop(dataset_name, None)
-        self._parent.dataset_list = [d for d in self._parent.dataset_list if d.name != dataset_name]
-
-
-class FakeAPI:
-    def __init__(self, parent: FakeLangfuseClient) -> None:
-        self.datasets = FakeDatasetsAPI(parent)
-
-
 class FakeLangfuseClient:
-    """A minimal Langfuse client surface covering the methods we call."""
+    """A minimal Langfuse SDK surface covering the methods we call.
+
+    Langfuse SDK v4 dropped the `client.api.datasets` proxy, so the store
+    lists and deletes datasets over the REST API (via httpx) and uses the
+    SDK client only for `get_dataset` / `create_dataset(_item)`. This fake
+    therefore plays two roles backed by one in-memory registry: the SDK
+    client handed to the store, and the backend that `_FakeAsyncHTTP`
+    serves the REST list/delete from. `_httpx_factory` binds httpx to the
+    same instance so both I/O paths see one set of datasets.
+    """
 
     def __init__(self) -> None:
         self.datasets: dict[str, FakeLangfuseDataset] = {}
-        self.dataset_list: list[FakeLangfuseDataset] = []
-        self.api = FakeAPI(self)
+        # REST dataset names passed to DELETE, in call order (for assertions).
+        self.deleted: list[str] = []
         self._counter = 0
 
     def _next_timestamp(self) -> str:
@@ -103,7 +75,6 @@ class FakeLangfuseClient:
             created_at=self._next_timestamp(),
         )
         self.datasets[name] = ds
-        self.dataset_list.append(ds)
         return ds
 
     def create_dataset_item(
@@ -129,13 +100,88 @@ class FakeLangfuseClient:
         return self.datasets[name]
 
 
+@dataclass
+class _FakeHTTPResponse:
+    """Just enough of an `httpx.Response` for the store's REST calls."""
+
+    payload: dict[str, Any] | None = None
+    status_code: int = 200
+
+    def json(self) -> Any:
+        return self.payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeAsyncHTTP:
+    """Serve the Langfuse dataset list/delete REST endpoints from an
+    in-memory :class:`FakeLangfuseClient`, so REST list/delete and the SDK
+    create/get share one registry."""
+
+    def __init__(self, backend: FakeLangfuseClient) -> None:
+        self._backend = backend
+
+    async def __aenter__(self) -> _FakeAsyncHTTP:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def get(
+        self,
+        url: str,
+        *,
+        auth: tuple[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> _FakeHTTPResponse:
+        params = params or {}
+        page = int(params.get("page", 1))
+        limit = max(1, int(params.get("limit", 100)))
+        ordered = list(self._backend.datasets.values())
+        chunk = ordered[(page - 1) * limit : (page - 1) * limit + limit]
+        total_pages = max(1, (len(ordered) + limit - 1) // limit)
+        data = [{"name": d.name, "createdAt": d.created_at} for d in chunk]
+        return _FakeHTTPResponse(payload={"data": data, "meta": {"totalPages": total_pages}})
+
+    async def delete(
+        self,
+        url: str,
+        *,
+        auth: tuple[str, str] | None = None,
+    ) -> _FakeHTTPResponse:
+        name = url.rsplit("/", 1)[-1]
+        self._backend.deleted.append(name)
+        existed = self._backend.datasets.pop(name, None) is not None
+        return _FakeHTTPResponse(status_code=200 if existed else 404)
+
+
+def _httpx_factory(backend: FakeLangfuseClient):
+    """A stand-in for `httpx.AsyncClient` bound to one in-memory backend."""
+
+    def _make(*_args: Any, **_kwargs: Any) -> _FakeAsyncHTTP:
+        return _FakeAsyncHTTP(backend)
+
+    return _make
+
+
 @pytest.fixture
 def fake_client() -> FakeLangfuseClient:
     return FakeLangfuseClient()
 
 
 @pytest.fixture
-def store(fake_client: FakeLangfuseClient) -> LangfuseDatasetStore:
+def store(
+    fake_client: FakeLangfuseClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> LangfuseDatasetStore:
+    # The store lists/deletes over REST, so give it credentials and route
+    # httpx at the same in-memory client the SDK create/get calls land in.
+    monkeypatch.setenv("LANGFUSE_HOST", "http://fake-langfuse")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    monkeypatch.setattr("httpx.AsyncClient", _httpx_factory(fake_client))
     return LangfuseDatasetStore(client=fake_client)
 
 
@@ -401,7 +447,7 @@ class TestDelete:
         await store.delete("myset", version=v1)
         remaining = await store.versions("myset")
         assert remaining == [v2]
-        assert fake_client.api.datasets.delete_calls == [f"myset{VERSION_SEPARATOR}{v1}"]
+        assert fake_client.deleted == [f"myset{VERSION_SEPARATOR}{v1}"]
 
     async def test_delete_all_versions(
         self,
@@ -415,7 +461,7 @@ class TestDelete:
             await store.versions("myset")
         composed1 = f"myset{VERSION_SEPARATOR}{v1}"
         composed2 = f"myset{VERSION_SEPARATOR}{v2}"
-        assert set(fake_client.api.datasets.delete_calls) == {composed1, composed2}
+        assert set(fake_client.deleted) == {composed1, composed2}
 
     async def test_delete_unknown_name_is_noop(
         self,
@@ -423,7 +469,7 @@ class TestDelete:
         fake_client: FakeLangfuseClient,
     ) -> None:
         await store.delete("nonexistent")  # must not raise
-        assert fake_client.api.datasets.delete_calls == []
+        assert fake_client.deleted == []
 
     async def test_delete_unknown_version_raises(self, store: LangfuseDatasetStore) -> None:
         await store.put(Dataset(name="myset", items=(_item("a"),)))
@@ -462,15 +508,17 @@ class TestNameComposition:
 
 
 class TestPagination:
-    async def test_list_walks_all_pages(self) -> None:
-        client = FakeLangfuseClient()
+    async def test_list_walks_all_pages(
+        self,
+        store: LangfuseDatasetStore,
+        fake_client: FakeLangfuseClient,
+    ) -> None:
         for i in range(250):
-            client.create_dataset(name=f"ds{i}{VERSION_SEPARATOR}v{i}")
-        store = LangfuseDatasetStore(client=client)
+            fake_client.create_dataset(name=f"ds{i}{VERSION_SEPARATOR}v{i}")
         names = await store.list_names()
         # Each fake-created dataset has a distinct forge name, so we
-        # expect 250 unique names back — page=100 page size means
-        # this only succeeds if pagination is followed.
+        # expect 250 unique names back — the REST page size is 100, so
+        # this only succeeds if the store walks every page.
         assert len(names) == 250
 
 
@@ -480,10 +528,13 @@ class TestPagination:
 
 
 def _install_fake_langfuse(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    backend = FakeLangfuseClient()
     fake_module = types.ModuleType("langfuse")
-    constructor = MagicMock(return_value=FakeLangfuseClient())
+    constructor = MagicMock(return_value=backend)
     fake_module.Langfuse = constructor  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langfuse", fake_module)
+    # The store lists datasets over REST; route httpx at the same backend.
+    monkeypatch.setattr("httpx.AsyncClient", _httpx_factory(backend))
     return constructor
 
 

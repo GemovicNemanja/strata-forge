@@ -21,6 +21,7 @@ from forge.llm.loop_events import (
     IterationStart,
     LoopError,
     LoopEvent,
+    PendingToolCalls,
     TextDelta,
     ToolCallStarted,
     ToolResult,
@@ -94,12 +95,13 @@ from forge.llm.streaming import (
     accumulate_tool_calls,
 )
 from forge.llm.tokens import count_tokens
-from forge.llm.tools import Tool, ToolFunc, ToolLoopExceededError, tool
+from forge.llm.tools import AnyTool, Tool, ToolDeclaration, ToolFunc, ToolLoopExceededError, tool
 
 __all__ = [
     "AnthropicConfig",
     "AnthropicProvider",
     "AnyMessage",
+    "AnyTool",
     "AssistantMessage",
     "AzureConfig",
     "AzureProvider",
@@ -129,6 +131,7 @@ __all__ = [
     "OpenAICompatProvider",
     "OpenAIConfig",
     "OpenAIProvider",
+    "PendingToolCalls",
     "Pricing",
     "ProviderClient",
     "ProviderConfig",
@@ -149,6 +152,7 @@ __all__ = [
     "ToolCall",
     "ToolCallDelta",
     "ToolCallStarted",
+    "ToolDeclaration",
     "ToolFunc",
     "ToolLoopExceededError",
     "ToolResult",

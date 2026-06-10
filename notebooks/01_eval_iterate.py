@@ -25,10 +25,7 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md(
-        "# Eval and iterate\n\n"
-        "Tweak the dataset, pick models, run, inspect."
-    )
+    mo.md("# Eval and iterate\n\nTweak the dataset, pick models, run, inspect.")
     return
 
 
