@@ -650,8 +650,10 @@ The test infrastructure itself:
   `ANTHROPIC_API_KEY`.
 - **Security audit**: `pip-audit --strict` runs in the nightly
   with the `|| true` swallow removed, so new CVEs surface as a
-  job failure. CodeQL `security-and-quality` query pack runs on
-  PR, push to `main`, and weekly via `.github/workflows/codeql.yml`.
+  job failure. (A CodeQL workflow is deliberately absent: code
+  scanning requires GitHub Advanced Security on a private repo,
+  so its runs can never upload results here — restore one from
+  the git history if the repo goes public or gains GHAS.)
 
 Also picked up a tokenizer-test cleanup along the way: removed
 the `test_concatenation_is_at_least_as_many_as_each_part`
