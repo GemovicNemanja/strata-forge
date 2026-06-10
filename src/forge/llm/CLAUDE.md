@@ -21,8 +21,8 @@ The module's `__init__.py` re-exports a curated surface:
 - Message types: `Message`, `SystemMessage`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`.
 - Response types: `LLMResponse`, `ResponseChunk`, `ToolCall`, `FinishReason`.
 - `ModelFallback` — explicit two-axis fallback entry.
-- `Tool`, `@tool` — tool calling primitives.
-- Streaming tool loop: `LLMClient.stream_tool_loop` + the `LoopEvent` union (`IterationStart`, `TextDelta`, `ToolCallStarted`, `ToolResult`, `Done`, `LoopError`) from `loop_events.py` ([ADR 0014](../../../docs/architecture/adr/0014-streaming-tool-loop-event-protocol.md)).
+- `Tool`, `@tool` — tool calling primitives. `ToolDeclaration` (+ the `AnyTool` union) — a declaration-only tool the caller executes out-of-band ([ADR 0015](../../../docs/architecture/adr/0015-client-executed-tools-suspend-the-streaming-loop.md)).
+- Streaming tool loop: `LLMClient.stream_tool_loop` + the `LoopEvent` union (`IterationStart`, `TextDelta`, `ToolCallStarted`, `ToolResult`, `PendingToolCalls`, `Done`, `LoopError`) from `loop_events.py` ([ADR 0014](../../../docs/architecture/adr/0014-streaming-tool-loop-event-protocol.md)). A turn that calls a `ToolDeclaration` suspends with terminal `PendingToolCalls`; resume by re-invoking with `input + event.messages + a ToolResultMessage per pending call` ([ADR 0015](../../../docs/architecture/adr/0015-client-executed-tools-suspend-the-streaming-loop.md)).
 - `ImageContent` — multimodal image input.
 - Errors: anything raised from this module is a `ProviderError` subclass or another `ForgeError` subclass.
 

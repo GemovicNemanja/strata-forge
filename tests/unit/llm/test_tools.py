@@ -8,7 +8,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from forge.core.errors import ForgeError, ValidationError
-from forge.llm.tools import Tool, ToolLoopExceededError, tool
+from forge.llm.tools import Tool, ToolDeclaration, ToolLoopExceededError, tool
 
 
 class _WeatherArgs(BaseModel):
@@ -111,6 +111,51 @@ class TestToolSchemaDelegation:
         assert schema["name"] == "get_weather"
         assert schema["description"] == "Get current weather for a city."
         assert schema["parameters"]["type"] == "object"
+
+
+class TestToolDeclaration:
+    """A declaration-only tool serializes exactly like an executable `Tool`
+    built from an equivalent Pydantic model — the raw JSON Schema passes
+    through verbatim."""
+
+    def _decl(self) -> ToolDeclaration:
+        return ToolDeclaration(
+            name="get_weather",
+            description="Get current weather for a city.",
+            parameters=_WeatherArgs.model_json_schema(),
+        )
+
+    def _tool(self) -> Tool:
+        async def _fn(args: _WeatherArgs) -> None:
+            return None
+
+        return Tool(
+            name="get_weather",
+            description="Get current weather for a city.",
+            parameters_model=_WeatherArgs,
+            fn=_fn,
+        )
+
+    def test_is_frozen(self) -> None:
+        d = self._decl()
+        with pytest.raises((AttributeError, TypeError)):
+            d.name = "y"  # type: ignore[misc]
+
+    def test_parameters_schema_passes_through_verbatim(self) -> None:
+        raw = {
+            "type": "object",
+            "properties": {"repo_id": {"type": "string"}},
+            "required": ["repo_id"],
+            "additionalProperties": False,
+        }
+        d = ToolDeclaration(name="load_model", description="d", parameters=raw)
+        assert d.parameters_schema() is raw
+
+    def test_provider_schemas_match_equivalent_tool(self) -> None:
+        d, t = self._decl(), self._tool()
+        assert d.to_openai_schema() == t.to_openai_schema()
+        assert d.to_anthropic_schema() == t.to_anthropic_schema()
+        assert d.to_gemini_schema() == t.to_gemini_schema()
 
 
 class TestToolInvoke:

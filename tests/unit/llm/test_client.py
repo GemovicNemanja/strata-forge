@@ -28,6 +28,7 @@ from forge.llm.loop_events import (
     Done,
     IterationStart,
     LoopError,
+    PendingToolCalls,
     TextDelta,
     ToolCallStarted,
     ToolResult,
@@ -38,7 +39,7 @@ from forge.llm.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from forge.llm.tools import ToolLoopExceededError, tool
+from forge.llm.tools import ToolDeclaration, ToolLoopExceededError, tool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -228,6 +229,19 @@ class _BadArgs(BaseModel):
 async def _explodes(args: _BadArgs) -> str:
     """A tool that always fails."""
     raise RuntimeError(f"oops at {args.x}")
+
+
+# A declaration-only tool — executed by the caller, never by forge.
+_LOAD_MODEL = ToolDeclaration(
+    name="load_model",
+    description="Load a model in the caller's app.",
+    parameters={
+        "type": "object",
+        "properties": {"repo_id": {"type": "string", "description": "Repo id"}},
+        "required": ["repo_id"],
+        "additionalProperties": False,
+    },
+)
 
 
 class TestToolCalling:
@@ -1314,6 +1328,268 @@ class TestStreamToolLoop:
         # (empty tools collapse to `None`, not an empty list).
         assert len(captured) == 1
         assert "tools" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# Streaming tool loop — suspension on declaration-only tools
+# ---------------------------------------------------------------------------
+
+
+class TestStreamToolLoopSuspension:
+    async def test_declaration_call_suspends_with_pending(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_text("Loading it now."),
+                    _stream_tool(
+                        0,
+                        id="c1",
+                        name="load_model",
+                        args='{"repo_id": "org/m"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("load org/m")], tools=[_get_weather, _LOAD_MODEL])
+        )
+        assert [type(e).__name__ for e in events] == [
+            "IterationStart",
+            "TextDelta",
+            "ToolCallStarted",
+            "PendingToolCalls",
+        ]
+        assert not any(isinstance(e, ToolResult) for e in events)
+        pending = events[-1]
+        assert isinstance(pending, PendingToolCalls)
+        assert [c.id for c in pending.calls] == ["c1"]
+        assert pending.calls[0].arguments == {"repo_id": "org/m"}
+        assert pending.iteration == 0
+        assert pending.iterations_used == 1
+        assert pending.usage is not None
+        # The delta carries exactly the assistant turn (text + the call).
+        assert len(pending.messages) == 1
+        assistant = pending.messages[0]
+        assert isinstance(assistant, AssistantMessage)
+        assert assistant.content == "Loading it now."
+        assert [c.id for c in assistant.tool_calls] == ["c1"]
+
+    async def test_mixed_turn_server_tool_executes_then_suspends(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(0, id="c1", name="_get_weather", args='{"location": "Tokyo"}'),
+                    _stream_tool(
+                        1,
+                        id="c2",
+                        name="load_model",
+                        args='{"repo_id": "org/m"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("?")], tools=[_get_weather, _LOAD_MODEL])
+        )
+        assert [type(e).__name__ for e in events] == [
+            "IterationStart",
+            "ToolCallStarted",
+            "ToolResult",
+            "ToolCallStarted",
+            "PendingToolCalls",
+        ]
+        pending = events[-1]
+        assert isinstance(pending, PendingToolCalls)
+        assert [c.id for c in pending.calls] == ["c2"]
+        # Delta: the assistant turn plus the executed server-tool result.
+        assert [type(m).__name__ for m in pending.messages] == [
+            "AssistantMessage",
+            "ToolResultMessage",
+        ]
+        executed = pending.messages[1]
+        assert isinstance(executed, ToolResultMessage)
+        assert executed.tool_call_id == "c1"
+        assert "Tokyo" in executed.content
+
+    async def test_mixed_turn_client_call_first_still_executes_server_tool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(0, id="c1", name="load_model", args='{"repo_id": "org/m"}'),
+                    _stream_tool(
+                        1,
+                        id="c2",
+                        name="_get_weather",
+                        args='{"location": "Paris"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("?")], tools=[_get_weather, _LOAD_MODEL])
+        )
+        # Started events keep model order; the server tool still executes
+        # even though it follows the suspending client call.
+        assert [type(e).__name__ for e in events] == [
+            "IterationStart",
+            "ToolCallStarted",
+            "ToolCallStarted",
+            "ToolResult",
+            "PendingToolCalls",
+        ]
+        pending = events[-1]
+        assert isinstance(pending, PendingToolCalls)
+        assert [c.id for c in pending.calls] == ["c1"]
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.id == "c2"
+        assert "Paris" in result.content
+
+    async def test_unknown_tool_with_client_call_errors_then_suspends(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(0, id="c1", name="_nope", args="{}"),
+                    _stream_tool(
+                        1,
+                        id="c2",
+                        name="load_model",
+                        args='{"repo_id": "org/m"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("?")], tools=[_get_weather, _LOAD_MODEL])
+        )
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.id == "c1"
+        assert result.is_error is True
+        pending = events[-1]
+        assert isinstance(pending, PendingToolCalls)
+        assert [c.id for c in pending.calls] == ["c2"]
+        # The unknown-tool error result is part of the resumption delta.
+        assert any(
+            isinstance(m, ToolResultMessage) and m.tool_call_id == "c1" and m.is_error
+            for m in pending.messages
+        )
+
+    async def test_resumption_round_trip(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(
+                        0,
+                        id="c1",
+                        name="load_model",
+                        args='{"repo_id": "org/m"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        first_input = [Message.user("load org/m")]
+        events = await _collect(
+            client.stream_tool_loop(first_input, tools=[_get_weather, _LOAD_MODEL])
+        )
+        pending = events[-1]
+        assert isinstance(pending, PendingToolCalls)
+
+        # Resume with the grown conversation: input + delta + the caller's
+        # result for the pending call. This must pass pre-flight validation
+        # (the regression validate_conversation is on the hook for).
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion([_stream_text("Loaded.", finish_reason="stop")]),
+        )
+        resumed = [
+            *first_input,
+            *pending.messages,
+            Message.tool_result("c1", "Loaded org/m: 24 layers."),
+        ]
+        events2 = await _collect(
+            client.stream_tool_loop(
+                resumed,
+                tools=[_get_weather, _LOAD_MODEL],
+                max_iterations=8 - pending.iterations_used,
+            )
+        )
+        assert [type(e).__name__ for e in events2] == ["IterationStart", "TextDelta", "Done"]
+        done = events2[-1]
+        assert isinstance(done, Done)
+        assert done.finish_reason == "stop"
+
+    async def test_duplicate_tool_name_raises_preflight(self) -> None:
+        clash = ToolDeclaration(name="_get_weather", description="x", parameters={})
+        client = LLMClient("claude-opus-4-7")
+        with pytest.raises(ValidationError, match="Duplicate tool name"):
+            await _collect(
+                client.stream_tool_loop([Message.user("hi")], tools=[_get_weather, clash])
+            )
+
+    async def test_suspends_on_last_allowed_iteration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A suspension on the final budgeted turn is a suspension, not an
+        # exceeded-iterations LoopError — the turn completed.
+        monkeypatch.setattr(
+            "litellm.acompletion",
+            _streaming_acompletion(
+                [
+                    _stream_tool(
+                        0,
+                        id="c1",
+                        name="load_model",
+                        args='{"repo_id": "org/m"}',
+                        finish_reason="tool_calls",
+                    ),
+                ],
+            ),
+        )
+        client = LLMClient("claude-opus-4-7")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("?")], tools=[_LOAD_MODEL], max_iterations=1)
+        )
+        assert isinstance(events[-1], PendingToolCalls)
+        assert not any(isinstance(e, LoopError) for e in events)
+
+    async def test_complete_accepts_declarations(self, mock_litellm: AsyncMock) -> None:
+        # Serialization-only smoke: a declaration rides the same `tools=`
+        # surface as executable tools on non-loop calls.
+        client = LLMClient("claude-opus-4-7")
+        await client.complete([Message.user("hi")], tools=[_LOAD_MODEL])
+        sent = _kwargs(mock_litellm)["tools"]
+        assert sent[0]["name"] == "load_model"
+        assert sent[0]["input_schema"]["required"] == ["repo_id"]
 
 
 # ---------------------------------------------------------------------------

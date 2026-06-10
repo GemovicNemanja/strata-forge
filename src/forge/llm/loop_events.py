@@ -12,12 +12,14 @@ models with ``extra="forbid"``. :data:`LoopEvent` is the discriminated
 union; every concrete event carries a ``type`` literal that doubles as the
 discriminator (and as the wire event name for SSE consumers).
 
-Terminal-event contract: a run ends with **exactly one** :class:`Done`
-(the model exited tool-use mode and produced an answer) or **exactly one**
-:class:`LoopError` (a provider/transport error, a malformed streamed tool
-call, or the iteration cap being hit). See ``stream_tool_loop`` for the
-raise-vs-emit policy that decides which failures raise synchronously
-versus surface as a terminal :class:`LoopError`.
+Terminal-event contract: a run ends with **exactly one** of :class:`Done`
+(the model exited tool-use mode and produced an answer),
+:class:`PendingToolCalls` (the model called declaration-only tools the
+caller must execute out-of-band before resuming), or :class:`LoopError`
+(a provider/transport error, a malformed streamed tool call, or the
+iteration cap being hit). See ``stream_tool_loop`` for the raise-vs-emit
+policy that decides which failures raise synchronously versus surface as
+a terminal :class:`LoopError`.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from pydantic import BaseModel, ConfigDict
 
 # Runtime imports — Pydantic needs the actual classes at model-build time to
 # resolve field annotations. Keeping them out of a TYPE_CHECKING block.
+from forge.llm.messages import AssistantMessage, ToolCall, ToolResultMessage  # noqa: TC001
 from forge.llm.responses import FinishReason, Usage  # noqa: TC001
 
 __all__ = [
@@ -35,6 +38,7 @@ __all__ = [
     "IterationStart",
     "LoopError",
     "LoopEvent",
+    "PendingToolCalls",
     "TextDelta",
     "ToolCallStarted",
     "ToolResult",
@@ -71,7 +75,9 @@ class ToolCallStarted(_BaseEvent):
     streamed ``ToolCallDelta`` fragments have been accumulated into a whole
     call (``id`` + ``name`` + parsed ``arguments``) — never with partial
     arguments. Exactly one :class:`ToolResult` with the matching ``id``
-    follows.
+    follows — unless the call targets a
+    :class:`~forge.llm.tools.ToolDeclaration`, in which case the run
+    suspends with a terminal :class:`PendingToolCalls` carrying it.
     """
 
     type: Literal["tool_call_started"] = "tool_call_started"
@@ -96,6 +102,37 @@ class ToolResult(_BaseEvent):
     content: str
     is_error: bool
     iteration: int
+
+
+class PendingToolCalls(_BaseEvent):
+    """Terminal event: the model called tools the caller must execute.
+
+    Emitted when the current turn requested at least one
+    :class:`~forge.llm.tools.ToolDeclaration`-targeted call. Any
+    executable :class:`~forge.llm.tools.Tool` calls in the same turn were
+    already invoked (in model call order) and their :class:`ToolResult`
+    events emitted; ``calls`` carries only the unexecuted
+    declaration-targeted calls, in model order.
+
+    ``messages`` is the conversation delta this run appended — the
+    assistant turns plus the tool results already executed, everything
+    after the caller's input. To resume, execute the pending calls
+    out-of-band and re-invoke ``stream_tool_loop`` with
+    ``input + messages + one ToolResultMessage per pending call``.
+
+    ``iterations_used`` (== ``iteration + 1``: the suspended turn consumed
+    a model call) supports cross-run budgeting — pass the remaining budget
+    as ``max_iterations`` on resume. ``usage`` is the suspended turn's
+    streamed usage when the provider reported it (per-turn, not a sum —
+    same accounting as :class:`Done`).
+    """
+
+    type: Literal["pending_tool_calls"] = "pending_tool_calls"
+    calls: list[ToolCall]
+    messages: list[AssistantMessage | ToolResultMessage]
+    iteration: int
+    iterations_used: int
+    usage: Usage | None = None
 
 
 class Done(_BaseEvent):
@@ -132,4 +169,6 @@ class LoopError(_BaseEvent):
     exceeded_max_iterations: bool = False
 
 
-type LoopEvent = IterationStart | TextDelta | ToolCallStarted | ToolResult | Done | LoopError
+type LoopEvent = (
+    IterationStart | TextDelta | ToolCallStarted | ToolResult | PendingToolCalls | Done | LoopError
+)
