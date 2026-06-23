@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
 from forge.compute.job import Job, JobStatus
 
 if TYPE_CHECKING:
@@ -37,6 +38,8 @@ class _JobState:
         self.finished_at: datetime | None = None
         self.exit_code: int | None = None
         self.cancelled = False
+        # The directory the subprocess ran in — read_file resolves paths under it.
+        self.workdir: str | None = None
 
 
 class LocalBackend:
@@ -69,6 +72,7 @@ class LocalBackend:
 
         job_id = uuid.uuid4().hex
         state = _JobState()
+        state.workdir = task.workdir
         self._jobs[job_id] = state
 
         env = self._build_env(task)
@@ -189,6 +193,36 @@ class LocalBackend:
             raise ValueError(err)
         lines = combined.splitlines()
         return "\n".join(lines[-tail:])
+
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
+        from pathlib import Path
+
+        state = self._require_job(job)
+        rel = safe_workdir_relpath(path)
+        if tail is not None:
+            tail = int(tail)
+            if tail <= 0:
+                err = f"tail must be >= 1 when set; got {tail}"
+                raise ValueError(err)
+        root = (Path(state.workdir) if state.workdir else Path.cwd()).resolve()
+        target = root / rel
+
+        def _read() -> str:
+            # Defense-in-depth beyond the lexical guard: reject a workdir symlink that
+            # resolves OUTSIDE the workdir. Bounded read so a huge file can't OOM us.
+            if not target.resolve().is_relative_to(root):
+                err = f"read_file: path resolves outside the job workdir; got {path!r}"
+                raise ValueError(err)
+            try:
+                with target.open(encoding="utf-8", errors="replace") as fh:
+                    return fh.read(MAX_READ_FILE_BYTES)
+            except FileNotFoundError, NotADirectoryError, IsADirectoryError:
+                return ""
+
+        content = await asyncio.to_thread(_read)
+        if tail is None:
+            return content
+        return "\n".join(content.splitlines()[-tail:])
 
     async def cancel(self, job: Job) -> None:
         state = self._require_job(job)

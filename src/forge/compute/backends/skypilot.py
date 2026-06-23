@@ -20,6 +20,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from forge.compute.backends.base import safe_workdir_relpath
 from forge.compute.job import Job, JobStatus
 from forge.compute.task import Task  # noqa: TC001 — runtime use in submit
 
@@ -207,6 +208,16 @@ class SkyPilotBackend:
             return text
         lines = text.splitlines()
         return "\n".join(lines[-tail:])
+
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
+        # Reading an arbitrary file off the cluster needs an exec+capture round-trip
+        # over the SkyPilot SDK that is verified when the SkyPilot compute path lands;
+        # the SSH backend (the current pipeline target) implements this fully. Validate
+        # the path here so the workdir-confinement contract is uniform across backends.
+        safe_workdir_relpath(path)
+        _ = (job, tail)
+        err = "SkyPilotBackend.read_file is not implemented yet (lands with the SkyPilot compute path)."
+        raise NotImplementedError(err)
 
     async def cancel(self, job: Job) -> None:
         cluster = self._cluster_for(job)
