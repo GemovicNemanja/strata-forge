@@ -17,6 +17,7 @@ from forge.compute.backends import (
     LocalBackend,
     SkyPilotBackend,
     SSHBackend,
+    safe_workdir_relpath,
 )
 from forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from forge.compute.job import Job, JobState, JobStatus
@@ -46,6 +47,7 @@ __all__ = [
     "build_sglang_task",
     "build_tgi_task",
     "build_vllm_task",
+    "safe_workdir_relpath",
     "serving_endpoint",
     "wait_for_endpoint",
 ]

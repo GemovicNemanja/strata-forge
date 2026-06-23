@@ -316,3 +316,50 @@ class TestEnvInherit:
             assert "MARK=MISSING" in logs
         finally:
             os.environ.pop("FORGE_TEST_MARKER", None)
+
+
+class TestReadFile:
+    async def _job_in(self, backend: LocalBackend, workdir: Path) -> Job:
+        job = await backend.submit(Task(name="t", run="true", workdir=str(workdir)))
+        await _wait_until_terminal(backend, job)
+        return job
+
+    async def test_reads_workdir_file(self, tmp_path: Path) -> None:
+        (tmp_path / "progress.jsonl").write_text('{"step": 1}\n')
+        backend = LocalBackend()
+        job = await self._job_in(backend, tmp_path)
+        assert await backend.read_file(job, "progress.jsonl") == '{"step": 1}\n'
+
+    async def test_tail(self, tmp_path: Path) -> None:
+        (tmp_path / "m.txt").write_text("a\nb\nc\nd\n")
+        backend = LocalBackend()
+        job = await self._job_in(backend, tmp_path)
+        assert await backend.read_file(job, "m.txt", tail=2) == "c\nd"
+
+    async def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await self._job_in(backend, tmp_path)
+        assert await backend.read_file(job, "missing.jsonl") == ""
+
+    async def test_invalid_tail(self, tmp_path: Path) -> None:
+        (tmp_path / "m.txt").write_text("x\n")
+        backend = LocalBackend()
+        job = await self._job_in(backend, tmp_path)
+        with pytest.raises(ValueError, match="tail"):
+            await backend.read_file(job, "m.txt", tail=0)
+
+    async def test_rejects_traversal(self, tmp_path: Path) -> None:
+        # A secret one level above the workdir must be unreachable.
+        (tmp_path / "secret.txt").write_text("nope")
+        sub = tmp_path / "run"
+        sub.mkdir()
+        backend = LocalBackend()
+        job = await self._job_in(backend, sub)
+        with pytest.raises(ValueError, match="within the job workdir"):
+            await backend.read_file(job, "../secret.txt")
+
+    async def test_rejects_absolute(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await self._job_in(backend, tmp_path)
+        with pytest.raises(ValueError, match="workdir-relative"):
+            await backend.read_file(job, "/etc/passwd")

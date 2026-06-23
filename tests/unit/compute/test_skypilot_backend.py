@@ -318,3 +318,19 @@ class TestLazyImport:
         assert client is fake_module
         # Cached on subsequent calls.
         assert backend._get_client() is fake_module  # type: ignore[attr-defined]
+
+
+class TestReadFile:
+    def _job(self) -> Any:
+        from forge.compute.job import Job
+
+        return Job(id="1", backend="skypilot", task_name="t", metadata={"cluster_name": "forge-x"})
+
+    async def test_deferred_to_skypilot_path(self, backend: SkyPilotBackend) -> None:
+        with pytest.raises(NotImplementedError, match="SkyPilot"):
+            await backend.read_file(self._job(), "progress.jsonl")
+
+    async def test_validates_path_before_deferral(self, backend: SkyPilotBackend) -> None:
+        # The workdir-confinement contract is enforced uniformly, even for the stub.
+        with pytest.raises(ValueError, match="within the job workdir"):
+            await backend.read_file(self._job(), "../../etc/passwd")

@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from forge.compute.backends.base import safe_workdir_relpath
 from forge.compute.job import Job, JobStatus
 
 if TYPE_CHECKING:
@@ -37,6 +38,8 @@ class _JobState:
         self.finished_at: datetime | None = None
         self.exit_code: int | None = None
         self.cancelled = False
+        # The directory the subprocess ran in — read_file resolves paths under it.
+        self.workdir: str | None = None
 
 
 class LocalBackend:
@@ -69,6 +72,7 @@ class LocalBackend:
 
         job_id = uuid.uuid4().hex
         state = _JobState()
+        state.workdir = task.workdir
         self._jobs[job_id] = state
 
         env = self._build_env(task)
@@ -189,6 +193,29 @@ class LocalBackend:
             raise ValueError(err)
         lines = combined.splitlines()
         return "\n".join(lines[-tail:])
+
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
+        from pathlib import Path
+
+        state = self._require_job(job)
+        rel = safe_workdir_relpath(path)
+        if tail is not None and tail <= 0:
+            err = f"tail must be >= 1 when set; got {tail}"
+            raise ValueError(err)
+        # `rel` is validated workdir-relative, so the join stays under the run's
+        # workdir (or cwd when the task set none). Missing file -> "" (not an error).
+        target = (Path(state.workdir) if state.workdir else Path.cwd()) / rel
+
+        def _read() -> str:
+            try:
+                return target.read_text(encoding="utf-8", errors="replace")
+            except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+                return ""
+
+        content = await asyncio.to_thread(_read)
+        if tail is None:
+            return content
+        return "\n".join(content.splitlines()[-tail:])
 
     async def cancel(self, job: Job) -> None:
         state = self._require_job(job)

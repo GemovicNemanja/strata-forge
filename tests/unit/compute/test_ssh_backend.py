@@ -273,6 +273,71 @@ class TestLogs:
 
 
 # ---------------------------------------------------------------------------
+# read_file (workdir-confined side-channel reads, e.g. progress.jsonl)
+# ---------------------------------------------------------------------------
+
+
+class TestReadFile:
+    async def _submit(self, backend: SSHBackend, fake_connection: _FakeSSHConnection) -> Any:
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        return await backend.submit(Task(name="t", run="echo"))
+
+    async def test_reads_workdir_file(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout='{"step": 1}\n'))
+        out = await backend.read_file(job, "progress.jsonl")
+        assert out == '{"step": 1}\n'
+        cmd = fake_connection.commands[-1]
+        assert cmd.startswith("cat ")
+        assert f"{job.metadata['remote_workdir']}/progress.jsonl" in cmd
+
+    async def test_tail(self, backend: SSHBackend, fake_connection: _FakeSSHConnection) -> None:
+        job = await self._submit(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout="last\n"))
+        await backend.read_file(job, "progress.jsonl", tail=3)
+        assert "tail -n 3" in fake_connection.commands[-1]
+
+    async def test_invalid_tail(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        with pytest.raises(ValueError, match="tail"):
+            await backend.read_file(job, "progress.jsonl", tail=0)
+
+    async def test_missing_file_returns_empty(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout=""))  # cat ... 2>/dev/null -> empty
+        assert await backend.read_file(job, "missing.jsonl") == ""
+
+    async def test_rejects_traversal(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        before = len(fake_connection.commands)
+        with pytest.raises(ValueError, match="within the job workdir"):
+            await backend.read_file(job, "../../etc/passwd")
+        # The unsafe path is rejected before any remote command runs.
+        assert len(fake_connection.commands) == before
+
+    async def test_rejects_absolute(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        before = len(fake_connection.commands)
+        with pytest.raises(ValueError, match="workdir-relative"):
+            await backend.read_file(job, "/etc/passwd")
+        assert len(fake_connection.commands) == before
+
+
+# ---------------------------------------------------------------------------
 # cancel / cleanup
 # ---------------------------------------------------------------------------
 

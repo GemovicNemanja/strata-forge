@@ -10,13 +10,33 @@ for the lifecycle decision and why every method is mandatory.
 
 from __future__ import annotations
 
+import posixpath
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from forge.compute.job import Job, JobStatus
     from forge.compute.task import Task
 
-__all__ = ["Backend"]
+__all__ = ["Backend", "safe_workdir_relpath"]
+
+
+def safe_workdir_relpath(path: str) -> str:
+    """Validate ``path`` as a job-workdir-relative path and return it normalized.
+
+    :meth:`Backend.read_file` reads files a job produced *inside its own working
+    directory*. This guard is the security boundary: it rejects absolute paths and
+    any ``..`` traversal so a caller (ultimately user/agent input on the control
+    plane) can never read outside the job's workdir. Backends call it before
+    composing the file path.
+    """
+    if not path or path.startswith("/") or "\x00" in path or "\\" in path:
+        err = f"read_file: path must be a non-empty workdir-relative path; got {path!r}"
+        raise ValueError(err)
+    normalized = posixpath.normpath(path)
+    if normalized == ".." or normalized.startswith(("../", "/")):
+        err = f"read_file: path must stay within the job workdir; got {path!r}"
+        raise ValueError(err)
+    return normalized
 
 
 @runtime_checkable
@@ -40,6 +60,20 @@ class Backend(Protocol):
         """Return the captured stdout/stderr of ``job``.
 
         When ``tail`` is set, return only the last ``tail`` lines.
+        """
+        ...  # pragma: no cover — Protocol body
+
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
+        """Read a text file ``job`` produced inside its working directory.
+
+        ``path`` is interpreted RELATIVE to the job's workdir and must stay
+        within it (no absolute paths, no ``..`` — see :func:`safe_workdir_relpath`);
+        backends raise ``ValueError`` otherwise. When ``tail`` is set, return only
+        the last ``tail`` lines. Returns ``""`` when the file does not exist yet (a
+        not-yet-written progress file is not an error).
+
+        This complements :meth:`logs` (stdout/stderr): it reads a side-channel file
+        such as a runner's ``progress.jsonl`` of structured metric events.
         """
         ...  # pragma: no cover — Protocol body
 
