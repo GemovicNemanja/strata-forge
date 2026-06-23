@@ -62,5 +62,15 @@ runner's `progress.jsonl`.
 - `read_file` is a deliberate filesystem read **scoped to a job's workdir**; it is not a
   general remote-file API. The `safe_workdir_relpath` guard is the enforced boundary and
   is unit-tested (absolute paths and `..` traversal are rejected before any I/O).
+- **Result is byte-capped** at `MAX_READ_FILE_BYTES` (8 MiB) on every backend. A control
+  plane polls `read_file` on an interval from a *shared* process, so an unbounded read of
+  a runaway file could exhaust that process's memory and degrade service for other users;
+  the cap is a hard ceiling (SSH `head -c`, Local bounded `read`).
+- **The guard is lexical and does not resolve symlinks.** A symlink *inside* the workdir
+  pointing outside would otherwise be followed. `LocalBackend` additionally resolves the
+  realpath and rejects a target outside the workdir; the SSH backend reads on the user's
+  own host with a fixed caller-supplied filename (self-to-self exposure), so it relies on
+  the lexical guard. If `read_file`'s `path` ever becomes agent/end-user-controlled rather
+  than a fixed runner filename, add realpath confinement to the SSH path too.
 - `SkyPilotBackend.read_file` is a known gap until the SkyPilot compute path; callers on
   the SSH backend are unaffected.

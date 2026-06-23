@@ -17,7 +17,13 @@ if TYPE_CHECKING:
     from forge.compute.job import Job, JobStatus
     from forge.compute.task import Task
 
-__all__ = ["Backend", "safe_workdir_relpath"]
+__all__ = ["MAX_READ_FILE_BYTES", "Backend", "safe_workdir_relpath"]
+
+# Hard cap on a single :meth:`Backend.read_file` result. A control plane polls
+# read_file on an interval from a SHARED process; without a cap a runaway/malicious
+# file (e.g. a huge progress.jsonl) could exhaust that process's memory and degrade
+# service for every user. Backends bound the read to this many bytes.
+MAX_READ_FILE_BYTES = 8 * 1024 * 1024
 
 
 def safe_workdir_relpath(path: str) -> str:
@@ -28,6 +34,12 @@ def safe_workdir_relpath(path: str) -> str:
     any ``..`` traversal so a caller (ultimately user/agent input on the control
     plane) can never read outside the job's workdir. Backends call it before
     composing the file path.
+
+    This is a **lexical** check only — it does not resolve symlinks. A symlink
+    *inside* the workdir that points outside would still be followed by the read.
+    The :class:`LocalBackend` additionally resolves the realpath and re-confines it;
+    the SSH backend reads on the user's own host with a fixed caller-supplied
+    filename, so a symlink there only re-exposes the user's own files to themselves.
     """
     if not path or path.startswith("/") or "\x00" in path or "\\" in path:
         err = f"read_file: path must be a non-empty workdir-relative path; got {path!r}"

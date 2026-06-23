@@ -363,3 +363,15 @@ class TestReadFile:
         job = await self._job_in(backend, tmp_path)
         with pytest.raises(ValueError, match="workdir-relative"):
             await backend.read_file(job, "/etc/passwd")
+
+    async def test_rejects_symlink_escape(self, tmp_path: Path) -> None:
+        # A symlink INSIDE the workdir pointing outside is rejected by the realpath
+        # check — the lexical guard alone cannot catch this.
+        (tmp_path / "secret.txt").write_text("top-secret")
+        run = tmp_path / "run"
+        run.mkdir()
+        (run / "link.txt").symlink_to(tmp_path / "secret.txt")
+        backend = LocalBackend()
+        job = await self._job_in(backend, run)
+        with pytest.raises(ValueError, match="resolves outside the job workdir"):
+            await backend.read_file(job, "link.txt")

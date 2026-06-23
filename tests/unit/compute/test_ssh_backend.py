@@ -294,7 +294,7 @@ class TestReadFile:
         out = await backend.read_file(job, "progress.jsonl")
         assert out == '{"step": 1}\n'
         cmd = fake_connection.commands[-1]
-        assert cmd.startswith("cat ")
+        assert cmd.startswith("head -c ")  # byte-capped read
         assert f"{job.metadata['remote_workdir']}/progress.jsonl" in cmd
 
     async def test_tail(self, backend: SSHBackend, fake_connection: _FakeSSHConnection) -> None:

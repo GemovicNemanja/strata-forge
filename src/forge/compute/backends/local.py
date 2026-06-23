@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from forge.compute.backends.base import safe_workdir_relpath
+from forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
 from forge.compute.job import Job, JobStatus
 
 if TYPE_CHECKING:
@@ -199,17 +199,24 @@ class LocalBackend:
 
         state = self._require_job(job)
         rel = safe_workdir_relpath(path)
-        if tail is not None and tail <= 0:
-            err = f"tail must be >= 1 when set; got {tail}"
-            raise ValueError(err)
-        # `rel` is validated workdir-relative, so the join stays under the run's
-        # workdir (or cwd when the task set none). Missing file -> "" (not an error).
-        target = (Path(state.workdir) if state.workdir else Path.cwd()) / rel
+        if tail is not None:
+            tail = int(tail)
+            if tail <= 0:
+                err = f"tail must be >= 1 when set; got {tail}"
+                raise ValueError(err)
+        root = (Path(state.workdir) if state.workdir else Path.cwd()).resolve()
+        target = root / rel
 
         def _read() -> str:
+            # Defense-in-depth beyond the lexical guard: reject a workdir symlink that
+            # resolves OUTSIDE the workdir. Bounded read so a huge file can't OOM us.
+            if not target.resolve().is_relative_to(root):
+                err = f"read_file: path resolves outside the job workdir; got {path!r}"
+                raise ValueError(err)
             try:
-                return target.read_text(encoding="utf-8", errors="replace")
-            except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+                with target.open(encoding="utf-8", errors="replace") as fh:
+                    return fh.read(MAX_READ_FILE_BYTES)
+            except FileNotFoundError, NotADirectoryError, IsADirectoryError:
                 return ""
 
         content = await asyncio.to_thread(_read)

@@ -204,6 +204,10 @@ class _FakeBackend:
         del job, tail
         return ""
 
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
+        del job, path, tail
+        return ""
+
     async def cancel(self, job: Job) -> None:
         self.cancelled.append(job)
 

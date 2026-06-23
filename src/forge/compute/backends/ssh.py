@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from forge.compute.backends.base import safe_workdir_relpath
+from forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
 from forge.compute.job import Job, JobStatus
 from forge.compute.task import Task  # noqa: TC001 — runtime use in submit
 
@@ -277,16 +277,19 @@ class SSHBackend:
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
         workdir = self._job_workdir(job)
         rel = safe_workdir_relpath(path)
-        if tail is not None and tail <= 0:
-            err = f"tail must be >= 1 when set; got {tail}"
-            raise ValueError(err)
-        # `rel` is validated workdir-relative; the full target is shlex-quoted so the
-        # path can't break the command. Missing file -> cat/tail errors swallowed -> "".
-        target = f"{workdir}/{rel}"
+        if tail is not None:
+            tail = int(tail)
+            if tail <= 0:
+                err = f"tail must be >= 1 when set; got {tail}"
+                raise ValueError(err)
+        # `rel` is validated workdir-relative and the full target is shlex-quoted, so the
+        # path can't break the command. `head -c` byte-caps the result so a huge file
+        # can't exhaust the polling process. Missing file -> errors swallowed -> "".
+        target = shlex.quote(f"{workdir}/{rel}")
         if tail is None:
-            cmd = f"cat {shlex.quote(target)} 2>/dev/null"
+            cmd = f"head -c {MAX_READ_FILE_BYTES} {target} 2>/dev/null"
         else:
-            cmd = f"tail -n {tail} {shlex.quote(target)} 2>/dev/null"
+            cmd = f"tail -n {tail} {target} 2>/dev/null | head -c {MAX_READ_FILE_BYTES}"
         _exit, stdout, _stderr = await self._run_remote(cmd)
         return stdout
 
