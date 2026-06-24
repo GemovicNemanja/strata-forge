@@ -36,6 +36,13 @@ _STDOUT_FILE = "stdout.log"
 _STDERR_FILE = "stderr.log"
 _FORGE_REMOTE_ROOT = ".forge-compute"
 
+# Bound every SSH op so an unresponsive / black-holed host can't stall a caller (e.g. a polling
+# loop) indefinitely. Connect/login cap the handshake; the command timeout caps each remote command
+# — read_file's bounded ``head -c`` (<= MAX_READ_FILE_BYTES) is the longest and sits well under it.
+_CONNECT_TIMEOUT_S = 30.0
+_LOGIN_TIMEOUT_S = 30.0
+_COMMAND_TIMEOUT_S = 120.0
+
 
 class SSHBackend:
     """Submit Forge tasks to an SSH-accessible host.
@@ -113,6 +120,8 @@ class SSHBackend:
             "username": self._username,
             "port": self._port,
             "known_hosts": self._known_hosts,
+            "connect_timeout": _CONNECT_TIMEOUT_S,
+            "login_timeout": _LOGIN_TIMEOUT_S,
         }
         if self._client_keys:
             kwargs["client_keys"] = self._client_keys
@@ -124,7 +133,7 @@ class SSHBackend:
     async def _run_remote(self, command: str, *, check: bool = False) -> tuple[int, str, str]:
         """Run ``command`` on the remote host; return (exit, stdout, stderr)."""
         connection = await self._get_connection()
-        result = await connection.run(command, check=check)
+        result = await connection.run(command, check=check, timeout=_COMMAND_TIMEOUT_S)
         return (
             int(result.exit_status or 0),
             str(result.stdout or ""),
