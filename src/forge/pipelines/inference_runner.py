@@ -28,6 +28,7 @@ credentials + the network):
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import re
@@ -106,7 +107,8 @@ class RunError(Exception):
 def _validate_repo_id(repo_id: str, what: str) -> str:
     """Defensively re-validate an id even though the server allow-listed it — the VM is the
     trust boundary that actually fetches/pushes."""
-    if ".." in repo_id or not _REPO_ID_RE.match(repo_id):
+    # fullmatch (not match): match's `$` accepts a trailing newline ("org/x\n").
+    if ".." in repo_id or not _REPO_ID_RE.fullmatch(repo_id):
         msg = f"invalid {what} id"
         raise RunError(msg)
     return repo_id
@@ -175,9 +177,11 @@ def _load_rows(spec: RunSpec, hf_token: str | None) -> list[dict[str, Any]]:
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
+    # Slice DURING iteration (not after): dataset size/content is attacker-controlled, so
+    # row_limit must bound materialization — a huge split mustn't OOM the VM before the cap.
     limit = spec.hyperparams.row_limit
-    rows: list[dict[str, Any]] = [dict(r) for r in dataset]
-    return rows[:limit] if limit is not None else rows
+    source = itertools.islice(dataset, limit) if limit is not None else dataset
+    return [dict(r) for r in source]
 
 
 def _build_requests(

@@ -96,7 +96,10 @@ def test_load_spec_rejects_extra_fields(monkeypatch: pytest.MonkeyPatch) -> None
         ir.load_spec()
 
 
-@pytest.mark.parametrize("bad", ["../evil", "https://x/y", "no-slash", "a b/c", "org/../escape"])
+@pytest.mark.parametrize(
+    "bad",
+    ["../evil", "https://x/y", "no-slash", "a b/c", "org/../escape", "org/model\n"],
+)
 def test_load_spec_rejects_bad_ids(monkeypatch: pytest.MonkeyPatch, bad: str) -> None:
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(model_id=bad))
     with pytest.raises(ir.RunError, match="invalid model id"):
@@ -120,6 +123,37 @@ def test_sanitize_strips_token_and_token_shapes() -> None:
     assert "Bearer abc.def-123" not in out
     assert "boom" in out
     assert "done" in out
+
+
+class _NeverEndingDataset:
+    """A split that yields forever — islice MUST stop it, or _load_rows would hang/OOM."""
+
+    column_names: ClassVar[list[str]] = ["question"]
+
+    def __init__(self, counter: dict[str, int]) -> None:
+        self._counter = counter
+
+    def __iter__(self) -> Any:
+        i = 0
+        while True:
+            self._counter["consumed"] += 1
+            yield {"question": f"q{i}"}
+            i += 1
+
+
+def test_load_rows_caps_materialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    counter = {"consumed": 0}
+
+    def _load_dataset(*_a: Any, **_k: Any) -> _NeverEndingDataset:
+        return _NeverEndingDataset(counter)
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
+    spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"row_limit": 3}))
+    rows = ir._load_rows(spec, None)  # pyright: ignore[reportPrivateUsage]
+    assert len(rows) == 3
+    assert counter["consumed"] == 3  # islice stopped at the cap; the split was NOT materialized
 
 
 def test_build_requests_index_aligned() -> None:
