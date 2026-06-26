@@ -40,7 +40,11 @@ class _FakeSSHConnection:
     # This double mirrors asyncssh's `run(*, timeout=...)` API, so it deliberately accepts a
     # `timeout` parameter (ASYNC109 targets real async code that should use `asyncio.timeout`).
     async def run(
-        self, command: str, *, check: bool = False, timeout: float | None = None  # noqa: ASYNC109
+        self,
+        command: str,
+        *,
+        check: bool = False,
+        timeout: float | None = None,  # noqa: ASYNC109
     ) -> _FakeProcessResult:
         self.commands.append(command)
         self.last_timeout = timeout
@@ -104,7 +108,9 @@ class TestConstruction:
 
 
 class TestTimeouts:
-    async def test_connect_applies_handshake_timeouts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_connect_applies_handshake_timeouts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         captured: dict[str, Any] = {}
 
         async def fake_connect(**kwargs: Any) -> _FakeSSHConnection:
