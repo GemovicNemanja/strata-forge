@@ -5,9 +5,10 @@ forge.pipelines.inference_runner``). It reads an INERT run spec from the
 ``STRATA_RUN_CONFIG`` env var, loads a Hugging Face dataset split, renders one prompt
 per row by simple ``{column}`` substitution (NO code execution), serves the model with
 vLLM on the same VM, runs a concurrency-bounded batch through an openai-compatible
-``LLMClient``, and pushes ``{custom_id, output}`` results to the user's HF dataset repo.
-Live progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestrator
-tails it).
+``LLMClient``, and then EITHER pushes ``{custom_id, output}`` results to the user's HF
+dataset repo (when a write token + an output repo are supplied) OR keeps them as a parquet
+file on the VM (outside the per-run workdir, for the user to retrieve over SSH). Live
+progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestrator tails it).
 
 Security boundary (the VM is where untrusted-but-allow-listed config meets real
 credentials + the network):
@@ -57,6 +58,8 @@ _SERVE_PORT = 8000
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 # An HF repo id: ``owner/name``, each segment alphanumeric-led, no traversal/scheme/space.
 _REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A safe single path segment for the on-VM results dir name (no slash / traversal / shell chars).
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
 _MAX_RENDERED_CHARS = 200_000
 # Scrub token-shaped substrings from any surfaced error (defense in depth on top of
@@ -95,9 +98,12 @@ class RunSpec(BaseModel):
     column_mapping: dict[str, str] = Field(default_factory=dict)
     template: str
     hyperparams: Hyperparams = Field(default_factory=Hyperparams)
-    # Where to push results. The server populates it; the VM never guesses ownership.
+    # Where to push results. The server populates it ONLY when pushing (a write token is present);
+    # when absent the runner keeps results on the VM instead of pushing. The VM never guesses ownership.
     output_repo_id: str | None = None
     progress_path: str | None = None
+    # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
+    run_id: str | None = None
 
 
 class RunError(Exception):
@@ -239,10 +245,21 @@ async def _run_batches(
     return out
 
 
-def _write_results(rows: list[dict[str, Any]], workdir: Path) -> Path:
+def _local_results_dir(run_id: str | None) -> Path:
+    """A stable, cleanup-surviving location for results when NOT pushing to the Hub: outside the
+    per-run workdir the orchestrator deletes, named by the run id so the user can retrieve it over
+    SSH. Falls back to the cwd when no usable run id was provided (degraded — may be cleaned — but
+    never crashes; the run id is validated as a single safe path segment)."""
+    if run_id and _SAFE_NAME_RE.fullmatch(run_id):
+        return Path.home() / "strata-inference-results" / run_id
+    return Path.cwd()
+
+
+def _write_results(rows: list[dict[str, Any]], outdir: Path) -> Path:
     """Write the results as parquet (renders in the HF Datasets Viewer)."""
     datasets_mod: Any = __import__("datasets")  # already required by _load_rows ([hf] extra)
-    path = workdir / _RESULTS_FILENAME
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / _RESULTS_FILENAME
     datasets_mod.Dataset.from_list(rows).to_parquet(str(path))
     return path
 
@@ -293,11 +310,15 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         )
         out = await _run_batches(spec, client, prompts, custom_ids, writer)
 
-    if not hf_token:
-        msg = "HF_WRITE_TOKEN is required to push results"
-        raise RunError(msg)
-    results_path = _write_results(out, Path.cwd())
-    out_repo = await _push_results(spec, results_path, hf_token)
+    # Push to the Hub only when BOTH a write token and an output repo are present (the control
+    # plane injects them together). Otherwise keep the results on the VM for the user to retrieve
+    # over SSH — written OUTSIDE the per-run workdir so the orchestrator's cleanup leaves them intact.
+    if hf_token and spec.output_repo_id:
+        results_path = _write_results(out, Path.cwd())
+        destination = await _push_results(spec, results_path, hf_token)
+    else:
+        results_path = _write_results(out, _local_results_dir(spec.run_id))
+        destination = str(results_path)
 
     ok = sum(1 for r in out if r["error"] is None)
     _emit(
@@ -307,10 +328,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
             step=len(out),
             total_steps=len(out),
             metrics={"succeeded": float(ok), "failed": float(len(out) - ok)},
-            message=out_repo,  # WHERE results landed (a repo id, not a secret)
+            message=destination,  # WHERE results landed: a repo id (pushed) or a VM path (local)
         ),
     )
-    return out_repo
+    return destination
 
 
 def _progress_path() -> str | None:
