@@ -32,12 +32,22 @@ class _FakeSSHConnection:
         self.commands: list[str] = []
         self.script: list[_FakeProcessResult] = []
         self.closed = False
+        self.last_timeout: float | None = None
 
     def queue(self, *results: _FakeProcessResult) -> None:
         self.script.extend(results)
 
-    async def run(self, command: str, *, check: bool = False) -> _FakeProcessResult:
+    # This double mirrors asyncssh's `run(*, timeout=...)` API, so it deliberately accepts a
+    # `timeout` parameter (ASYNC109 targets real async code that should use `asyncio.timeout`).
+    async def run(
+        self,
+        command: str,
+        *,
+        check: bool = False,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> _FakeProcessResult:
         self.commands.append(command)
+        self.last_timeout = timeout
         result = self.script.pop(0) if self.script else _FakeProcessResult()
         if check and result.exit_status != 0:
             err = f"command failed (exit {result.exit_status}): {command!r}"
@@ -90,6 +100,40 @@ class TestConstruction:
     async def test_satisfies_backend_protocol(self) -> None:
         backend = SSHBackend(connection=_FakeSSHConnection())
         assert isinstance(backend, Backend)
+
+
+# ---------------------------------------------------------------------------
+# Timeouts — an unresponsive host must not stall a caller indefinitely
+# ---------------------------------------------------------------------------
+
+
+class TestTimeouts:
+    async def test_connect_applies_handshake_timeouts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_connect(**kwargs: Any) -> _FakeSSHConnection:
+            captured.update(kwargs)
+            return _FakeSSHConnection()
+
+        monkeypatch.setitem(sys.modules, "asyncssh", types.SimpleNamespace(connect=fake_connect))
+        backend = SSHBackend(host="example.com", username="me")
+        await backend._get_connection()  # pyright: ignore[reportPrivateUsage]
+        assert captured["connect_timeout"] > 0
+        assert captured["login_timeout"] > 0
+
+    async def test_remote_commands_carry_a_timeout(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        await backend.submit(Task(name="t", run="echo"))
+        assert fake_connection.last_timeout is not None
+        assert fake_connection.last_timeout > 0
 
 
 # ---------------------------------------------------------------------------
