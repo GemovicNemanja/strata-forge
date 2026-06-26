@@ -273,3 +273,59 @@ async def test_main_error_path_scrubs_token(
     text = progress.read_text()
     assert _TOKEN not in text  # even an exception message carrying the token is scrubbed
     assert "***" in text
+
+
+# ----------------------- main: optional push (results-on-VM) ----------------
+
+
+async def test_main_no_token_keeps_results_on_vm_and_skips_push(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    # No write token + no output repo -> keep results on the VM, never push.
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(progress_path=str(progress), output_repo_id=None, run_id="run123"),
+    )
+    monkeypatch.delenv("HF_WRITE_TOKEN", raising=False)
+
+    def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
+        del spec, token
+        return [{"question": "a"}]
+
+    written: dict[str, str] = {}
+
+    def _write(rows: Any, outdir: Any) -> str:
+        del rows
+        written["outdir"] = str(outdir)
+        return f"{outdir}/results.parquet"
+
+    pushed = {"called": False}
+
+    async def _fake_push(*_a: Any, **_kw: Any) -> str:
+        pushed["called"] = True
+        return "unreachable"
+
+    _FakeRunner.scripted = [_ok("A")]
+    monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "serving_endpoint", _fake_serving)
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+    monkeypatch.setattr(ir, "_write_results", _write)
+    monkeypatch.setattr(ir, "_push_results", _fake_push)
+
+    code = await ir.main()
+    assert code == 0
+    assert pushed["called"] is False  # no token + no repo -> never pushes
+    # Results land in the cleanup-surviving dir named by the run id (outside the workdir), not the cwd.
+    assert written["outdir"].endswith("strata-inference-results/run123")
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert events[-1]["kind"] == "end"
+    assert events[-1]["message"].endswith("results.parquet")  # a VM path, not a repo id
+
+
+def test_local_results_dir_validates_run_id() -> None:
+    safe = ir._local_results_dir("abc-123_DEF")  # pyright: ignore[reportPrivateUsage]
+    assert str(safe).endswith("strata-inference-results/abc-123_DEF")
+    # Traversal / unsafe / empty / missing names fall back to the cwd — never an escaping path.
+    for bad in ("../../etc", "a/b", "", None):
+        assert ir._local_results_dir(bad) == ir.Path.cwd()  # pyright: ignore[reportPrivateUsage]
