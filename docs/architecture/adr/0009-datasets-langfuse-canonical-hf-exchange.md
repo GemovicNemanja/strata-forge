@@ -1,13 +1,13 @@
 # ADR 0009 — Langfuse is canonical for Forge datasets; HF Datasets is the exchange format
 
 **Status:** Accepted
-**Date:** Initial scaffolding for `forge.datasets`
+**Date:** Initial scaffolding for `strata_forge.datasets`
 **Supersedes:** —
 **Superseded by:** —
 
 ## Context
 
-`forge.datasets` ships data shapes (typed dataset items + datasets) plus
+`strata_forge.datasets` ships data shapes (typed dataset items + datasets) plus
 two backends and a bridge to a third format. Three questions had to be
 answered before any code lands:
 
@@ -21,7 +21,7 @@ answered before any code lands:
    else?
 
 Phase 2.4 (the eval runner) will consume the answers. Picking wrong
-here means the eval module reaches around `forge.datasets` for the
+here means the eval module reaches around `strata_forge.datasets` for the
 shape it needs, which defeats the point.
 
 ## Decision
@@ -36,7 +36,7 @@ one-system operation rather than an export-import dance.
 the de-facto exchange format for ML data: it handles
 parquet/arrow/JSON serialization, Hub upload/download, streaming, and
 the long tail of public datasets you might want to pull in. Forge
-provides a bidirectional bridge (`forge.datasets.hf_bridge`) so any HF
+provides a bidirectional bridge (`strata_forge.datasets.hf_bridge`) so any HF
 `Dataset` flows in or out of a Forge dataset cleanly.
 
 **Canonical in-memory shape: Forge-owned Pydantic models.**
@@ -54,10 +54,10 @@ two items with the same input + expected output are the same item
 regardless of who constructed them.
 
 ```
-                     forge.evals  (Phase 2.4)
+                     strata_forge.evals  (Phase 2.4)
                           │
                           ▼ consumes
-              DatasetItem / Dataset  (forge.datasets.schema)
+              DatasetItem / Dataset  (strata_forge.datasets.schema)
                   ▲              ▲                  ▲
                   │              │                  │
                   │              │                  │

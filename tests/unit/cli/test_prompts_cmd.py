@@ -1,13 +1,13 @@
-"""Unit tests for `forge.cli.prompts`."""
+"""Unit tests for `strata_forge.cli.prompts`."""
 
 from __future__ import annotations
 
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.prompts.stores.memory import InMemoryPromptStore
-from forge.prompts.template import PromptTemplate
+from strata_forge.cli.main import app
+from strata_forge.prompts.stores.memory import InMemoryPromptStore
+from strata_forge.prompts.template import PromptTemplate
 
 runner = CliRunner()
 
@@ -32,14 +32,14 @@ def store_with_one(monkeypatch: pytest.MonkeyPatch) -> InMemoryPromptStore:
 
     store = InMemoryPromptStore()
     asyncio.run(store.put(_make_template()))
-    monkeypatch.setattr("forge.cli.prompts.prompt_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.prompts.prompt_store_from_settings", lambda: store)
     return store
 
 
 @pytest.fixture
 def empty_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryPromptStore:
     store = InMemoryPromptStore()
-    monkeypatch.setattr("forge.cli.prompts.prompt_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.prompts.prompt_store_from_settings", lambda: store)
     return store
 
 
@@ -78,7 +78,7 @@ class TestPromptsShow:
             dynamic_variables=("question",),
         )
         asyncio.run(store.put(template))
-        monkeypatch.setattr("forge.cli.prompts.prompt_store_from_settings", lambda: store)
+        monkeypatch.setattr("strata_forge.cli.prompts.prompt_store_from_settings", lambda: store)
         result = runner.invoke(app, ["prompts", "show", "parametric-system"])
         assert result.exit_code == 0
         assert "stable_variables" in result.output

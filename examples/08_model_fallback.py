@@ -15,7 +15,7 @@ import asyncio
 
 from _common import print_summary, require_env
 
-from forge.llm import LLMClient, Message
+from strata_forge.llm import LLMClient, Message
 
 
 async def _main() -> None:

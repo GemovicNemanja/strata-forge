@@ -15,7 +15,7 @@ Python has two idiomatic ways to model recoverable failures: exceptions, or `Res
 
 ## Decision
 
-Forge uses **exceptions** for all error paths. The hierarchy is rooted at `ForgeError` and lives in `forge.core.errors`:
+Forge uses **exceptions** for all error paths. The hierarchy is rooted at `ForgeError` and lives in `strata_forge.core.errors`:
 
 ```
 ForgeError
@@ -34,7 +34,7 @@ ForgeError
 └── FallbackExhaustedError   # entire chain failed; carries underlying causes
 ```
 
-LiteLLM exceptions are normalized at the seam (`forge.llm.errors.map_litellm_exception`) into the `ProviderError` subtree before bubbling out of `forge.llm`. Higher-level modules raise their own `ForgeError` subclasses; they never re-throw raw provider SDK or LiteLLM exceptions.
+LiteLLM exceptions are normalized at the seam (`strata_forge.llm.errors.map_litellm_exception`) into the `ProviderError` subtree before bubbling out of `strata_forge.llm`. Higher-level modules raise their own `ForgeError` subclasses; they never re-throw raw provider SDK or LiteLLM exceptions.
 
 `Result`-style returns were explicitly considered and rejected.
 

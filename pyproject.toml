@@ -61,16 +61,16 @@ all = [
 ]
 
 [project.scripts]
-forge = "forge.cli.main:app"
-# Alias under the new distribution name; `forge` stays the canonical CLI.
-strata-forge = "forge.cli.main:app"
+# Only the distribution-qualified name is installed: a bare `forge` binary would collide on PATH
+# with any other package shipping one (the generic name is already taken on PyPI).
+strata-forge = "strata_forge.cli.main:app"
 
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/forge"]
+packages = ["src/strata_forge"]
 
 [tool.uv]
 default-groups = ["dev"]
@@ -136,7 +136,7 @@ ignore = [
 "notebooks/**/*.py" = ["B018"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["forge"]
+known-first-party = ["strata_forge"]
 
 [tool.ruff.lint.flake8-bugbear]
 # Typer's Option/Argument are the documented way to declare CLI params.
@@ -151,7 +151,7 @@ venv = ".venv"
 pythonVersion = "3.14"
 pythonPlatform = "All"
 typeCheckingMode = "strict"
-strict = ["src/forge"]
+strict = ["src/strata_forge"]
 reportMissingTypeStubs = "warning"
 reportUnknownMemberType = "warning"
 reportUnknownVariableType = "warning"
@@ -175,7 +175,7 @@ markers = [
 
 # ----------------------------- coverage -----------------------------
 [tool.coverage.run]
-source = ["src/forge"]
+source = ["src/strata_forge"]
 branch = true
 
 [tool.coverage.report]

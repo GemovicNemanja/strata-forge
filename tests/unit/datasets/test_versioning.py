@@ -1,11 +1,11 @@
-"""Unit tests for `forge.datasets.versioning`."""
+"""Unit tests for `strata_forge.datasets.versioning`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.versioning import DatasetDelta, dataset_version, diff
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.versioning import DatasetDelta, dataset_version, diff
 
 
 def _items(*ids: str) -> tuple[DatasetItem, ...]:

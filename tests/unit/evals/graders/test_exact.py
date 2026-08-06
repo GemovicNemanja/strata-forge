@@ -1,14 +1,14 @@
-"""Unit tests for `forge.evals.graders.exact`."""
+"""Unit tests for `strata_forge.evals.graders.exact`."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
-from forge.datasets.schema import DatasetItem
-from forge.evals.graders.exact import ExactMatch, Regex
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.datasets.schema import DatasetItem
+from strata_forge.evals.graders.exact import ExactMatch, Regex
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _response(text: str) -> LLMResponse:

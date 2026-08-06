@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.diagnostic`."""
+"""Unit tests for `strata_forge.llm.diagnostic`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import anyio
 import pytest
 
-from forge.llm.diagnostic import (
+from strata_forge.llm.diagnostic import (
     DiagnosticRecord,
     make_error_field,
     utcnow_iso,

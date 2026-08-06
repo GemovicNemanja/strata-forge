@@ -1,4 +1,4 @@
-"""Unit tests for `forge.datasets.hf_bridge`."""
+"""Unit tests for `strata_forge.datasets.hf_bridge`."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from forge.datasets.hf_bridge import from_hf_dataset, to_hf_dataset
-from forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.hf_bridge import from_hf_dataset, to_hf_dataset
+from strata_forge.datasets.schema import Dataset, DatasetItem
 
 # ---------------------------------------------------------------------------
 # Minimal fake `datasets` module + Dataset class
@@ -71,7 +71,7 @@ class TestLazyImport:
         monkeypatch.setitem(sys.modules, "datasets", None)
         import importlib
 
-        from forge.datasets import hf_bridge
+        from strata_forge.datasets import hf_bridge
 
         importlib.reload(hf_bridge)
         assert hasattr(hf_bridge, "to_hf_dataset")

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.tracing.span`."""
+"""Unit tests for `strata_forge.tracing.span`."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.core.ids import correlation_id_var
-from forge.tracing.span import traced_span
+from strata_forge.core.ids import correlation_id_var
+from strata_forge.tracing.span import traced_span
 
 
 def _install_fake_langfuse(monkeypatch: pytest.MonkeyPatch) -> MagicMock:

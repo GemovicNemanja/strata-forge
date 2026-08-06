@@ -1,7 +1,7 @@
 # ADR 0007 — Prompts are structurally split into stable prefix and dynamic suffix
 
 **Status:** Accepted
-**Date:** Initial scaffolding for `forge.prompts`
+**Date:** Initial scaffolding for `strata_forge.prompts`
 **Supersedes:** —
 **Superseded by:** —
 
@@ -36,7 +36,7 @@ structural.
 
 ## Decision
 
-`forge.prompts` requires every `PromptTemplate` to declare two
+`strata_forge.prompts` requires every `PromptTemplate` to declare two
 sections:
 
 - `stable` — the system prompt, role/persona, instructions, few-shot
@@ -59,11 +59,11 @@ the LLM client uses to populate provider-specific cache hints:
   automatic — but we order content so the stable portion is
   contiguous at the top, maximizing the prefix the provider's
   auto-cache can match.
-- For Gemini: emit a hint that `forge.llm` can use to construct a
+- For Gemini: emit a hint that `strata_forge.llm` can use to construct a
   `CachedContent` resource (the actual resource lifecycle is a Phase-3
   concern when the request volume justifies it).
 
-The `forge.prompts.cache_aware` module owns the split, the
+The `strata_forge.prompts.cache_aware` module owns the split, the
 per-provider marker emission, and the validation that stable
 variables don't leak into dynamic positions (or vice versa).
 
@@ -80,7 +80,7 @@ variables don't leak into dynamic positions (or vice versa).
 - Provider-specific cache mechanics live in one place. Adding a new
   provider with a new caching API is one function in `cache_aware.py`,
   not a change to every prompt.
-- The `forge.evals` Phase-2.4 reports can attribute cost differences
+- The `strata_forge.evals` Phase-2.4 reports can attribute cost differences
   to cache-hit rate, because each call's cache markers are deterministic.
 
 **Negative**
@@ -98,7 +98,7 @@ variables don't leak into dynamic positions (or vice versa).
   treats the entire body as dynamic with an empty stable section,
   trading cache hits for ergonomics. Use it for the genuinely
   stable-less cases.
-- `forge.prompts.validation` includes a "prompt smells" lint pass that
+- `strata_forge.prompts.validation` includes a "prompt smells" lint pass that
   warns when a template's stable portion is short enough (< 100 tokens
   by default) that prompt caching can't kick in on most providers —
   authors get told they're paying the boilerplate tax for nothing.
@@ -116,14 +116,14 @@ variables don't leak into dynamic positions (or vice versa).
    resulting boundary is opaque to the author, and the cache invalidates
    any time the heuristic changes.
 
-3. **No structural split; let `forge.llm` do best-effort caching.** The
+3. **No structural split; let `strata_forge.llm` do best-effort caching.** The
    LLM client could try to identify a stable prefix across recent
    requests and insert markers post-hoc. Rejected: doing this safely
    requires knowing which content is "stable" by intent, not just by
    coincidence — heuristics on rendered output are unreliable. Better
    to make intent explicit at the template level.
 
-4. **A separate `forge.prompts.caching` module instead of a built-in
+4. **A separate `strata_forge.prompts.caching` module instead of a built-in
    split.** Authors opt into caching by wrapping their templates.
    Rejected for the same reason as ADR 0006 rejected
    "tools-as-opt-in": the right default is "caching works", not

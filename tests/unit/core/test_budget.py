@@ -1,4 +1,4 @@
-"""Unit tests for `forge.core.budget`."""
+"""Unit tests for `strata_forge.core.budget`."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from forge.core.budget import BudgetContext, current_budget
-from forge.core.errors import BudgetExceededError
+from strata_forge.core.budget import BudgetContext, current_budget
+from strata_forge.core.errors import BudgetExceededError
 
 
 class TestBasic:

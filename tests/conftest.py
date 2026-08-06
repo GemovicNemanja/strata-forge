@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.config import reset_settings as _reset_settings
+from strata_forge.config import reset_settings as _reset_settings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -68,7 +68,7 @@ def _disable_dotenv_during_tests() -> Iterator[None]:  # pyright: ignore[reportU
     defaults. We swap the module-level ``_ENV_FILE`` to ``None`` for the
     duration of the session.
     """
-    from forge.config import settings as settings_mod
+    from strata_forge.config import settings as settings_mod
 
     original = settings_mod._ENV_FILE  # pyright: ignore[reportPrivateUsage]
     settings_mod._ENV_FILE = None  # pyright: ignore[reportPrivateUsage]

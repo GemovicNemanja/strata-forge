@@ -15,7 +15,7 @@ import sys
 
 from _common import parse_args, require_env
 
-from forge.llm import LLMClient, Message
+from strata_forge.llm import LLMClient, Message
 
 
 async def _main() -> None:

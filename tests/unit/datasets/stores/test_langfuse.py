@@ -1,4 +1,4 @@
-"""Unit tests for `forge.datasets.stores.langfuse`."""
+"""Unit tests for `strata_forge.datasets.stores.langfuse`."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.store import DatasetNotFoundError
-from forge.datasets.stores.langfuse import (
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.store import DatasetNotFoundError
+from strata_forge.datasets.stores.langfuse import (
     VERSION_SEPARATOR,
     LangfuseDatasetStore,
     compose_langfuse_name,
     decompose_langfuse_name,
 )
-from forge.datasets.versioning import dataset_version
+from strata_forge.datasets.versioning import dataset_version
 
 
 @dataclass
@@ -200,7 +200,7 @@ class TestLazyImport:
         # must work without the [langfuse] extra installed.
         import importlib
 
-        from forge.datasets.stores import langfuse as lf_mod
+        from strata_forge.datasets.stores import langfuse as lf_mod
 
         # Reimport with langfuse blocked to make sure the module body
         # doesn't eagerly import the SDK.
@@ -217,7 +217,7 @@ class TestLazyImport:
 
         monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
         monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         store = LangfuseDatasetStore()  # construction is cheap, succeeds
@@ -231,7 +231,7 @@ class TestLazyImport:
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
         monkeypatch.setitem(sys.modules, "langfuse", None)
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         store = LangfuseDatasetStore()
@@ -543,7 +543,7 @@ class TestSettingsBasedClient:
         monkeypatch.setenv("LANGFUSE_HOST", "http://test-langfuse")
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-x")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-x")
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         constructor = _install_fake_langfuse(monkeypatch)
@@ -559,7 +559,7 @@ class TestSettingsBasedClient:
         monkeypatch.setenv("LANGFUSE_HOST", "http://test-langfuse")
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-x")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-x")
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         constructor = _install_fake_langfuse(monkeypatch)

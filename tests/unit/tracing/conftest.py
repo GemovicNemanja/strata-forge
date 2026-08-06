@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.tracing.client import reset_client
+from strata_forge.tracing.client import reset_client
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

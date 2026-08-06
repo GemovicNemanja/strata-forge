@@ -20,7 +20,7 @@ import sys
 import types
 from typing import Any
 
-from forge.storage import HFHubClient
+from strata_forge.storage import HFHubClient
 
 DRY_RUN = True
 

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.storage.gateway.StorageGateway`."""
+"""Unit tests for `strata_forge.storage.gateway.StorageGateway`."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from forge.storage import FileInfo, StorageGateway
-from forge.storage.gateway import _split_protocol  # pyright: ignore[reportPrivateUsage]
+from strata_forge.storage import FileInfo, StorageGateway
+from strata_forge.storage.gateway import _split_protocol  # pyright: ignore[reportPrivateUsage]
 
 
 class TestSplitProtocol:

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.backends.ssh.SSHBackend`."""
+"""Unit tests for `strata_forge.compute.backends.ssh.SSHBackend`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.compute import Backend, SSHBackend, Task
+from strata_forge.compute import Backend, SSHBackend, Task
 
 # ---------------------------------------------------------------------------
 # Fake asyncssh connection
@@ -424,7 +424,7 @@ class TestCancelCleanup:
     ) -> None:
         backend = SSHBackend(connection=fake_connection, remote_root=".forge-test")
         # Build a job whose metadata pretends a workdir outside the root.
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bad_job = Job(
             id="bogus",
@@ -443,7 +443,7 @@ class TestCancelCleanup:
 
 class TestJobOwnership:
     async def test_status_wrong_backend(self, backend: SSHBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(
             id="x",
@@ -455,7 +455,7 @@ class TestJobOwnership:
             await backend.status(bogus)
 
     async def test_status_missing_metadata(self, backend: SSHBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(id="x", backend="ssh", task_name="t")
         with pytest.raises(ValueError, match="remote_workdir"):
@@ -511,7 +511,7 @@ class TestSettingsBackedConnection:
 
 class TestJobMetadataErrors:
     async def test_status_rejects_job_without_pid(self, backend: SSHBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(
             id="x",
@@ -525,7 +525,7 @@ class TestJobMetadataErrors:
     async def test_status_handles_unparseable_submitted_at(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
     ) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         # Manually build a job with a broken submitted_at; status should still work.
         fake_connection.queue(_FakeProcessResult(stdout="RUNNING\n"))

@@ -21,8 +21,8 @@ import asyncio
 
 from _common import parse_args, print_summary, require_env
 
-from forge.llm import LLMClient, Message
-from forge.tracing import (
+from strata_forge.llm import LLMClient, Message
+from strata_forge.tracing import (
     get_client,
     install_litellm_callback,
     is_litellm_callback_installed,

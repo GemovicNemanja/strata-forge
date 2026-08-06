@@ -7,9 +7,9 @@ AI Forge is a typed, async-first, vendor-neutral baseline for AI/LLM experiments
 
 Always-on rules:
 
-- Public API is async. Sync wrappers live only in `forge.sync`.
+- Public API is async. Sync wrappers live only in `strata_forge.sync`.
 - pyright strict on `src/forge`. No `Any` without `# pyright: ignore[...]` justification.
-- Errors are exception-based: every Forge-raised error subclasses `forge.core.errors.ForgeError`. Never `except:`.
+- Errors are exception-based: every Forge-raised error subclasses `strata_forge.core.errors.ForgeError`. Never `except:`.
 - Heavy deps (torch, transformers, trl, peft, skypilot, asyncssh, qdrant-client, vllm, pillow, redis, inspect-ai) are imported **inside the function that uses them**, never at module load. Each gates behind a PyPI extra in `pyproject.toml`.
 - Commits MUST follow Conventional Commits: `<type>(<optional-scope>): <imperative summary>`. Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`. Scope is the module name (e.g. `feat(llm):`, `docs(rag):`) when the change is local to one module; omit it for cross-cutting work. Commit messages describe changes in **time-stable terms** — never reference phase numbers, sub-phase numbers, step numbers, or scaffolding metadata. See `CLAUDE.md` §8 for the full table.
 - **Self-maintenance protocol** (CLAUDE.md §7): when you spot a stale `CLAUDE.md` / MDC rule / ADR / module README, propose the fix in the same PR. Never silently ignore a stale rule.

@@ -20,14 +20,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import BaseModel
 
-from forge.llm.client import LLMClient
-from forge.llm.fallback import ModelFallback
-from forge.llm.messages import Message
-from forge.llm.tools import tool
+from strata_forge.llm.client import LLMClient
+from strata_forge.llm.fallback import ModelFallback
+from strata_forge.llm.messages import Message
+from strata_forge.llm.tools import tool
 from vcr import VCR  # pyright: ignore[reportMissingTypeStubs]
 
 if TYPE_CHECKING:
-    from forge.llm.registry import ProviderName
+    from strata_forge.llm.registry import ProviderName
 
 
 _CASSETTE_ROOT = Path(__file__).parent / "cassettes"
@@ -170,8 +170,8 @@ async def test_structured_output(provider: ProviderName) -> None:
 
 @pytest.mark.parametrize("provider", _VISION_PROVIDERS)
 async def test_multimodal(provider: ProviderName) -> None:
-    from forge.llm.messages import TextPart, UserMessage
-    from forge.llm.multimodal import ImageContent
+    from strata_forge.llm.messages import TextPart, UserMessage
+    from strata_forge.llm.multimodal import ImageContent
 
     cassette = _cassette_for(provider, "multimodal")
     _requires_cassette(cassette)
@@ -241,7 +241,7 @@ async def test_rate_limit_retry(provider: ProviderName) -> None:
 @pytest.mark.parametrize("provider", _ALL_PROVIDERS)
 async def test_content_filter(provider: ProviderName) -> None:
     """The recorded request triggers a content-filter response."""
-    from forge.core.errors import ProviderContentFilterError
+    from strata_forge.core.errors import ProviderContentFilterError
 
     cassette = _cassette_for(provider, "content_filter")
     _requires_cassette(cassette)

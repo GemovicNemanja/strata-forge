@@ -1,4 +1,4 @@
-"""Unit tests for `forge.agents.agent`."""
+"""Unit tests for `strata_forge.agents.agent`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from forge.agents import (
+from strata_forge.agents import (
     Agent,
     AgentResult,
     AssistantMessage,
@@ -19,11 +19,13 @@ from forge.agents import (
     UserMessage,
     tool,
 )
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 if TYPE_CHECKING:
-    from forge.llm.registry import ProviderName as ProviderNameType  # type: ignore[unused-import]
+    from strata_forge.llm.registry import (
+        ProviderName as ProviderNameType,  # type: ignore[unused-import]
+    )
 
 
 def _response(text: str = "answer", *, provider: ProviderNameType = "anthropic") -> LLMResponse:
@@ -278,7 +280,7 @@ class TestRunStructured:
         client = _client()
         # AgentResult.final_response needs a real LLMResponse, so we
         # build a StructuredResponse (a subclass) and hand it back.
-        from forge.llm.client import StructuredResponse
+        from strata_forge.llm.client import StructuredResponse
 
         real_resp = _response(text="the answer is x")
         sr = StructuredResponse(
@@ -304,7 +306,7 @@ class TestRunStructured:
     async def test_tools_not_used_in_structured(self) -> None:
         # run_structured ignores agent tools; complete_structured is called.
         client = _client()
-        from forge.llm.client import StructuredResponse
+        from strata_forge.llm.client import StructuredResponse
 
         sr = StructuredResponse(
             text="x",
@@ -330,7 +332,7 @@ class TestRunStructured:
 
     async def test_schema_forwarded(self) -> None:
         client = _client()
-        from forge.llm.client import StructuredResponse
+        from strata_forge.llm.client import StructuredResponse
 
         sr = StructuredResponse(
             text="x",
@@ -356,7 +358,7 @@ class TestRunStructured:
 
     async def test_max_reprompt_attempts_forwarded(self) -> None:
         client = _client()
-        from forge.llm.client import StructuredResponse
+        from strata_forge.llm.client import StructuredResponse
 
         sr = StructuredResponse(
             text="x",

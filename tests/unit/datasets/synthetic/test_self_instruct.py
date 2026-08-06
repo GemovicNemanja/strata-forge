@@ -1,4 +1,4 @@
-"""Unit tests for `forge.datasets.synthetic.self_instruct`."""
+"""Unit tests for `strata_forge.datasets.synthetic.self_instruct`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.synthetic.self_instruct import (
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.synthetic.self_instruct import (
     SelfInstructBatch,
     SelfInstructItem,
     self_instruct,

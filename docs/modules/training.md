@@ -1,6 +1,6 @@
-# `forge.training` — SFT, preference tuning, PEFT, chat-template, packing
+# `strata_forge.training` — SFT, preference tuning, PEFT, chat-template, packing
 
-`forge.training` ships fine-tuning primitives: SFT via TRL's
+`strata_forge.training` ships fine-tuning primitives: SFT via TRL's
 :class:`SFTTrainer`, preference tuning (DPO, ORPO, KTO, GRPO)
 via the TRL preference trainer family, and PEFT (LoRA, QLoRA)
 adapters via peft. Supporting helpers cover chat-template
@@ -10,7 +10,7 @@ and sequence packing for SFT throughput.
 The module wraps each TRL trainer with a typed Pydantic
 config and a small runner class. Configs serialize cleanly to
 YAML for reproducibility and ship across to remote
-:mod:`forge.compute` runs; runners defer every heavy import
+:mod:`strata_forge.compute` runs; runners defer every heavy import
 until ``train()`` is called.
 
 Integration points:
@@ -49,7 +49,7 @@ Source: [`src/forge/training/`](../../src/forge/training/).
 ## Quickstart
 
 ```python
-from forge.training import LoRAConfig, SFTConfig, SFTRunner
+from strata_forge.training import LoRAConfig, SFTConfig, SFTRunner
 
 sft = SFTConfig(
     model_id="meta-llama/Llama-3.1-8B-Instruct",
@@ -69,7 +69,7 @@ print(result.train_loss, result.train_runtime_s, result.output_dir)
 For preference tuning:
 
 ```python
-from forge.training import DPOConfig, PreferenceRunner
+from strata_forge.training import DPOConfig, PreferenceRunner
 
 dpo = DPOConfig(
     model_id="./checkpoints/sft",  # the SFT-tuned model
@@ -129,7 +129,7 @@ reads ``config.method`` and dispatches to the right
 ``trl.XxxTrainer`` / ``trl.XxxConfig`` pair.
 
 ```python
-from forge.training import (
+from strata_forge.training import (
     DPOConfig, ORPOConfig, KTOConfig, GRPOConfig, PreferenceRunner
 )
 
@@ -171,7 +171,7 @@ Forwarding rules:
 ## PEFT (LoRA / QLoRA)
 
 ```python
-from forge.training import LoRAConfig, QLoRAConfig
+from strata_forge.training import LoRAConfig, QLoRAConfig
 
 lora = LoRAConfig(
     r=32, alpha=64, dropout=0.05,
@@ -196,8 +196,8 @@ QLoRA, ``to_bnb_config()`` additionally builds the
 ## Chat-template formatting
 
 ```python
-from forge.llm import Message
-from forge.training import apply_chat_template, conversation_to_dicts
+from strata_forge.llm import Message
+from strata_forge.training import apply_chat_template, conversation_to_dicts
 
 conversation = [
     Message.system("You are a helpful assistant."),
@@ -214,7 +214,7 @@ token_ids = apply_chat_template(conversation, tokenizer=tokenizer, tokenize=True
 ```
 
 The formatter targets text-only training. Multimodal content
-parts (image messages from :mod:`forge.llm.multimodal`) collapse
+parts (image messages from :mod:`strata_forge.llm.multimodal`) collapse
 to ``[non-text: ClassName]`` placeholders rather than being
 silently dropped — a clear signal that vision-instruction
 training needs its own path.
@@ -224,7 +224,7 @@ training needs its own path.
 For SFT throughput on short conversations:
 
 ```python
-from forge.training import pack_sequences
+from strata_forge.training import pack_sequences
 
 tokenized = [tokenizer.encode(text) for text in texts]
 packs = pack_sequences(
@@ -247,7 +247,7 @@ for pad.
 
 ## Lazy-import contract
 
-Importing ``forge.training`` works without the ``[finetuning]``
+Importing ``strata_forge.training`` works without the ``[finetuning]``
 extra installed. The heavy deps are imported inside the methods
 that need them:
 

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.agents.tools.fetch_url`."""
+"""Unit tests for `strata_forge.agents.tools.fetch_url`."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import pytest
 import respx
 from httpx import Response
 
-from forge.agents.tools.fetch_url import FetchURLArgs, fetch_url
-from forge.core.errors import ValidationError
+from strata_forge.agents.tools.fetch_url import FetchURLArgs, fetch_url
+from strata_forge.core.errors import ValidationError
 
 
 class TestFetchURLArgs:

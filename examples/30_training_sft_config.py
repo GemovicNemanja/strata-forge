@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 
-from forge.training import LoRAConfig, QLoRAConfig, SFTConfig, SFTRunner
+from strata_forge.training import LoRAConfig, QLoRAConfig, SFTConfig, SFTRunner
 
 
 def _main() -> None:

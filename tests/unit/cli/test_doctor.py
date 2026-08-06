@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.doctor`."""
+"""Unit tests for `strata_forge.cli.doctor`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli import doctor as doctor_module
-from forge.cli.main import app
+from strata_forge.cli import doctor as doctor_module
+from strata_forge.cli.main import app
 
 runner = CliRunner()
 

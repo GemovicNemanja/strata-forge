@@ -1,4 +1,4 @@
-"""Unit tests for the `forge.compute.backends.base` workdir-confinement guard.
+"""Unit tests for the `strata_forge.compute.backends.base` workdir-confinement guard.
 
 `safe_workdir_relpath` is the security boundary that keeps `Backend.read_file`
 inside a job's working directory. These lock its lexical contract directly (the
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from forge.compute import safe_workdir_relpath
+from strata_forge.compute import safe_workdir_relpath
 
 # Workdir-relative inputs that MUST be accepted, with their normalized form.
 ALLOWED = [

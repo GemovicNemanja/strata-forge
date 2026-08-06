@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 
-from forge.datasets import (
+from strata_forge.datasets import (
     Dataset,
     DatasetItem,
     InMemoryDatasetStore,

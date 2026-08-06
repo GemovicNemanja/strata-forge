@@ -8,7 +8,7 @@
 
 ## Context
 
-[ADR 0006] made tool calling a first-class `forge.llm` primitive, and
+[ADR 0006] made tool calling a first-class `strata_forge.llm` primitive, and
 shipped two complementary surfaces: `run_tool_loop` (the buffered
 multi-turn loop, returning one final `LLMResponse`) and `stream` (a
 single streamed turn, yielding `ResponseChunk`s). They don't compose:
@@ -85,8 +85,8 @@ Five decisions pin the shape:
 5. **Events live in their own module.** `loop_events.py` keeps the union
    out of `responses.py` (whose `LLMResponse`/`ResponseChunk` are the
    non-loop surface) and cohesive with the streaming-loop method that
-   produces them. They are re-exported from both `forge.llm` and
-   `forge.agents`, since `Agent.run_streaming` yields them.
+   produces them. They are re-exported from both `strata_forge.llm` and
+   `strata_forge.agents`, since `Agent.run_streaming` yields them.
 
 `usage` on `Done` is the final iteration's usage only — not a sum across
 iterations — consistent with `run_tool_loop` / `AgentResult` (see

@@ -5,39 +5,39 @@ AI Forge is a typed, async-first library of primitives for running AI experiment
 ## Design pillars
 
 1. **Vendor-neutral at the seam.** LiteLLM handles provider HTTP/auth/streaming/normalization. Forge owns a typed Pydantic layer on top. ([ADR 0001](adr/0001-litellm-as-transport.md))
-2. **Async-first everywhere.** Every public function is `async`. Sync wrappers live only in `forge.sync` for CLI / notebook ergonomics. ([ADR 0002](adr/0002-async-only-public-api.md))
+2. **Async-first everywhere.** Every public function is `async`. Sync wrappers live only in `strata_forge.sync` for CLI / notebook ergonomics. ([ADR 0002](adr/0002-async-only-public-api.md))
 3. **Strict typing.** pyright `strict` on `src/forge`. No `Any` without a justified ignore. Pydantic for data, Protocol for behavior.
 4. **Exception-based errors.** Every Forge-raised error inherits from `ForgeError`; provider errors normalize at the seam. ([ADR 0003](adr/0003-exception-hierarchy.md))
-5. **Modules are independent.** `import forge.<module>` works without optional extras installed; heavy deps are lazily imported inside the functions that need them.
+5. **Modules are independent.** `import strata_forge.<module>` works without optional extras installed; heavy deps are lazily imported inside the functions that need them.
 6. **Observability and cost are first-class.** Every LLM call is traceable to Langfuse, dumpable to NDJSON, and respects an active `BudgetContext`.
-7. **Reproducibility is built in.** `set_seed`, `content_hash`, `env_snapshot` are in `forge.core.repro`; long-running operations capture them.
-8. **No vendor lock-in upward.** Higher-level modules (evals, agents, RAG) talk only to `forge.llm` — they never import provider SDKs.
+7. **Reproducibility is built in.** `set_seed`, `content_hash`, `env_snapshot` are in `strata_forge.core.repro`; long-running operations capture them.
+8. **No vendor lock-in upward.** Higher-level modules (evals, agents, RAG) talk only to `strata_forge.llm` — they never import provider SDKs.
 
 ## Layering
 
 ```
                 ┌───────────────────────────┐
-                │         forge.cli         │
+                │         strata_forge.cli         │
                 │   (Typer entry points)    │
                 └─────────────┬─────────────┘
                               │
    ┌──────────────────────────┴───────────────────────────┐
-   │  forge.evals   forge.agents   forge.rag   forge.compute │
-   │  forge.training  forge.datasets  forge.prompts          │
+   │  strata_forge.evals   strata_forge.agents   strata_forge.rag   strata_forge.compute │
+   │  strata_forge.training  strata_forge.datasets  strata_forge.prompts          │
    └──────────────────────────┬───────────────────────────┘
                               │
                 ┌─────────────┴─────────────┐
-                │       forge.llm           │
-                │  + forge.tracing          │
-                │  + forge.storage          │
+                │       strata_forge.llm           │
+                │  + strata_forge.tracing          │
+                │  + strata_forge.storage          │
                 └─────────────┬─────────────┘
                               │
                 ┌─────────────┴─────────────┐
-                │      forge.config         │
+                │      strata_forge.config         │
                 └─────────────┬─────────────┘
                               │
                 ┌─────────────┴─────────────┐
-                │       forge.core          │
+                │       strata_forge.core          │
                 │  (errors, retry, logging, │
                 │   budget, repro, ids)     │
                 └───────────────────────────┘
@@ -59,11 +59,11 @@ Fallback is two-axis: provider-level (same model across providers) within a `Mod
 
 ## Tool calling, structured output, and multimodal
 
-All three are first-class features of `forge.llm` — they ship together, not as separate add-ons. The agent module (Phase 3) reuses these primitives rather than reimplementing them. ([ADR 0006](adr/0006-tool-calling-as-llm-primitive.md))
+All three are first-class features of `strata_forge.llm` — they ship together, not as separate add-ons. The agent module (Phase 3) reuses these primitives rather than reimplementing them. ([ADR 0006](adr/0006-tool-calling-as-llm-primitive.md))
 
 ## Configuration
 
-`forge.config.Settings` is a Pydantic `BaseSettings` with sub-models per concern. Layering: defaults → `configs/<FORGE_PROFILE>.yaml` overlay → `.env` → process env → in-code override. `forge doctor` validates everything at startup.
+`strata_forge.config.Settings` is a Pydantic `BaseSettings` with sub-models per concern. Layering: defaults → `configs/<FORGE_PROFILE>.yaml` overlay → `.env` → process env → in-code override. `forge doctor` validates everything at startup.
 
 ## Observability
 
@@ -94,8 +94,8 @@ Langfuse is the default tracing destination. The LiteLLM Langfuse callback handl
 
 ## What's deliberately out of scope
 
-- Hosted inference serving — that's vLLM / TGI / SGLang's job; we orchestrate them via `forge.compute`.
+- Hosted inference serving — that's vLLM / TGI / SGLang's job; we orchestrate them via `strata_forge.compute`.
 - Provider catalog beyond OpenAI / Anthropic / Google — see [ADR 0004](adr/0004-model-registry-scope.md); new vendors require an ADR.
-- Telemetry beyond Langfuse — OpenTelemetry / Prometheus support can be added later through `forge.tracing` if needed.
+- Telemetry beyond Langfuse — OpenTelemetry / Prometheus support can be added later through `strata_forge.tracing` if needed.
 - A Forge-defined prompt-engineering DSL — Jinja2 templates and Langfuse-stored prompts are enough; DSPy-style compilation is out of scope.
 - Production-grade authentication/authorization — Forge is a library, not a service.

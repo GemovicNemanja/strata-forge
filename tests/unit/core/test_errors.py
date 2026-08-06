@@ -1,10 +1,10 @@
-"""Unit tests for `forge.core.errors`."""
+"""Unit tests for `strata_forge.core.errors`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.core.errors import (
+from strata_forge.core.errors import (
     BudgetExceededError,
     CacheError,
     ConfigError,
@@ -250,10 +250,10 @@ class TestRaiseFromChaining:
 
 
 class TestPublicReExports:
-    """All concrete error classes are re-exported from `forge.core`."""
+    """All concrete error classes are re-exported from `strata_forge.core`."""
 
     def test_reexports(self) -> None:
-        import forge.core as core
+        import strata_forge.core as core
 
         for cls in ALL_ERRORS:
             assert getattr(core, cls.__name__) is cls

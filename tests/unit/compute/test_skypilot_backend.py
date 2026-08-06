@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.backends.skypilot.SkyPilotBackend`."""
+"""Unit tests for `strata_forge.compute.backends.skypilot.SkyPilotBackend`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.compute import Backend, SkyPilotBackend, Task
+from strata_forge.compute import Backend, SkyPilotBackend, Task
 
 # ---------------------------------------------------------------------------
 # Fake sky.api.sdk
@@ -120,7 +120,7 @@ class TestSubmit:
         assert launch_kwargs["cluster_name"] == job.metadata["cluster_name"]
 
     async def test_resources_forwarded(self, backend: SkyPilotBackend, fake_sky: _FakeSky) -> None:
-        from forge.compute.task import ResourceSpec
+        from strata_forge.compute.task import ResourceSpec
 
         await backend.submit(
             Task(
@@ -256,7 +256,7 @@ class TestCleanup:
 
 class TestJobOwnership:
     async def test_wrong_backend_rejected(self, backend: SkyPilotBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(
             id="1",
@@ -268,7 +268,7 @@ class TestJobOwnership:
             await backend.status(bogus)
 
     async def test_missing_cluster_metadata(self, backend: SkyPilotBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(id="1", backend="skypilot", task_name="t")
         with pytest.raises(ValueError, match="cluster_name"):
@@ -322,7 +322,7 @@ class TestLazyImport:
 
 class TestReadFile:
     def _job(self) -> Any:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         return Job(id="1", backend="skypilot", task_name="t", metadata={"cluster_name": "forge-x"})
 

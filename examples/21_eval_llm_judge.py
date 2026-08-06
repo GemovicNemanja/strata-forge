@@ -21,8 +21,8 @@ import asyncio
 
 from _common import parse_args, require_env  # type: ignore[import-not-found]
 
-from forge.datasets import Dataset, DatasetItem
-from forge.evals import (
+from strata_forge.datasets import Dataset, DatasetItem
+from strata_forge.evals import (
     Experiment,
     LLMJudge,
     SamplingParams,
@@ -30,8 +30,8 @@ from forge.evals import (
     render_markdown,
     run_experiment,
 )
-from forge.llm.client import LLMClient
-from forge.llm.messages import SystemMessage, UserMessage
+from strata_forge.llm.client import LLMClient
+from strata_forge.llm.messages import SystemMessage, UserMessage
 
 
 def _dataset() -> Dataset:

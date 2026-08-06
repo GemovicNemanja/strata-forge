@@ -1,10 +1,10 @@
-"""Unit tests for `forge.agents.memory.conversation`."""
+"""Unit tests for `strata_forge.agents.memory.conversation`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.agents import AssistantMessage, ConversationMemory, SystemMessage, UserMessage
+from strata_forge.agents import AssistantMessage, ConversationMemory, SystemMessage, UserMessage
 
 # ---------------------------------------------------------------------------
 # Construction

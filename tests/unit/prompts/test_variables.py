@@ -1,11 +1,11 @@
-"""Unit tests for `forge.prompts.variables`."""
+"""Unit tests for `strata_forge.prompts.variables`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.prompts.template import PromptTemplate, PromptValidationError
-from forge.prompts.variables import (
+from strata_forge.prompts.template import PromptTemplate, PromptValidationError
+from strata_forge.prompts.variables import (
     extract_variables,
     validate_template_variables,
 )

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.training.chat_template`."""
+"""Unit tests for `strata_forge.training.chat_template`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from forge.llm.messages import (
+from strata_forge.llm.messages import (
     AssistantMessage,
     Message,
     SystemMessage,
@@ -14,7 +14,7 @@ from forge.llm.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from forge.training.chat_template import (
+from strata_forge.training.chat_template import (
     apply_chat_template,
     conversation_to_dicts,
     conversation_to_text,

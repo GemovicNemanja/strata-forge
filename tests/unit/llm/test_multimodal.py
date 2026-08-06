@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.multimodal`."""
+"""Unit tests for `strata_forge.llm.multimodal`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from forge.llm.messages import ContentPart
-from forge.llm.multimodal import ImageContent, downscale_image
+from strata_forge.llm.messages import ContentPart
+from strata_forge.llm.multimodal import ImageContent, downscale_image
 
 if TYPE_CHECKING:
     from pathlib import Path

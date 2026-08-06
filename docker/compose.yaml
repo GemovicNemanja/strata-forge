@@ -1,6 +1,6 @@
 # Local dev stack: Postgres + Qdrant + Redis.
 # The Langfuse v3 service stack (web + worker + ClickHouse + MinIO) is wired in when
-# `forge.tracing` lands; today this file is enough to bring up the services Phase 0
+# `strata_forge.tracing` lands; today this file is enough to bring up the services Phase 0
 # foundations actually use.
 #
 # Usage: `make stack-up` / `make stack-down`.

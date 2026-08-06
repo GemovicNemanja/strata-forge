@@ -1,4 +1,4 @@
-"""Unit tests for `forge.rag.retrieval`."""
+"""Unit tests for `strata_forge.rag.retrieval`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-from forge.rag.chunking import Chunk
-from forge.rag.retrieval import RetrievalResult, Retriever
+from strata_forge.rag.chunking import Chunk
+from strata_forge.rag.retrieval import RetrievalResult, Retriever
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

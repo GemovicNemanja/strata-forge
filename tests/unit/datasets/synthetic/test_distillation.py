@@ -1,4 +1,4 @@
-"""Unit tests for `forge.datasets.synthetic.distillation`."""
+"""Unit tests for `strata_forge.datasets.synthetic.distillation`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.synthetic.distillation import distill
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.synthetic.distillation import distill
 
 
 def _item(

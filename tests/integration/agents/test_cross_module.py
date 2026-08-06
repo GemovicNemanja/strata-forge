@@ -1,6 +1,6 @@
 """Cross-module agent workflows that don't need external services.
 
-Each test wires multiple :mod:`forge.agents` pieces together so the
+Each test wires multiple :mod:`strata_forge.agents` pieces together so the
 seams hold under realistic compositions: agent + built-in tool,
 agent + memory, two agents in a critic-refiner loop, and so on.
 Unit tests cover each piece in isolation; these tests prove the
@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock
 
-from forge.agents import (
+from strata_forge.agents import (
     Agent,
     AgentResult,
     ConversationMemory,
@@ -26,9 +26,9 @@ from forge.agents import (
     critic_refiner_run,
     handoff,
 )
-from forge.llm.client import StructuredResponse
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.llm.client import StructuredResponse
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _route() -> ModelRoute:

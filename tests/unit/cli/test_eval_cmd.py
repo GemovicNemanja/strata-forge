@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.eval_cmd`."""
+"""Unit tests for `strata_forge.cli.eval_cmd`."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.stores.memory import InMemoryDatasetStore
-from forge.evals.experiment import GraderResult, Outcome, Trial
-from forge.llm.responses import Usage
+from strata_forge.cli.main import app
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.stores.memory import InMemoryDatasetStore
+from strata_forge.evals.experiment import GraderResult, Outcome, Trial
+from strata_forge.llm.responses import Usage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,7 +56,7 @@ def fake_eval(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         state["runs"].append({"args": args, "kwargs": kwargs})
         return _make_outcomes()
 
-    monkeypatch.setattr("forge.evals.runner.run_experiment", _fake_run)
+    monkeypatch.setattr("strata_forge.evals.runner.run_experiment", _fake_run)
 
     class _FakeClient:
         def __init__(self, **kwargs: Any) -> None:
@@ -64,7 +64,7 @@ def fake_eval(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
         complete = AsyncMock()
 
-    monkeypatch.setattr("forge.llm.client.LLMClient", _FakeClient)
+    monkeypatch.setattr("strata_forge.llm.client.LLMClient", _FakeClient)
     return state
 
 
@@ -74,14 +74,14 @@ def store_with_dataset(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
 
     store = InMemoryDatasetStore()
     asyncio.run(store.put(_make_dataset()))
-    monkeypatch.setattr("forge.cli.eval_cmd.dataset_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.eval_cmd.dataset_store_from_settings", lambda: store)
     return store
 
 
 @pytest.fixture
 def empty_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
     store = InMemoryDatasetStore()
-    monkeypatch.setattr("forge.cli.eval_cmd.dataset_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.eval_cmd.dataset_store_from_settings", lambda: store)
     return store
 
 
@@ -89,8 +89,8 @@ def empty_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
 def isolated_reports(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Redirect both modules' report dirs to a temp path."""
     report_dir = tmp_path / "experiments"
-    monkeypatch.setattr("forge.cli.eval_cmd._REPORT_DIR", report_dir)
-    monkeypatch.setattr("forge.cli.experiments._REPORT_DIR", report_dir)
+    monkeypatch.setattr("strata_forge.cli.eval_cmd._REPORT_DIR", report_dir)
+    monkeypatch.setattr("strata_forge.cli.experiments._REPORT_DIR", report_dir)
     return report_dir
 
 

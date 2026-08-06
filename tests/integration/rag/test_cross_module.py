@@ -1,6 +1,6 @@
 """Cross-module RAG workflows that don't need external services.
 
-Each test wires multiple :mod:`forge.rag` pieces together so the
+Each test wires multiple :mod:`strata_forge.rag` pieces together so the
 seams hold under realistic compositions: chunker + dense retriever
 + pipeline, hybrid (dense + BM25), pipeline + reranker, end-to-end
 augment_prompt.
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.rag import (
+from strata_forge.rag import (
     BM25Retriever,
     Chunk,
     DenseRetriever,

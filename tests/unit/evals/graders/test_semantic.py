@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.graders.semantic`."""
+"""Unit tests for `strata_forge.evals.graders.semantic`."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from forge.datasets.schema import DatasetItem
-from forge.evals.graders.semantic import SemanticSimilarity, cosine_similarity
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.datasets.schema import DatasetItem
+from strata_forge.evals.graders.semantic import SemanticSimilarity, cosine_similarity
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

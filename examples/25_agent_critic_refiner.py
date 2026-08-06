@@ -19,8 +19,8 @@ import asyncio
 
 from _common import parse_args, require_env  # type: ignore[import-not-found]
 
-from forge.agents import Agent, critic_refiner_run
-from forge.llm.client import LLMClient
+from strata_forge.agents import Agent, critic_refiner_run
+from strata_forge.llm.client import LLMClient
 
 
 async def _main() -> None:

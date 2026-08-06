@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import asyncio
 
-from forge.core.ids import correlation_id_var
-from forge.tracing import (
+from strata_forge.core.ids import correlation_id_var
+from strata_forge.tracing import (
     record_numeric_metric,
     score_trace,
     traced,

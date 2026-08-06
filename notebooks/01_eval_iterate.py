@@ -2,7 +2,7 @@
 
 Builds an :class:`InMemoryDatasetStore` with a handful of items,
 runs an evaluation across one or more models with
-:func:`forge.evals.runner.run_experiment`, and displays the
+:func:`strata_forge.evals.runner.run_experiment`, and displays the
 outcomes table for quick inspection.
 
 Set the relevant provider env vars before launching with::
@@ -33,7 +33,7 @@ def _(mo):
 def _():
     # Tiny inline dataset — replace with a `DatasetStore.get` call once
     # you have a real one configured.
-    from forge.datasets.schema import Dataset, DatasetItem
+    from strata_forge.datasets.schema import Dataset, DatasetItem
 
     items = (
         DatasetItem(
@@ -78,10 +78,10 @@ def _(models_input):
 
 @app.cell
 async def _(dataset, models_input):
-    from forge.evals.experiment import Experiment, SamplingParams
-    from forge.evals.graders.exact import ExactMatch
-    from forge.evals.runner import run_experiment
-    from forge.llm.client import LLMClient
+    from strata_forge.evals.experiment import Experiment, SamplingParams
+    from strata_forge.evals.graders.exact import ExactMatch
+    from strata_forge.evals.runner import run_experiment
+    from strata_forge.llm.client import LLMClient
 
     chosen = list(models_input.value)
     clients = {m: LLMClient(model=m) for m in chosen}

@@ -1,6 +1,6 @@
-# `forge.evals` — typed experiments, graders, runner, reports, CI gate
+# `strata_forge.evals` — typed experiments, graders, runner, reports, CI gate
 
-`forge.evals` is the evaluation runner: it composes models, prompts,
+`strata_forge.evals` is the evaluation runner: it composes models, prompts,
 datasets, and graders into a typed matrix, runs the LLM calls
 concurrently, grades each response, and produces results downstream
 tools (reports, CI gate) consume. See
@@ -54,16 +54,16 @@ Source: [`src/forge/evals/`](../../src/forge/evals/).
 
 ```python
 import asyncio
-from forge.datasets import Dataset, DatasetItem
-from forge.evals import (
+from strata_forge.datasets import Dataset, DatasetItem
+from strata_forge.evals import (
     ExactMatch,
     Experiment,
     SamplingParams,
     render_markdown,
     run_experiment,
 )
-from forge.llm.client import LLMClient
-from forge.llm.messages import UserMessage
+from strata_forge.llm.client import LLMClient
+from strata_forge.llm.messages import UserMessage
 
 async def main() -> None:
     dataset = Dataset(
@@ -228,7 +228,7 @@ sink the whole batch.
 ## Metrics
 
 ```python
-from forge.evals import (
+from strata_forge.evals import (
     pass_rate,                  # fraction passing one grader
     mean_score,                 # average score across one grader
     pass_rate_by_model,         # {model -> rate}
@@ -248,7 +248,7 @@ that field when constructing the runner's input.
 ## Parameter sweeps
 
 ```python
-from forge.evals import sweep_sampling, sweep
+from strata_forge.evals import sweep_sampling, sweep
 
 # Sweep sampling axes — Cartesian product over temperature × top_p × max_tokens.
 variants = sweep_sampling(
@@ -270,7 +270,7 @@ configurations.
 ## Reports
 
 ```python
-from forge.evals import render_markdown, render_html
+from strata_forge.evals import render_markdown, render_html
 
 print(render_markdown(outcomes, title="Today's eval"))
 
@@ -289,7 +289,7 @@ Both escape user content — XSS isn't a risk in the HTML report.
 ## The CI gate
 
 ```python
-from forge.evals import CIGateThresholds, evaluate_ci_gate
+from strata_forge.evals import CIGateThresholds, evaluate_ci_gate
 
 result = evaluate_ci_gate(
     outcomes,
@@ -320,7 +320,7 @@ custom rules.
 ## Trace replay
 
 ```python
-from forge.evals import ReplayOverrides, replay_trace
+from strata_forge.evals import ReplayOverrides, replay_trace
 
 result = await replay_trace(
     trace_id="abc-123",
@@ -347,7 +347,7 @@ call is wrapped in `asyncio.to_thread`.
 
 ## Lazy-import contract
 
-`import forge.evals` works without any optional extras installed.
+`import strata_forge.evals` works without any optional extras installed.
 SDK imports happen lazily inside the functions that need them:
 
 - `bleu` / `rouge` → `[evals]` extra (`nltk`, `rouge-score`).

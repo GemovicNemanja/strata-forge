@@ -1,6 +1,6 @@
-# `forge.cli` — the `forge` command-line interface
+# `strata_forge.cli` — the `forge` command-line interface
 
-`forge.cli` is the Typer-based CLI for the library. Every Forge
+`strata_forge.cli` is the Typer-based CLI for the library. Every Forge
 module with a useful operator workflow surfaces a command here:
 `doctor`, `chat`, `prompts`, `datasets`, `eval`, `experiments`,
 `compute`, `train`, `serve`. Every command is a thin wrapper
@@ -8,7 +8,7 @@ over its module — Forge never duplicates business logic in the
 CLI layer.
 
 The CLI installs as the `forge` entry point. The same code is
-importable as `forge.cli.app` for testing or for users embedding
+importable as `strata_forge.cli.app` for testing or for users embedding
 the CLI in their own Typer apps.
 
 Module rules: [`src/forge/cli/CLAUDE.md`](../../src/forge/cli/CLAUDE.md).
@@ -85,7 +85,7 @@ Options: `--model`, `--provider`, `--message`, `--system`,
 ## prompts
 
 Inspect the configured `PromptStore`. Backend selection follows
-`forge.config.settings` (Langfuse if configured, otherwise
+`strata_forge.config.settings` (Langfuse if configured, otherwise
 in-memory).
 
 ```bash
@@ -122,7 +122,7 @@ forge eval show <name>
 
 Supported graders for the CLI: `exact_match`,
 `regex:<pattern>`. For richer experiments (LLM-judge, pairwise,
-sweeps), use `forge.evals.runner.run_experiment` directly.
+sweeps), use `strata_forge.evals.runner.run_experiment` directly.
 
 ## experiments
 
@@ -183,7 +183,7 @@ forge train dpo \
 
 For ORPO / KTO / GRPO or fine-grained hyperparameter control,
 drop into Python and use
-`forge.training.PreferenceRunner` directly.
+`strata_forge.training.PreferenceRunner` directly.
 
 ## serve
 

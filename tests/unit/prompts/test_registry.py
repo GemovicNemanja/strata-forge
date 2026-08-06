@@ -1,4 +1,4 @@
-"""Unit tests for `forge.prompts.registry`."""
+"""Unit tests for `strata_forge.prompts.registry`."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 from structlog.testing import capture_logs
 
-from forge.core.errors import ForgeError
-from forge.prompts.registry import (
+from strata_forge.core.errors import ForgeError
+from strata_forge.prompts.registry import (
     PromptNotFoundError,
     PromptRegistry,
     PromptStore,
 )
-from forge.prompts.template import PromptTemplate, PromptValidationError
+from strata_forge.prompts.template import PromptTemplate, PromptValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

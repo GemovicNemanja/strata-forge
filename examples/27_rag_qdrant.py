@@ -25,7 +25,7 @@ import sys
 
 from _common import parse_args, require_env  # type: ignore[import-not-found]
 
-from forge.rag import (
+from strata_forge.rag import (
     DenseRetriever,
     Document,
     LiteLLMEmbedder,
@@ -70,7 +70,7 @@ async def _main() -> None:
         print("[skip] [rag] extra not installed; pip install 'ai-forge[rag]'", file=sys.stderr)
         sys.exit(0)
 
-    from forge.rag import QdrantVectorStore
+    from strata_forge.rag import QdrantVectorStore
 
     embedder = LiteLLMEmbedder(model="text-embedding-3-small")
     store = QdrantVectorStore(

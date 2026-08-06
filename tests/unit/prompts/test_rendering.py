@@ -1,14 +1,14 @@
-"""Unit tests for `forge.prompts.rendering`."""
+"""Unit tests for `strata_forge.prompts.rendering`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.core.errors import ValidationError
-from forge.llm.messages import SystemMessage, UserMessage
-from forge.prompts.cache_aware import CacheHints, StableDynamicSplit
-from forge.prompts.rendering import RenderedPrompt, render
-from forge.prompts.template import PromptTemplate, PromptValidationError
+from strata_forge.core.errors import ValidationError
+from strata_forge.llm.messages import SystemMessage, UserMessage
+from strata_forge.prompts.cache_aware import CacheHints, StableDynamicSplit
+from strata_forge.prompts.rendering import RenderedPrompt, render
+from strata_forge.prompts.template import PromptTemplate, PromptValidationError
 
 _LONG_STABLE = (
     "You are a helpful and concise assistant. Always think step by step "
@@ -297,7 +297,7 @@ class TestCacheHintsIntegration:
         assert result.cache_hints.cache_stable_prefix is True
 
     def test_digest_matches_rendered_stable_text(self) -> None:
-        from forge.core.repro import content_hash
+        from strata_forge.core.repro import content_hash
 
         template = PromptTemplate(
             name="x",

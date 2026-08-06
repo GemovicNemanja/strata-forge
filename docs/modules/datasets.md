@@ -1,10 +1,10 @@
-# `forge.datasets` — typed dataset shapes, versioning, and pluggable backends
+# `strata_forge.datasets` — typed dataset shapes, versioning, and pluggable backends
 
-`forge.datasets` is the dataset layer the eval runner consumes. It
+`strata_forge.datasets` is the dataset layer the eval runner consumes. It
 ships a small core of typed Pydantic models, content-hash versioning,
 an abstract `DatasetStore` plus two concrete backends, and a
 bidirectional bridge to Hugging Face Datasets. Two synthetic-data
-helpers built on `forge.llm` round out the surface. See
+helpers built on `strata_forge.llm` round out the surface. See
 [ADR 0009](../architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md)
 for the canonical-store + exchange-format decision.
 
@@ -46,7 +46,7 @@ Source: [`src/forge/datasets/`](../../src/forge/datasets/).
 
 ```python
 import asyncio
-from forge.datasets import (
+from strata_forge.datasets import (
     Dataset,
     DatasetItem,
     InMemoryDatasetStore,
@@ -128,7 +128,7 @@ class Dataset(BaseModel):
 Item collections are `tuple[...]`, not `list[...]` — Pydantic's
 `frozen=True` only prevents attribute reassignment; a tuple field
 also prevents in-place `.append` mutation through the attribute.
-Construction fails with `forge.core.errors.ValidationError` when two
+Construction fails with `strata_forge.core.errors.ValidationError` when two
 items share an `id`.
 
 ---
@@ -138,7 +138,7 @@ items share an `id`.
 A dataset's version is the SHA-256 of its canonical content:
 
 ```python
-from forge.datasets import dataset_version
+from strata_forge.datasets import dataset_version
 
 version = dataset_version(ds)  # hashes name + sorted item IDs + metadata
 ```
@@ -152,7 +152,7 @@ deduplication.
 `diff(old, new)` returns a `DatasetDelta` partitioning items by ID:
 
 ```python
-from forge.datasets import diff
+from strata_forge.datasets import diff
 
 delta = diff(v1, v2)
 print(f"added: {len(delta.added)}, removed: {len(delta.removed)}")
@@ -187,7 +187,7 @@ Dict-backed, content-hash versioning, natural dedup. Good for
 tests, notebooks, and prototyping.
 
 ```python
-from forge.datasets import InMemoryDatasetStore
+from strata_forge.datasets import InMemoryDatasetStore
 
 store = InMemoryDatasetStore()
 v = await store.put(ds)
@@ -203,13 +203,13 @@ Langfuse UI and addressable via the Langfuse SDK without
 out-of-band bookkeeping.
 
 ```python
-from forge.datasets import LangfuseDatasetStore
+from strata_forge.datasets import LangfuseDatasetStore
 
 # Uses LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY by default.
 store = LangfuseDatasetStore()
 
 # Or inject an already-built client (useful for tests, or when sharing
-# the Langfuse client with forge.tracing).
+# the Langfuse client with strata_forge.tracing).
 store = LangfuseDatasetStore(client=my_langfuse_client)
 ```
 
@@ -221,7 +221,7 @@ the `[langfuse]` extra:
 pip install 'ai-forge[langfuse]'
 ```
 
-Importing `forge.datasets.stores.langfuse` works without the extra —
+Importing `strata_forge.datasets.stores.langfuse` works without the extra —
 the `ImportError` surfaces only when a caller actually constructs
 the store and triggers the lazy SDK import.
 
@@ -230,7 +230,7 @@ the store and triggers the lazy SDK import.
 ## The Hugging Face bridge
 
 ```python
-from forge.datasets import to_hf_dataset, from_hf_dataset
+from strata_forge.datasets import to_hf_dataset, from_hf_dataset
 
 hf_ds = to_hf_dataset(forge_dataset)
 # ... ship to HF Hub, write to parquet, hand to the training pipeline ...
@@ -258,7 +258,7 @@ value (missing column OR per-row `None`) get content-hash IDs via
 `DatasetItem.from_input`.
 
 Requires the `[hf]` extra: `pip install 'ai-forge[hf]'`. Importing
-`forge.datasets.hf_bridge` works without it; the `ImportError`
+`strata_forge.datasets.hf_bridge` works without it; the `ImportError`
 surfaces only when a caller invokes `to_hf_dataset`.
 
 ---
@@ -278,8 +278,8 @@ batches, and bails out early when a whole batch yields no novel
 items. Capped by `max_attempts`.
 
 ```python
-from forge.datasets import self_instruct
-from forge.llm.client import LLMClient
+from strata_forge.datasets import self_instruct
+from strata_forge.llm.client import LLMClient
 
 client = LLMClient(model="claude-opus-4-7", provider="anthropic")
 new_items = await self_instruct(
@@ -302,7 +302,7 @@ that already carry a non-`None` `expected_output` pass through
 unchanged.
 
 ```python
-from forge.datasets import distill
+from strata_forge.datasets import distill
 
 labeled = await distill(
     inputs=unlabeled_dataset,
@@ -317,7 +317,7 @@ labeled = await distill(
 
 ## Lazy-import contract
 
-`import forge.datasets` works without `[langfuse]` or `[hf]`
+`import strata_forge.datasets` works without `[langfuse]` or `[hf]`
 installed. Both SDKs are imported lazily inside the functions that
 need them; the `ImportError` surfaces only when a caller actually
 constructs a `LangfuseDatasetStore` or invokes `to_hf_dataset`.
@@ -348,5 +348,5 @@ Install it with: pip install 'ai-forge[hf]'.
   of novel patterns within `max_attempts`. Increase `max_attempts`,
   raise `temperature`, or supply more diverse seeds.
 - **`distill` raises**: the teacher's `LLMClient.complete` exception
-  propagates verbatim. Inspect via `forge.llm.errors` —
+  propagates verbatim. Inspect via `strata_forge.llm.errors` —
   `ProviderError` subclasses tell you exactly what failed.

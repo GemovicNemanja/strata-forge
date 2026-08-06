@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.azure`."""
+"""Unit tests for `strata_forge.llm.providers.azure`."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from forge.llm.providers.azure import AzureProvider
-from forge.llm.providers.config import AzureConfig
+from strata_forge.llm.providers.azure import AzureProvider
+from strata_forge.llm.providers.config import AzureConfig
 
 
 @pytest.fixture(autouse=True)

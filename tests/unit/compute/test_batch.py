@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.batch.BatchInferenceRunner`."""
+"""Unit tests for `strata_forge.compute.batch.BatchInferenceRunner`."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
-from forge.llm.messages import UserMessage
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
+from strata_forge.llm.messages import UserMessage
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _response(text: str = "ok") -> LLMResponse:

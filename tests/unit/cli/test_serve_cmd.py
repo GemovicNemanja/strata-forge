@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.serve`."""
+"""Unit tests for `strata_forge.cli.serve`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.compute.job import Job
+from strata_forge.cli.main import app
+from strata_forge.compute.job import Job
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,8 +71,8 @@ def fake_local_submit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[s
             state["submitted"] = task
             return Job(id="serve-job-1", backend="local", task_name=task.name)
 
-    monkeypatch.setattr("forge.compute.backends.local.LocalBackend", _FakeLocalBackend)
-    monkeypatch.setattr("forge.cli.compute._STATE_DIR", tmp_path / "jobs")
+    monkeypatch.setattr("strata_forge.compute.backends.local.LocalBackend", _FakeLocalBackend)
+    monkeypatch.setattr("strata_forge.cli.compute._STATE_DIR", tmp_path / "jobs")
     return state
 
 

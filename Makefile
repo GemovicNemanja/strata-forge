@@ -18,7 +18,7 @@ fmt: ## Format source with ruff
 lint: ## Lint source with ruff
 	$(UV) ruff check $(PY_DIRS)
 
-type: ## Type-check with pyright (strict on src/forge)
+type: ## Type-check with pyright (strict on src/strata_forge)
 	$(UV) pyright
 
 check: lint type ## Run lint + type-check
@@ -27,7 +27,7 @@ test: ## Run unit tests
 	$(UV) pytest tests/unit
 
 test-cov: ## Run unit tests with coverage report
-	$(UV) pytest tests/unit --cov=forge --cov-report=term-missing
+	$(UV) pytest tests/unit --cov=strata_forge --cov-report=term-missing
 
 integration: ## Run integration tests (requires `make stack-up` first)
 	$(UV) pytest -m integration

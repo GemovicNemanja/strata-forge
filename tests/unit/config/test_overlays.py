@@ -1,4 +1,4 @@
-"""Unit tests for `forge.config.overlays`."""
+"""Unit tests for `strata_forge.config.overlays`."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.config.overlays import (
+from strata_forge.config.overlays import (
     DEFAULT_PROFILE_DIR,
     deep_merge,
     load_overlay,
     overlay_path_for_profile,
 )
-from forge.core.errors import ConfigError
+from strata_forge.core.errors import ConfigError
 
 if TYPE_CHECKING:
     from pathlib import Path

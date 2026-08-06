@@ -1,4 +1,4 @@
-"""Unit tests for `forge.rag.qdrant`."""
+"""Unit tests for `strata_forge.rag.qdrant`."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from forge.rag.qdrant import QdrantVectorStore
-from forge.rag.vector_store import VectorItem, VectorStore
+from strata_forge.rag.qdrant import QdrantVectorStore
+from strata_forge.rag.vector_store import VectorItem, VectorStore
 
 # ---------------------------------------------------------------------------
 # Fake qdrant_client module + AsyncQdrantClient

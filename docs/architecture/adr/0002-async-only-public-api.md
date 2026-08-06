@@ -14,9 +14,9 @@ A common anti-pattern in async Python libraries is to maintain two parallel APIs
 ## Decision
 
 - Every public function on every Forge module is `async`.
-- Sync wrappers live exclusively in `forge.sync`. Each wrapper is a thin shim over the async equivalent (`return asyncio.run(forge.llm.complete(...))`).
+- Sync wrappers live exclusively in `strata_forge.sync`. Each wrapper is a thin shim over the async equivalent (`return asyncio.run(strata_forge.llm.complete(...))`).
 - Internal calls between Forge modules are async end-to-end. We never call `httpx.Client` (sync) or `requests` from production code paths.
-- The CLI (`forge.cli`) calls into `forge.sync` for ergonomics; commands that need async features (streaming) handle their own event loops via `anyio` / `asyncio`.
+- The CLI (`strata_forge.cli`) calls into `strata_forge.sync` for ergonomics; commands that need async features (streaming) handle their own event loops via `anyio` / `asyncio`.
 
 ## Consequences
 
@@ -29,17 +29,17 @@ A common anti-pattern in async Python libraries is to maintain two parallel APIs
 
 **Negative**
 
-- Notebook users in a pure-sync mental model must remember to use `forge.sync` for one-shot calls. Mitigation: `from forge.sync import complete, stream, run_tool_loop, …` is one import.
+- Notebook users in a pure-sync mental model must remember to use `strata_forge.sync` for one-shot calls. Mitigation: `from strata_forge.sync import complete, stream, run_tool_loop, …` is one import.
 - New contributors need familiarity with `async def` / `await`. We accept this as table stakes for modern Python work.
 - Pure-sync libraries we depend on (e.g. some training utilities) must be wrapped via `anyio.to_thread.run_sync` when called from async paths. We do this inline where needed.
 
 **Mitigations**
 
-- `forge.sync` is generated mechanically wherever feasible — when adding a new async public function, add the sync wrapper in the same PR; CI lint can check for the pair.
+- `strata_forge.sync` is generated mechanically wherever feasible — when adding a new async public function, add the sync wrapper in the same PR; CI lint can check for the pair.
 - Marimo notebooks (top-level `await` supported) sidestep most of the awkwardness.
 
 ## Alternatives considered
 
 1. **Sync-only public API, async only internally.** Forces async-savvy users to fight the abstraction, blocks event-loop integration with agent frameworks (PydanticAI is async-native).
 2. **Dual sync + async APIs at parity.** Doubles maintenance and test surface; the two implementations drift.
-3. **Async-only, no sync wrappers.** Forces CLI and notebook authors to write `asyncio.run(...)` everywhere; small but constant friction. The `forge.sync` namespace removes it cheaply.
+3. **Async-only, no sync wrappers.** Forces CLI and notebook authors to write `asyncio.run(...)` everywhere; small but constant friction. The `strata_forge.sync` namespace removes it cheaply.

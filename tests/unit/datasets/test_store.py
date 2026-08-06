@@ -1,11 +1,11 @@
-"""Unit tests for `forge.datasets.store` — the abstract interface + error type."""
+"""Unit tests for `strata_forge.datasets.store` — the abstract interface + error type."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.core.errors import ForgeError
-from forge.datasets.store import DatasetNotFoundError, DatasetStore
+from strata_forge.core.errors import ForgeError
+from strata_forge.datasets.store import DatasetNotFoundError, DatasetStore
 
 
 class TestDatasetNotFoundError:

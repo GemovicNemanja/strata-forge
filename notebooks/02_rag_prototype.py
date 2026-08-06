@@ -69,11 +69,11 @@ def _(mo, query_input, top_k_input):
 
 @app.cell
 async def _(documents, query_input, top_k_input):
-    from forge.rag.chunking import RecursiveChunker
-    from forge.rag.dense import DenseRetriever
-    from forge.rag.embedding import LiteLLMEmbedder
-    from forge.rag.pipeline import RAGPipeline
-    from forge.rag.vector_store import InMemoryVectorStore
+    from strata_forge.rag.chunking import RecursiveChunker
+    from strata_forge.rag.dense import DenseRetriever
+    from strata_forge.rag.embedding import LiteLLMEmbedder
+    from strata_forge.rag.pipeline import RAGPipeline
+    from strata_forge.rag.vector_store import InMemoryVectorStore
 
     pipeline = RAGPipeline(
         chunker=RecursiveChunker(chunk_size=200, chunk_overlap=20),
