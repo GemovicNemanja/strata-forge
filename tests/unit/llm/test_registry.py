@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.registry`."""
+"""Unit tests for `strata_forge.llm.registry`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from forge.core.errors import RegistryError
-from forge.llm.registry import (
+from strata_forge.core.errors import RegistryError
+from strata_forge.llm.registry import (
     Capabilities,
     Model,
     Pricing,
@@ -16,7 +16,7 @@ from forge.llm.registry import (
     Registry,
     _load_registry,  # pyright: ignore[reportPrivateUsage]
 )
-from forge.llm.registry import (
+from strata_forge.llm.registry import (
     registry as global_registry,
 )
 

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.chat`."""
+"""Unit tests for `strata_forge.cli.chat`."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.cli.main import app
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 runner = CliRunner()
 
@@ -43,13 +43,13 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
         complete = AsyncMock(return_value=_response("hello from forge"))
 
-    monkeypatch.setattr("forge.llm.client.LLMClient", _FakeClient)
+    monkeypatch.setattr("strata_forge.llm.client.LLMClient", _FakeClient)
 
     # Make every model resolve cleanly. The `registry` name on the
-    # forge.llm package shadows the submodule, so target sys.modules.
+    # strata_forge.llm package shadows the submodule, so target sys.modules.
     fake_registry = MagicMock()
     fake_registry.get = MagicMock(return_value=None)
-    registry_module = sys.modules["forge.llm.registry"]
+    registry_module = sys.modules["strata_forge.llm.registry"]
     monkeypatch.setattr(registry_module, "registry", fake_registry)
 
     return state
@@ -76,7 +76,7 @@ class TestOneShot:
     def test_unknown_model_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_registry = MagicMock()
         fake_registry.get = MagicMock(side_effect=Exception("nope"))
-        registry_module = sys.modules["forge.llm.registry"]
+        registry_module = sys.modules["strata_forge.llm.registry"]
         monkeypatch.setattr(registry_module, "registry", fake_registry)
 
         result = runner.invoke(app, ["chat", "--model", "bogus-model", "--message", "hi"])

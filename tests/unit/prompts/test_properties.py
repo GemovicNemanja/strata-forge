@@ -1,4 +1,4 @@
-"""Property-based tests for `forge.prompts`.
+"""Property-based tests for `strata_forge.prompts`.
 
 These are the tests that don't fit cleanly into per-module unit files —
 broad invariants we want to hold across the design rather than a specific
@@ -12,10 +12,10 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from forge.prompts.cache_aware import StableDynamicSplit
-from forge.prompts.rendering import render
-from forge.prompts.template import PromptTemplate, PromptValidationError
-from forge.prompts.variables import (
+from strata_forge.prompts.cache_aware import StableDynamicSplit
+from strata_forge.prompts.rendering import render
+from strata_forge.prompts.template import PromptTemplate, PromptValidationError
+from strata_forge.prompts.variables import (
     extract_variables,
     validate_template_variables,
 )

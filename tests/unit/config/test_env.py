@@ -1,10 +1,10 @@
-"""Unit tests for `forge.config.env`."""
+"""Unit tests for `strata_forge.config.env`."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from forge.config.env import load_env_file
+from strata_forge.config.env import load_env_file
 
 if TYPE_CHECKING:
     from pathlib import Path

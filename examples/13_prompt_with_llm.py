@@ -15,8 +15,8 @@ import asyncio
 
 from _common import parse_args, print_summary, require_env
 
-from forge.llm import LLMClient
-from forge.prompts import PromptTemplate, render
+from strata_forge.llm import LLMClient
+from strata_forge.prompts import PromptTemplate, render
 
 
 async def _main() -> None:

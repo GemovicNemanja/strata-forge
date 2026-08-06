@@ -1,11 +1,11 @@
-"""Unit tests for `forge.cli.helpers`."""
+"""Unit tests for `strata_forge.cli.helpers`."""
 
 from __future__ import annotations
 
 import pytest
 import typer
 
-from forge.cli.helpers import (
+from strata_forge.cli.helpers import (
     dataset_store_from_settings,
     error_exit,
     prompt_store_from_settings,
@@ -43,8 +43,8 @@ class TestErrorExit:
 
 class TestStoreFactories:
     def test_prompt_store_falls_back_to_memory(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from forge.config.settings import reset_settings
-        from forge.prompts.stores.memory import InMemoryPromptStore
+        from strata_forge.config.settings import reset_settings
+        from strata_forge.prompts.stores.memory import InMemoryPromptStore
 
         # Clear Langfuse env so settings.langfuse.enabled is False.
         for k in (
@@ -59,8 +59,8 @@ class TestStoreFactories:
         assert isinstance(store, InMemoryPromptStore)
 
     def test_dataset_store_falls_back_to_memory(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from forge.config.settings import reset_settings
-        from forge.datasets.stores.memory import InMemoryDatasetStore
+        from strata_forge.config.settings import reset_settings
+        from strata_forge.datasets.stores.memory import InMemoryDatasetStore
 
         for k in (
             "LANGFUSE_PUBLIC_KEY",
@@ -78,7 +78,7 @@ class TestLangfuseBranch:
     """When LANGFUSE_* env vars are set, the factories should pick Langfuse."""
 
     def test_prompt_store_picks_langfuse(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from forge.config.settings import reset_settings
+        from strata_forge.config.settings import reset_settings
 
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
@@ -90,14 +90,14 @@ class TestLangfuseBranch:
             def __new__(cls) -> object:  # type: ignore[misc]
                 return sentinel
 
-        import forge.prompts.stores.langfuse as lf_mod
+        import strata_forge.prompts.stores.langfuse as lf_mod
 
         monkeypatch.setattr(lf_mod, "LangfusePromptStore", _FakeLangfuseStore)
         result = prompt_store_from_settings()
         assert result is sentinel
 
     def test_dataset_store_picks_langfuse(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from forge.config.settings import reset_settings
+        from strata_forge.config.settings import reset_settings
 
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
@@ -109,7 +109,7 @@ class TestLangfuseBranch:
             def __new__(cls) -> object:  # type: ignore[misc]
                 return sentinel
 
-        import forge.datasets.stores.langfuse as lf_mod
+        import strata_forge.datasets.stores.langfuse as lf_mod
 
         monkeypatch.setattr(lf_mod, "LangfuseDatasetStore", _FakeLangfuseDataset)
         result = dataset_store_from_settings()
@@ -118,14 +118,14 @@ class TestLangfuseBranch:
     def test_prompt_store_missing_extra_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import sys
 
-        from forge.config.settings import reset_settings
+        from strata_forge.config.settings import reset_settings
 
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
         reset_settings()
 
         # Drop the langfuse store module so the lazy import raises.
-        monkeypatch.setitem(sys.modules, "forge.prompts.stores.langfuse", None)
+        monkeypatch.setitem(sys.modules, "strata_forge.prompts.stores.langfuse", None)
 
         with pytest.raises(typer.Exit):
             prompt_store_from_settings()
@@ -133,13 +133,13 @@ class TestLangfuseBranch:
     def test_dataset_store_missing_extra_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import sys
 
-        from forge.config.settings import reset_settings
+        from strata_forge.config.settings import reset_settings
 
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
         reset_settings()
 
-        monkeypatch.setitem(sys.modules, "forge.datasets.stores.langfuse", None)
+        monkeypatch.setitem(sys.modules, "strata_forge.datasets.stores.langfuse", None)
 
         with pytest.raises(typer.Exit):
             dataset_store_from_settings()

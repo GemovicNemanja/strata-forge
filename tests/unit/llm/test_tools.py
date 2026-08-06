@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.tools`."""
+"""Unit tests for `strata_forge.llm.tools`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from forge.core.errors import ForgeError, ValidationError
-from forge.llm.tools import Tool, ToolDeclaration, ToolLoopExceededError, tool
+from strata_forge.core.errors import ForgeError, ValidationError
+from strata_forge.llm.tools import Tool, ToolDeclaration, ToolLoopExceededError, tool
 
 
 class _WeatherArgs(BaseModel):

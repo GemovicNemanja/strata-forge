@@ -1,4 +1,4 @@
-"""Unit tests for `forge.training.preference`."""
+"""Unit tests for `strata_forge.training.preference`."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.training.peft import LoRAConfig
-from forge.training.preference import (
+from strata_forge.training.peft import LoRAConfig
+from strata_forge.training.preference import (
     DPOConfig,
     GRPOConfig,
     KTOConfig,

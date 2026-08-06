@@ -1,10 +1,10 @@
-"""Unit tests for `forge.cli.main` — top-level Typer wiring."""
+"""Unit tests for `strata_forge.cli.main` — top-level Typer wiring."""
 
 from __future__ import annotations
 
 from typer.testing import CliRunner
 
-from forge.cli.main import app
+from strata_forge.cli.main import app
 
 runner = CliRunner()
 

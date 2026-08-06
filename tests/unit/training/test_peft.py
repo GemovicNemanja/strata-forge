@@ -1,4 +1,4 @@
-"""Unit tests for `forge.training.peft`."""
+"""Unit tests for `strata_forge.training.peft`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.training.peft import LoRAConfig, QLoRAConfig
+from strata_forge.training.peft import LoRAConfig, QLoRAConfig
 
 
 class TestLoRAConfig:

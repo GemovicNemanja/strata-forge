@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.job`."""
+"""Unit tests for `strata_forge.compute.job`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from forge.compute.job import Job, JobStatus
+from strata_forge.compute.job import Job, JobStatus
 
 
 class TestJob:

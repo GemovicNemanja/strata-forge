@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.fallback`."""
+"""Unit tests for `strata_forge.llm.fallback`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 
-from forge.core.errors import (
+from strata_forge.core.errors import (
     FallbackExhaustedError,
     ProviderAuthError,
     ProviderBadRequestError,
@@ -17,7 +17,7 @@ from forge.core.errors import (
     ProviderTimeoutError,
     RegistryError,
 )
-from forge.llm.fallback import (
+from strata_forge.llm.fallback import (
     ModelFallback,
     normalize_fallback_chain,
     run_with_fallback,
@@ -26,7 +26,7 @@ from forge.llm.fallback import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from forge.llm.routing import ModelRoute
+    from strata_forge.llm.routing import ModelRoute
 
 
 # ---------------------------------------------------------------------------

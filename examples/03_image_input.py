@@ -16,7 +16,7 @@ import asyncio
 
 from _common import parse_args, print_summary, require_env
 
-from forge.llm import ImageContent, LLMClient, TextPart, UserMessage
+from strata_forge.llm import ImageContent, LLMClient, TextPart, UserMessage
 
 
 async def _main() -> None:

@@ -1,15 +1,15 @@
-"""Unit tests for `forge.evals.graders.base.Grader`."""
+"""Unit tests for `strata_forge.evals.graders.base.Grader`."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from forge.evals.experiment import GraderResult
-from forge.evals.graders import Grader
+from strata_forge.evals.experiment import GraderResult
+from strata_forge.evals.graders import Grader
 
 if TYPE_CHECKING:
-    from forge.datasets.schema import DatasetItem
-    from forge.llm.responses import LLMResponse
+    from strata_forge.datasets.schema import DatasetItem
+    from strata_forge.llm.responses import LLMResponse
 
 
 class _DuckTypedGrader:

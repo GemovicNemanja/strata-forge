@@ -2,7 +2,7 @@
 
 Typed, async-first baseline repository for AI/LLM experiments — inference, evaluation, fine-tuning, and remote compute orchestration across the major foundation-model providers (OpenAI, Anthropic, Google).
 
-Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing. Async-first public API with sync wrappers in `forge.sync` for CLI / notebook ergonomics. Heavy optional dependencies (training, serving, remote compute) live behind extras so the base install stays light.
+Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing. Async-first public API with sync wrappers in `strata_forge.sync` for CLI / notebook ergonomics. Heavy optional dependencies (training, serving, remote compute) live behind extras so the base install stays light.
 
 > **Status:** Phase 0 scaffolding. Proprietary; not open source.
 

@@ -16,14 +16,14 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
 
-from forge.compute.batch import BatchInferenceResult
-from forge.pipelines import inference_runner as ir
+from strata_forge.compute.batch import BatchInferenceResult
+from strata_forge.pipelines import inference_runner as ir
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
 
-    from forge.llm import LLMClient, LLMResponse
+    from strata_forge.llm import LLMClient, LLMResponse
 
 _TOKEN = "hf_secretwritetoken1234567890"
 

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.routing`."""
+"""Unit tests for `strata_forge.llm.routing`."""
 
 from __future__ import annotations
 
@@ -6,15 +6,15 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from forge.core.errors import RegistryError
-from forge.llm.registry import (
+from strata_forge.core.errors import RegistryError
+from strata_forge.llm.registry import (
     Capabilities,
     Model,
     Pricing,
     ProviderRoute,
     Registry,
 )
-from forge.llm.routing import ModelRoute, resolve
+from strata_forge.llm.routing import ModelRoute, resolve
 
 
 def _make_test_registry() -> Registry:

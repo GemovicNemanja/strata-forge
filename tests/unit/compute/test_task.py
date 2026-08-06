@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.task`."""
+"""Unit tests for `strata_forge.compute.task`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-from forge.compute.task import ResourceSpec, Task
+from strata_forge.compute.task import ResourceSpec, Task
 
 if TYPE_CHECKING:
     from pathlib import Path

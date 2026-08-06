@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.bedrock`."""
+"""Unit tests for `strata_forge.llm.providers.bedrock`."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from forge.llm.providers.bedrock import BedrockProvider
-from forge.llm.providers.config import BedrockConfig
+from strata_forge.llm.providers.bedrock import BedrockProvider
+from strata_forge.llm.providers.config import BedrockConfig
 
 
 @pytest.fixture(autouse=True)

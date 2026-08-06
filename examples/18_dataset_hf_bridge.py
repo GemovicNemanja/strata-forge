@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sys
 
-from forge.datasets import (
+from strata_forge.datasets import (
     Dataset,
     DatasetItem,
     from_hf_dataset,

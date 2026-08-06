@@ -1,11 +1,11 @@
-"""Unit tests for `forge.core.repro`."""
+"""Unit tests for `strata_forge.core.repro`."""
 
 from __future__ import annotations
 
 import random
 import sys
 
-from forge.core.repro import content_hash, env_snapshot, set_seed
+from strata_forge.core.repro import content_hash, env_snapshot, set_seed
 
 
 class TestSetSeed:

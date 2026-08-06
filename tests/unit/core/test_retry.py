@@ -1,10 +1,10 @@
-"""Unit tests for `forge.core.retry`."""
+"""Unit tests for `strata_forge.core.retry`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.core.errors import (
+from strata_forge.core.errors import (
     ProviderAuthError,
     ProviderBadRequestError,
     ProviderContentFilterError,
@@ -12,7 +12,7 @@ from forge.core.errors import (
     ProviderServerError,
     ProviderTimeoutError,
 )
-from forge.core.retry import DEFAULT_RETRY_ON, retry
+from strata_forge.core.retry import DEFAULT_RETRY_ON, retry
 
 
 class TestDefaults:

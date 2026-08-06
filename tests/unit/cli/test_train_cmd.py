@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.train`."""
+"""Unit tests for `strata_forge.cli.train`."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.stores.memory import InMemoryDatasetStore
+from strata_forge.cli.main import app
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.stores.memory import InMemoryDatasetStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,14 +30,14 @@ def store_with_dataset(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
 
     store = InMemoryDatasetStore()
     asyncio.run(store.put(_make_dataset()))
-    monkeypatch.setattr("forge.cli.train.dataset_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.train.dataset_store_from_settings", lambda: store)
     return store
 
 
 @pytest.fixture
 def empty_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
     store = InMemoryDatasetStore()
-    monkeypatch.setattr("forge.cli.train.dataset_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.train.dataset_store_from_settings", lambda: store)
     return store
 
 
@@ -58,7 +58,7 @@ def fake_sft_runner(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
             return _Result()
 
-    monkeypatch.setattr("forge.training.sft.SFTRunner", _FakeRunner)
+    monkeypatch.setattr("strata_forge.training.sft.SFTRunner", _FakeRunner)
     return state
 
 
@@ -79,7 +79,7 @@ def fake_pref_runner(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
             return _Result()
 
-    monkeypatch.setattr("forge.training.preference.PreferenceRunner", _FakeRunner)
+    monkeypatch.setattr("strata_forge.training.preference.PreferenceRunner", _FakeRunner)
     return state
 
 
@@ -133,7 +133,7 @@ class TestSFT:
                 "32",
             ],
         )
-        from forge.training.peft import LoRAConfig
+        from strata_forge.training.peft import LoRAConfig
 
         peft = fake_sft_runner["init_args"]["peft_config"]
         assert isinstance(peft, LoRAConfig)
@@ -160,7 +160,7 @@ class TestSFT:
                 "qlora",
             ],
         )
-        from forge.training.peft import QLoRAConfig
+        from strata_forge.training.peft import QLoRAConfig
 
         peft = fake_sft_runner["init_args"]["peft_config"]
         assert isinstance(peft, QLoRAConfig)

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.datasets.schema`."""
+"""Unit tests for `strata_forge.datasets.schema`."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from forge.core.errors import ValidationError
-from forge.core.repro import content_hash
-from forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.core.errors import ValidationError
+from strata_forge.core.repro import content_hash
+from strata_forge.datasets.schema import Dataset, DatasetItem
 
 # ---------------------------------------------------------------------------
 # DatasetItem

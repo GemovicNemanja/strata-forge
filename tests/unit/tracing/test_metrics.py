@@ -1,4 +1,4 @@
-"""Unit tests for `forge.tracing.metrics`."""
+"""Unit tests for `strata_forge.tracing.metrics`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.tracing.metrics import record_categorical_metric, record_numeric_metric
+from strata_forge.tracing.metrics import record_categorical_metric, record_numeric_metric
 
 
 def _install_fake_langfuse(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
@@ -203,10 +203,10 @@ class TestRecordCategoricalMetric:
 
 class TestModuleSurface:
     def test_re_exported_from_tracing(self) -> None:
-        from forge.tracing import (
+        from strata_forge.tracing import (
             record_categorical_metric as exported_cat,
         )
-        from forge.tracing import (
+        from strata_forge.tracing import (
             record_numeric_metric as exported_num,
         )
 

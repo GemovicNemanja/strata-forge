@@ -1,14 +1,14 @@
-"""Unit tests for `forge.evals.graders.pairwise`."""
+"""Unit tests for `strata_forge.evals.graders.pairwise`."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 from unittest.mock import AsyncMock
 
-from forge.datasets.schema import DatasetItem
-from forge.evals.graders.pairwise import PairwiseGrader, PairwiseVerdict
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.datasets.schema import DatasetItem
+from strata_forge.evals.graders.pairwise import PairwiseGrader, PairwiseVerdict
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _response(text: str) -> LLMResponse:

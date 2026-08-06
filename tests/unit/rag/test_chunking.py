@@ -1,11 +1,11 @@
-"""Unit tests for `forge.rag.chunking`."""
+"""Unit tests for `strata_forge.rag.chunking`."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from forge.rag.chunking import Chunk, Chunker, Document, RecursiveChunker
+from strata_forge.rag.chunking import Chunk, Chunker, Document, RecursiveChunker
 
 # ---------------------------------------------------------------------------
 # Document

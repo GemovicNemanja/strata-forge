@@ -1,4 +1,4 @@
-"""Unit tests for `forge.rag.rerankers`."""
+"""Unit tests for `strata_forge.rag.rerankers`."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from forge.rag.chunking import Chunk
-from forge.rag.rerankers import (
+from strata_forge.rag.chunking import Chunk
+from strata_forge.rag.rerankers import (
     CohereReranker,
     CrossEncoderReranker,
     Reranker,
 )
-from forge.rag.retrieval import RetrievalResult
+from strata_forge.rag.retrieval import RetrievalResult
 
 
 def _result(chunk_id: str, text: str, score: float = 1.0) -> RetrievalResult:

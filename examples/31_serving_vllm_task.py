@@ -6,10 +6,10 @@ backend. No GPU is required.
 
 To actually launch one of these you'd do something like::
 
-    from forge.compute import LocalBackend
-    from forge.compute.serving import build_vllm_task, serving_endpoint
-    from forge.llm import LLMClient
-    from forge.llm.providers.config import OpenAICompatConfig
+    from strata_forge.compute import LocalBackend
+    from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+    from strata_forge.llm import LLMClient
+    from strata_forge.llm.providers.config import OpenAICompatConfig
 
     task = build_vllm_task("meta-llama/Llama-3.1-8B-Instruct", port=8000)
     backend = LocalBackend()
@@ -30,8 +30,8 @@ Usage::
 
 from __future__ import annotations
 
-from forge.compute import ResourceSpec
-from forge.compute.serving import build_sglang_task, build_tgi_task, build_vllm_task
+from strata_forge.compute import ResourceSpec
+from strata_forge.compute.serving import build_sglang_task, build_tgi_task, build_vllm_task
 
 
 def _main() -> None:

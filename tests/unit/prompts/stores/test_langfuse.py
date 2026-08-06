@@ -1,4 +1,4 @@
-"""Unit tests for `forge.prompts.stores.langfuse`."""
+"""Unit tests for `strata_forge.prompts.stores.langfuse`."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.core.errors import ForgeError
-from forge.prompts.registry import PromptNotFoundError, PromptStore
-from forge.prompts.stores.langfuse import LangfusePromptStore
-from forge.prompts.template import PromptTemplate
+from strata_forge.core.errors import ForgeError
+from strata_forge.prompts.registry import PromptNotFoundError, PromptStore
+from strata_forge.prompts.stores.langfuse import LangfusePromptStore
+from strata_forge.prompts.template import PromptTemplate
 
 
 def _fake_prompt(

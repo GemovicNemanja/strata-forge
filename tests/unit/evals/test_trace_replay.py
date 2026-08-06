@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.trace_replay`."""
+"""Unit tests for `strata_forge.evals.trace_replay`."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from forge.evals.trace_replay import (
+from strata_forge.evals.trace_replay import (
     ReplayOverrides,
     extract_messages_from_trace,
     replay_trace,
 )
-from forge.llm.messages import AssistantMessage, SystemMessage, UserMessage
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.llm.messages import AssistantMessage, SystemMessage, UserMessage
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _new_response(text: str = "new") -> LLMResponse:
@@ -238,7 +238,7 @@ class TestClientConstruction:
     ) -> None:
         monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
         monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         with pytest.raises(RuntimeError, match="not configured"):
@@ -253,7 +253,7 @@ class TestClientConstruction:
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
         monkeypatch.setitem(sys.modules, "langfuse", None)
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         with pytest.raises(ImportError, match=r"\[langfuse\] extra"):
@@ -269,7 +269,7 @@ class TestClientConstruction:
         # Even with no LANGFUSE env vars set, an explicit client works.
         monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
         monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         trace = FakeTrace(input=[{"role": "user", "content": "hi"}], output="x")
@@ -286,7 +286,7 @@ class TestClientConstruction:
         monkeypatch.setenv("LANGFUSE_HOST", "http://test")
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         # Inject a fake langfuse module so the lazy import succeeds.

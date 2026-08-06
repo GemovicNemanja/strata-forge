@@ -24,8 +24,8 @@ import asyncio
 
 from _common import parse_args, require_env  # type: ignore[import-not-found]
 
-from forge.datasets import Dataset, DatasetItem, distill, self_instruct
-from forge.llm.client import LLMClient
+from strata_forge.datasets import Dataset, DatasetItem, distill, self_instruct
+from strata_forge.llm.client import LLMClient
 
 
 def _seeds() -> tuple[DatasetItem, ...]:

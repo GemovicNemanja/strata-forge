@@ -1,4 +1,4 @@
-"""Unit tests for `forge.core.logging`."""
+"""Unit tests for `strata_forge.core.logging`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import time
 import pytest
 from structlog.testing import capture_logs
 
-from forge.core.ids import correlation_id_var, set_correlation_id
-from forge.core.logging import (
+from strata_forge.core.ids import correlation_id_var, set_correlation_id
+from strata_forge.core.logging import (
     add_correlation_id,
     configure_logging,
     get_logger,

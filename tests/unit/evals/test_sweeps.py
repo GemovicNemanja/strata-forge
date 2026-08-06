@@ -1,11 +1,11 @@
-"""Unit tests for `forge.evals.sweeps`."""
+"""Unit tests for `strata_forge.evals.sweeps`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.evals.experiment import Experiment, SamplingParams
-from forge.evals.sweeps import sweep, sweep_sampling
+from strata_forge.evals.experiment import Experiment, SamplingParams
+from strata_forge.evals.sweeps import sweep, sweep_sampling
 
 
 def _base() -> Experiment:

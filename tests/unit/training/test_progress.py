@@ -1,4 +1,4 @@
-"""Unit tests for `forge.training.progress` (live training-progress events)."""
+"""Unit tests for `strata_forge.training.progress` (live training-progress events)."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.training.progress import (
+from strata_forge.training.progress import (
     JsonlProgressWriter,
     ProgressEvent,
     attach,
     trainer_callback,
 )
-from forge.training.sft import SFTConfig, SFTRunner
+from strata_forge.training.sft import SFTConfig, SFTRunner
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 
-from forge.prompts import PromptTemplate, render
+from strata_forge.prompts import PromptTemplate, render
 
 
 def _main() -> None:

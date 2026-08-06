@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.backends.local.LocalBackend`."""
+"""Unit tests for `strata_forge.compute.backends.local.LocalBackend`."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.compute import Backend, LocalBackend, Task
+from strata_forge.compute import Backend, LocalBackend, Task
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from forge.compute.job import Job
+    from strata_forge.compute.job import Job
 
 
 async def _wait_until_terminal(
@@ -184,8 +184,10 @@ class TestCancel:
         # Race window: the runner coroutine is scheduled but hasn't yet
         # called create_subprocess_exec. The cancel path should mark the
         # job cancelled without crashing.
-        from forge.compute.backends.local import _JobState  # pyright: ignore[reportPrivateUsage]
-        from forge.compute.job import Job
+        from strata_forge.compute.backends.local import (
+            _JobState,  # pyright: ignore[reportPrivateUsage]
+        )
+        from strata_forge.compute.job import Job
 
         backend = LocalBackend()
         job_id = "synth-cancel-1"
@@ -276,7 +278,7 @@ class TestCleanup:
 
     async def test_status_unknown_job_raises(self) -> None:
         backend = LocalBackend()
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(id="not-real", backend="local", task_name="t")
         with pytest.raises(ValueError, match="unknown job"):
@@ -284,7 +286,7 @@ class TestCleanup:
 
     async def test_status_wrong_backend_rejected(self) -> None:
         backend = LocalBackend()
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         job = Job(id="x", backend="some-other-backend", task_name="t")
         with pytest.raises(ValueError, match="backend"):

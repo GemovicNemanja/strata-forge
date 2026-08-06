@@ -22,7 +22,7 @@ import asyncio
 
 from _common import parse_args, require_env  # type: ignore[import-not-found]
 
-from forge.rag import (
+from strata_forge.rag import (
     DenseRetriever,
     Document,
     InMemoryVectorStore,

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.experiment`."""
+"""Unit tests for `strata_forge.evals.experiment`."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from typing import Any
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from forge.evals.experiment import (
+from strata_forge.evals.experiment import (
     Experiment,
     GraderResult,
     Outcome,
     SamplingParams,
     Trial,
 )
-from forge.llm.responses import Usage
+from strata_forge.llm.responses import Usage
 
 
 def _usage(input_tokens: int = 10, output_tokens: int = 5) -> Usage:

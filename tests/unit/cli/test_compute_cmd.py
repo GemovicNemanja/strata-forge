@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.compute`."""
+"""Unit tests for `strata_forge.cli.compute`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.compute.job import Job, JobStatus
+from strata_forge.cli.main import app
+from strata_forge.compute.job import Job, JobStatus
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,7 +21,7 @@ runner = CliRunner()
 def isolated_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Redirect the CLI state dir into a temp path."""
     state = tmp_path / "jobs"
-    monkeypatch.setattr("forge.cli.compute._STATE_DIR", state)
+    monkeypatch.setattr("strata_forge.cli.compute._STATE_DIR", state)
     return state
 
 
@@ -72,7 +72,7 @@ def fake_local(monkeypatch: pytest.MonkeyPatch) -> _FakeBackend:
         del name, kwargs
         return backend
 
-    monkeypatch.setattr("forge.cli.compute._make_backend", _make)
+    monkeypatch.setattr("strata_forge.cli.compute._make_backend", _make)
     return backend
 
 
@@ -188,15 +188,15 @@ class TestList:
 
 class TestBackendFactory:
     def test_local_backend(self) -> None:
-        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
-        from forge.compute.backends.local import LocalBackend
+        from strata_forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from strata_forge.compute.backends.local import LocalBackend
 
         backend = _make_backend("local", {})
         assert isinstance(backend, LocalBackend)
 
     def test_ssh_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
-        from forge.compute.backends.ssh import SSHBackend
+        from strata_forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from strata_forge.compute.backends.ssh import SSHBackend
 
         # SSHBackend requires either a connection or host+username; we
         # pass a sentinel connection object to skip the asyncssh import.
@@ -205,8 +205,8 @@ class TestBackendFactory:
         assert isinstance(backend, SSHBackend)
 
     def test_skypilot_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
-        from forge.compute.backends.skypilot import SkyPilotBackend
+        from strata_forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from strata_forge.compute.backends.skypilot import SkyPilotBackend
 
         backend = _make_backend("skypilot", {"client": object()})
         assert isinstance(backend, SkyPilotBackend)
@@ -214,7 +214,7 @@ class TestBackendFactory:
     def test_unknown_backend(self) -> None:
         import typer
 
-        from forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
+        from strata_forge.cli.compute import _make_backend  # pyright: ignore[reportPrivateUsage]
 
         with pytest.raises(typer.Exit):
             _make_backend("nope", {})

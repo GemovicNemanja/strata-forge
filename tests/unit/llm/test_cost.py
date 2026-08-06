@@ -1,12 +1,12 @@
-"""Unit tests for `forge.llm.cost`."""
+"""Unit tests for `strata_forge.llm.cost`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.core.errors import RegistryError
-from forge.llm.cost import compute_cost
-from forge.llm.responses import Usage
+from strata_forge.core.errors import RegistryError
+from strata_forge.llm.cost import compute_cost
+from strata_forge.llm.responses import Usage
 
 
 class TestBasic:

@@ -1,13 +1,13 @@
-"""Unit tests for `forge.datasets.stores.memory`."""
+"""Unit tests for `strata_forge.datasets.stores.memory`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.store import DatasetNotFoundError, DatasetStore
-from forge.datasets.stores.memory import InMemoryDatasetStore
-from forge.datasets.versioning import dataset_version
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.store import DatasetNotFoundError, DatasetStore
+from strata_forge.datasets.stores.memory import InMemoryDatasetStore
+from strata_forge.datasets.versioning import dataset_version
 
 
 def _ds(name: str, *ids: str, metadata: dict[str, object] | None = None) -> Dataset:

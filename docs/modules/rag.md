@@ -1,6 +1,6 @@
-# `forge.rag` — embeddings, vector stores, chunking, retrieval, reranking, pipeline
+# `strata_forge.rag` — embeddings, vector stores, chunking, retrieval, reranking, pipeline
 
-`forge.rag` is the retrieval-augmented generation layer. It ships
+`strata_forge.rag` is the retrieval-augmented generation layer. It ships
 four Protocols, concrete in-process and production-backend
 implementations, and a composable :class:`RAGPipeline` that ties
 them together. See
@@ -50,7 +50,7 @@ Source: [`src/forge/rag/`](../../src/forge/rag/).
 
 ```python
 import asyncio
-from forge.rag import (
+from strata_forge.rag import (
     DenseRetriever,
     Document,
     InMemoryVectorStore,
@@ -151,7 +151,7 @@ directly so the same code targets OpenAI, Cohere, Voyage, …
 without per-provider wiring.
 
 ```python
-from forge.rag import LiteLLMEmbedder
+from strata_forge.rag import LiteLLMEmbedder
 
 embedder = LiteLLMEmbedder(
     model="text-embedding-3-small",
@@ -175,7 +175,7 @@ fallback chain (`"\n\n"` → `"\n"` → `". "` → `" "` → hard split)
 and configurable character-based overlap.
 
 ```python
-from forge.rag import RecursiveChunker, Document
+from strata_forge.rag import RecursiveChunker, Document
 
 chunker = RecursiveChunker(chunk_size=1000, chunk_overlap=100)
 chunks = chunker.chunk(Document(id="doc-1", text="..."))
@@ -194,7 +194,7 @@ The default separator chain works well for prose; pass
 Two backends ship; both satisfy the `VectorStore` Protocol.
 
 ```python
-from forge.rag import InMemoryVectorStore, QdrantVectorStore
+from strata_forge.rag import InMemoryVectorStore, QdrantVectorStore
 
 # Tests, prototyping, small-scale agent runs.
 store = InMemoryVectorStore()
@@ -226,7 +226,7 @@ Embeds the query and looks it up in a `VectorStore`. Provides an
 `index(chunks)` helper for one-shot batch ingestion.
 
 ```python
-from forge.rag import DenseRetriever
+from strata_forge.rag import DenseRetriever
 
 retriever = DenseRetriever(embedder=embedder, store=store)
 await retriever.index(chunks)
@@ -239,7 +239,7 @@ Pure-Python Okapi BM25. Indexes the corpus at construction time;
 not re-indexable.
 
 ```python
-from forge.rag import BM25Retriever
+from strata_forge.rag import BM25Retriever
 
 retriever = BM25Retriever(chunks, k1=1.5, b=0.75)
 results = await retriever.retrieve("exact keyword query", top_k=5)
@@ -253,7 +253,7 @@ numeric tokens that semantic embeddings tend to drown out.
 Fuses two or more retrievers via Reciprocal Rank Fusion (RRF).
 
 ```python
-from forge.rag import HybridRetriever
+from strata_forge.rag import HybridRetriever
 
 hybrid = HybridRetriever(
     [dense, sparse],
@@ -280,7 +280,7 @@ Cohere's hosted Rerank API. Lazy `cohere` SDK behind the `[rag]`
 extra; reads `COHERE_API_KEY` from the environment by default.
 
 ```python
-from forge.rag import CohereReranker
+from strata_forge.rag import CohereReranker
 
 reranker = CohereReranker(model="rerank-english-v3.0")
 top_3 = await reranker.rerank("query", candidates, top_k=3)
@@ -297,7 +297,7 @@ pip install sentence-transformers
 ```
 
 ```python
-from forge.rag import CrossEncoderReranker
+from strata_forge.rag import CrossEncoderReranker
 
 reranker = CrossEncoderReranker(
     model="cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -316,7 +316,7 @@ doesn't block the event loop.
 `RAGPipeline` glues the pieces together.
 
 ```python
-from forge.rag import RAGPipeline
+from strata_forge.rag import RAGPipeline
 
 pipeline = RAGPipeline(
     chunker=RecursiveChunker(chunk_size=500),
@@ -349,7 +349,7 @@ upfront; calling `ingest` on a non-indexable pipeline raises
 
 ## Lazy-import contract
 
-`import forge.rag` works without any optional extras installed.
+`import strata_forge.rag` works without any optional extras installed.
 SDK imports happen lazily inside the functions that need them:
 
 - `QdrantVectorStore` → `[rag]` extra (`qdrant-client`).

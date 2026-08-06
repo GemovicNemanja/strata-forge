@@ -1,4 +1,4 @@
-"""Unit tests for `forge.storage.hf_hub.HFHubClient`."""
+"""Unit tests for `strata_forge.storage.hf_hub.HFHubClient`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from forge.storage import HFHubClient
+from strata_forge.storage import HFHubClient
 
 
 class _FakeApi:

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.base`."""
+"""Unit tests for `strata_forge.llm.providers.base`."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from forge.llm.providers.base import ProviderClient
-from forge.llm.providers.config import OpenAIConfig, ProviderConfig
+from strata_forge.llm.providers.base import ProviderClient
+from strata_forge.llm.providers.config import OpenAIConfig, ProviderConfig
 
 if TYPE_CHECKING:
-    from forge.llm.registry import ProviderName
+    from strata_forge.llm.registry import ProviderName
 
 
 class _FakeProvider(ProviderClient):

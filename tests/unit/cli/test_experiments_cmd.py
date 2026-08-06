@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.experiments`."""
+"""Unit tests for `strata_forge.cli.experiments`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
+from strata_forge.cli.main import app
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -18,7 +18,7 @@ runner = CliRunner()
 @pytest.fixture
 def isolated_reports(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     report_dir = tmp_path / "experiments"
-    monkeypatch.setattr("forge.cli.experiments._REPORT_DIR", report_dir)
+    monkeypatch.setattr("strata_forge.cli.experiments._REPORT_DIR", report_dir)
     return report_dir
 
 

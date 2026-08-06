@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.schemas`."""
+"""Unit tests for `strata_forge.llm.schemas`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel, Field
 
-from forge.core.errors import ForgeError, ValidationError
-from forge.llm.schemas import (
+from strata_forge.core.errors import ForgeError, ValidationError
+from strata_forge.llm.schemas import (
     StructuredOutputError,
     make_reprompt_instruction,
     parse_json_response,

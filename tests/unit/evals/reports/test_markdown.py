@@ -1,12 +1,12 @@
-"""Unit tests for `forge.evals.reports.markdown`."""
+"""Unit tests for `strata_forge.evals.reports.markdown`."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from forge.evals.experiment import GraderResult, Outcome, Trial
-from forge.evals.reports.markdown import render_markdown
-from forge.llm.responses import Usage
+from strata_forge.evals.experiment import GraderResult, Outcome, Trial
+from strata_forge.evals.reports.markdown import render_markdown
+from strata_forge.llm.responses import Usage
 
 
 def _trial(

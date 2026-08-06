@@ -1,10 +1,10 @@
-"""Unit tests for `forge.rag.vector_store`."""
+"""Unit tests for `strata_forge.rag.vector_store`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.rag.vector_store import (
+from strata_forge.rag.vector_store import (
     InMemoryVectorStore,
     VectorItem,
     VectorStore,
@@ -99,8 +99,8 @@ class TestAgentsReExport:
     """Confirm the relocation didn't break the agents-side import path."""
 
     def test_agents_re_exports_same_objects(self) -> None:
-        from forge.agents.memory.vector_store import InMemoryVectorStore as AgentsIMVS
-        from forge.agents.memory.vector_store import VectorStore as AgentsVS
+        from strata_forge.agents.memory.vector_store import InMemoryVectorStore as AgentsIMVS
+        from strata_forge.agents.memory.vector_store import VectorStore as AgentsVS
 
         assert AgentsVS is VectorStore
         assert AgentsIMVS is InMemoryVectorStore

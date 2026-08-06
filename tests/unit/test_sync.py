@@ -1,4 +1,4 @@
-"""Unit tests for `forge.sync` — sync wrappers around the async LLM API."""
+"""Unit tests for `strata_forge.sync` — sync wrappers around the async LLM API."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel
 
-from forge import sync
-from forge.llm.client import LLMClient, StructuredResponse
-from forge.llm.fallback import ModelFallback
-from forge.llm.messages import Message
-from forge.llm.tools import tool
+from strata_forge import sync
+from strata_forge.llm.client import LLMClient, StructuredResponse
+from strata_forge.llm.fallback import ModelFallback
+from strata_forge.llm.messages import Message
+from strata_forge.llm.tools import tool
 
 # ---------------------------------------------------------------------------
 # Helpers

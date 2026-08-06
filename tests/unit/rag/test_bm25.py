@@ -1,12 +1,12 @@
-"""Unit tests for `forge.rag.bm25`."""
+"""Unit tests for `strata_forge.rag.bm25`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.rag.bm25 import BM25Retriever, tokenize
-from forge.rag.chunking import Chunk
-from forge.rag.retrieval import Retriever
+from strata_forge.rag.bm25 import BM25Retriever, tokenize
+from strata_forge.rag.chunking import Chunk
+from strata_forge.rag.retrieval import Retriever
 
 
 def _chunks(*texts: str) -> list[Chunk]:

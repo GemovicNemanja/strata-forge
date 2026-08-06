@@ -20,7 +20,7 @@ import asyncio
 from _common import parse_args, require_env
 from pydantic import BaseModel, Field
 
-from forge.llm import (
+from strata_forge.llm import (
     Done,
     IterationStart,
     LLMClient,

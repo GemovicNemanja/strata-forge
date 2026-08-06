@@ -1,4 +1,4 @@
-"""Unit tests for `forge.tracing.litellm_callback`."""
+"""Unit tests for `strata_forge.tracing.litellm_callback`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 
-from forge.tracing.litellm_callback import (
+from strata_forge.tracing.litellm_callback import (
     LITELLM_CALLBACK_NAME,
     install_litellm_callback,
     is_litellm_callback_installed,
@@ -193,10 +193,10 @@ class TestModuleSurface:
         assert LITELLM_CALLBACK_NAME == "langfuse"
 
     def test_install_re_export(self) -> None:
-        from forge.tracing import (
+        from strata_forge.tracing import (
             install_litellm_callback as exported_install,
         )
-        from forge.tracing import (
+        from strata_forge.tracing import (
             is_litellm_callback_installed as exported_check,
         )
 

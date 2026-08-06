@@ -1,15 +1,15 @@
-"""Unit tests for `forge.agents.tools.calculator`."""
+"""Unit tests for `strata_forge.agents.tools.calculator`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.agents.tools.calculator import (
+from strata_forge.agents.tools.calculator import (
     CalculatorArgs,
     _safe_eval,  # pyright: ignore[reportPrivateUsage]
     calculator,
 )
-from forge.core.errors import ValidationError
+from strata_forge.core.errors import ValidationError
 
 # ---------------------------------------------------------------------------
 # _safe_eval — happy path

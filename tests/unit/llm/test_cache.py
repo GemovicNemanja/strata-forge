@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.cache`."""
+"""Unit tests for `strata_forge.llm.cache`."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from forge.core.errors import CacheError
-from forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.core.errors import CacheError
+from strata_forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 # ---------------------------------------------------------------------------
 # Fixtures

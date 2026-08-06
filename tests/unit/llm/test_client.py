@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.client`.
+"""Unit tests for `strata_forge.llm.client`.
 
 The strategy: mock `litellm.acompletion` at the boundary so the LLMClient
 + ProviderClient stack runs end-to-end against synthetic responses.
@@ -14,17 +14,17 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel, Field
 
-from forge.core.budget import BudgetContext
-from forge.core.errors import (
+from strata_forge.core.budget import BudgetContext
+from strata_forge.core.errors import (
     BudgetExceededError,
     ProviderRateLimitError,
     RegistryError,
     ValidationError,
 )
-from forge.llm.cache import InMemoryCache
-from forge.llm.client import LLMClient, StructuredResponse
-from forge.llm.fallback import ModelFallback
-from forge.llm.loop_events import (
+from strata_forge.llm.cache import InMemoryCache
+from strata_forge.llm.client import LLMClient, StructuredResponse
+from strata_forge.llm.fallback import ModelFallback
+from strata_forge.llm.loop_events import (
     Done,
     IterationStart,
     LoopError,
@@ -33,19 +33,19 @@ from forge.llm.loop_events import (
     ToolCallStarted,
     ToolResult,
 )
-from forge.llm.messages import (
+from strata_forge.llm.messages import (
     AssistantMessage,
     Message,
     ToolResultMessage,
     UserMessage,
 )
-from forge.llm.tools import ToolDeclaration, ToolLoopExceededError, tool
+from strata_forge.llm.tools import ToolDeclaration, ToolLoopExceededError, tool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
-    from forge.llm.providers.base import ProviderClient
-    from forge.llm.registry import ProviderName
+    from strata_forge.llm.providers.base import ProviderClient
+    from strata_forge.llm.registry import ProviderName
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ class TestCompleteBasics:
     async def test_unknown_model_raises(self, mock_litellm: AsyncMock) -> None:
         # Unknown models surface during fallback as RegistryError; the runner
         # records and exhausts.
-        from forge.core.errors import FallbackExhaustedError
+        from strata_forge.core.errors import FallbackExhaustedError
 
         client = LLMClient("not-a-real-model")
         with pytest.raises(FallbackExhaustedError):
@@ -231,7 +231,7 @@ async def _explodes(args: _BadArgs) -> str:
     raise RuntimeError(f"oops at {args.x}")
 
 
-# A declaration-only tool — executed by the caller, never by forge.
+# A declaration-only tool — executed by the caller, never by strata_forge.
 _LOAD_MODEL = ToolDeclaration(
     name="load_model",
     description="Load a model in the caller's app.",
@@ -253,7 +253,7 @@ class TestToolCalling:
         # synthesize one that doesn't. Patch the model's capability flag.
         from unittest.mock import patch
 
-        from forge.llm.registry import registry as _registry
+        from strata_forge.llm.registry import registry as _registry
 
         original = _registry.get("claude-opus-4-7")
         synth = original.model_copy(
@@ -348,7 +348,7 @@ class TestRequireToolSupport:
         def _zero_cost(*_a: object, **_k: object) -> float:
             return 0.0
 
-        monkeypatch.setattr("forge.llm.client.compute_cost", _zero_cost)
+        monkeypatch.setattr("strata_forge.llm.client.compute_cost", _zero_cost)
         client = LLMClient("some/unknown-model", provider="openai_compat")
         resp = await client.complete([Message.user("hi")], tools=[_get_weather])
         assert resp.text == "ok"
@@ -554,7 +554,7 @@ class TestStructuredOutput:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from forge.llm.schemas import StructuredOutputError
+        from strata_forge.llm.schemas import StructuredOutputError
 
         # Always return invalid JSON.
         async def _fake(**_kwargs: Any) -> Any:
@@ -613,7 +613,7 @@ class TestStructuredOutput:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from forge.llm.schemas import StructuredOutputError
+        from strata_forge.llm.schemas import StructuredOutputError
 
         # The model returns absolutely nothing usable on every attempt.
         async def _fake(**_kwargs: Any) -> Any:
@@ -1235,7 +1235,7 @@ class TestStreamToolLoop:
     ) -> None:
         from unittest.mock import patch
 
-        from forge.llm.registry import registry as _registry
+        from strata_forge.llm.registry import registry as _registry
 
         original = _registry.get("claude-opus-4-7")
         synth = original.model_copy(
@@ -1641,7 +1641,7 @@ class TestDiagnosticIntegration:
             retry_initial_wait=0.0,
             retry_max_wait=0.0,
         )
-        from forge.core.errors import FallbackExhaustedError
+        from strata_forge.core.errors import FallbackExhaustedError
 
         with pytest.raises(FallbackExhaustedError):
             await client.complete([Message.user("hi")])
@@ -1663,8 +1663,8 @@ class TestMultimodal:
         self,
         mock_litellm: AsyncMock,
     ) -> None:
-        from forge.llm.messages import TextPart
-        from forge.llm.multimodal import ImageContent
+        from strata_forge.llm.messages import TextPart
+        from strata_forge.llm.multimodal import ImageContent
 
         client = LLMClient("claude-opus-4-7", provider="anthropic")
         await client.complete(
@@ -1686,8 +1686,8 @@ class TestMultimodal:
         assert image_part["source"]["type"] == "url"
 
     async def test_image_for_openai(self, mock_litellm: AsyncMock) -> None:
-        from forge.llm.messages import TextPart
-        from forge.llm.multimodal import ImageContent
+        from strata_forge.llm.messages import TextPart
+        from strata_forge.llm.multimodal import ImageContent
 
         client = LLMClient("gpt-5.5", provider="openai")
         await client.complete(
@@ -1719,7 +1719,7 @@ class TestWireMessages:
         assert wire[1] == {"role": "user", "content": "hi"}
 
     async def test_assistant_with_tool_calls(self, mock_litellm: AsyncMock) -> None:
-        from forge.llm.messages import ToolCall
+        from strata_forge.llm.messages import ToolCall
 
         client = LLMClient("claude-opus-4-7")
         msgs = [
@@ -1751,12 +1751,12 @@ class TestWireMessages:
 class TestProviderClientInjection:
     async def test_custom_provider_client(self, mock_litellm: AsyncMock) -> None:
         # Inject a mocked provider client and verify it's used.
-        from forge.llm.providers import AnthropicProvider
+        from strata_forge.llm.providers import AnthropicProvider
 
         custom = AnthropicProvider()
         custom_dict: dict[ProviderName, ProviderClient] = {"anthropic": custom}
         # Fill remaining providers with stubs so init doesn't crash.
-        from forge.llm.providers import (
+        from strata_forge.llm.providers import (
             AzureProvider,
             BedrockProvider,
             OpenAICompatProvider,

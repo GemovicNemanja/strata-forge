@@ -1,4 +1,4 @@
-"""Unit tests for `forge.tracing.score`."""
+"""Unit tests for `strata_forge.tracing.score`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import types
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from forge.tracing.score import score_observation, score_trace
+from strata_forge.tracing.score import score_observation, score_trace
 
 if TYPE_CHECKING:
     import pytest
@@ -167,10 +167,10 @@ class TestScoreObservation:
 
 class TestModuleSurface:
     def test_re_exported_from_tracing(self) -> None:
-        from forge.tracing import (
+        from strata_forge.tracing import (
             score_observation as exported_obs,
         )
-        from forge.tracing import (
+        from strata_forge.tracing import (
             score_trace as exported_trace,
         )
 

@@ -1,10 +1,10 @@
-"""Unit tests for `forge.training.packing`."""
+"""Unit tests for `strata_forge.training.packing`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.training.packing import PackedSequence, pack_sequences
+from strata_forge.training.packing import PackedSequence, pack_sequences
 
 
 class TestPackSequences:

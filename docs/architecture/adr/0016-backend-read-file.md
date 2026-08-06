@@ -10,7 +10,7 @@
 A job's structured progress — training loss curves, eval scores, batch-inference
 throughput — is emitted by the runner as a stream of `ProgressEvent`s written to a
 file (a `progress.jsonl`), separate from the process stdout/stderr. A control plane
-that orchestrates `forge.compute` jobs (submit → poll → relay live metrics → tear
+that orchestrates `strata_forge.compute` jobs (submit → poll → relay live metrics → tear
 down) needs to read that file off the remote box on each poll to surface live
 metrics.
 
@@ -33,7 +33,7 @@ async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> st
   absolute paths and `..` traversal are rejected. This is a security boundary: on a
   control plane, `path` ultimately derives from caller input, and `read_file` must
   never reach outside a job's own workdir. The shared guard `safe_workdir_relpath`
-  (in `forge.compute.backends.base`, re-exported from `forge.compute`) normalizes and
+  (in `strata_forge.compute.backends.base`, re-exported from `strata_forge.compute`) normalizes and
   validates the path; every backend calls it first.
 - `tail` returns only the last N lines (mirrors `logs`).
 - A **missing file returns `""`**, not an error — a progress file that hasn't been

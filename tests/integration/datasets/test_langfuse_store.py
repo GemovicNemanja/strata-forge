@@ -21,7 +21,7 @@ import uuid
 
 import pytest
 
-from forge.datasets import (
+from strata_forge.datasets import (
     Dataset,
     DatasetItem,
     LangfuseDatasetStore,

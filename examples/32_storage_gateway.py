@@ -17,7 +17,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from forge.storage import StorageGateway
+from strata_forge.storage import StorageGateway
 
 
 async def _main() -> None:

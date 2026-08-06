@@ -1,4 +1,4 @@
-"""Cross-module integration tests for `forge.prompts`.
+"""Cross-module integration tests for `strata_forge.prompts`.
 
 The per-file tests cover each piece in isolation; these wire the whole
 module together — registry + store + validation + rendering — to catch
@@ -13,13 +13,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.core.errors import ValidationError
-from forge.llm.messages import SystemMessage, UserMessage
-from forge.prompts.registry import PromptRegistry
-from forge.prompts.rendering import render
-from forge.prompts.stores.langfuse import LangfusePromptStore
-from forge.prompts.stores.memory import InMemoryPromptStore
-from forge.prompts.template import PromptTemplate, PromptValidationError
+from strata_forge.core.errors import ValidationError
+from strata_forge.llm.messages import SystemMessage, UserMessage
+from strata_forge.prompts.registry import PromptRegistry
+from strata_forge.prompts.rendering import render
+from strata_forge.prompts.stores.langfuse import LangfusePromptStore
+from strata_forge.prompts.stores.memory import InMemoryPromptStore
+from strata_forge.prompts.template import PromptTemplate, PromptValidationError
 
 _PERSONA_TEMPLATE = PromptTemplate(
     name="greet",

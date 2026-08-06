@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.vertex`."""
+"""Unit tests for `strata_forge.llm.providers.vertex`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from forge.llm.providers.config import VertexConfig
-from forge.llm.providers.vertex import VertexProvider, to_gemini_tool_schema
+from strata_forge.llm.providers.config import VertexConfig
+from strata_forge.llm.providers.vertex import VertexProvider, to_gemini_tool_schema
 
 
 @pytest.fixture(autouse=True)
