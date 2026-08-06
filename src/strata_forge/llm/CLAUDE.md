@@ -10,7 +10,7 @@ Provider-abstracted async LLM client built on LiteLLM ([ADR 0001](../../../docs/
 
 - **Owns:** `client.py`, `messages.py`, `responses.py`, `loop_events.py`, `schemas.py`, `tools.py`, `multimodal.py`, `streaming.py`, `tokens.py`, `cost.py`, `cache.py`, `fallback.py`, `routing.py`, `errors.py`, `registry.py`, `registry_data.yaml`, `diagnostic.py`, `providers/`.
 - **Imports from inside `forge`:** `strata_forge.core`, `strata_forge.config`. Nothing higher.
-- **Imports of provider SDKs** (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`): ONLY inside `src/forge/llm/providers/`. Everywhere else uses `LLMClient` or the `provider_extras` passthrough.
+- **Imports of provider SDKs** (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`): ONLY inside `src/strata_forge/llm/providers/`. Everywhere else uses `LLMClient` or the `provider_extras` passthrough.
 - **Does NOT:** manage prompts, store datasets, run evaluations, build agents, perform retrieval, orchestrate remote compute.
 
 ## Public API

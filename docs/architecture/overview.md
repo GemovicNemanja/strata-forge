@@ -6,7 +6,7 @@ AI Forge is a typed, async-first library of primitives for running AI experiment
 
 1. **Vendor-neutral at the seam.** LiteLLM handles provider HTTP/auth/streaming/normalization. Forge owns a typed Pydantic layer on top. ([ADR 0001](adr/0001-litellm-as-transport.md))
 2. **Async-first everywhere.** Every public function is `async`. Sync wrappers live only in `strata_forge.sync` for CLI / notebook ergonomics. ([ADR 0002](adr/0002-async-only-public-api.md))
-3. **Strict typing.** pyright `strict` on `src/forge`. No `Any` without a justified ignore. Pydantic for data, Protocol for behavior.
+3. **Strict typing.** pyright `strict` on `src/strata_forge`. No `Any` without a justified ignore. Pydantic for data, Protocol for behavior.
 4. **Exception-based errors.** Every Forge-raised error inherits from `ForgeError`; provider errors normalize at the seam. ([ADR 0003](adr/0003-exception-hierarchy.md))
 5. **Modules are independent.** `import strata_forge.<module>` works without optional extras installed; heavy deps are lazily imported inside the functions that need them.
 6. **Observability and cost are first-class.** Every LLM call is traceable to Langfuse, dumpable to NDJSON, and respects an active `BudgetContext`.
@@ -63,7 +63,7 @@ All three are first-class features of `strata_forge.llm` — they ship together,
 
 ## Configuration
 
-`strata_forge.config.Settings` is a Pydantic `BaseSettings` with sub-models per concern. Layering: defaults → `configs/<FORGE_PROFILE>.yaml` overlay → `.env` → process env → in-code override. `forge doctor` validates everything at startup.
+`strata_forge.config.Settings` is a Pydantic `BaseSettings` with sub-models per concern. Layering: defaults → `configs/<FORGE_PROFILE>.yaml` overlay → `.env` → process env → in-code override. `strata-forge doctor` validates everything at startup.
 
 ## Observability
 
@@ -73,20 +73,20 @@ Langfuse is the default tracing destination. The LiteLLM Langfuse callback handl
 
 | Concern | Location |
 |---|---|
-| Cross-cutting utilities | `src/forge/core/` |
-| Runtime configuration | `src/forge/config/` |
-| LLM client + tools + registry | `src/forge/llm/` ([reference](../modules/llm.md)) |
-| Prompt templates + registry | `src/forge/prompts/` ([reference](../modules/prompts.md)) |
-| Langfuse tracing helpers | `src/forge/tracing/` ([reference](../modules/tracing.md)) |
-| Datasets bridge | `src/forge/datasets/` ([reference](../modules/datasets.md)) |
-| Evaluation runner | `src/forge/evals/` ([reference](../modules/evals.md)) |
-| Agent builder | `src/forge/agents/` ([reference](../modules/agents.md)) |
-| Retrieval-augmented generation | `src/forge/rag/` ([reference](../modules/rag.md)) |
-| Storage backends | `src/forge/storage/` |
-| Remote compute | `src/forge/compute/` |
-| Fine-tuning | `src/forge/training/` |
-| CLI entry points | `src/forge/cli/` |
-| Sync wrappers | `src/forge/sync.py` |
+| Cross-cutting utilities | `src/strata_forge/core/` |
+| Runtime configuration | `src/strata_forge/config/` |
+| LLM client + tools + registry | `src/strata_forge/llm/` ([reference](../modules/llm.md)) |
+| Prompt templates + registry | `src/strata_forge/prompts/` ([reference](../modules/prompts.md)) |
+| Langfuse tracing helpers | `src/strata_forge/tracing/` ([reference](../modules/tracing.md)) |
+| Datasets bridge | `src/strata_forge/datasets/` ([reference](../modules/datasets.md)) |
+| Evaluation runner | `src/strata_forge/evals/` ([reference](../modules/evals.md)) |
+| Agent builder | `src/strata_forge/agents/` ([reference](../modules/agents.md)) |
+| Retrieval-augmented generation | `src/strata_forge/rag/` ([reference](../modules/rag.md)) |
+| Storage backends | `src/strata_forge/storage/` |
+| Remote compute | `src/strata_forge/compute/` |
+| Fine-tuning | `src/strata_forge/training/` |
+| CLI entry points | `src/strata_forge/cli/` |
+| Sync wrappers | `src/strata_forge/sync.py` |
 | Decision records | `docs/architecture/adr/` |
 | Module reference docs | `docs/modules/` |
 | Recipes | `docs/recipes/` |

@@ -38,8 +38,8 @@ vcr-replay: ## Replay committed VCR cassettes (no live keys needed)
 vcr-record: ## Record fresh VCR cassettes (requires live keys, RECORD=1)
 	RECORD=1 $(UV) pytest tests/vcr
 
-doctor: ## Run the `forge doctor` diagnostic command
-	$(UV) forge doctor
+doctor: ## Run the `strata-forge doctor` diagnostic command
+	$(UV) strata-forge doctor
 
 stack-up: ## Start the local dev stack (Langfuse + Postgres + Qdrant + Redis)
 	docker compose -f docker/compose.yaml up -d

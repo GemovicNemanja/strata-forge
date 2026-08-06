@@ -3,14 +3,14 @@ description: Cross-cutting rules for AI Forge — always-on. Defers to `CLAUDE.m
 alwaysApply: true
 ---
 
-AI Forge is a typed, async-first, vendor-neutral baseline for AI/LLM experiments. **Read [`CLAUDE.md`](mdc:CLAUDE.md) before suggesting non-trivial changes.** Module-specific rules live in `src/forge/<module>/CLAUDE.md`.
+AI Forge is a typed, async-first, vendor-neutral baseline for AI/LLM experiments. **Read [`CLAUDE.md`](mdc:CLAUDE.md) before suggesting non-trivial changes.** Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`.
 
 Always-on rules:
 
 - Public API is async. Sync wrappers live only in `strata_forge.sync`.
-- pyright strict on `src/forge`. No `Any` without `# pyright: ignore[...]` justification.
+- pyright strict on `src/strata_forge`. No `Any` without `# pyright: ignore[...]` justification.
 - Errors are exception-based: every Forge-raised error subclasses `strata_forge.core.errors.ForgeError`. Never `except:`.
 - Heavy deps (torch, transformers, trl, peft, skypilot, asyncssh, qdrant-client, vllm, pillow, redis, inspect-ai) are imported **inside the function that uses them**, never at module load. Each gates behind a PyPI extra in `pyproject.toml`.
 - Commits MUST follow Conventional Commits: `<type>(<optional-scope>): <imperative summary>`. Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`. Scope is the module name (e.g. `feat(llm):`, `docs(rag):`) when the change is local to one module; omit it for cross-cutting work. Commit messages describe changes in **time-stable terms** — never reference phase numbers, sub-phase numbers, step numbers, or scaffolding metadata. See `CLAUDE.md` §8 for the full table.
 - **Self-maintenance protocol** (CLAUDE.md §7): when you spot a stale `CLAUDE.md` / MDC rule / ADR / module README, propose the fix in the same PR. Never silently ignore a stale rule.
-- Provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) are imported **only inside `src/forge/llm/providers/`**. Everything else goes through `LLMClient` or the `provider_extras` passthrough.
+- Provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) are imported **only inside `src/strata_forge/llm/providers/`**. Everything else goes through `LLMClient` or the `provider_extras` passthrough.

@@ -26,8 +26,8 @@ Integration points:
   and `critic_refiner_run(drafter=, critic=, ...)`. Both are pure
   compositions over `Agent`.
 
-Module rules: [`src/forge/agents/CLAUDE.md`](../../src/forge/agents/CLAUDE.md).
-Source: [`src/forge/agents/`](../../src/forge/agents/).
+Module rules: [`src/strata_forge/agents/CLAUDE.md`](../../src/strata_forge/agents/CLAUDE.md).
+Source: [`src/strata_forge/agents/`](../../src/strata_forge/agents/).
 
 ---
 

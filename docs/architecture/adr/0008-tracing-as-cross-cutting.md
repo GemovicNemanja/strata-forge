@@ -122,11 +122,11 @@ configuration crashes a production call.
 
 **Mitigations**
 
-- The `forge` CLI's entry-point installs the callback automatically
+- The `strata-forge` CLI's entry-point installs the callback automatically
   when Langfuse is configured. Scripts using the library directly
   must install it themselves; the docs spell this out and the
   example scripts demonstrate it.
-- `forge doctor` reports whether the callback has been installed and
+- `strata-forge doctor` reports whether the callback has been installed and
   whether Langfuse is reachable, so the silent-failure case surfaces
   on diagnostic runs.
 

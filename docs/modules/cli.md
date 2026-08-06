@@ -7,12 +7,12 @@ module with a useful operator workflow surfaces a command here:
 over its module — Forge never duplicates business logic in the
 CLI layer.
 
-The CLI installs as the `forge` entry point. The same code is
+The CLI installs as the `strata-forge` entry point. The same code is
 importable as `strata_forge.cli.app` for testing or for users embedding
 the CLI in their own Typer apps.
 
-Module rules: [`src/forge/cli/CLAUDE.md`](../../src/forge/cli/CLAUDE.md).
-Source: [`src/forge/cli/`](../../src/forge/cli/).
+Module rules: [`src/strata_forge/cli/CLAUDE.md`](../../src/strata_forge/cli/CLAUDE.md).
+Source: [`src/strata_forge/cli/`](../../src/strata_forge/cli/).
 
 ---
 
@@ -37,26 +37,26 @@ Source: [`src/forge/cli/`](../../src/forge/cli/).
 
 ```bash
 # Verify your environment.
-forge doctor
+strata-forge doctor
 
 # Chat with a model.
-forge chat --model claude-opus-4-7 --message "Summarize Forge in one line."
+strata-forge chat --model claude-opus-4-7 --message "Summarize Forge in one line."
 
 # Run a quick eval.
-forge eval run --model claude-opus-4-7 --dataset eval-pack --grader exact_match
+strata-forge eval run --model claude-opus-4-7 --dataset eval-pack --grader exact_match
 
 # Submit a compute job and watch it.
-forge compute submit ./task.yaml --backend local
-forge compute status <job-id>
-forge compute logs <job-id> --tail 20
+strata-forge compute submit ./task.yaml --backend local
+strata-forge compute status <job-id>
+strata-forge compute logs <job-id> --tail 20
 
 # Kick off SFT.
-forge train sft --model meta-llama/Llama-3.1-8B-Instruct \
+strata-forge train sft --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset sft-pack --output-dir ./checkpoints/sft \
     --adapter lora --adapter-rank 32
 
 # Build a vLLM serving task.
-forge serve vllm --model meta-llama/Llama-3.1-8B-Instruct --port 8000
+strata-forge serve vllm --model meta-llama/Llama-3.1-8B-Instruct --port 8000
 ```
 
 ## doctor
@@ -65,7 +65,7 @@ Diagnose environment, configuration, and service reachability.
 Always exits 0 — it's a report, not a gate.
 
 ```bash
-forge doctor
+strata-forge doctor
 ```
 
 ## chat
@@ -73,9 +73,9 @@ forge doctor
 Single-shot or interactive REPL against an `LLMClient`.
 
 ```bash
-forge chat --model claude-opus-4-7 --message "what's 2+2?"
-forge chat --model claude-opus-4-7  # opens a REPL
-forge chat --model gpt-5.5 --provider azure \
+strata-forge chat --model claude-opus-4-7 --message "what's 2+2?"
+strata-forge chat --model claude-opus-4-7  # opens a REPL
+strata-forge chat --model gpt-5.5 --provider azure \
     --system "answer only in haiku" --message "the moon"
 ```
 
@@ -89,9 +89,9 @@ Inspect the configured `PromptStore`. Backend selection follows
 in-memory).
 
 ```bash
-forge prompts list
-forge prompts show summarize
-forge prompts render summarize --vars '{"passage": "..."}'
+strata-forge prompts list
+strata-forge prompts show summarize
+strata-forge prompts render summarize --vars '{"passage": "..."}'
 ```
 
 ## datasets
@@ -99,9 +99,9 @@ forge prompts render summarize --vars '{"passage": "..."}'
 Inspect the configured `DatasetStore`.
 
 ```bash
-forge datasets list
-forge datasets show eval-pack
-forge datasets head eval-pack -n 5
+strata-forge datasets list
+strata-forge datasets show eval-pack
+strata-forge datasets head eval-pack -n 5
 ```
 
 ## eval
@@ -110,14 +110,14 @@ Run quick evaluations against the configured dataset store.
 Writes a markdown report to `~/.forge/experiments/<name>.md`.
 
 ```bash
-forge eval run \
+strata-forge eval run \
     --model claude-opus-4-7 \
     --dataset eval-pack \
     --grader exact_match \
     --grader regex:'^[A-Z]\d{3}$'
 
-forge eval list
-forge eval show <name>
+strata-forge eval list
+strata-forge eval show <name>
 ```
 
 Supported graders for the CLI: `exact_match`,
@@ -130,9 +130,9 @@ Mirror group over saved eval reports for users built around the
 "experiments" verb.
 
 ```bash
-forge experiments list
-forge experiments show <name>
-forge experiments delete <name>
+strata-forge experiments list
+strata-forge experiments show <name>
+strata-forge experiments delete <name>
 ```
 
 ## compute
@@ -143,16 +143,16 @@ Submit and monitor compute jobs against any backend. The
 right backend automatically.
 
 ```bash
-forge compute submit ./task.yaml --backend local
-forge compute submit ./task.yaml --backend ssh \
+strata-forge compute submit ./task.yaml --backend local
+strata-forge compute submit ./task.yaml --backend ssh \
     --ssh-host gpu-host --ssh-user ml-team
-forge compute submit ./task.yaml --backend skypilot
+strata-forge compute submit ./task.yaml --backend skypilot
 
-forge compute status <job-id>
-forge compute logs <job-id> --tail 50
-forge compute cancel <job-id>
-forge compute cleanup <job-id>
-forge compute list
+strata-forge compute status <job-id>
+strata-forge compute logs <job-id> --tail 50
+strata-forge compute cancel <job-id>
+strata-forge compute cleanup <job-id>
+strata-forge compute list
 ```
 
 The SSH backend needs `--ssh-host` and `--ssh-user` (port
@@ -167,14 +167,14 @@ deps (`torch`, `transformers`, `trl`, `peft`) ride behind the
 actually trains.
 
 ```bash
-forge train sft \
+strata-forge train sft \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset sft-pack \
     --output-dir ./checkpoints/sft \
     --epochs 3 --batch-size 2 --grad-accum 8 \
     --adapter lora --adapter-rank 32
 
-forge train dpo \
+strata-forge train dpo \
     --model ./checkpoints/sft \
     --dataset preference-pairs \
     --output-dir ./checkpoints/dpo \
@@ -191,20 +191,20 @@ Build (and optionally submit) self-hosted inference serving
 tasks. The default `--submit none` prints the YAML so callers
 can route it to SkyPilot or SSH; `--submit local` runs it on
 the in-process `LocalBackend` and stores the resulting job for
-`forge compute` to monitor.
+`strata-forge compute` to monitor.
 
 ```bash
-forge serve vllm --model meta-llama/Llama-3.1-8B-Instruct \
+strata-forge serve vllm --model meta-llama/Llama-3.1-8B-Instruct \
     --port 8000 --tp 1 --max-model-len 8192
 
-forge serve tgi --model mistralai/Mistral-7B-v0.1 \
+strata-forge serve tgi --model mistralai/Mistral-7B-v0.1 \
     --port 8080 --num-shard 2
 
-forge serve sglang --model Qwen/Qwen2-7B-Instruct \
+strata-forge serve sglang --model Qwen/Qwen2-7B-Instruct \
     --port 30000 --tp-size 4
 
-# Run locally and let `forge compute` take over for monitoring.
-forge serve vllm --model my-model --submit local
+# Run locally and let `strata-forge compute` take over for monitoring.
+strata-forge serve vllm --model my-model --submit local
 ```
 
 ## Local state
@@ -214,8 +214,8 @@ invocations:
 
 | Path | Owner | Contents |
 |---|---|---|
-| `~/.forge/jobs/<id>.json` | `forge compute submit` | Job handle + backend selection + backend kwargs. |
-| `~/.forge/experiments/<name>.md` | `forge eval run` | Markdown reports. |
+| `~/.forge/jobs/<id>.json` | `strata-forge compute submit` | Job handle + backend selection + backend kwargs. |
+| `~/.forge/experiments/<name>.md` | `strata-forge eval run` | Markdown reports. |
 
 Both layouts are intentionally simple — JSON for jobs, markdown
 for reports — so you can shell-script over them or wipe them
@@ -235,9 +235,9 @@ without touching the rest of your environment.
   install with `pip install 'ai-forge[finetuning]'`. Expect a
   lengthy `torch` wheel build on CPU-only macOS.
 - **`unknown job id`:** the saved state file under
-  `~/.forge/jobs` was removed (probably by `forge compute
+  `~/.forge/jobs` was removed (probably by `strata-forge compute
   cleanup` on a previous invocation). Re-submit.
-- **`forge serve ... --submit local` doesn't expose the
+- **`strata-forge serve ... --submit local` doesn't expose the
   endpoint:** the `LocalBackend` spawns the server in the
-  background; use `forge compute status` and check the
+  background; use `strata-forge compute status` and check the
   `base_url` printed at submit time once the server is ready.

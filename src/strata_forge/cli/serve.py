@@ -1,4 +1,4 @@
-"""``forge serve`` — print or launch self-hosted inference servers.
+"""``strata-forge serve`` — print or launch self-hosted inference servers.
 
 Three subcommands wrap the corresponding :mod:`strata_forge.compute.serving`
 task builder:
@@ -11,7 +11,7 @@ By default each subcommand only **prints** the YAML task that
 would be submitted (so callers can route it to SkyPilot / SSH /
 elsewhere). Pass ``--submit local`` to actually run it on the
 in-process :class:`LocalBackend`; the submitted job lands in
-``~/.forge/jobs`` and ``forge compute status <id>`` takes over.
+``~/.forge/jobs`` and ``strata-forge compute status <id>`` takes over.
 """
 
 from __future__ import annotations
@@ -147,6 +147,6 @@ async def _submit_local(task: object, base_url: str) -> None:
     console.print(f"  task:      {task.name}")
     console.print(f"  base_url:  {base_url}")
     console.print(
-        f"\n[dim]use `forge compute status {job.id}` "
-        f"and `forge compute logs {job.id}` to monitor.[/]"
+        f"\n[dim]use `strata-forge compute status {job.id}` "
+        f"and `strata-forge compute logs {job.id}` to monitor.[/]"
     )

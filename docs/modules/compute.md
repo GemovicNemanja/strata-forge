@@ -32,8 +32,8 @@ Integration points:
   :func:`serving_endpoint`, :func:`wait_for_endpoint`,
   :class:`ServingEndpoint`.
 
-Module rules: [`src/forge/compute/CLAUDE.md`](../../src/forge/compute/CLAUDE.md).
-Source: [`src/forge/compute/`](../../src/forge/compute/).
+Module rules: [`src/strata_forge/compute/CLAUDE.md`](../../src/strata_forge/compute/CLAUDE.md).
+Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 
 ---
 

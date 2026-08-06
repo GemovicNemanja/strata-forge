@@ -1,4 +1,4 @@
-"""``forge prompts`` — inspect and render templates from the prompt registry.
+"""``strata-forge prompts`` — inspect and render templates from the prompt registry.
 
 The subcommands target the same :class:`PromptRegistry` that
 production code uses. The backend (Langfuse vs in-memory) is

@@ -1,45 +1,87 @@
-# AI Forge
+# strata-forge
 
-Typed, async-first baseline repository for AI/LLM experiments — inference, evaluation, fine-tuning, and remote compute orchestration across the major foundation-model providers (OpenAI, Anthropic, Google).
+Typed, async-first toolkit for AI/LLM work — inference, evaluation, fine-tuning, retrieval, and
+remote compute orchestration across the major foundation-model providers.
 
-Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing. Async-first public API with sync wrappers in `strata_forge.sync` for CLI / notebook ergonomics. Heavy optional dependencies (training, serving, remote compute) live behind extras so the base install stays light.
+Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing. The public API is
+async, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Heavy optional
+dependencies (training, serving, remote compute) live behind extras, so the base install stays light.
 
-> **Status:** Phase 0 scaffolding. Proprietary; not open source.
+## Install
+
+```bash
+pip install strata-forge
+```
+
+Requires **Python 3.14+**.
+
+Optional extras pull in the heavy dependencies only when you need them:
+
+```bash
+pip install "strata-forge[rag]"        # embeddings, vector store, reranking
+pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
+pip install "strata-forge[serving]"    # vLLM
+pip install "strata-forge[finetuning]" # torch, transformers, trl, peft
+pip install "strata-forge[all]"        # everything
+```
+
+Full set: `redis`, `multimodal`, `inspect`, `langfuse`, `hf`, `evals`, `rag`, `compute`, `serving`,
+`bedrock`, `storage`, `finetuning`, `all`.
 
 ## Quickstart
 
-```bash
-uv sync                  # materialize the venv + lockfile
-make doctor              # check env vars + reachability of configured services
-make test                # unit tests
-make check               # lint (ruff) + type-check (pyright strict)
+```python
+import asyncio
+
+from strata_forge.llm import LLMClient, Message
+
+
+async def main() -> None:
+    client = LLMClient("gpt-5.5", provider="openai")
+    response = await client.complete([Message.user("Say hello in one short sentence.")])
+    print(response.text)
+
+
+asyncio.run(main())
 ```
+
+Provider credentials are read from the environment (for example `OPENAI_API_KEY`). A CLI is
+installed as `strata-forge`.
+
+## What's in it
+
+| Module | Purpose |
+|---|---|
+| `strata_forge.llm` | Provider abstraction, structured output, tool calling, two-axis fallback |
+| `strata_forge.core` | Cross-cutting errors, retry, logging, budget ceilings, reproducibility |
+| `strata_forge.config` | Pydantic Settings root with YAML overlays and `.env` support |
+| `strata_forge.prompts` | Jinja2 and Langfuse-backed prompt registry |
+| `strata_forge.tracing` | Langfuse observability |
+| `strata_forge.datasets` | Dataset CRUD with a Hugging Face bridge |
+| `strata_forge.evals` | Experiment runner, graders, metrics |
+| `strata_forge.agents` | Agent runtime, memory, multi-agent composition |
+| `strata_forge.rag` | Embed, chunk, store, retrieve, rerank |
+| `strata_forge.storage` | fsspec gateway and Hugging Face Hub |
+| `strata_forge.compute` | SkyPilot and SSH backends, serving, batch inference |
+| `strata_forge.training` | SFT / DPO / ORPO / KTO / GRPO with PEFT |
+| `strata_forge.pipelines` | Runnable entrypoints executed on a compute target |
 
 ## Documentation
 
-- `docs/architecture/overview.md` — design overview and module map
-- `docs/architecture/adr/` — Architecture Decision Records
-- `docs/modules/<name>.md` — per-module API reference
-- `docs/roadmap.md` — phase status
-- `CLAUDE.md` — agent guidance (read via the `AGENTS.md` symlink by Cursor / Codex / Copilot, and directly by Claude Code)
+Reference docs live in the repository:
 
-## Layout
+- [Architecture overview](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/overview.md)
+- [Architecture Decision Records](https://github.com/GemovicNemanja/strata-forge/tree/main/docs/architecture/adr)
+- [Per-module API reference](https://github.com/GemovicNemanja/strata-forge/tree/main/docs/modules)
 
-```
-src/forge/
-  core/         cross-cutting (errors, retry, logging, budget, repro)
-  config/       Pydantic Settings + YAML overlays + .env
-  llm/          provider abstraction, structured output, tools, fallback   (Phase 1)
-  prompts/      Jinja2 + Langfuse-backed prompt registry                   (Phase 2.1)
-  tracing/      Langfuse observability                                     (Phase 2.2)
-  datasets/     dataset CRUD + Hugging Face bridge                         (Phase 2.3)
-  evals/        experiment runner + graders + metrics                      (Phase 2.4)
-  agents/       PydanticAI builder, memory, multi-agent                    (Phase 3)
-  rag/          embed + vector + chunk + retrieve + rerank                 (Phase 4)
-  storage/      fsspec gateway, Hugging Face Hub                           (Phase 6)
-  compute/      SkyPilot + SSH backends + inference                        (Phase 5)
-  training/     SFT / DPO / ORPO / KTO / GRPO with PEFT                    (Phase 5.3)
-  cli/          Typer entry points                                         (Phase 7)
+## Development
+
+```bash
+uv sync        # materialize the venv + lockfile
+make check     # lint (ruff) + type-check (pyright strict)
+make test      # unit tests
 ```
 
-See `docs/roadmap.md` for current phase status.
+## License
+
+[Apache License 2.0](https://github.com/GemovicNemanja/strata-forge/blob/main/LICENSE).

@@ -13,7 +13,7 @@ duplicate the callback in the lists — and **silent-no-op when Langfuse
 isn't configured**, so library code can call it unconditionally.
 
 :func:`is_litellm_callback_installed` is the diagnostic counterpart;
-``forge doctor`` uses it to surface the "I configured Langfuse but I'm
+``strata-forge doctor`` uses it to surface the "I configured Langfuse but I'm
 not seeing traces" failure mode.
 """
 

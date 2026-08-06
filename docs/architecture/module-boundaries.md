@@ -97,6 +97,6 @@ Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdr
 
 ## Cross-cutting guarantees
 
-- **Imports of provider SDKs** (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) appear ONLY inside `src/forge/llm/providers/`. Everywhere else uses `LLMClient` or the `provider_extras` passthrough.
-- **Direct env-var reads** (`os.environ[...]`) appear ONLY inside `src/forge/config/`. Other modules consume `strata_forge.config.get_settings()`.
+- **Imports of provider SDKs** (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) appear ONLY inside `src/strata_forge/llm/providers/`. Everywhere else uses `LLMClient` or the `provider_extras` passthrough.
+- **Direct env-var reads** (`os.environ[...]`) appear ONLY inside `src/strata_forge/config/`. Other modules consume `strata_forge.config.get_settings()`.
 - **Direct file-system writes for caches / dumps** route through `strata_forge.storage` when persisting beyond a single process.

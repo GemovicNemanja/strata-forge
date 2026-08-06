@@ -9,8 +9,8 @@ accounting, an NDJSON diagnostic dump, and budget integration.
 
 This document is the canonical API reference for the module. The
 architectural rationale for individual decisions lives in the ADRs linked
-inline. The implementation lives under `src/forge/llm/`; module-specific
-agent rules live in [`src/forge/llm/CLAUDE.md`](../../src/forge/llm/CLAUDE.md).
+inline. The implementation lives under `src/strata_forge/llm/`; module-specific
+agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/llm/CLAUDE.md).
 
 > **TL;DR.** Build an `LLMClient`, call `complete` / `stream` /
 > `complete_structured` / `run_tool_loop` / `stream_tool_loop`. Configure provider-level and
@@ -88,7 +88,7 @@ ADR. Pricing is in USD per million tokens.
 
 Aliases (`opus`, `sonnet`, `haiku`, `gpt55`, `gemini-pro`, …) resolve to
 their canonical name before lookup. The source of truth is
-[`src/forge/llm/registry_data.yaml`](../../src/forge/llm/registry_data.yaml);
+[`src/strata_forge/llm/registry_data.yaml`](../../src/strata_forge/llm/registry_data.yaml);
 edits to it must keep YAML and this table in sync.
 
 Programmatic access:
@@ -169,7 +169,7 @@ parts. See [Multimodal](#multimodal) for the image case.
 `AssistantMessage` carries both `content: str | None` and
 `tool_calls: list[ToolCall]`. `ToolResultMessage` carries
 `tool_call_id`, `content`, and `is_error: bool`. The full hierarchy
-lives in [`messages.py`](../../src/forge/llm/messages.py).
+lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
 
 ### Responses
 
@@ -470,7 +470,7 @@ async for chunk in await client.stream([Message.user("Write a haiku.")]):
 Each `ResponseChunk` carries `delta_text`, `delta_tool_calls`, and
 optional `finish_reason` + `usage` (present on the final chunk when the
 provider reports them). The streaming utilities in
-[`streaming.py`](../../src/forge/llm/streaming.py) provide accumulators
+[`streaming.py`](../../src/strata_forge/llm/streaming.py) provide accumulators
 for the common postprocessing patterns:
 
 - `accumulate_text(chunks)` → the concatenated text.
@@ -650,7 +650,7 @@ route, messages, response text, tool calls, finish_reason, usage,
 cost, latency, cache_hit, error (on failure).
 
 The record schema (`DiagnosticRecord` in
-[`diagnostic.py`](../../src/forge/llm/diagnostic.py)) is plain
+[`diagnostic.py`](../../src/strata_forge/llm/diagnostic.py)) is plain
 JSON-serializable so replay/analytics scripts don't need to import
 Forge.
 
@@ -660,7 +660,7 @@ Forge.
 
 Every exception raised from `strata_forge.llm` is a `ForgeError` subclass — no
 raw LiteLLM exceptions ever bubble out. The seam is
-[`map_litellm_exception`](../../src/forge/llm/errors.py).
+[`map_litellm_exception`](../../src/strata_forge/llm/errors.py).
 
 | Exception | When it fires |
 |---|---|
