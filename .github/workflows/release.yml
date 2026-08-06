@@ -37,7 +37,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pkg="$(uv run --no-sync python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          # `--no-project`: this step runs before any sync, so there is no project environment yet.
+          # Uses the uv-managed interpreter rather than the runner's system python, whose version
+          # (and therefore whether `tomllib` exists) is not ours to control.
+          pkg="$(uv run --no-project python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
           if [ "$tag" != "$pkg" ]; then
             echo "::error::tag v$tag does not match pyproject version $pkg"
             exit 1
