@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
-from forge.prompts import (
+from strata_forge.prompts import (
     InMemoryPromptStore,
     PromptRegistry,
     PromptTemplate,

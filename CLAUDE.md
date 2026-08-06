@@ -2,7 +2,7 @@
 
 This file is the single source of truth for cross-cutting conventions that every contributor (human or agent — Claude Code, Cursor, Codex, Copilot, …) follows in this codebase. Tools that read `AGENTS.md` get the same content via the symlink at the repo root.
 
-Module-specific rules live in `src/forge/<module>/CLAUDE.md`. If a module rule conflicts with this file, **fix the conflict** before merging — the module file is authoritative for itself, this file is authoritative for cross-cutting concerns.
+Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`. If a module rule conflicts with this file, **fix the conflict** before merging — the module file is authoritative for itself, this file is authoritative for cross-cutting concerns.
 
 Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` for Cursor's rule engine, mirroring the relevant sections of this file.
 
@@ -17,7 +17,7 @@ Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` fo
 - Not a one-off research script — generality over single-use convenience.
 - Not a wrapper around any one provider — vendor-neutral via LiteLLM at the transport seam.
 - Not opinionated about prompt design or grader curation — Forge ships primitives, not opinions.
-- Not aimed at production-grade inference serving (that's vLLM/TGI/SGLang's job; we orchestrate them via `forge.compute`).
+- Not aimed at production-grade inference serving (that's vLLM/TGI/SGLang's job; we orchestrate them via `strata_forge.compute`).
 
 ---
 
@@ -25,19 +25,19 @@ Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` fo
 
 | Module | Purpose | Module rules |
 |---|---|---|
-| `forge.core` | Cross-cutting utilities: errors (`ForgeError` hierarchy), retry, structlog logging with `trace_id` propagation, `BudgetContext`, reproducibility helpers, UUIDv7 ids, shared types. Strictly upstream — does not import from any other `forge.*` module. | [`src/forge/core/CLAUDE.md`](src/forge/core/CLAUDE.md) |
-| `forge.config` | Pydantic Settings root with sub-models per concern; YAML profile overlays (`FORGE_PROFILE`); `.env` loading. The single configuration entry point — never read env vars directly elsewhere. | [`src/forge/config/CLAUDE.md`](src/forge/config/CLAUDE.md) |
-| `forge.llm` | Provider-abstracted async LLM client over LiteLLM. Owns the typed layer: Pydantic messages/responses, structured output, tools (`Tool`, `@tool`, `run_tool_loop`), multimodal, streaming, two-axis fallback, provider-agnostic cache, model registry. Reference: [`docs/modules/llm.md`](docs/modules/llm.md). | [`src/forge/llm/CLAUDE.md`](src/forge/llm/CLAUDE.md) |
-| `forge.prompts` | Jinja2 templating with safe filters + Langfuse-backed prompt registry. Templates model the stable-prefix / dynamic-suffix split so provider prompt caching just works. Reference: [`docs/modules/prompts.md`](docs/modules/prompts.md). | [`src/forge/prompts/CLAUDE.md`](src/forge/prompts/CLAUDE.md) |
-| `forge.tracing` | Langfuse observability. Auto-tracing via LiteLLM callback, `@traced` decorator, span context managers, score/metric helpers. Reference: [`docs/modules/tracing.md`](docs/modules/tracing.md). | [`src/forge/tracing/CLAUDE.md`](src/forge/tracing/CLAUDE.md) |
-| `forge.datasets` | Dataset CRUD + versioning; Langfuse ↔ Hugging Face Datasets bridge; synthetic-data primitives. | [`src/forge/datasets/CLAUDE.md`](src/forge/datasets/CLAUDE.md) |
-| `forge.evals` | Experiment runner (model × prompt × dataset × graders); graders, metrics, reports, parameter sweeps; trace replay; CI eval-regression gate. | [`src/forge/evals/CLAUDE.md`](src/forge/evals/CLAUDE.md) |
-| `forge.agents` | PydanticAI agent builder + built-in tools + memory + multi-agent patterns. **Reuses** `Tool`, `@tool`, message types, `run_tool_loop` from `forge.llm` — does NOT re-implement tool plumbing. | [`src/forge/agents/CLAUDE.md`](src/forge/agents/CLAUDE.md) |
-| `forge.rag` | Embedders (via `forge.llm`), Qdrant store, chunkers, retrieval (dense / BM25 / hybrid RRF), rerankers, composable pipeline. | [`src/forge/rag/CLAUDE.md`](src/forge/rag/CLAUDE.md) |
-| `forge.storage` | `fsspec` gateway (local, S3, GCS, Azure Blob, HF Hub); HF Hub model push/pull; dataset handling. | [`src/forge/storage/CLAUDE.md`](src/forge/storage/CLAUDE.md) |
-| `forge.compute` | Remote compute orchestration: SkyPilot via `sky.api.sdk`, raw `asyncssh` SSH backend, YAML task templates, async batch inference. | [`src/forge/compute/CLAUDE.md`](src/forge/compute/CLAUDE.md) |
-| `forge.training` | Fine-tuning: SFT, DPO/ORPO/KTO/GRPO, PEFT (LoRA/QLoRA), chat-template formatting, sequence packing. | [`src/forge/training/CLAUDE.md`](src/forge/training/CLAUDE.md) |
-| `forge.cli` | Typer entry points: `chat`, `eval`, `experiments`, `prompts`, `datasets`, `train`, `serve`, `compute`, `doctor`. | [`src/forge/cli/CLAUDE.md`](src/forge/cli/CLAUDE.md) |
+| `strata_forge.core` | Cross-cutting utilities: errors (`ForgeError` hierarchy), retry, structlog logging with `trace_id` propagation, `BudgetContext`, reproducibility helpers, UUIDv7 ids, shared types. Strictly upstream — does not import from any other `strata_forge.*` module. | [`src/strata_forge/core/CLAUDE.md`](src/strata_forge/core/CLAUDE.md) |
+| `strata_forge.config` | Pydantic Settings root with sub-models per concern; YAML profile overlays (`FORGE_PROFILE`); `.env` loading. The single configuration entry point — never read env vars directly elsewhere. | [`src/strata_forge/config/CLAUDE.md`](src/strata_forge/config/CLAUDE.md) |
+| `strata_forge.llm` | Provider-abstracted async LLM client over LiteLLM. Owns the typed layer: Pydantic messages/responses, structured output, tools (`Tool`, `@tool`, `run_tool_loop`), multimodal, streaming, two-axis fallback, provider-agnostic cache, model registry. Reference: [`docs/modules/llm.md`](docs/modules/llm.md). | [`src/strata_forge/llm/CLAUDE.md`](src/strata_forge/llm/CLAUDE.md) |
+| `strata_forge.prompts` | Jinja2 templating with safe filters + Langfuse-backed prompt registry. Templates model the stable-prefix / dynamic-suffix split so provider prompt caching just works. Reference: [`docs/modules/prompts.md`](docs/modules/prompts.md). | [`src/strata_forge/prompts/CLAUDE.md`](src/strata_forge/prompts/CLAUDE.md) |
+| `strata_forge.tracing` | Langfuse observability. Auto-tracing via LiteLLM callback, `@traced` decorator, span context managers, score/metric helpers. Reference: [`docs/modules/tracing.md`](docs/modules/tracing.md). | [`src/strata_forge/tracing/CLAUDE.md`](src/strata_forge/tracing/CLAUDE.md) |
+| `strata_forge.datasets` | Dataset CRUD + versioning; Langfuse ↔ Hugging Face Datasets bridge; synthetic-data primitives. | [`src/strata_forge/datasets/CLAUDE.md`](src/strata_forge/datasets/CLAUDE.md) |
+| `strata_forge.evals` | Experiment runner (model × prompt × dataset × graders); graders, metrics, reports, parameter sweeps; trace replay; CI eval-regression gate. | [`src/strata_forge/evals/CLAUDE.md`](src/strata_forge/evals/CLAUDE.md) |
+| `strata_forge.agents` | PydanticAI agent builder + built-in tools + memory + multi-agent patterns. **Reuses** `Tool`, `@tool`, message types, `run_tool_loop` from `strata_forge.llm` — does NOT re-implement tool plumbing. | [`src/strata_forge/agents/CLAUDE.md`](src/strata_forge/agents/CLAUDE.md) |
+| `strata_forge.rag` | Embedders (via `strata_forge.llm`), Qdrant store, chunkers, retrieval (dense / BM25 / hybrid RRF), rerankers, composable pipeline. | [`src/strata_forge/rag/CLAUDE.md`](src/strata_forge/rag/CLAUDE.md) |
+| `strata_forge.storage` | `fsspec` gateway (local, S3, GCS, Azure Blob, HF Hub); HF Hub model push/pull; dataset handling. | [`src/strata_forge/storage/CLAUDE.md`](src/strata_forge/storage/CLAUDE.md) |
+| `strata_forge.compute` | Remote compute orchestration: SkyPilot via `sky.api.sdk`, raw `asyncssh` SSH backend, YAML task templates, async batch inference. | [`src/strata_forge/compute/CLAUDE.md`](src/strata_forge/compute/CLAUDE.md) |
+| `strata_forge.training` | Fine-tuning: SFT, DPO/ORPO/KTO/GRPO, PEFT (LoRA/QLoRA), chat-template formatting, sequence packing. | [`src/strata_forge/training/CLAUDE.md`](src/strata_forge/training/CLAUDE.md) |
+| `strata_forge.cli` | Typer entry points: `chat`, `eval`, `experiments`, `prompts`, `datasets`, `train`, `serve`, `compute`, `doctor`. | [`src/strata_forge/cli/CLAUDE.md`](src/strata_forge/cli/CLAUDE.md) |
 
 Per-module reference docs live under `docs/modules/<name>.md`. The phase roadmap lives in [`docs/roadmap.md`](docs/roadmap.md); architectural rationale lives in `docs/architecture/`.
 
@@ -45,28 +45,28 @@ Per-module reference docs live under `docs/modules/<name>.md`. The phase roadmap
 
 ## 3. Architecture principles
 
-These apply everywhere in `src/forge/`. Code that violates them is wrong by default; if a violation is genuinely necessary, write an ADR before merging.
+These apply everywhere in `src/strata_forge/`. Code that violates them is wrong by default; if a violation is genuinely necessary, write an ADR before merging.
 
 ### 3.1 Async-first public API
 - Every public function on every module is `async`.
-- Sync wrappers live **only** in `forge.sync` and exist for CLI / notebook ergonomics. They wrap async functions via `asyncio.run`.
+- Sync wrappers live **only** in `strata_forge.sync` and exist for CLI / notebook ergonomics. They wrap async functions via `asyncio.run`.
 - Internal calls are async end-to-end. Do not mix `requests` / sync `httpx` with async code paths.
 - HTTP I/O uses `httpx.AsyncClient` (often indirectly through LiteLLM).
 
 ### 3.2 Strict typing
-- pyright runs in `strict` mode on `src/forge/`. New code must be strict-clean.
+- pyright runs in `strict` mode on `src/strata_forge/`. New code must be strict-clean.
 - No `Any` without a single-line `# pyright: ignore[reportXxx]` justification.
 - Data types: Pydantic v2 models. Behavior types: `Protocol`. Narrow boundaries: `TypedDict`.
 - `from __future__ import annotations` at the top of modules using generics — keeps annotations lazy on Python 3.14.
 
 ### 3.3 Exception-based errors
-- Every Forge-raised error inherits from `forge.core.errors.ForgeError`.
-- Provider exceptions are normalized at the seam (`forge.llm.errors.map_litellm_exception`) into `ProviderError` subclasses.
+- Every Forge-raised error inherits from `strata_forge.core.errors.ForgeError`.
+- Provider exceptions are normalized at the seam (`strata_forge.llm.errors.map_litellm_exception`) into `ProviderError` subclasses.
 - Never `except:`. Never swallow exceptions. Decorators (`@retry`) drive control flow; predicates select on `ProviderError` subclasses.
 - Validation errors raise `ValidationError` (or a subclass), never silently coerce.
 
 ### 3.4 Module independence + lazy heavy imports
-- `import forge.<module>` MUST NOT crash when an optional extra is uninstalled.
+- `import strata_forge.<module>` MUST NOT crash when an optional extra is uninstalled.
 - Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`) live behind PyPI extras — `[compute]`, `[finetuning]`, `[serving]`, `[multimodal]`, `[redis]`, `[inspect]`.
 - Heavy deps are imported **inside the function that uses them**, never at module load. The function raises `ImportError` with an installation hint if the extra is missing.
 
@@ -76,7 +76,7 @@ These apply everywhere in `src/forge/`. Code that violates them is wrong by defa
 
 ### 3.6 Observability built in
 - Every LLM call is traced (when Langfuse is configured) and dumpable to NDJSON (env-gated via `FORGE_DIAGNOSTIC=1`).
-- Use the structlog logger from `forge.core.logging`; `trace_id` propagates via contextvars across `await` boundaries — never pass it manually.
+- Use the structlog logger from `strata_forge.core.logging`; `trace_id` propagates via contextvars across `await` boundaries — never pass it manually.
 - Do not log full prompts at `INFO`; use `DEBUG`. Never log raw API keys, AWS signatures, or session tokens.
 
 ### 3.7 Cost awareness
@@ -84,12 +84,12 @@ These apply everywhere in `src/forge/`. Code that violates them is wrong by defa
 - Don't silently truncate prompts; raise `BudgetExceededError` instead.
 
 ### 3.8 Reproducibility
-- Long-running operations capture `forge.core.repro.env_snapshot()` in their run metadata.
-- Pseudo-randomness goes through `forge.core.repro.set_seed()` — never call `random.seed` directly.
+- Long-running operations capture `strata_forge.core.repro.env_snapshot()` in their run metadata.
+- Pseudo-randomness goes through `strata_forge.core.repro.set_seed()` — never call `random.seed` directly.
 - Dataset content is hashed via `content_hash()` for run provenance.
 
 ### 3.9 No vendor lock-in in higher-level modules
-- `forge.evals`, `forge.agents`, `forge.rag` use `forge.llm` for all model calls. They never import provider SDKs directly.
+- `strata_forge.evals`, `strata_forge.agents`, `strata_forge.rag` use `strata_forge.llm` for all model calls. They never import provider SDKs directly.
 - Vector store, prompt registry, dataset bridge — all behind interfaces that can be swapped.
 
 ---
@@ -99,9 +99,9 @@ These apply everywhere in `src/forge/`. Code that violates them is wrong by defa
 Most of these are enforced by `ruff` and `pyright`. Local violations without justification fail pre-commit.
 
 - **Ruff** is the lint + format authority. Single config in `pyproject.toml`. Line length 100. `target-version = "py314"`. Selected rule sets include E, F, W, I, N, UP, B, A, C4, PIE, SIM, RUF, ASYNC, S (bandit), PT (pytest), TID, TCH, PTH, ERA.
-- **Pyright** strict on `src/forge`. Tests are typed but not strict (pragmatic). `Any` requires a justified ignore comment.
+- **Pyright** strict on `src/strata_forge`. Tests are typed but not strict (pragmatic). `Any` requires a justified ignore comment.
 - **Naming:** `snake_case` for functions / variables / modules; `PascalCase` for classes; `SCREAMING_SNAKE` for constants. Pydantic models follow `XxxConfig`, `XxxRequest`, `XxxResponse`, `XxxError`.
-- **Imports:** ruff isort. First-party is `forge`. Avoid `from forge.<other_module> import *` re-exports without explicit `__all__`.
+- **Imports:** ruff isort. First-party is `forge`. Avoid `from strata_forge.<other_module> import *` re-exports without explicit `__all__`.
 - **Docstrings:** module-level summary mandatory. Public functions / classes: one-line summary; multi-line only when the *why* is non-obvious. No paragraph-long docstrings — long-form belongs in `docs/modules/<name>.md`.
 - **Comments:** rare. Only when the *why* is non-obvious. Never describe *what* — names already do that. Never reference current tasks, PRs, or scaffolding metadata.
 - **Emojis:** none in source.
@@ -114,8 +114,8 @@ Most of these are enforced by `ruff` and `pyright`. Local violations without jus
 - Every new code path gets a test in the same PR.
 - Prefer fast unit tests (no network) for most logic. Use VCR for provider-touching tests; live integration is env-gated and runs only nightly.
 - Coverage thresholds enforced in CI:
-  - `src/forge/llm/` ≥ 90 % line
-  - `src/forge/core/`, `src/forge/config/` ≥ 85 % line
+  - `src/strata_forge/llm/` ≥ 90 % line
+  - `src/strata_forge/core/`, `src/strata_forge/config/` ≥ 85 % line
 - No skipped tests committed without a tracking issue link in the skip reason.
 - VCR cassettes scrub secrets in `before_record_request`. Recording without scrubbing = leaking credentials; rotate them.
 - Snapshot tests (`syrupy`) for provider format mappings — a failing snapshot is an early-warning signal, not noise to suppress.
@@ -213,7 +213,7 @@ forge is a library, not a service, so it has no deploy of its own — but its br
 
 ## 9. How to add a new top-level module
 
-1. Create `src/forge/<module>/` with `__init__.py` (module docstring), `README.md` (what + why), `CLAUDE.md` (module-specific rules).
+1. Create `src/strata_forge/<module>/` with `__init__.py` (module docstring), `README.md` (what + why), `CLAUDE.md` (module-specific rules).
 2. Add a row to the **Project map** table in §2 of this file.
 3. Add `docs/modules/<module>.md` reference doc.
 4. If the module introduces new heavy deps, add an extra to `pyproject.toml` and gate the imports lazily inside the using function.
@@ -225,10 +225,36 @@ forge is a library, not a service, so it has no deploy of its own — but its br
 
 ---
 
+## 9b. Publishing to PyPI
+
+`strata-forge` is published to PyPI under **Apache-2.0**. The distribution is `strata-forge`; the
+import package is `strata_forge`. Only the `strata-forge` console script is installed — never
+reintroduce a bare `forge` binary or a bare `forge` import package, both of which collide with an
+unrelated PyPI project.
+
+**An sdist is public and permanent.** The build config is an allow-list, not a filter:
+`[tool.hatch.build.targets.sdist] only-include` ships **only** `src/strata_forge` (hatchling adds
+the readme, licence, `NOTICE`, and `pyproject.toml`), and both targets exclude `CLAUDE.md` /
+`AGENTS.md` / `.env*`. If you add a build `include`/`force-include`, re-check what lands in the
+archive — `.env` holds live provider keys and is kept out only by the allow-list plus VCS ignores.
+`release.yml` re-asserts this before every upload and fails the job rather than publishing.
+
+Anything under `src/` ships to a public index, so it must not name private sibling repos or
+internal infrastructure — write module docstrings for an outside reader.
+
+**Cutting a release:** bump `version` in `pyproject.toml` **and** `__version__` in
+`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), promote
+`dev` → `main` per §8, then tag `main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies
+the tag matches the packaged version, builds, checks the archives, and uploads via PyPI **Trusted
+Publishing** (OIDC — there is no API token in this repo). `workflow_dispatch` publishes to TestPyPI
+for a rehearsal.
+
+---
+
 ## 10. Where to look when stuck
 
 - This file → cross-cutting rules.
-- `src/forge/<module>/CLAUDE.md` → module-specific rules.
+- `src/strata_forge/<module>/CLAUDE.md` → module-specific rules.
 - `docs/architecture/overview.md` → high-level architecture narrative.
 - `docs/architecture/adr/` → "why does this look the way it does?"
 - `docs/modules/<name>.md` → public API reference for a module.

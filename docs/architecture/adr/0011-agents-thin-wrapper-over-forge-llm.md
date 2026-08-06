@@ -1,14 +1,14 @@
-# ADR 0011 — `forge.agents` is a thin wrapper over `forge.llm`, not a parallel runtime
+# ADR 0011 — `strata_forge.agents` is a thin wrapper over `strata_forge.llm`, not a parallel runtime
 
 **Status:** Accepted
-**Date:** Initial scaffolding for `forge.agents`
+**Date:** Initial scaffolding for `strata_forge.agents`
 **Supersedes:** —
 **Superseded by:** —
 
 ## Context
 
 Phase 1 deliberately shipped tool calling, structured output, and the
-multi-turn tool loop inside `forge.llm` (ADR 0006). Phase 3 adds an
+multi-turn tool loop inside `strata_forge.llm` (ADR 0006). Phase 3 adds an
 agent layer: a higher-level builder that wires a system prompt, a set
 of tools, and an :class:`LLMClient` into a single object whose
 ``.run(user_input)`` method produces a final answer.
@@ -20,16 +20,16 @@ libraries do this. We're explicitly rejecting that shape.
 
 ## Decision
 
-`forge.agents` is a **thin, composition-only layer over
-`forge.llm`**. Concretely:
+`strata_forge.agents` is a **thin, composition-only layer over
+`strata_forge.llm`**. Concretely:
 
-1. **No new tool abstraction.** Agents accept :class:`forge.llm.Tool`
-   instances built with the existing :func:`forge.llm.tool`
+1. **No new tool abstraction.** Agents accept :class:`strata_forge.llm.Tool`
+   instances built with the existing :func:`strata_forge.llm.tool`
    decorator. The agent's tools field is typed as
    ``tuple[Tool, ...]``; nothing else satisfies it.
 2. **No new message types.** Agent input is either a string
    (wrapped into a :class:`UserMessage`) or a sequence of the
-   existing :data:`forge.llm.AnyMessage` union members. The agent
+   existing :data:`strata_forge.llm.AnyMessage` union members. The agent
    prepends a :class:`SystemMessage` from its system prompt and
    passes the result through verbatim.
 3. **No new tool loop.** Agents delegate to
@@ -43,22 +43,22 @@ libraries do this. We're explicitly rejecting that shape.
 5. **`AgentResult` is the only new shape.** It bundles the final
    text, the conversation that was sent to the LLM, and the raw
    :class:`LLMResponse`. The raw response is exposed so callers
-   that already understand `forge.llm` semantics never need to
+   that already understand `strata_forge.llm` semantics never need to
    learn an agent-specific accounting layer.
 
 ```
-                                     forge.agents.Agent
+                                     strata_forge.agents.Agent
                                             │
                                             │  .run() / .run_structured()
                                             ▼
-                              forge.llm.LLMClient
+                              strata_forge.llm.LLMClient
                                             │
                           ┌─────────────────┼──────────────────┐
                           ▼                 ▼                  ▼
                  .run_tool_loop()    .complete()    .complete_structured()
                           │                 │                  │
                           ▼                 ▼                  ▼
-                     forge.llm.Tool ◄── @tool decorator ──► Pydantic schema
+                     strata_forge.llm.Tool ◄── @tool decorator ──► Pydantic schema
 ```
 
 Built-in tools (Phase 3.2) are concrete :class:`Tool` instances
@@ -75,7 +75,7 @@ instances rather than introducing a new orchestration primitive.
   are fixed in one place. The agent module can't drift from the
   LLM client's semantics because it doesn't have its own.
 - **Token, cost, and tracing accounting works automatically.** The
-  Langfuse callback registered by `forge.tracing` traces every
+  Langfuse callback registered by `strata_forge.tracing` traces every
   LLM call regardless of whether it originated from a bare
   `LLMClient.complete` or from `Agent.run`. The diagnostic NDJSON
   dump catches every iteration of the agent's tool loop.
@@ -94,12 +94,12 @@ instances rather than introducing a new orchestration primitive.
   messages live inside the method. `AgentResult.messages`
   therefore carries the *input* conversation plus the final
   assistant message, not every iteration. Callers that need the
-  full iteration trace rely on `forge.tracing` (Langfuse traces
+  full iteration trace rely on `strata_forge.tracing` (Langfuse traces
   capture every call) or the `FORGE_DIAGNOSTIC` NDJSON dump.
 - **Some agent-library features don't have an obvious home.**
   Things like "rate-limit my agent's tool calls" or "give my
   agent a persistent budget across runs" don't fit a thin wrapper.
-  Those land in adjacent modules (`forge.core.budget` for the
+  Those land in adjacent modules (`strata_forge.core.budget` for the
   budget case) rather than reshaping the agent itself.
 
 **Mitigations**
@@ -110,23 +110,23 @@ instances rather than introducing a new orchestration primitive.
   care know where to look.
 - Power features that don't fit the thin-wrapper shape are
   evaluated case-by-case; the bar for adding them is "does this
-  belong somewhere else in `forge.*` instead?" before we extend
+  belong somewhere else in `strata_forge.*` instead?" before we extend
   the agent.
 
 ## Alternatives considered
 
-1. **Re-implement tool calling inside `forge.agents`.** Maximizes
+1. **Re-implement tool calling inside `strata_forge.agents`.** Maximizes
    flexibility but doubles the surface area of "how does Forge do
    tool calling?", with the inevitable drift between the two
    implementations. Rejected on consistency grounds.
 
-2. **`forge.agents` exposes `Tool`, `@tool`, messages as
+2. **`strata_forge.agents` exposes `Tool`, `@tool`, messages as
    re-exports without any new shape.** Smaller still, but loses
    the convenience of "I want one object that knows about my
    tools and my system prompt." The `Agent` shape pays for itself
-   in ergonomics. Kept the re-exports anyway — `from forge.agents
+   in ergonomics. Kept the re-exports anyway — `from strata_forge.agents
    import tool, UserMessage` works for users who don't want to
-   know that the primitives live in `forge.llm`.
+   know that the primitives live in `strata_forge.llm`.
 
 3. **Build the agent on PydanticAI directly.** Loses the
    provider-agnostic Forge surface (PydanticAI has its own

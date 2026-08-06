@@ -1,0 +1,90 @@
+# Publishes strata-forge to PyPI via Trusted Publishing (OIDC) — no API token is ever
+# stored in this repo. PyPI is configured to trust THIS repository + workflow filename +
+# the `pypi` environment, so a fork or a different workflow cannot mint a publish token.
+#
+# Release flow:
+#   1. Bump `version` in pyproject.toml and `__version__` in src/strata_forge/__init__.py.
+#   2. Merge to main through the normal dev -> main promotion.
+#   3. Tag main: `git tag v0.1.0 && git push origin v0.1.0`.
+#
+# A tag whose version disagrees with pyproject.toml fails the build job before anything
+# is uploaded — PyPI releases are immutable, so the check is deliberately pre-publish.
+#
+# `workflow_dispatch` publishes to TestPyPI instead, for rehearsing a release.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Verify the tag matches the packaged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(uv run --no-sync python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match pyproject version $pkg"
+            exit 1
+          fi
+
+      - run: uv build
+
+      # An sdist is public and permanent. Fail loudly if the build config ever regresses and
+      # sweeps in the environment file, coverage data, recorded cassettes, or agent instructions.
+      - name: Assert no sensitive or internal files are packaged
+        run: |
+          contents="$(tar tzf dist/*.tar.gz; unzip -Z1 dist/*.whl)"
+          if printf '%s\n' "$contents" | grep -Ei '(^|/)\.env|\.coverage|cassettes/|CLAUDE\.md|AGENTS\.md'; then
+            echo "::error::refusing to publish: the distributions contain excluded files (see above)"
+            exit 1
+          fi
+          printf '%s\n' "$contents"
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The environment is half of the Trusted Publishing binding, and lets you require a
+    # manual approval on the PyPI environment if you want a human gate before upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/strata-forge
+    permissions:
+      # Mints the short-lived OIDC token Trusted Publishing exchanges for an upload token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        # Pinned to the v1.14.2 release commit: this step holds an OIDC identity that can
+        # publish under our project name, so it must not float on a mutable tag.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          repository-url: ${{ github.event_name == 'workflow_dispatch' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

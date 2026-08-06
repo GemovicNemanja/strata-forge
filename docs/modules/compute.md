@@ -1,6 +1,6 @@
-# `forge.compute` — task shapes, backends, batch inference, serving adapters
+# `strata_forge.compute` — task shapes, backends, batch inference, serving adapters
 
-`forge.compute` is the remote-compute orchestration layer. It
+`strata_forge.compute` is the remote-compute orchestration layer. It
 ships typed task / job / status Pydantic shapes, a
 :class:`Backend` Protocol, three concrete backends
 (:class:`LocalBackend`, :class:`SSHBackend`,
@@ -32,8 +32,8 @@ Integration points:
   :func:`serving_endpoint`, :func:`wait_for_endpoint`,
   :class:`ServingEndpoint`.
 
-Module rules: [`src/forge/compute/CLAUDE.md`](../../src/forge/compute/CLAUDE.md).
-Source: [`src/forge/compute/`](../../src/forge/compute/).
+Module rules: [`src/strata_forge/compute/CLAUDE.md`](../../src/strata_forge/compute/CLAUDE.md).
+Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 
 ---
 
@@ -56,7 +56,7 @@ Source: [`src/forge/compute/`](../../src/forge/compute/).
 ## Quickstart
 
 ```python
-from forge.compute import LocalBackend, Task
+from strata_forge.compute import LocalBackend, Task
 
 backend = LocalBackend()
 task = Task(name="hello", run="echo 'hi from compute'")
@@ -72,8 +72,8 @@ await backend.cleanup(job)
 For batch inference:
 
 ```python
-from forge.compute import BatchInferenceRunner
-from forge.llm import LLMClient, Message
+from strata_forge.compute import BatchInferenceRunner
+from strata_forge.llm import LLMClient, Message
 
 client = LLMClient(model="claude-haiku-4-5")
 runner = BatchInferenceRunner(client, concurrency=10, on_error="collect")
@@ -90,10 +90,10 @@ for r in results:
 For a self-hosted vLLM server:
 
 ```python
-from forge.compute import LocalBackend
-from forge.compute.serving import build_vllm_task, serving_endpoint
-from forge.llm import LLMClient
-from forge.llm.providers.config import OpenAICompatConfig
+from strata_forge.compute import LocalBackend
+from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.llm import LLMClient
+from strata_forge.llm.providers.config import OpenAICompatConfig
 
 task = build_vllm_task("meta-llama/Llama-3.1-8B-Instruct", port=8000)
 async with serving_endpoint(
@@ -117,7 +117,7 @@ SkyPilot YAML task shape so users with existing YAML pipelines
 can adopt it incrementally.
 
 ```python
-from forge.compute import Task, ResourceSpec
+from strata_forge.compute import Task, ResourceSpec
 
 task = Task(
     name="train-llama",
@@ -175,7 +175,7 @@ backend-specific knowledge of which methods are no-ops.
 ## LocalBackend
 
 ```python
-from forge.compute import LocalBackend, Task
+from strata_forge.compute import LocalBackend, Task
 
 backend = LocalBackend(workdir="./local-forge-jobs")
 job = await backend.submit(Task(name="t", run="python -m my_script"))
@@ -189,7 +189,7 @@ tracks them by job id. Each job gets its own workdir
 ## SSHBackend
 
 ```python
-from forge.compute import SSHBackend, Task
+from strata_forge.compute import SSHBackend, Task
 
 backend = SSHBackend(host="gpu-host.example.com", username="ml-team")
 job = await backend.submit(Task(name="t", run="python train.py"))
@@ -207,7 +207,7 @@ Pass a pre-built ``asyncssh.SSHClientConnection`` via
 ## SkyPilotBackend
 
 ```python
-from forge.compute import SkyPilotBackend, Task, ResourceSpec
+from strata_forge.compute import SkyPilotBackend, Task, ResourceSpec
 
 backend = SkyPilotBackend()
 task = Task(
@@ -245,12 +245,12 @@ exception in the corresponding result slot.
 
 The serving helpers build a :class:`Task` whose ``run`` launches
 an OpenAI-compatible inference server. Combined with the
-``openai_compat`` provider in :mod:`forge.llm`, you can talk to
+``openai_compat`` provider in :mod:`strata_forge.llm`, you can talk to
 self-hosted models with the same :class:`LLMClient` API you use
 for SaaS providers.
 
 ```python
-from forge.compute.serving import build_vllm_task, build_tgi_task, build_sglang_task
+from strata_forge.compute.serving import build_vllm_task, build_tgi_task, build_sglang_task
 
 vllm_task = build_vllm_task(
     "meta-llama/Llama-3.1-8B-Instruct",
@@ -268,8 +268,8 @@ yields a :class:`ServingEndpoint`, and on exit cancels the job
 and (optionally) calls ``backend.cleanup``.
 
 ```python
-from forge.compute import LocalBackend
-from forge.compute.serving import serving_endpoint
+from strata_forge.compute import LocalBackend
+from strata_forge.compute.serving import serving_endpoint
 
 async with serving_endpoint(
     LocalBackend(), vllm_task, base_url="http://localhost:8000/v1"

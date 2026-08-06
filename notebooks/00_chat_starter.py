@@ -57,7 +57,7 @@ def _(mo, model_input, prompt_input, temperature_input):
 
 @app.cell
 async def _(model_input, prompt_input, temperature_input):
-    from forge.llm import LLMClient, Message
+    from strata_forge.llm import LLMClient, Message
 
     client = LLMClient(model=model_input.value)
     response = await client.complete(

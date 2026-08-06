@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.graders.json_grader`."""
+"""Unit tests for `strata_forge.evals.graders.json_grader`."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from forge.datasets.schema import DatasetItem
-from forge.evals.graders.json_grader import JSONField, JSONStructure
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.datasets.schema import DatasetItem
+from strata_forge.evals.graders.json_grader import JSONField, JSONStructure
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _response(text: str) -> LLMResponse:

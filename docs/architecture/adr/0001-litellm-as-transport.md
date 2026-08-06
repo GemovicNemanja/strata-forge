@@ -21,12 +21,12 @@ What it does NOT need to own: HTTP transport, authentication mechanics, streamin
 
 ## Decision
 
-Use **LiteLLM** as the underlying transport layer. Forge wraps LiteLLM in a thin, typed layer that owns the concerns above. Provider SDKs are imported only inside `src/forge/llm/providers/` — never elsewhere in the codebase.
+Use **LiteLLM** as the underlying transport layer. Forge wraps LiteLLM in a thin, typed layer that owns the concerns above. Provider SDKs are imported only inside `src/strata_forge/llm/providers/` — never elsewhere in the codebase.
 
 Concretely:
-- `forge.llm.providers.ProviderClient` is an abstract base over LiteLLM's `acompletion` and `astream`.
+- `strata_forge.llm.providers.ProviderClient` is an abstract base over LiteLLM's `acompletion` and `astream`.
 - Per-provider modules (`openai.py`, `anthropic.py`, etc.) handle provider-specific quirks (auth config shape, tool schema serialization, idiosyncratic error mapping).
-- `forge.llm.errors.map_litellm_exception` normalizes LiteLLM exceptions into the `ProviderError` subtree.
+- `strata_forge.llm.errors.map_litellm_exception` normalizes LiteLLM exceptions into the `ProviderError` subtree.
 - The `provider_extras={...}` argument on `LLMClient.complete` forwards verbatim to LiteLLM, giving callers a typed-but-not-too-typed escape hatch when they need provider-specific features (Anthropic's `thinking` parameter, OpenAI's Responses API, Vertex tuning, …).
 
 ## Consequences
@@ -35,7 +35,7 @@ Concretely:
 
 - Provider breadth and protocol freshness come for free. New providers added to LiteLLM upstream are immediately reachable.
 - ~30–40 % less code than hand-rolled adapters; we focus engineering effort on what differentiates Forge (typing, caching, fallback semantics, registry, observability).
-- LiteLLM's Langfuse callback integrates cleanly — `forge.tracing` doesn't need to instrument LLM calls separately.
+- LiteLLM's Langfuse callback integrates cleanly — `strata_forge.tracing` doesn't need to instrument LLM calls separately.
 - One place to handle most provider-specific quirks (LiteLLM's normalization) plus one place to handle the remainder (our provider modules + error-mapping seam).
 
 **Negative**

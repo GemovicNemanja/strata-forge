@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.metrics`."""
+"""Unit tests for `strata_forge.evals.metrics`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from forge.evals.experiment import GraderResult, Outcome, Trial
-from forge.evals.metrics import (
+from strata_forge.evals.experiment import GraderResult, Outcome, Trial
+from strata_forge.evals.metrics import (
     bleu,
     mean_score,
     pass_rate,
@@ -17,7 +17,7 @@ from forge.evals.metrics import (
     pass_rate_by_model,
     rouge,
 )
-from forge.llm.responses import Usage
+from strata_forge.llm.responses import Usage
 
 
 def _trial(

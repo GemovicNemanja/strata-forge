@@ -4,7 +4,7 @@ The example writes a script that prints a few lines, submits it to
 the in-process :class:`LocalBackend`, polls for completion, and
 prints the captured stdout. No remote infrastructure needed —
 this is the smallest possible end-to-end exercise of
-:mod:`forge.compute`.
+:mod:`strata_forge.compute`.
 
 Usage::
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 
-from forge.compute import LocalBackend, Task
+from strata_forge.compute import LocalBackend, Task
 
 
 async def _main() -> None:

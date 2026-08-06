@@ -1,11 +1,11 @@
-"""Unit tests for `forge.config.settings`."""
+"""Unit tests for `strata_forge.config.settings`."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import SecretStr
 
-from forge.config.settings import (
+from strata_forge.config.settings import (
     DiagnosticConfig,
     LangfuseConfig,
     LoggingConfig,
@@ -117,10 +117,10 @@ class TestEnvOverrides:
 
     def test_diagnostic_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FORGE_DIAGNOSTIC_ENABLED", "1")
-        monkeypatch.setenv("FORGE_DIAGNOSTIC_PATH", "/tmp/forge.ndjson")  # noqa: S108
+        monkeypatch.setenv("FORGE_DIAGNOSTIC_PATH", "/tmp/strata_forge.ndjson")  # noqa: S108
         cfg = DiagnosticConfig()
         assert cfg.enabled is True
-        assert cfg.path == "/tmp/forge.ndjson"  # noqa: S108
+        assert cfg.path == "/tmp/strata_forge.ndjson"  # noqa: S108
 
     def test_root_settings_combines_subconfigs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("LANGFUSE_HOST", "https://langfuse.example.com")

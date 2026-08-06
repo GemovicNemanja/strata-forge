@@ -27,14 +27,14 @@ from __future__ import annotations
 
 import sys
 
-from forge.evals import (
+from strata_forge.evals import (
     CIGateThresholds,
     GraderResult,
     Outcome,
     Trial,
     evaluate_ci_gate,
 )
-from forge.llm.responses import Usage
+from strata_forge.llm.responses import Usage
 
 
 def _outcome(*, passed: bool, cost_usd: float = 0.001) -> Outcome:

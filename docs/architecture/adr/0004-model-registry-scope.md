@@ -21,7 +21,7 @@ The initial model registry is scoped to the **latest foundation models from Open
 | OpenAI | GPT-5.5, GPT-5.5 Pro, GPT-5.5 Thinking, GPT-5.5 Instant | `openai`, `azure` |
 | Google | Gemini 3.1 Pro, Gemini 3.1 Flash Lite | `vertex` |
 
-The registry data format (`src/forge/llm/registry_data.yaml`) is general — it does not constrain which models can be added. Adding new vendors (Mistral, Cohere, xAI, Meta open-weight via inference providers, etc.) or older variants requires a new ADR justifying the trade-off and updating this one's status to `Superseded by`.
+The registry data format (`src/strata_forge/llm/registry_data.yaml`) is general — it does not constrain which models can be added. Adding new vendors (Mistral, Cohere, xAI, Meta open-weight via inference providers, etc.) or older variants requires a new ADR justifying the trade-off and updating this one's status to `Superseded by`.
 
 OpenAI-compatible self-hosted endpoints (vLLM, TGI, SGLang) are addressed via the `openai_compat` provider, not via registry entries — those models are configured per-deployment.
 
@@ -41,7 +41,7 @@ OpenAI-compatible self-hosted endpoints (vLLM, TGI, SGLang) are addressed via th
 **Mitigations**
 
 - The registry loader merges `registry_data.yaml` with an optional user overlay path declared in `Settings.registry.overlay_path` — local extensions don't need an ADR.
-- `forge doctor` reports the registry contents at runtime, making it obvious which models are reachable in this deployment.
+- `strata-forge doctor` reports the registry contents at runtime, making it obvious which models are reachable in this deployment.
 
 ## Alternatives considered
 

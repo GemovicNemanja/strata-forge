@@ -1,4 +1,4 @@
-"""Unit tests for `forge.agents.multi_agent`."""
+"""Unit tests for `strata_forge.agents.multi_agent`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.agents import (
+from strata_forge.agents import (
     Agent,
     AgentResult,
     CritiqueVerdict,
@@ -15,9 +15,9 @@ from forge.agents import (
     critic_refiner_run,
     handoff,
 )
-from forge.llm.client import StructuredResponse
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.llm.client import StructuredResponse
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 
 def _route() -> ModelRoute:

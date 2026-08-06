@@ -1,12 +1,12 @@
-"""Unit tests for `forge.llm.messages`."""
+"""Unit tests for `strata_forge.llm.messages`."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from forge.core.errors import ValidationError
-from forge.llm.messages import (
+from strata_forge.core.errors import ValidationError
+from strata_forge.llm.messages import (
     AssistantMessage,
     Message,
     SystemMessage,

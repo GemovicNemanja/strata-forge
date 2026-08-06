@@ -1,4 +1,4 @@
-"""Unit tests for `forge.tracing.client`."""
+"""Unit tests for `strata_forge.tracing.client`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import types
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from forge.tracing.client import get_client, reset_client
+from strata_forge.tracing.client import get_client, reset_client
 
 if TYPE_CHECKING:
     import pytest
@@ -177,7 +177,7 @@ class TestResetClient:
         # take effect; the autouse `reset_settings_cache` fixture does
         # that for each test, but we trigger it manually here so the
         # second `get_client` rereads the (changed) env.
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-different")
@@ -202,7 +202,7 @@ class TestResetClient:
         assert get_client() is None
 
         reset_client()
-        from forge.config import reset_settings
+        from strata_forge.config import reset_settings
 
         reset_settings()
         _configure_langfuse(monkeypatch)
@@ -218,7 +218,7 @@ class TestResetClient:
 
 class TestLazyImportContract:
     def test_importing_module_does_not_import_langfuse(self) -> None:
-        # The whole point of the lazy import: `from forge.tracing import
+        # The whole point of the lazy import: `from strata_forge.tracing import
         # get_client` must work without the [langfuse] extra installed.
         # We can't directly test "no import happens at module load" easily
         # here, but we verify that get_client returns None cleanly when
@@ -226,7 +226,7 @@ class TestLazyImportContract:
         # contract.
         # (This is also covered by TestGetClientLangfuseMissing; the test
         # here documents the design intent explicitly.)
-        from forge.tracing import client
+        from strata_forge.tracing import client
 
         assert hasattr(client, "get_client")
         assert hasattr(client, "reset_client")
@@ -238,11 +238,11 @@ class TestLazyImportContract:
         # Block the langfuse import and re-import the client module from
         # scratch to confirm it doesn't try to eager-import langfuse.
         monkeypatch.setitem(sys.modules, "langfuse", None)
-        monkeypatch.delitem(sys.modules, "forge.tracing.client", raising=False)
+        monkeypatch.delitem(sys.modules, "strata_forge.tracing.client", raising=False)
         # If the module eager-imported langfuse, this raises.
         import importlib
 
-        importlib.import_module("forge.tracing.client")
+        importlib.import_module("strata_forge.tracing.client")
 
 
 # ---------------------------------------------------------------------------

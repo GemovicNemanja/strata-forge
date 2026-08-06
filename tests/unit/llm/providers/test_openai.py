@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.openai`."""
+"""Unit tests for `strata_forge.llm.providers.openai`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from forge.llm.providers.config import OpenAIConfig
-from forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
+from strata_forge.llm.providers.config import OpenAIConfig
+from strata_forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
 
 
 @pytest.fixture(autouse=True)

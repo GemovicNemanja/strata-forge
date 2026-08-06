@@ -1,13 +1,13 @@
-# ADR 0013 — `forge.compute` ships task-as-data + a Backend Protocol
+# ADR 0013 — `strata_forge.compute` ships task-as-data + a Backend Protocol
 
 **Status:** Accepted
-**Date:** Initial scaffolding for `forge.compute`
+**Date:** Initial scaffolding for `strata_forge.compute`
 **Supersedes:** —
 **Superseded by:** —
 
 ## Context
 
-`forge.compute` is the module that lets Forge code submit remote
+`strata_forge.compute` is the module that lets Forge code submit remote
 work — training jobs, batch inference, eval runs — to either a
 managed orchestrator (SkyPilot reaching AWS / GCP / Azure / RunPod
 / Lambda / Kubernetes) or directly to a single SSH-accessible host
@@ -83,7 +83,7 @@ five methods. The full lifecycle is mandatory because the absence
 of (say) `logs` or `cleanup` would force higher-level code to
 special-case backends — defeating the point of the abstraction.
 
-Backends ship in :mod:`forge.compute.backends`:
+Backends ship in :mod:`strata_forge.compute.backends`:
 
 - **Phase 5.1:** :class:`LocalBackend` — runs the task in a local
   `asyncio.create_subprocess_exec`. Dep-free, primarily for tests
@@ -185,7 +185,7 @@ re-implement orchestration we'd rather delegate.
 
 2. **Backend as an ABC with abstract methods.** Forces subclassing
    on every implementation. Protocol-based composition matches
-   the rest of `forge.*` (graders, retrievers, vector stores) and
+   the rest of `strata_forge.*` (graders, retrievers, vector stores) and
    lets user-supplied backends drop in without inheriting from a
    Forge class. Rejected.
 

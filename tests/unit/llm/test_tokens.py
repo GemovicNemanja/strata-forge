@@ -1,4 +1,4 @@
-"""Unit and property tests for `forge.llm.tokens`."""
+"""Unit and property tests for `strata_forge.llm.tokens`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from forge.llm.tokens import count_tokens
+from strata_forge.llm.tokens import count_tokens
 
 
 class TestBasic:

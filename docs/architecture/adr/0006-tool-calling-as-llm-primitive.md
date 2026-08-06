@@ -1,4 +1,4 @@
-# ADR 0006 — Tool calling, structured output, and multimodal as `forge.llm` primitives
+# ADR 0006 — Tool calling, structured output, and multimodal as `strata_forge.llm` primitives
 
 **Status:** Accepted
 **Date:** Initial scaffolding
@@ -20,9 +20,9 @@ The same logic applies to **structured output** (Pydantic-typed responses) and *
 
 ## Decision
 
-Tool calling is a first-class feature of `forge.llm`, shipped in `src/forge/llm/tools.py`. The agent module (`forge.agents`, phase 3) reuses these primitives rather than reimplementing them. The same module also ships `forge.llm.schemas` (structured output) and `forge.llm.multimodal` (image input).
+Tool calling is a first-class feature of `strata_forge.llm`, shipped in `src/strata_forge/llm/tools.py`. The agent module (`strata_forge.agents`, phase 3) reuses these primitives rather than reimplementing them. The same module also ships `strata_forge.llm.schemas` (structured output) and `strata_forge.llm.multimodal` (image input).
 
-Concretely, `forge.llm` exposes:
+Concretely, `strata_forge.llm` exposes:
 
 - `Tool` protocol: `.name`, `.description`, `.parameters_schema` (Pydantic model class), `.invoke(args)`.
 - `@tool` decorator: wraps an `async def fn(args: ArgsModel) -> ...` into a `Tool`. Schema is generated from the Pydantic args model.
@@ -31,7 +31,7 @@ Concretely, `forge.llm` exposes:
 - `LLMClient.run_tool_loop(messages, tools, max_iterations)` — multi-turn loop: completion → if `tool_use`, invoke each tool, append result messages, completion again, until `finish_reason != "tool_use"` or `max_iterations` hit. Cost/token/budget accrue across iterations.
 - Capability gate: requesting tools against a model whose registry entry doesn't support `tool_calling` raises `RegistryError` before any provider call.
 
-The agent module's contribution in phase 3 is: PydanticAI agent builder, built-in tools (`web_search`, `fs_read`, `fetch_url`, `calculator`), `ConversationMemory`, `EpisodicMemory`, multi-agent patterns. The agent module does NOT reimplement `Tool`, `@tool`, `run_tool_loop`, or message types — those are imported from `forge.llm`.
+The agent module's contribution in phase 3 is: PydanticAI agent builder, built-in tools (`web_search`, `fs_read`, `fetch_url`, `calculator`), `ConversationMemory`, `EpisodicMemory`, multi-agent patterns. The agent module does NOT reimplement `Tool`, `@tool`, `run_tool_loop`, or message types — those are imported from `strata_forge.llm`.
 
 ## Consequences
 
@@ -44,7 +44,7 @@ The agent module's contribution in phase 3 is: PydanticAI agent builder, built-i
 
 **Negative**
 
-- `forge.llm` is larger and more featured than a strict "just send completions" abstraction. The module is harder to read end-to-end.
+- `strata_forge.llm` is larger and more featured than a strict "just send completions" abstraction. The module is harder to read end-to-end.
 
 **Mitigations**
 
@@ -54,6 +54,6 @@ The agent module's contribution in phase 3 is: PydanticAI agent builder, built-i
 
 ## Alternatives considered
 
-1. **Tools live in `forge.agents`; other consumers import from there.** Forces every tool-using consumer to take the agent module as a transitive dep. Couples agents to evals/RAG/scripts in a direction that doesn't match the dependency graph. Rejected.
-2. **A separate `forge.tools` module.** A reasonable design, but tool serialization is tightly coupled to provider message construction — splitting them creates a circular-feeling dependency between `forge.llm` and `forge.tools`. Rejected on cohesion grounds.
-3. **No first-class tool support in `forge.llm`; everyone writes their own.** Loses provider-format normalization, multi-turn loop semantics, capability gates. Defeats the "batteries included" pillar. Rejected.
+1. **Tools live in `strata_forge.agents`; other consumers import from there.** Forces every tool-using consumer to take the agent module as a transitive dep. Couples agents to evals/RAG/scripts in a direction that doesn't match the dependency graph. Rejected.
+2. **A separate `strata_forge.tools` module.** A reasonable design, but tool serialization is tightly coupled to provider message construction — splitting them creates a circular-feeling dependency between `strata_forge.llm` and `strata_forge.tools`. Rejected on cohesion grounds.
+3. **No first-class tool support in `strata_forge.llm`; everyone writes their own.** Loses provider-format normalization, multi-turn loop semantics, capability gates. Defeats the "batteries included" pillar. Rejected.

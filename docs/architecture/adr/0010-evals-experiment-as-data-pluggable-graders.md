@@ -1,13 +1,13 @@
 # ADR 0010 — Evals: experiments as data, graders as pluggable async protocols, four-axis matrix
 
 **Status:** Accepted
-**Date:** Initial scaffolding for `forge.evals`
+**Date:** Initial scaffolding for `strata_forge.evals`
 **Supersedes:** —
 **Superseded by:** —
 
 ## Context
 
-`forge.evals` is the experiment runner: it takes a definition of
+`strata_forge.evals` is the experiment runner: it takes a definition of
 "these models, these prompts, this dataset, these graders" and
 produces typed results that downstream tools (CI eval gate, reports,
 trace replay) consume.
@@ -48,8 +48,8 @@ same bytes, the same hash, and the same cache key — which makes
 against the result store.
 
 The runner (Phase 2.4.2) consumes the `Experiment` and resolves
-names against the live registries (`forge.llm`, `forge.prompts`,
-`forge.datasets`). No `Experiment` instance holds an `LLMClient` or
+names against the live registries (`strata_forge.llm`, `strata_forge.prompts`,
+`strata_forge.datasets`). No `Experiment` instance holds an `LLMClient` or
 a `Dataset` directly — those resolve at run time, so a serialized
 Experiment is portable across processes.
 
@@ -70,7 +70,7 @@ class Grader(Protocol):
 ```
 
 The Protocol is async because LLM-judge graders need
-`LLMClient.complete_structured`, and the rest of `forge.*` is
+`LLMClient.complete_structured`, and the rest of `strata_forge.*` is
 async-only. Pure-text graders (`ExactMatch`, `Regex`) just don't
 await anything; their `grade` is `async def` for shape uniformity.
 
@@ -120,7 +120,7 @@ class Outcome(BaseModel):
     grader_results: tuple[GraderResult, ...]
 ```
 
-`tuple[GraderResult, ...]` mirrors the choice in `forge.datasets`:
+`tuple[GraderResult, ...]` mirrors the choice in `strata_forge.datasets`:
 Pydantic's `frozen=True` only prevents attribute reassignment, so
 collections that should be structurally immutable use tuples, not
 lists.
@@ -202,7 +202,7 @@ generation — those are separate, composable layers downstream.
 
 3. **Synchronous Grader protocol with sync wrappers for LLM-judge.**
    Cleanly mirrors the bulk of graders (pure text). Rejected
-   because every other public function in `forge.*` is async; a
+   because every other public function in `strata_forge.*` is async; a
    sync grader Protocol would be the one exception, and an
    `asyncio.run`-inside-grader pattern would block the runner's
    event loop.

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.prompts.template`."""
+"""Unit tests for `strata_forge.prompts.template`."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import pytest
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import ValidationError
 
-from forge.core.errors import ForgeError
-from forge.prompts.template import (
+from strata_forge.core.errors import ForgeError
+from strata_forge.prompts.template import (
     SAFE_FILTERS,
     PromptError,
     PromptTemplate,

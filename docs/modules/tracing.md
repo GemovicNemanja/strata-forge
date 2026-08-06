@@ -1,8 +1,8 @@
-# `forge.tracing` — Langfuse observability layered above every other module
+# `strata_forge.tracing` — Langfuse observability layered above every other module
 
-`forge.tracing` is the cross-cutting Langfuse layer. It wraps every
-other Forge module *from above* — no other `forge.*` module imports
-`forge.tracing`, which keeps the dependency arrow clean, the
+`strata_forge.tracing` is the cross-cutting Langfuse layer. It wraps every
+other Forge module *from above* — no other `strata_forge.*` module imports
+`strata_forge.tracing`, which keeps the dependency arrow clean, the
 `[langfuse]` extra truly optional, and the unit-test surface free of
 tracing concerns. See
 [ADR 0008](../architecture/adr/0008-tracing-as-cross-cutting.md) for
@@ -11,7 +11,7 @@ the design rationale.
 Five integration points ship in Phase 2.2:
 
 - `install_litellm_callback()` — wire LiteLLM's built-in Langfuse
-  callback so every LLM call through `forge.llm` (or any other
+  callback so every LLM call through `strata_forge.llm` (or any other
   library that uses LiteLLM) auto-traces.
 - `@traced` — wrap a sync or async function in a Langfuse trace.
 - `traced_span()` — async context manager for nested observations.
@@ -25,8 +25,8 @@ When Langfuse isn't configured, every public function is a silent
 no-op. Tracing failures are swallowed so they never break a
 production call path.
 
-Module rules: [`src/forge/tracing/CLAUDE.md`](../../src/forge/tracing/CLAUDE.md).
-Source: [`src/forge/tracing/`](../../src/forge/tracing/).
+Module rules: [`src/strata_forge/tracing/CLAUDE.md`](../../src/strata_forge/tracing/CLAUDE.md).
+Source: [`src/strata_forge/tracing/`](../../src/strata_forge/tracing/).
 
 ---
 
@@ -48,7 +48,7 @@ Source: [`src/forge/tracing/`](../../src/forge/tracing/).
 ## Quickstart
 
 ```python
-from forge.tracing import (
+from strata_forge.tracing import (
     install_litellm_callback,  # auto-trace LLM calls
     traced,                    # decorate non-LLM functions
     traced_span,               # async context manager for sub-spans
@@ -81,7 +81,7 @@ For end-to-end runnable demos:
 ## Configuration + the lazy import contract
 
 Tracing reads its credentials from
-[`forge.config.LangfuseConfig`](../../src/forge/config/settings.py):
+[`strata_forge.config.LangfuseConfig`](../../src/strata_forge/config/settings.py):
 
 | Env var | Field | Default |
 |---|---|---|
@@ -92,7 +92,7 @@ Tracing reads its credentials from
 `LangfuseConfig.enabled` is `True` only when **both** keys are set.
 
 The `langfuse` Python SDK is behind the `[langfuse]` extra. The
-**lazy-import contract** is structural: `import forge.tracing` works
+**lazy-import contract** is structural: `import strata_forge.tracing` works
 without the extra installed, and `get_client()` returns `None` cleanly
 in three cases — keys not configured, the SDK not installed, or a
 defensive guard. Every public function in this module checks
@@ -113,7 +113,7 @@ LiteLLM call auto-trace. Idempotent — calling it multiple times leaves
 the callback registered exactly once:
 
 ```python
-from forge.tracing import install_litellm_callback
+from strata_forge.tracing import install_litellm_callback
 
 ok = install_litellm_callback()
 # ok is True when Langfuse is configured and the callback is now
@@ -126,7 +126,7 @@ Internally this appends `"langfuse"` to `litellm.success_callback` and
 `LANGFUSE_*` env vars on each call and ships traces.
 
 `is_litellm_callback_installed()` is the diagnostic counterpart;
-`forge doctor` uses it to surface the "I configured Langfuse but I'm
+`strata-forge doctor` uses it to surface the "I configured Langfuse but I'm
 not seeing traces" failure mode. It reports `True` only when
 `"langfuse"` appears in **both** lists — the half-installed asymmetric
 state reports `False` so the diagnostic isn't misleading.
@@ -161,7 +161,7 @@ to pick the right wrapper.
 Lifecycle:
 
 - On entry: opens a Langfuse trace with the given name + tags, sets
-  `forge.core.ids.correlation_id_var` to the trace ID.
+  `strata_forge.core.ids.correlation_id_var` to the trace ID.
 - On normal return: `trace.update(output={"status": "ok"})`.
 - On exception: `trace.update(output={"error": repr(exc)}, level="ERROR")`,
   then re-raises the original exception.
@@ -251,9 +251,9 @@ instead of silently dropping data only in production.
 ## Correlation IDs
 
 The active Langfuse trace ID is published on
-[`forge.core.ids.correlation_id_var`](../../src/forge/core/ids.py)
+[`strata_forge.core.ids.correlation_id_var`](../../src/strata_forge/core/ids.py)
 while a `@traced` function is running. The structlog logger
-(configured by `forge.core.logging.configure_logging`) has a
+(configured by `strata_forge.core.logging.configure_logging`) has a
 processor that injects this value into every log record under
 `correlation_id`. The net effect: every log line emitted inside a
 `@traced` function carries the trace ID without any manual plumbing.
@@ -266,7 +266,7 @@ its span but doesn't mutate it.
 
 ## Resilience and the no-op contract
 
-Every public function in `forge.tracing` follows the same two
+Every public function in `strata_forge.tracing` follows the same two
 invariants:
 
 - **No-op when unconfigured.** If `get_client()` returns `None` (no
@@ -287,14 +287,14 @@ programmer error, not a runtime tracing failure.
 ## Troubleshooting
 
 **"I configured Langfuse but I'm not seeing traces."**
-Most often the LiteLLM callback wasn't installed. Run `forge doctor`
+Most often the LiteLLM callback wasn't installed. Run `strata-forge doctor`
 to check; it reports whether `is_litellm_callback_installed()` is
 True. If not, add `install_litellm_callback()` once at process
 startup.
 
 **`ImportError: ... requires the [langfuse] extra`.**
 Install with `pip install ai-forge[langfuse]` (or
-`uv sync --extra langfuse`). `forge.tracing` itself imports without
+`uv sync --extra langfuse`). `strata_forge.tracing` itself imports without
 the extra; only constructing or using the client requires it.
 
 **Tracing crashes my production code.**
@@ -318,7 +318,7 @@ distinct names.
 
 **Correlation ID shows up as `None` in my logs.**
 The `correlation_id_var` is only set inside a `@traced` function (or
-when you explicitly call `forge.core.ids.set_correlation_id`).
+when you explicitly call `strata_forge.core.ids.set_correlation_id`).
 Outside those, log records emit with `correlation_id=null`. If you
 want a request-scoped correlation ID independent of Langfuse, set
 one manually at the start of your handler.

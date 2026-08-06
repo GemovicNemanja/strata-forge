@@ -1,12 +1,12 @@
-"""Unit tests for `forge.prompts.stores.memory`."""
+"""Unit tests for `strata_forge.prompts.stores.memory`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.prompts.registry import PromptNotFoundError, PromptStore
-from forge.prompts.stores.memory import InMemoryPromptStore
-from forge.prompts.template import PromptTemplate
+from strata_forge.prompts.registry import PromptNotFoundError, PromptStore
+from strata_forge.prompts.stores.memory import InMemoryPromptStore
+from strata_forge.prompts.template import PromptTemplate
 
 
 def _t(name: str, body: str = "hi") -> PromptTemplate:

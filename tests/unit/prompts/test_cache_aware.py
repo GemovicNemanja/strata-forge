@@ -1,11 +1,11 @@
-"""Unit tests for `forge.prompts.cache_aware`."""
+"""Unit tests for `strata_forge.prompts.cache_aware`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.core.repro import content_hash
-from forge.prompts.cache_aware import (
+from strata_forge.core.repro import content_hash
+from strata_forge.prompts.cache_aware import (
     DEFAULT_MIN_CACHEABLE_TOKENS,
     CacheHints,
     StableDynamicSplit,

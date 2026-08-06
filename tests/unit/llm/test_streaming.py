@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.streaming`."""
+"""Unit tests for `strata_forge.llm.streaming`."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.core.errors import ValidationError
-from forge.llm.responses import ResponseChunk, ToolCallDelta, Usage
-from forge.llm.streaming import (
+from strata_forge.core.errors import ValidationError
+from strata_forge.llm.responses import ResponseChunk, ToolCallDelta, Usage
+from strata_forge.llm.streaming import (
     JSONAccumulator,
     StreamingToolCallAccumulator,
     accumulate_text,

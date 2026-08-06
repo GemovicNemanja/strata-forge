@@ -16,7 +16,7 @@ import asyncio
 from _common import parse_args, print_summary, require_env
 from pydantic import BaseModel, Field
 
-from forge.llm import LLMClient, Message
+from strata_forge.llm import LLMClient, Message
 
 
 class Summary(BaseModel):

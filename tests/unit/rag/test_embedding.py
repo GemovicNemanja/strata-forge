@@ -1,4 +1,4 @@
-"""Unit tests for `forge.rag.embedding`."""
+"""Unit tests for `strata_forge.rag.embedding`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.rag.embedding import Embedder, LiteLLMEmbedder
+from strata_forge.rag.embedding import Embedder, LiteLLMEmbedder
 
 # ---------------------------------------------------------------------------
 # Embedder Protocol

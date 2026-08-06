@@ -5,10 +5,10 @@ This is the script the nightly CI eval-gate job invokes. It:
 1. Builds a tiny canonical dataset checked into this script (the
    capital-cities pack used elsewhere — small, deterministic,
    doesn't need an external store).
-2. Runs :func:`forge.evals.runner.run_experiment` against one
+2. Runs :func:`strata_forge.evals.runner.run_experiment` against one
    configured model.
 3. Compares the outcomes against the committed thresholds via
-   :func:`forge.evals.ci_gate.evaluate_ci_gate`.
+   :func:`strata_forge.evals.ci_gate.evaluate_ci_gate`.
 4. Exits non-zero if the gate fails.
 
 Usage::
@@ -26,12 +26,12 @@ import argparse
 import asyncio
 import sys
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.evals.ci_gate import CIGateThresholds, evaluate_ci_gate
-from forge.evals.experiment import Experiment, SamplingParams
-from forge.evals.graders.exact import ExactMatch
-from forge.evals.runner import run_experiment
-from forge.llm.client import LLMClient
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.evals.ci_gate import CIGateThresholds, evaluate_ci_gate
+from strata_forge.evals.experiment import Experiment, SamplingParams
+from strata_forge.evals.graders.exact import ExactMatch
+from strata_forge.evals.runner import run_experiment
+from strata_forge.llm.client import LLMClient
 
 _CAPITALS: tuple[tuple[str, str, str], ...] = (
     ("fr", "France", "Paris"),

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.errors` — LiteLLM exception → ProviderError mapping."""
+"""Unit tests for `strata_forge.llm.errors` — LiteLLM exception → ProviderError mapping."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from litellm.exceptions import (
 )
 from litellm.exceptions import BudgetExceededError as LiteLLMBudgetExceededError
 
-from forge.core.errors import (
+from strata_forge.core.errors import (
     ProviderAuthError,
     ProviderBadRequestError,
     ProviderContentFilterError,
@@ -43,7 +43,7 @@ from forge.core.errors import (
     ProviderServerError,
     ProviderTimeoutError,
 )
-from forge.llm.errors import map_litellm_exception, raise_as_provider_error
+from strata_forge.llm.errors import map_litellm_exception, raise_as_provider_error
 
 
 def _make_response(status: int = 500) -> httpx.Response:

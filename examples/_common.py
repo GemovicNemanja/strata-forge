@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING
 
 # Load `.env` (if present) into os.environ before any provider check
 # runs. The examples are end-to-end scripts; users expect their
-# repo-root .env to be picked up the same way `forge doctor` and the
-# CLI do via forge.config.settings.
+# repo-root .env to be picked up the same way `strata-forge doctor` and the
+# CLI do via strata_forge.config.settings.
 try:
     from dotenv import load_dotenv
 
@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover — python-dotenv is a core dep
     pass
 
 if TYPE_CHECKING:
-    from forge.llm.responses import LLMResponse
+    from strata_forge.llm.responses import LLMResponse
 
 __all__ = [
     "parse_args",

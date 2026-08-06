@@ -1,4 +1,4 @@
-"""Unit tests for `forge.core.ids`."""
+"""Unit tests for `strata_forge.core.ids`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import time
 import uuid
 
-from forge.core.ids import (
+from strata_forge.core.ids import (
     correlation_id_var,
     get_correlation_id,
     new_correlation_id,

@@ -1,13 +1,13 @@
-"""Unit tests for `forge.cli.datasets`."""
+"""Unit tests for `strata_forge.cli.datasets`."""
 
 from __future__ import annotations
 
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli.main import app
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.datasets.stores.memory import InMemoryDatasetStore
+from strata_forge.cli.main import app
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.datasets.stores.memory import InMemoryDatasetStore
 
 runner = CliRunner()
 
@@ -33,14 +33,14 @@ def store_with_one(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
 
     store = InMemoryDatasetStore()
     asyncio.run(store.put(_make_dataset()))
-    monkeypatch.setattr("forge.cli.datasets.dataset_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.datasets.dataset_store_from_settings", lambda: store)
     return store
 
 
 @pytest.fixture
 def empty_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryDatasetStore:
     store = InMemoryDatasetStore()
-    monkeypatch.setattr("forge.cli.datasets.dataset_store_from_settings", lambda: store)
+    monkeypatch.setattr("strata_forge.cli.datasets.dataset_store_from_settings", lambda: store)
     return store
 
 

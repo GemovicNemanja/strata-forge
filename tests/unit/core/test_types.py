@@ -1,4 +1,4 @@
-"""Unit tests for `forge.core.types`."""
+"""Unit tests for `strata_forge.core.types`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from forge.core.types import JSONValue, PathLike
+    from strata_forge.core.types import JSONValue, PathLike
 
 
 class TestAliasesUsable:

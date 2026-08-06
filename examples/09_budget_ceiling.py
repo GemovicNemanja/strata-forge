@@ -1,7 +1,7 @@
 """BudgetContext enforces a cost ceiling — the second call would exceed it.
 
 The first call lands inside the budget; the second projected spend
-trips :class:`forge.core.errors.BudgetExceededError` *before* the
+trips :class:`strata_forge.core.errors.BudgetExceededError` *before* the
 provider call is made, so spend never overshoots.
 
 Usage::
@@ -15,9 +15,9 @@ import asyncio
 
 from _common import parse_args, print_summary, require_env
 
-from forge.core.budget import BudgetContext
-from forge.core.errors import BudgetExceededError
-from forge.llm import LLMClient, Message
+from strata_forge.core.budget import BudgetContext
+from strata_forge.core.errors import BudgetExceededError
+from strata_forge.llm import LLMClient, Message
 
 
 async def _main() -> None:

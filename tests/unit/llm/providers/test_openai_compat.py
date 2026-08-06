@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.openai_compat`."""
+"""Unit tests for `strata_forge.llm.providers.openai_compat`."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from forge.llm.providers.config import OpenAICompatConfig
-from forge.llm.providers.openai_compat import OpenAICompatProvider
+from strata_forge.llm.providers.config import OpenAICompatConfig
+from strata_forge.llm.providers.openai_compat import OpenAICompatProvider
 
 
 @pytest.fixture(autouse=True)

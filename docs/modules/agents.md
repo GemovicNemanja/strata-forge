@@ -1,9 +1,9 @@
-# `forge.agents` — agent runtime, built-in tools, memory, multi-agent patterns
+# `strata_forge.agents` — agent runtime, built-in tools, memory, multi-agent patterns
 
-`forge.agents` is a thin composition layer on top of `forge.llm`.
+`strata_forge.agents` is a thin composition layer on top of `strata_forge.llm`.
 The agent runtime never re-implements tool calling, structured
 output, the multi-turn tool loop, or message handling — every one
-of those primitives comes from `forge.llm` directly. See
+of those primitives comes from `strata_forge.llm` directly. See
 [ADR 0011](../architecture/adr/0011-agents-thin-wrapper-over-forge-llm.md)
 for the design rationale.
 
@@ -21,13 +21,13 @@ Integration points:
 - **Memory:** `ConversationMemory` for in-process turn history with
   token-budget trimming; `EpisodicMemory` against a pluggable
   `VectorStore` Protocol (concrete `InMemoryVectorStore` ships
-  here; Qdrant backend lands with `forge.rag`).
+  here; Qdrant backend lands with `strata_forge.rag`).
 - **Multi-agent patterns:** `handoff(router=, specialists=, ...)`
   and `critic_refiner_run(drafter=, critic=, ...)`. Both are pure
   compositions over `Agent`.
 
-Module rules: [`src/forge/agents/CLAUDE.md`](../../src/forge/agents/CLAUDE.md).
-Source: [`src/forge/agents/`](../../src/forge/agents/).
+Module rules: [`src/strata_forge/agents/CLAUDE.md`](../../src/strata_forge/agents/CLAUDE.md).
+Source: [`src/strata_forge/agents/`](../../src/strata_forge/agents/).
 
 ---
 
@@ -47,8 +47,8 @@ Source: [`src/forge/agents/`](../../src/forge/agents/).
 
 ```python
 import asyncio
-from forge.agents import Agent, calculator
-from forge.llm.client import LLMClient
+from strata_forge.agents import Agent, calculator
+from strata_forge.llm.client import LLMClient
 
 async def main() -> None:
     client = LLMClient(model="claude-opus-4-7", provider="anthropic")
@@ -119,7 +119,7 @@ the LLM (system + user). Intermediate tool-call / tool-result
 messages from inside `run_tool_loop` are not included here —
 `LLMClient.run_tool_loop` doesn't expose them. For full iteration
 visibility, install the LiteLLM Langfuse callback via
-`forge.tracing.install_litellm_callback()` or set
+`strata_forge.tracing.install_litellm_callback()` or set
 `FORGE_DIAGNOSTIC=1` for the NDJSON dump.
 
 For *live* visibility, use `Agent.run_streaming()` — the streaming
@@ -150,7 +150,7 @@ function calls, attribute access, names, strings, lists, and
 comparisons.
 
 ```python
-from forge.agents import Agent, calculator
+from strata_forge.agents import Agent, calculator
 agent = Agent("math", client=client, tools=[calculator])
 ```
 
@@ -161,7 +161,7 @@ HTTP GET via `httpx.AsyncClient` (already in core deps via
 timeout; follows redirects.
 
 ```python
-from forge.agents import Agent, fetch_url
+from strata_forge.agents import Agent, fetch_url
 agent = Agent("reader", client=client, tools=[fetch_url])
 ```
 
@@ -174,7 +174,7 @@ fail safely.
 
 ```python
 from pathlib import Path
-from forge.agents import Agent, fs_read_tool
+from strata_forge.agents import Agent, fs_read_tool
 
 reader = fs_read_tool(allowed_dirs=[Path("docs/").resolve()])
 agent = Agent("doc-bot", client=client, tools=[reader])
@@ -187,7 +187,7 @@ in a backend (async `(query, max_results) -> Sequence[SearchResult]`)
 that wraps Tavily / SerpAPI / DuckDuckGo / your internal index.
 
 ```python
-from forge.agents import Agent, SearchResult, web_search_tool
+from strata_forge.agents import Agent, SearchResult, web_search_tool
 
 async def my_backend(query: str, n: int) -> list[SearchResult]:
     # ... call your search provider ...
@@ -210,7 +210,7 @@ In-process append-only history with a dedicated system message slot
 that's never evicted under memory pressure.
 
 ```python
-from forge.agents import ConversationMemory
+from strata_forge.agents import ConversationMemory
 
 memory = ConversationMemory(system_message="be helpful")
 memory.append_user("hi")
@@ -228,11 +228,11 @@ message survives every trim.
 
 Vector-backed long-term memory against a pluggable `VectorStore`
 Protocol. The in-process `InMemoryVectorStore` works for tests and
-prototyping; `forge.rag`'s Qdrant backend (Phase 4) will satisfy
+prototyping; `strata_forge.rag`'s Qdrant backend (Phase 4) will satisfy
 the same Protocol.
 
 ```python
-from forge.agents import EpisodicMemory, InMemoryVectorStore
+from strata_forge.agents import EpisodicMemory, InMemoryVectorStore
 
 async def my_embed(text: str) -> list[float]:
     # ... call your embedding provider ...
@@ -263,7 +263,7 @@ A router agent picks one specialist from a catalog; the chosen
 specialist responds to the original user input.
 
 ```python
-from forge.agents import Agent, handoff
+from strata_forge.agents import Agent, handoff
 
 router = Agent("router", client=client, system_prompt="Pick the right specialist.")
 math_agent = Agent("math", client=client, system_prompt="You solve math problems.")
@@ -289,7 +289,7 @@ approves or returns feedback. The loop continues until approval or
 returned (partial progress beats raising).
 
 ```python
-from forge.agents import Agent, critic_refiner_run
+from strata_forge.agents import Agent, critic_refiner_run
 
 drafter = Agent("drafter", client=client, system_prompt="Write product copy.")
 critic = Agent("critic", client=stronger_client, system_prompt="Approve only when concise + vivid.")
@@ -310,7 +310,7 @@ a system + user message bundle.
 
 ## Lazy-import contract
 
-`import forge.agents` works without any optional extras. The
+`import strata_forge.agents` works without any optional extras. The
 built-in tools' SDK dependencies are minimal:
 
 - `calculator` — stdlib only.
@@ -320,7 +320,7 @@ built-in tools' SDK dependencies are minimal:
 
 Memory primitives are likewise stdlib-only. `EpisodicMemory`
 accepts any `VectorStore` Protocol implementation — the concrete
-adapter for Qdrant lands in `forge.rag` (Phase 4).
+adapter for Qdrant lands in `strata_forge.rag` (Phase 4).
 
 ---
 
@@ -331,4 +331,4 @@ adapter for Qdrant lands in `forge.rag` (Phase 4).
 - **`PermissionError: path X is outside the allowed directories`**: the `fs_read` sandbox rejected the path. Add the directory to `allowed_dirs` at tool construction, or use an explicit path inside an existing allowed root.
 - **`ValueError: handoff: router picked X, which isn't in the specialists catalog`**: the router LLM emitted an unknown specialist name. Make the router's system prompt enumerate the available specialists more explicitly, or run a sanity-check verification of the catalog the router sees.
 - **Critic loops forever / `max_rounds` exhausted**: the critic is too strict, or the drafter can't act on the feedback. Inspect via Langfuse traces (every iteration is captured) and either soften the critic's criteria or improve the drafter's instructions.
-- **Multi-modal `UserMessage` content lost from `ConversationMemory` token counts**: the token extractor counts text parts only; images aren't counted toward `trim_to_tokens`. Image tokens are computed by `forge.llm.tokens` only when paired with a real model.
+- **Multi-modal `UserMessage` content lost from `ConversationMemory` token counts**: the token extractor counts text parts only; images aren't counted toward `trim_to_tokens`. Image tokens are computed by `strata_forge.llm.tokens` only when paired with a real model.

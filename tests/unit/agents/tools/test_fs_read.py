@@ -1,4 +1,4 @@
-"""Unit tests for `forge.agents.tools.fs_read`."""
+"""Unit tests for `strata_forge.agents.tools.fs_read`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.agents.tools.fs_read import FSReadArgs, fs_read_tool
+from strata_forge.agents.tools.fs_read import FSReadArgs, fs_read_tool
 
 if TYPE_CHECKING:
     from pathlib import Path

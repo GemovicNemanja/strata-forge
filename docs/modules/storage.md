@@ -1,6 +1,6 @@
-# `forge.storage` — fsspec gateway, HuggingFace Hub model/dataset push/pull
+# `strata_forge.storage` — fsspec gateway, HuggingFace Hub model/dataset push/pull
 
-`forge.storage` is the file-storage and HuggingFace Hub layer.
+`strata_forge.storage` is the file-storage and HuggingFace Hub layer.
 Two cooperating clients live here:
 :class:`StorageGateway` for generic fsspec-backed file
 operations across local / S3 / GCS / Azure / HTTP / HF Hub, and
@@ -14,11 +14,11 @@ Integration points:
 
 Both clients defer their heavy imports — ``fsspec``,
 ``s3fs`` / ``gcsfs`` / ``adlfs``, ``huggingface_hub`` — until
-the first network call, so ``import forge.storage`` works
+the first network call, so ``import strata_forge.storage`` works
 without the ``[storage]`` extra installed.
 
-Module rules: [`src/forge/storage/CLAUDE.md`](../../src/forge/storage/CLAUDE.md).
-Source: [`src/forge/storage/`](../../src/forge/storage/).
+Module rules: [`src/strata_forge/storage/CLAUDE.md`](../../src/strata_forge/storage/CLAUDE.md).
+Source: [`src/strata_forge/storage/`](../../src/strata_forge/storage/).
 
 ---
 
@@ -37,7 +37,7 @@ Source: [`src/forge/storage/`](../../src/forge/storage/).
 Cross-target file shuffling:
 
 ```python
-from forge.storage import StorageGateway
+from strata_forge.storage import StorageGateway
 
 gw = StorageGateway(
     options={
@@ -56,7 +56,7 @@ await gw.copy("s3://my-bucket/a.bin", "s3://my-bucket/b.bin")
 HF Hub model push/pull:
 
 ```python
-from forge.storage import HFHubClient
+from strata_forge.storage import HFHubClient
 
 hub = HFHubClient(token="hf_xxx")
 

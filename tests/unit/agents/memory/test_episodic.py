@@ -1,4 +1,4 @@
-"""Unit tests for `forge.agents.memory.episodic`."""
+"""Unit tests for `strata_forge.agents.memory.episodic`."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.agents.memory.episodic import EmbedFn, EpisodicMemory
-from forge.agents.memory.vector_store import InMemoryVectorStore
+from strata_forge.agents.memory.episodic import EmbedFn, EpisodicMemory
+from strata_forge.agents.memory.vector_store import InMemoryVectorStore
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

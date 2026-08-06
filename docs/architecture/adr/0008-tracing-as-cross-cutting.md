@@ -1,32 +1,32 @@
-# ADR 0008 — `forge.tracing` is layered above every other module, not threaded through them
+# ADR 0008 — `strata_forge.tracing` is layered above every other module, not threaded through them
 
 **Status:** Accepted
-**Date:** Initial scaffolding for `forge.tracing`
+**Date:** Initial scaffolding for `strata_forge.tracing`
 **Supersedes:** —
 **Superseded by:** —
 
 ## Context
 
 Phase 1 deliberately left observability as a separate concern. The LLM
-module produces correlation IDs (`forge.core.ids.correlation_id_var`)
+module produces correlation IDs (`strata_forge.core.ids.correlation_id_var`)
 and emits NDJSON diagnostic records when `FORGE_DIAGNOSTIC_ENABLED=1`,
 but it never imports anything from a tracing layer — by design.
 
 Phase 2.2 introduces that tracing layer. The obvious shape would have
-been to add `from forge.tracing import traced` calls inside `forge.llm`
+been to add `from strata_forge.tracing import traced` calls inside `strata_forge.llm`
 so every completion is traced automatically. We're explicitly rejecting
 that shape, for four reasons:
 
-1. **Dependency direction.** `forge.tracing` already needs to import
-   message and response types from `forge.llm` to render trace inputs
-   and outputs sensibly. If `forge.llm` also imports from
-   `forge.tracing`, we get a circular dependency that has to be broken
+1. **Dependency direction.** `strata_forge.tracing` already needs to import
+   message and response types from `strata_forge.llm` to render trace inputs
+   and outputs sensibly. If `strata_forge.llm` also imports from
+   `strata_forge.tracing`, we get a circular dependency that has to be broken
    by lazy imports or partial-module hacks — both of which are
    load-order hazards.
 
-2. **Optional-extras hygiene.** `forge.tracing` is gated by the
+2. **Optional-extras hygiene.** `strata_forge.tracing` is gated by the
    `[langfuse]` extra. A Forge install without the extra still needs
-   `forge.llm` to work end-to-end. Threading tracing through the LLM
+   `strata_forge.llm` to work end-to-end. Threading tracing through the LLM
    module either makes the extra effectively required (every call
    tries to invoke a tracing function) or sprinkles `try/except
    ImportError` everywhere — neither is clean.
@@ -40,43 +40,43 @@ that shape, for four reasons:
    process startup. Wiring it once in app initialization gives every
    downstream LiteLLM call automatic tracing — including calls from
    third-party libraries that go through LiteLLM but don't know about
-   Forge. Putting the integration inside `forge.llm` would miss those
+   Forge. Putting the integration inside `strata_forge.llm` would miss those
    call sites.
 
 ## Decision
 
-`forge.tracing` is a **cross-cutting layer that wraps every other
+`strata_forge.tracing` is a **cross-cutting layer that wraps every other
 module from above**. The dependency arrow points one way:
 
 ```
-                 forge.tracing
+                 strata_forge.tracing
                     │  (imports from)
                     ▼
-forge.llm    forge.prompts    (forge.evals, forge.agents, …)
+strata_forge.llm    strata_forge.prompts    (strata_forge.evals, strata_forge.agents, …)
                     │
                     ▼
-                forge.core
+                strata_forge.core
 ```
 
-`forge.tracing` may import:
+`strata_forge.tracing` may import:
 
-- `forge.core` — for the structlog logger and the
+- `strata_forge.core` — for the structlog logger and the
   `correlation_id_var` ContextVar (so trace IDs propagate through log
   records).
-- `forge.config` — for the `LangfuseConfig` sub-model.
-- `forge.llm` — for the message/response types, only for serializing
+- `strata_forge.config` — for the `LangfuseConfig` sub-model.
+- `strata_forge.llm` — for the message/response types, only for serializing
   trace inputs/outputs into Langfuse's payload shape.
-- `forge.prompts` — for the same reason (when later sub-phases need
+- `strata_forge.prompts` — for the same reason (when later sub-phases need
   to attach prompt metadata to a trace).
 - `langfuse` — lazy-imported behind the `[langfuse]` extra.
 
-`forge.llm`, `forge.prompts`, and every other downstream module MUST
-NOT import from `forge.tracing`. The integration points are:
+`strata_forge.llm`, `strata_forge.prompts`, and every other downstream module MUST
+NOT import from `strata_forge.tracing`. The integration points are:
 
-- **For LLM calls.** `forge.tracing.litellm_callback.install_litellm_callback()`
+- **For LLM calls.** `strata_forge.tracing.litellm_callback.install_litellm_callback()`
   registers LiteLLM's existing Langfuse callback. The callback runs
   inside LiteLLM, observes every completion, and reports to Langfuse —
-  with zero `forge.llm` code change. Applications call this once at
+  with zero `strata_forge.llm` code change. Applications call this once at
   startup; CI / scripts that don't want tracing don't call it.
 
 - **For non-LLM code.** `@traced` and `traced_span()` are applied at
@@ -90,7 +90,7 @@ NOT import from `forge.tracing`. The integration points are:
   pipelines.
 
 When Langfuse isn't configured (no public/secret key in
-`LangfuseConfig`), every public function in `forge.tracing` is a
+`LangfuseConfig`), every public function in `strata_forge.tracing` is a
 silent no-op. There's never a code path where missing Langfuse
 configuration crashes a production call.
 
@@ -105,15 +105,15 @@ configuration crashes a production call.
   tracing concerns unless that module explicitly opted in via
   `@traced`.
 - Optional-extras hygiene: a Forge install without `[langfuse]`
-  imports `forge.tracing` cleanly; only `get_client()` and
+  imports `strata_forge.tracing` cleanly; only `get_client()` and
   `install_litellm_callback()` lazy-import `langfuse`, and both
   no-op gracefully without credentials.
 - Composition: third-party code that uses LiteLLM directly (not via
-  `forge.llm`) gets the same trace records.
+  `strata_forge.llm`) gets the same trace records.
 
 **Negative**
 
-- The integration is less discoverable. A reader of `forge.llm.client`
+- The integration is less discoverable. A reader of `strata_forge.llm.client`
   won't see *any* mention of tracing and won't know it happens. The
   module reference doc compensates with an explicit cross-link.
 - Trace coverage depends on `install_litellm_callback()` being called
@@ -122,26 +122,26 @@ configuration crashes a production call.
 
 **Mitigations**
 
-- The `forge` CLI's entry-point installs the callback automatically
+- The `strata-forge` CLI's entry-point installs the callback automatically
   when Langfuse is configured. Scripts using the library directly
   must install it themselves; the docs spell this out and the
   example scripts demonstrate it.
-- `forge doctor` reports whether the callback has been installed and
+- `strata-forge doctor` reports whether the callback has been installed and
   whether Langfuse is reachable, so the silent-failure case surfaces
   on diagnostic runs.
 
 ## Alternatives considered
 
-1. **`forge.llm` imports `forge.tracing` and wraps every call.**
+1. **`strata_forge.llm` imports `strata_forge.tracing` and wraps every call.**
    Rejected for the four reasons in Context — circular dep,
    extras hygiene, test surface, and missing non-Forge LiteLLM calls.
 
-2. **Inversion of control: `forge.llm` exposes hooks, `forge.tracing`
+2. **Inversion of control: `strata_forge.llm` exposes hooks, `strata_forge.tracing`
    subscribes.** Cleaner in theory, but requires building a generic
    hook bus when we already have LiteLLM's callback mechanism for
    free. Rejected on "use the upstream extension point" grounds.
 
-3. **No `forge.tracing` module at all; users wire LiteLLM's callback
+3. **No `strata_forge.tracing` module at all; users wire LiteLLM's callback
    themselves.** Loses the Forge-flavored conveniences (`@traced` on
    non-LLM code, score helpers, `correlation_id` integration).
    Rejected: we ship enough syntactic sugar that it's worth the

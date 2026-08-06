@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.serving`."""
+"""Unit tests for `strata_forge.compute.serving`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from forge.compute import (
+from strata_forge.compute import (
     Job,
     JobStatus,
     ResourceSpec,
@@ -204,6 +204,10 @@ class _FakeBackend:
         del job, tail
         return ""
 
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
+        del job, path, tail
+        return ""
+
     async def cancel(self, job: Job) -> None:
         self.cancelled.append(job)
 
@@ -221,7 +225,7 @@ class TestServingEndpoint:
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "forge.compute.serving.wait_for_endpoint",
+            "strata_forge.compute.serving.wait_for_endpoint",
             AsyncMock(return_value=None),
         )
         task = build_vllm_task("m")
@@ -237,7 +241,7 @@ class TestServingEndpoint:
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "forge.compute.serving.wait_for_endpoint",
+            "strata_forge.compute.serving.wait_for_endpoint",
             AsyncMock(return_value=None),
         )
         task = build_vllm_task("m")
@@ -252,7 +256,7 @@ class TestServingEndpoint:
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "forge.compute.serving.wait_for_endpoint",
+            "strata_forge.compute.serving.wait_for_endpoint",
             AsyncMock(return_value=None),
         )
         task = build_vllm_task("m")
@@ -268,7 +272,7 @@ class TestServingEndpoint:
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "forge.compute.serving.wait_for_endpoint",
+            "strata_forge.compute.serving.wait_for_endpoint",
             AsyncMock(side_effect=TimeoutError("not ready")),
         )
         task = build_vllm_task("m")
@@ -282,7 +286,7 @@ class TestServingEndpoint:
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "forge.compute.serving.wait_for_endpoint",
+            "strata_forge.compute.serving.wait_for_endpoint",
             AsyncMock(return_value=None),
         )
 

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.cli.doctor`."""
+"""Unit tests for `strata_forge.cli.doctor`."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from forge.cli import doctor as doctor_module
-from forge.cli.main import app
+from strata_forge.cli import doctor as doctor_module
+from strata_forge.cli.main import app
 
 runner = CliRunner()
 
@@ -52,7 +52,7 @@ class TestDoctorOutput:
 
     def test_renders_header(self) -> None:
         result = runner.invoke(app, ["doctor"])
-        assert "forge doctor" in result.output
+        assert "strata-forge doctor" in result.output
         assert "Python" in result.output
 
     def test_renders_settings_section(self) -> None:

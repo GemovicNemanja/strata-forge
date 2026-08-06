@@ -1,4 +1,4 @@
-"""Unit tests for `forge.compute.backends.ssh.SSHBackend`."""
+"""Unit tests for `strata_forge.compute.backends.ssh.SSHBackend`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.compute import Backend, SSHBackend, Task
+from strata_forge.compute import Backend, SSHBackend, Task
 
 # ---------------------------------------------------------------------------
 # Fake asyncssh connection
@@ -32,12 +32,22 @@ class _FakeSSHConnection:
         self.commands: list[str] = []
         self.script: list[_FakeProcessResult] = []
         self.closed = False
+        self.last_timeout: float | None = None
 
     def queue(self, *results: _FakeProcessResult) -> None:
         self.script.extend(results)
 
-    async def run(self, command: str, *, check: bool = False) -> _FakeProcessResult:
+    # This double mirrors asyncssh's `run(*, timeout=...)` API, so it deliberately accepts a
+    # `timeout` parameter (ASYNC109 targets real async code that should use `asyncio.timeout`).
+    async def run(
+        self,
+        command: str,
+        *,
+        check: bool = False,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> _FakeProcessResult:
         self.commands.append(command)
+        self.last_timeout = timeout
         result = self.script.pop(0) if self.script else _FakeProcessResult()
         if check and result.exit_status != 0:
             err = f"command failed (exit {result.exit_status}): {command!r}"
@@ -90,6 +100,40 @@ class TestConstruction:
     async def test_satisfies_backend_protocol(self) -> None:
         backend = SSHBackend(connection=_FakeSSHConnection())
         assert isinstance(backend, Backend)
+
+
+# ---------------------------------------------------------------------------
+# Timeouts — an unresponsive host must not stall a caller indefinitely
+# ---------------------------------------------------------------------------
+
+
+class TestTimeouts:
+    async def test_connect_applies_handshake_timeouts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_connect(**kwargs: Any) -> _FakeSSHConnection:
+            captured.update(kwargs)
+            return _FakeSSHConnection()
+
+        monkeypatch.setitem(sys.modules, "asyncssh", types.SimpleNamespace(connect=fake_connect))
+        backend = SSHBackend(host="example.com", username="me")
+        await backend._get_connection()  # pyright: ignore[reportPrivateUsage]
+        assert captured["connect_timeout"] > 0
+        assert captured["login_timeout"] > 0
+
+    async def test_remote_commands_carry_a_timeout(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        await backend.submit(Task(name="t", run="echo"))
+        assert fake_connection.last_timeout is not None
+        assert fake_connection.last_timeout > 0
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +317,71 @@ class TestLogs:
 
 
 # ---------------------------------------------------------------------------
+# read_file (workdir-confined side-channel reads, e.g. progress.jsonl)
+# ---------------------------------------------------------------------------
+
+
+class TestReadFile:
+    async def _submit(self, backend: SSHBackend, fake_connection: _FakeSSHConnection) -> Any:
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        return await backend.submit(Task(name="t", run="echo"))
+
+    async def test_reads_workdir_file(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout='{"step": 1}\n'))
+        out = await backend.read_file(job, "progress.jsonl")
+        assert out == '{"step": 1}\n'
+        cmd = fake_connection.commands[-1]
+        assert cmd.startswith("head -c ")  # byte-capped read
+        assert f"{job.metadata['remote_workdir']}/progress.jsonl" in cmd
+
+    async def test_tail(self, backend: SSHBackend, fake_connection: _FakeSSHConnection) -> None:
+        job = await self._submit(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout="last\n"))
+        await backend.read_file(job, "progress.jsonl", tail=3)
+        assert "tail -n 3" in fake_connection.commands[-1]
+
+    async def test_invalid_tail(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        with pytest.raises(ValueError, match="tail"):
+            await backend.read_file(job, "progress.jsonl", tail=0)
+
+    async def test_missing_file_returns_empty(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout=""))  # cat ... 2>/dev/null -> empty
+        assert await backend.read_file(job, "missing.jsonl") == ""
+
+    async def test_rejects_traversal(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        before = len(fake_connection.commands)
+        with pytest.raises(ValueError, match="within the job workdir"):
+            await backend.read_file(job, "../../etc/passwd")
+        # The unsafe path is rejected before any remote command runs.
+        assert len(fake_connection.commands) == before
+
+    async def test_rejects_absolute(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._submit(backend, fake_connection)
+        before = len(fake_connection.commands)
+        with pytest.raises(ValueError, match="workdir-relative"):
+            await backend.read_file(job, "/etc/passwd")
+        assert len(fake_connection.commands) == before
+
+
+# ---------------------------------------------------------------------------
 # cancel / cleanup
 # ---------------------------------------------------------------------------
 
@@ -315,7 +424,7 @@ class TestCancelCleanup:
     ) -> None:
         backend = SSHBackend(connection=fake_connection, remote_root=".forge-test")
         # Build a job whose metadata pretends a workdir outside the root.
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bad_job = Job(
             id="bogus",
@@ -334,7 +443,7 @@ class TestCancelCleanup:
 
 class TestJobOwnership:
     async def test_status_wrong_backend(self, backend: SSHBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(
             id="x",
@@ -346,7 +455,7 @@ class TestJobOwnership:
             await backend.status(bogus)
 
     async def test_status_missing_metadata(self, backend: SSHBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(id="x", backend="ssh", task_name="t")
         with pytest.raises(ValueError, match="remote_workdir"):
@@ -402,7 +511,7 @@ class TestSettingsBackedConnection:
 
 class TestJobMetadataErrors:
     async def test_status_rejects_job_without_pid(self, backend: SSHBackend) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         bogus = Job(
             id="x",
@@ -416,7 +525,7 @@ class TestJobMetadataErrors:
     async def test_status_handles_unparseable_submitted_at(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
     ) -> None:
-        from forge.compute.job import Job
+        from strata_forge.compute.job import Job
 
         # Manually build a job with a broken submitted_at; status should still work.
         fake_connection.queue(_FakeProcessResult(stdout="RUNNING\n"))

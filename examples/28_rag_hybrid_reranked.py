@@ -26,7 +26,7 @@ import sys
 
 from _common import parse_args, require_env  # type: ignore[import-not-found]
 
-from forge.rag import (
+from strata_forge.rag import (
     BM25Retriever,
     Chunk,
     DenseRetriever,
@@ -100,7 +100,7 @@ async def _main() -> None:
         try:
             import cohere  # noqa: F401
 
-            from forge.rag import CohereReranker
+            from strata_forge.rag import CohereReranker
 
             reranker = CohereReranker(model="rerank-english-v3.0")
             print("--- using Cohere reranker")

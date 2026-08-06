@@ -1,6 +1,6 @@
-# `forge.llm` — async LLM client
+# `strata_forge.llm` — async LLM client
 
-The `forge.llm` package is the typed, async LLM surface used by every other
+The `strata_forge.llm` package is the typed, async LLM surface used by every other
 module that needs to talk to a model. It wraps LiteLLM ([ADR 0001]) and adds
 the layer that Forge actually wants to depend on: Pydantic messages and
 responses, structured output, tool calling, multimodal input, streaming,
@@ -9,8 +9,8 @@ accounting, an NDJSON diagnostic dump, and budget integration.
 
 This document is the canonical API reference for the module. The
 architectural rationale for individual decisions lives in the ADRs linked
-inline. The implementation lives under `src/forge/llm/`; module-specific
-agent rules live in [`src/forge/llm/CLAUDE.md`](../../src/forge/llm/CLAUDE.md).
+inline. The implementation lives under `src/strata_forge/llm/`; module-specific
+agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/llm/CLAUDE.md).
 
 > **TL;DR.** Build an `LLMClient`, call `complete` / `stream` /
 > `complete_structured` / `run_tool_loop` / `stream_tool_loop`. Configure provider-level and
@@ -47,7 +47,7 @@ agent rules live in [`src/forge/llm/CLAUDE.md`](../../src/forge/llm/CLAUDE.md).
 ## Quickstart
 
 ```python
-from forge.llm import LLMClient, Message
+from strata_forge.llm import LLMClient, Message
 
 client = LLMClient("claude-opus-4-7")
 resp = await client.complete([Message.user("Say hello.")])
@@ -64,7 +64,7 @@ client = LLMClient("claude-opus-4-7", provider="bedrock")
 ```
 
 Every method on `LLMClient` is `async def`. Sync wrappers for CLI and
-notebook ergonomics live in [`forge.sync`](#sync-wrappers).
+notebook ergonomics live in [`strata_forge.sync`](#sync-wrappers).
 
 ---
 
@@ -88,13 +88,13 @@ ADR. Pricing is in USD per million tokens.
 
 Aliases (`opus`, `sonnet`, `haiku`, `gpt55`, `gemini-pro`, …) resolve to
 their canonical name before lookup. The source of truth is
-[`src/forge/llm/registry_data.yaml`](../../src/forge/llm/registry_data.yaml);
+[`src/strata_forge/llm/registry_data.yaml`](../../src/strata_forge/llm/registry_data.yaml);
 edits to it must keep YAML and this table in sync.
 
 Programmatic access:
 
 ```python
-from forge.llm import registry
+from strata_forge.llm import registry
 
 model = registry.get("opus")        # alias -> Model("claude-opus-4-7")
 all_models = registry.list_models() # 9 entries
@@ -154,7 +154,7 @@ Every conversation is a sequence of `AnyMessage` — one of
 The ergonomic way to build them is via the `Message` namespace:
 
 ```python
-from forge.llm import Message
+from strata_forge.llm import Message
 
 conversation = [
     Message.system("You are a concise assistant."),
@@ -169,7 +169,7 @@ parts. See [Multimodal](#multimodal) for the image case.
 `AssistantMessage` carries both `content: str | None` and
 `tool_calls: list[ToolCall]`. `ToolResultMessage` carries
 `tool_call_id`, `content`, and `is_error: bool`. The full hierarchy
-lives in [`messages.py`](../../src/forge/llm/messages.py).
+lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
 
 ### Responses
 
@@ -193,11 +193,11 @@ the Pydantic model passed to `complete_structured`.
 
 ## Routing
 
-`forge.llm.routing.resolve(model, provider=None)` translates a logical
+`strata_forge.llm.routing.resolve(model, provider=None)` translates a logical
 `(model, provider)` request into a concrete `ModelRoute`:
 
 ```python
-from forge.llm import resolve
+from strata_forge.llm import resolve
 
 route = resolve("opus", provider="bedrock")
 # ModelRoute(model="claude-opus-4-7",
@@ -222,7 +222,7 @@ provider)` combo raises `RegistryError(reason="unsupported_route")`.
   logical model.
 
 ```python
-from forge.llm import LLMClient, ModelFallback
+from strata_forge.llm import LLMClient, ModelFallback
 
 # Same Claude model, three provider routes; then drop to GPT.
 client = LLMClient.with_fallbacks([
@@ -253,7 +253,7 @@ Per-error rules (see also the docstring on `run_with_fallback`):
 | `RegistryError` (from `resolve()`) | advance | advance |
 | Anything else | propagate unchanged | propagate unchanged |
 
-Each provider attempt is wrapped in `forge.core.retry.retry` (exponential
+Each provider attempt is wrapped in `strata_forge.core.retry.retry` (exponential
 backoff + jitter), so a transient rate-limit retries before the provider
 is counted as exhausted. The retry policy is configured by the
 `retry_max_attempts` / `retry_initial_wait` / `retry_max_wait` kwargs on
@@ -278,7 +278,7 @@ Bedrock — including the provider would defeat the cache during
 provider-level failover.
 
 ```python
-from forge.llm import InMemoryCache, LLMClient, Message
+from strata_forge.llm import InMemoryCache, LLMClient, Message
 
 cache = InMemoryCache(max_size=1024)
 client = LLMClient("claude-opus-4-7", cache=cache)
@@ -345,13 +345,13 @@ For a hand-rolled reprompt loop, the building blocks are exported:
 
 ## Tool calling
 
-[ADR 0006] makes tool calling first-class in `forge.llm`. Tools are
+[ADR 0006] makes tool calling first-class in `strata_forge.llm`. Tools are
 async functions with a single Pydantic-typed argument; the `@tool`
 decorator wraps one into a `Tool` instance.
 
 ```python
 from pydantic import BaseModel, Field
-from forge.llm import tool
+from strata_forge.llm import tool
 
 class WeatherArgs(BaseModel):
     location: str = Field(..., description="City, country")
@@ -436,7 +436,7 @@ methods, so `tools=` accepts any mix of the two (`AnyTool`).
 `ImageContent` is the multimodal building block:
 
 ```python
-from forge.llm import ImageContent, Message, TextPart, UserMessage
+from strata_forge.llm import ImageContent, Message, TextPart, UserMessage
 
 await client.complete([
     UserMessage(content=[
@@ -470,7 +470,7 @@ async for chunk in await client.stream([Message.user("Write a haiku.")]):
 Each `ResponseChunk` carries `delta_text`, `delta_tool_calls`, and
 optional `finish_reason` + `usage` (present on the final chunk when the
 provider reports them). The streaming utilities in
-[`streaming.py`](../../src/forge/llm/streaming.py) provide accumulators
+[`streaming.py`](../../src/strata_forge/llm/streaming.py) provide accumulators
 for the common postprocessing patterns:
 
 - `accumulate_text(chunks)` → the concatenated text.
@@ -498,7 +498,7 @@ typed `LoopEvent`s as the conversation unfolds — so a UI can show the
 model's tool use live.
 
 ```python
-from forge.llm import (
+from strata_forge.llm import (
     LLMClient, Message, IterationStart, TextDelta,
     ToolCallStarted, ToolResult, Done, LoopError,
 )
@@ -516,7 +516,7 @@ async for event in client.stream_tool_loop(
         case LoopError(message=m):           ...   # failure, terminal
 ```
 
-The event union lives in `forge.llm.loop_events`; every event carries a
+The event union lives in `strata_forge.llm.loop_events`; every event carries a
 `type` literal (the discriminator):
 
 | Event | Emitted | Fields |
@@ -562,7 +562,7 @@ caller executes out-of-band (e.g. a server streaming the loop to a
 browser that performs the action):
 
 ```python
-from forge.llm import ToolDeclaration
+from strata_forge.llm import ToolDeclaration
 
 load_model = ToolDeclaration(
     name="load_model",
@@ -623,11 +623,11 @@ prices when usage reports them. `cache_hit=True` responses report
 
 ### Budgets
 
-`BudgetContext` from `forge.core.budget` enforces a USD or token
+`BudgetContext` from `strata_forge.core.budget` enforces a USD or token
 ceiling around a block of code:
 
 ```python
-from forge.core.budget import BudgetContext
+from strata_forge.core.budget import BudgetContext
 
 async with BudgetContext(max_usd=1.00) as budget:
     await client.complete([...])
@@ -650,7 +650,7 @@ route, messages, response text, tool calls, finish_reason, usage,
 cost, latency, cache_hit, error (on failure).
 
 The record schema (`DiagnosticRecord` in
-[`diagnostic.py`](../../src/forge/llm/diagnostic.py)) is plain
+[`diagnostic.py`](../../src/strata_forge/llm/diagnostic.py)) is plain
 JSON-serializable so replay/analytics scripts don't need to import
 Forge.
 
@@ -658,9 +658,9 @@ Forge.
 
 ## Errors
 
-Every exception raised from `forge.llm` is a `ForgeError` subclass — no
+Every exception raised from `strata_forge.llm` is a `ForgeError` subclass — no
 raw LiteLLM exceptions ever bubble out. The seam is
-[`map_litellm_exception`](../../src/forge/llm/errors.py).
+[`map_litellm_exception`](../../src/strata_forge/llm/errors.py).
 
 | Exception | When it fires |
 |---|---|
@@ -682,12 +682,12 @@ raw LiteLLM exceptions ever bubble out. The seam is
 
 ## Sync wrappers
 
-Every async surface has a sync facade in `forge.sync` for CLI and
+Every async surface has a sync facade in `strata_forge.sync` for CLI and
 notebook use:
 
 ```python
-from forge import sync
-from forge.llm import Message
+from strata_forge import sync
+from strata_forge.llm import Message
 
 resp = sync.complete([Message.user("hi")], model="claude-opus-4-7")
 parsed = sync.complete_structured([...], schema=Summary, model="gpt-5.5")

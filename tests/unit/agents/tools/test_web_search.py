@@ -1,4 +1,4 @@
-"""Unit tests for `forge.agents.tools.web_search`."""
+"""Unit tests for `strata_forge.agents.tools.web_search`."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.agents.tools.web_search import (
+from strata_forge.agents.tools.web_search import (
     SearchResult,
     WebSearchArgs,
     web_search_tool,
 )
-from forge.core.errors import ValidationError
+from strata_forge.core.errors import ValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

@@ -1,4 +1,4 @@
-"""Unit tests for `forge.llm.providers.anthropic`."""
+"""Unit tests for `strata_forge.llm.providers.anthropic`."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
-from forge.llm.providers.anthropic import AnthropicProvider, to_anthropic_tool_schema
-from forge.llm.providers.config import AnthropicConfig
+from strata_forge.llm.providers.anthropic import AnthropicProvider, to_anthropic_tool_schema
+from strata_forge.llm.providers.config import AnthropicConfig
 
 
 @pytest.fixture(autouse=True)

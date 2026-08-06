@@ -25,8 +25,8 @@ import os
 
 import pytest
 
-from forge.core.ids import correlation_id_var
-from forge.tracing import get_client, traced
+from strata_forge.core.ids import correlation_id_var
+from strata_forge.tracing import get_client, traced
 
 pytestmark = pytest.mark.integration
 

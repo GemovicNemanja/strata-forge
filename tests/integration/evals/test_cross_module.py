@@ -1,6 +1,6 @@
 """Cross-module evaluation workflows that don't need external services.
 
-Each test wires multiple :mod:`forge.evals` pieces together —
+Each test wires multiple :mod:`strata_forge.evals` pieces together —
 runner + graders + metrics, runner + reports, runner + CI gate —
 to confirm the seams hold. Unit tests cover each piece in isolation;
 these tests prove the pieces compose.
@@ -11,19 +11,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.evals.ci_gate import CIGateThresholds, evaluate_ci_gate
-from forge.evals.experiment import Experiment, SamplingParams
-from forge.evals.graders.exact import ExactMatch
-from forge.evals.metrics import pass_rate, pass_rate_by_grader
-from forge.evals.reports.html import render_html
-from forge.evals.reports.markdown import render_markdown
-from forge.evals.runner import run_experiment
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.evals.ci_gate import CIGateThresholds, evaluate_ci_gate
+from strata_forge.evals.experiment import Experiment, SamplingParams
+from strata_forge.evals.graders.exact import ExactMatch
+from strata_forge.evals.metrics import pass_rate, pass_rate_by_grader
+from strata_forge.evals.reports.html import render_html
+from strata_forge.evals.reports.markdown import render_markdown
+from strata_forge.evals.runner import run_experiment
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 if TYPE_CHECKING:
-    from forge.llm.registry import ProviderName
+    from strata_forge.llm.registry import ProviderName
 
 
 def _response(text: str, *, provider: ProviderName = "anthropic") -> LLMResponse:

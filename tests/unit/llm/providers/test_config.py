@@ -1,11 +1,11 @@
-"""Unit tests for `forge.llm.providers.config`."""
+"""Unit tests for `strata_forge.llm.providers.config`."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import SecretStr
 
-from forge.llm.providers.config import (
+from strata_forge.llm.providers.config import (
     AnthropicConfig,
     AzureConfig,
     BedrockConfig,

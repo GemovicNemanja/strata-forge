@@ -1,18 +1,18 @@
-"""Unit tests for `forge.llm.responses`."""
+"""Unit tests for `strata_forge.llm.responses`."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from forge.llm.messages import ToolCall
-from forge.llm.responses import (
+from strata_forge.llm.messages import ToolCall
+from strata_forge.llm.responses import (
     LLMResponse,
     ResponseChunk,
     ToolCallDelta,
     Usage,
 )
-from forge.llm.routing import ModelRoute
+from strata_forge.llm.routing import ModelRoute
 
 _ROUTE = ModelRoute(
     model="claude-opus-4-7",

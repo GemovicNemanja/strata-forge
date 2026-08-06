@@ -1,4 +1,4 @@
-"""Unit tests for `forge.rag.dense`."""
+"""Unit tests for `strata_forge.rag.dense`."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.rag.chunking import Chunk
-from forge.rag.dense import DenseRetriever
-from forge.rag.retrieval import Retriever
-from forge.rag.vector_store import InMemoryVectorStore
+from strata_forge.rag.chunking import Chunk
+from strata_forge.rag.dense import DenseRetriever
+from strata_forge.rag.retrieval import Retriever
+from strata_forge.rag.vector_store import InMemoryVectorStore
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

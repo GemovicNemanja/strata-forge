@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.runner`."""
+"""Unit tests for `strata_forge.evals.runner`."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.datasets.schema import Dataset, DatasetItem
-from forge.evals.experiment import Experiment, GraderResult, SamplingParams
-from forge.evals.runner import run_experiment
-from forge.llm.messages import UserMessage
-from forge.llm.responses import LLMResponse, Usage
-from forge.llm.routing import ModelRoute
+from strata_forge.datasets.schema import Dataset, DatasetItem
+from strata_forge.evals.experiment import Experiment, GraderResult, SamplingParams
+from strata_forge.evals.runner import run_experiment
+from strata_forge.llm.messages import UserMessage
+from strata_forge.llm.responses import LLMResponse, Usage
+from strata_forge.llm.routing import ModelRoute
 
 if TYPE_CHECKING:
-    from forge.llm.messages import AnyMessage
-    from forge.llm.registry import ProviderName
+    from strata_forge.llm.messages import AnyMessage
+    from strata_forge.llm.registry import ProviderName
 
 
 def _response(

@@ -1,6 +1,6 @@
 """Cross-module dataset workflows that don't need external services.
 
-Each test exercises two or more pieces of :mod:`forge.datasets`
+Each test exercises two or more pieces of :mod:`strata_forge.datasets`
 working together — the unit-test suite covers each piece in
 isolation; these tests confirm the seams hold.
 """
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forge.datasets import (
+from strata_forge.datasets import (
     Dataset,
     DatasetItem,
     InMemoryDatasetStore,
@@ -25,7 +25,7 @@ from forge.datasets import (
     self_instruct,
     to_hf_dataset,
 )
-from forge.datasets.synthetic.self_instruct import SelfInstructBatch, SelfInstructItem
+from strata_forge.datasets.synthetic.self_instruct import SelfInstructBatch, SelfInstructItem
 
 # ---------------------------------------------------------------------------
 # Fake HF Dataset module (mirrors the fixtures in tests/unit/datasets/test_hf_bridge.py)

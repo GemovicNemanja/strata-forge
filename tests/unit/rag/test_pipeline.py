@@ -1,4 +1,4 @@
-"""Unit tests for `forge.rag.pipeline`."""
+"""Unit tests for `strata_forge.rag.pipeline`."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from forge.rag.chunking import Chunk, Document, RecursiveChunker
-from forge.rag.pipeline import (
+from strata_forge.rag.chunking import Chunk, Document, RecursiveChunker
+from strata_forge.rag.pipeline import (
     DEFAULT_AUGMENT_TEMPLATE,
     IndexableRetriever,
     RAGPipeline,
 )
-from forge.rag.retrieval import RetrievalResult
+from strata_forge.rag.retrieval import RetrievalResult
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

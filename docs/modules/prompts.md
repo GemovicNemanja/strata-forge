@@ -1,10 +1,10 @@
-# `forge.prompts` — typed prompt authoring with structural cache-awareness
+# `strata_forge.prompts` — typed prompt authoring with structural cache-awareness
 
-`forge.prompts` is where prompts live: a Jinja2-driven template layer
+`strata_forge.prompts` is where prompts live: a Jinja2-driven template layer
 backed by a sandboxed environment, a store-agnostic registry with
 in-memory and Langfuse backends, and a renderer that compiles
-`(template, variables)` into `list[forge.llm.AnyMessage]` plus the
-cache hints `forge.llm.LLMClient` uses to populate provider-specific
+`(template, variables)` into `list[strata_forge.llm.AnyMessage]` plus the
+cache hints `strata_forge.llm.LLMClient` uses to populate provider-specific
 prompt caching.
 
 The module's organizing principle is the **structural split between a
@@ -17,8 +17,8 @@ to declare what's stable and what's per-call, the module makes cache
 hits the default behavior rather than something you remember to opt
 into.
 
-Module rules: [`src/forge/prompts/CLAUDE.md`](../../src/forge/prompts/CLAUDE.md).
-Source: [`src/forge/prompts/`](../../src/forge/prompts/).
+Module rules: [`src/strata_forge/prompts/CLAUDE.md`](../../src/strata_forge/prompts/CLAUDE.md).
+Source: [`src/strata_forge/prompts/`](../../src/strata_forge/prompts/).
 
 ---
 
@@ -33,7 +33,7 @@ Source: [`src/forge/prompts/`](../../src/forge/prompts/).
   - [`StableDynamicSplit` + `CacheHints`](#stabledynamicsplit--cachehints)
 - [Variable validation](#variable-validation)
 - [The Jinja2 sandbox](#the-jinja2-sandbox)
-- [Cache integration with `forge.llm`](#cache-integration-with-forgellm)
+- [Cache integration with `strata_forge.llm`](#cache-integration-with-forgellm)
 - [Stores](#stores)
 - [Errors](#errors)
 - [Troubleshooting](#troubleshooting)
@@ -43,7 +43,7 @@ Source: [`src/forge/prompts/`](../../src/forge/prompts/).
 ## Quickstart
 
 ```python
-from forge.prompts import PromptTemplate, render
+from strata_forge.prompts import PromptTemplate, render
 
 template = PromptTemplate(
     name="explainer",
@@ -166,7 +166,7 @@ A registry wraps a store and adds validation + a "stable section too
 short" lint signal on every `put()`:
 
 ```python
-from forge.prompts import PromptRegistry, InMemoryPromptStore
+from strata_forge.prompts import PromptRegistry, InMemoryPromptStore
 
 registry = PromptRegistry(InMemoryPromptStore())
 
@@ -252,7 +252,7 @@ environment each call so per-call state doesn't leak.
 
 ---
 
-## Cache integration with `forge.llm`
+## Cache integration with `strata_forge.llm`
 
 The hints `render` returns are provider-agnostic. When `LLMClient`
 consumes them (Phase 3+ wiring), it'll dispatch per provider:
@@ -287,7 +287,7 @@ the Langfuse store for that.
 
 Backed by Langfuse's prompt management API. Requires the `[langfuse]`
 extra (`pip install ai-forge[langfuse]`). The constructor lazy-imports
-`langfuse`; importing `forge.prompts` without the extra is safe.
+`langfuse`; importing `strata_forge.prompts` without the extra is safe.
 
 `PromptTemplate` serializes into Langfuse's prompt model by packing
 both Jinja sections into a JSON blob in the `prompt` field and the
@@ -305,14 +305,14 @@ prompts created through this store; UI edits may produce gaps).
 
 ## Errors
 
-Every exception raised from `forge.prompts` is a `ForgeError` subclass.
+Every exception raised from `strata_forge.prompts` is a `ForgeError` subclass.
 
 | Exception | When it fires |
 |---|---|
 | `PromptError` | Base class — catch-all for the module. |
 | `PromptValidationError` | Invalid Jinja syntax, disallowed filter, undeclared variable reference, stable/dynamic overlap. |
 | `PromptNotFoundError` | `PromptStore.get` against an unknown name or version. Carries `name` and `version` attributes. |
-| `ValidationError` (from `forge.core.errors`) | Render-time variable mismatch — missing required or extra unexpected. |
+| `ValidationError` (from `strata_forge.core.errors`) | Render-time variable mismatch — missing required or extra unexpected. |
 | `ForgeError` | Misc failures from the Langfuse store (e.g., malformed prompt body, list call failed). |
 
 ---

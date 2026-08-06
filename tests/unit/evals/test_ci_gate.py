@@ -1,4 +1,4 @@
-"""Unit tests for `forge.evals.ci_gate`."""
+"""Unit tests for `strata_forge.evals.ci_gate`."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from typing import Any
 
 import pytest
 
-from forge.evals.ci_gate import (
+from strata_forge.evals.ci_gate import (
     CIGateThresholds,
     evaluate_ci_gate,
     wilson_lower_bound,
 )
-from forge.evals.experiment import GraderResult, Outcome, Trial
-from forge.llm.responses import Usage
+from strata_forge.evals.experiment import GraderResult, Outcome, Trial
+from strata_forge.llm.responses import Usage
 
 
 def _trial(*, model: str = "m", cost_usd: float = 0.001) -> Trial:

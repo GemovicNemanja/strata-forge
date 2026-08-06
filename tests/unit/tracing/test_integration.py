@@ -1,4 +1,4 @@
-"""Cross-module integration tests for `forge.tracing`.
+"""Cross-module integration tests for `strata_forge.tracing`.
 
 The per-file unit tests cover each piece in isolation; these wire the
 pieces together — `@traced` + `traced_span` nested, `@traced` + scores
@@ -16,11 +16,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from forge.core.ids import correlation_id_var
-from forge.tracing.decorator import traced
-from forge.tracing.metrics import record_numeric_metric
-from forge.tracing.score import score_trace
-from forge.tracing.span import traced_span
+from strata_forge.core.ids import correlation_id_var
+from strata_forge.tracing.decorator import traced
+from strata_forge.tracing.metrics import record_numeric_metric
+from strata_forge.tracing.score import score_trace
+from strata_forge.tracing.span import traced_span
 
 
 def _install_fake_langfuse(
@@ -325,7 +325,7 @@ class TestPublicSurface:
     def test_all_helpers_importable_from_package(self) -> None:
         # Round-trip import check: everything advertised in __all__
         # actually resolves.
-        from forge.tracing import (
+        from strata_forge.tracing import (
             LITELLM_CALLBACK_NAME,
             ScoreValue,
             get_client,
@@ -356,12 +356,12 @@ class TestPublicSurface:
         assert callable(traced_span)
 
     def test_no_eager_langfuse_import(self) -> None:
-        # Importing forge.tracing without the [langfuse] extra installed
+        # Importing strata_forge.tracing without the [langfuse] extra installed
         # must not crash. The lazy-import contract is enforced by every
         # langfuse-touching function importing inside its body.
         import importlib
 
-        import forge.tracing as tracing_pkg
+        import strata_forge.tracing as tracing_pkg
 
         # Re-import in a fresh state to be extra defensive.
         importlib.reload(tracing_pkg)

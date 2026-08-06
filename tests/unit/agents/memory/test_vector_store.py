@@ -1,10 +1,10 @@
-"""Unit tests for `forge.agents.memory.vector_store`."""
+"""Unit tests for `strata_forge.agents.memory.vector_store`."""
 
 from __future__ import annotations
 
 import pytest
 
-from forge.agents.memory.vector_store import (
+from strata_forge.agents.memory.vector_store import (
     InMemoryVectorStore,
     VectorItem,
     VectorStore,
