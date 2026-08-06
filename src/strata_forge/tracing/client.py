@@ -7,7 +7,7 @@ three cases — Langfuse credentials aren't configured, the
 ``[langfuse]`` extra isn't installed, or the constructor itself
 failed — so every public function in :mod:`strata_forge.tracing` can
 short-circuit cleanly without crashing a production call path. The
-"why is this None?" diagnosis surfaces through ``forge doctor``, not
+"why is this None?" diagnosis surfaces through ``strata-forge doctor``, not
 through exceptions on the hot path.
 
 :func:`reset_client` clears the cache; tests use it between cases via

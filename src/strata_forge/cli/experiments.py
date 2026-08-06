@@ -1,6 +1,6 @@
-"""``forge experiments`` — alias group over saved eval reports.
+"""``strata-forge experiments`` — alias group over saved eval reports.
 
-Mirrors ``forge eval list`` / ``forge eval show`` semantics so
+Mirrors ``strata-forge eval list`` / ``strata-forge eval show`` semantics so
 users with a workflow built around "experiments" don't have to
 learn a parallel verb. The state lives under
 ``~/.forge/experiments``.

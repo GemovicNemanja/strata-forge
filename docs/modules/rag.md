@@ -26,8 +26,8 @@ Integration points:
 - **Pipeline:** `RAGPipeline` (chunk → retrieve → optional rerank →
   optional prompt augmentation).
 
-Module rules: [`src/forge/rag/CLAUDE.md`](../../src/forge/rag/CLAUDE.md).
-Source: [`src/forge/rag/`](../../src/forge/rag/).
+Module rules: [`src/strata_forge/rag/CLAUDE.md`](../../src/strata_forge/rag/CLAUDE.md).
+Source: [`src/strata_forge/rag/`](../../src/strata_forge/rag/).
 
 ---
 

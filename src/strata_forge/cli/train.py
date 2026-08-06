@@ -1,4 +1,4 @@
-"""``forge train`` — kick off SFT or DPO fine-tuning jobs.
+"""``strata-forge train`` — kick off SFT or DPO fine-tuning jobs.
 
 The subcommands are thin wrappers over :class:`SFTRunner` and
 :class:`PreferenceRunner` (DPO method). Forge resolves the
@@ -225,7 +225,7 @@ async def _run_sft(
 
     console = Console()
     console.print(
-        f"[bold]forge train sft[/]  model={model_id}  dataset={dataset_name}  adapter={adapter}"
+        f"[bold]strata-forge train sft[/]  model={model_id}  dataset={dataset_name}  adapter={adapter}"
     )
 
     runner = SFTRunner(config, peft_config=peft_cfg)
@@ -280,7 +280,7 @@ async def _run_dpo(
 
     console = Console()
     console.print(
-        f"[bold]forge train dpo[/]  model={model_id}  dataset={dataset_name}  beta={beta}"
+        f"[bold]strata-forge train dpo[/]  model={model_id}  dataset={dataset_name}  beta={beta}"
     )
 
     runner = PreferenceRunner(config, peft_config=peft_cfg)

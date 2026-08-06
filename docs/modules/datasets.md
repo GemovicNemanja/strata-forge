@@ -24,8 +24,8 @@ Five integration points ship:
 - `self_instruct` / `distill` — async synthetic-data helpers built
   on `LLMClient`.
 
-Module rules: [`src/forge/datasets/CLAUDE.md`](../../src/forge/datasets/CLAUDE.md).
-Source: [`src/forge/datasets/`](../../src/forge/datasets/).
+Module rules: [`src/strata_forge/datasets/CLAUDE.md`](../../src/strata_forge/datasets/CLAUDE.md).
+Source: [`src/strata_forge/datasets/`](../../src/strata_forge/datasets/).
 
 ---
 

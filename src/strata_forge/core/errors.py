@@ -170,7 +170,7 @@ class RegistryError(ForgeError):
     """Model registry lookup or validation failed.
 
     Raised for unknown models, missing pricing, unsupported ``(model, provider)``
-    routes, and inconsistencies detected by ``forge doctor``. The ``reason``
+    routes, and inconsistencies detected by ``strata-forge doctor``. The ``reason``
     field is a short machine-friendly tag (``"unknown_model"``,
     ``"missing_pricing"``, ``"unsupported_route"``, ``"capability_missing"``,
     ``"capability_unknown"``).

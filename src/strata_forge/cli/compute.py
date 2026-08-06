@@ -1,4 +1,4 @@
-"""``forge compute`` — submit, monitor, cancel, and cleanup compute jobs.
+"""``strata-forge compute`` — submit, monitor, cancel, and cleanup compute jobs.
 
 Submitting a task persists the resulting :class:`Job` to
 ``~/.forge/jobs/<id>.json`` so subsequent commands (``status``,

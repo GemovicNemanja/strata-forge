@@ -17,8 +17,8 @@ Both clients defer their heavy imports — ``fsspec``,
 the first network call, so ``import strata_forge.storage`` works
 without the ``[storage]`` extra installed.
 
-Module rules: [`src/forge/storage/CLAUDE.md`](../../src/forge/storage/CLAUDE.md).
-Source: [`src/forge/storage/`](../../src/forge/storage/).
+Module rules: [`src/strata_forge/storage/CLAUDE.md`](../../src/strata_forge/storage/CLAUDE.md).
+Source: [`src/strata_forge/storage/`](../../src/strata_forge/storage/).
 
 ---
 

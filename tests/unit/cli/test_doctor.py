@@ -52,7 +52,7 @@ class TestDoctorOutput:
 
     def test_renders_header(self) -> None:
         result = runner.invoke(app, ["doctor"])
-        assert "forge doctor" in result.output
+        assert "strata-forge doctor" in result.output
         assert "Python" in result.output
 
     def test_renders_settings_section(self) -> None:

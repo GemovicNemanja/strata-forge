@@ -1,4 +1,4 @@
-"""``forge chat`` — one-shot or interactive completion against an LLM.
+"""``strata-forge chat`` — one-shot or interactive completion against an LLM.
 
 The command builds an :class:`LLMClient` for the requested model
 (and optional provider pin) and either:
@@ -148,7 +148,7 @@ async def _interactive_loop(
     from strata_forge.llm.messages import Message
 
     console = Console()
-    console.print("[dim]forge chat — (blank line or Ctrl-D to exit)[/]")
+    console.print("[dim]strata-forge chat — (blank line or Ctrl-D to exit)[/]")
     while True:
         try:
             user_input = console.input(f"{_PROMPT} > ").strip()

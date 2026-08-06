@@ -30,7 +30,7 @@ streaming, multi-iteration tool loop yield?
 
 `LLMClient.stream_tool_loop` yields a flat stream of **typed events** —
 a discriminated union (`LoopEvent`) of frozen Pydantic models in
-[`loop_events.py`](../../src/forge/llm/loop_events.py) — not a stream of
+[`loop_events.py`](../../src/strata_forge/llm/loop_events.py) — not a stream of
 `ResponseChunk`s and not a buffered `LLMResponse`.
 
 ```

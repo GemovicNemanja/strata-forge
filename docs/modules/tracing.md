@@ -25,8 +25,8 @@ When Langfuse isn't configured, every public function is a silent
 no-op. Tracing failures are swallowed so they never break a
 production call path.
 
-Module rules: [`src/forge/tracing/CLAUDE.md`](../../src/forge/tracing/CLAUDE.md).
-Source: [`src/forge/tracing/`](../../src/forge/tracing/).
+Module rules: [`src/strata_forge/tracing/CLAUDE.md`](../../src/strata_forge/tracing/CLAUDE.md).
+Source: [`src/strata_forge/tracing/`](../../src/strata_forge/tracing/).
 
 ---
 
@@ -81,7 +81,7 @@ For end-to-end runnable demos:
 ## Configuration + the lazy import contract
 
 Tracing reads its credentials from
-[`strata_forge.config.LangfuseConfig`](../../src/forge/config/settings.py):
+[`strata_forge.config.LangfuseConfig`](../../src/strata_forge/config/settings.py):
 
 | Env var | Field | Default |
 |---|---|---|
@@ -126,7 +126,7 @@ Internally this appends `"langfuse"` to `litellm.success_callback` and
 `LANGFUSE_*` env vars on each call and ships traces.
 
 `is_litellm_callback_installed()` is the diagnostic counterpart;
-`forge doctor` uses it to surface the "I configured Langfuse but I'm
+`strata-forge doctor` uses it to surface the "I configured Langfuse but I'm
 not seeing traces" failure mode. It reports `True` only when
 `"langfuse"` appears in **both** lists — the half-installed asymmetric
 state reports `False` so the diagnostic isn't misleading.
@@ -251,7 +251,7 @@ instead of silently dropping data only in production.
 ## Correlation IDs
 
 The active Langfuse trace ID is published on
-[`strata_forge.core.ids.correlation_id_var`](../../src/forge/core/ids.py)
+[`strata_forge.core.ids.correlation_id_var`](../../src/strata_forge/core/ids.py)
 while a `@traced` function is running. The structlog logger
 (configured by `strata_forge.core.logging.configure_logging`) has a
 processor that injects this value into every log record under
@@ -287,7 +287,7 @@ programmer error, not a runtime tracing failure.
 ## Troubleshooting
 
 **"I configured Langfuse but I'm not seeing traces."**
-Most often the LiteLLM callback wasn't installed. Run `forge doctor`
+Most often the LiteLLM callback wasn't installed. Run `strata-forge doctor`
 to check; it reports whether `is_litellm_callback_installed()` is
 True. If not, add `install_litellm_callback()` once at process
 startup.

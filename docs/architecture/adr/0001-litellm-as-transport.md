@@ -21,7 +21,7 @@ What it does NOT need to own: HTTP transport, authentication mechanics, streamin
 
 ## Decision
 
-Use **LiteLLM** as the underlying transport layer. Forge wraps LiteLLM in a thin, typed layer that owns the concerns above. Provider SDKs are imported only inside `src/forge/llm/providers/` — never elsewhere in the codebase.
+Use **LiteLLM** as the underlying transport layer. Forge wraps LiteLLM in a thin, typed layer that owns the concerns above. Provider SDKs are imported only inside `src/strata_forge/llm/providers/` — never elsewhere in the codebase.
 
 Concretely:
 - `strata_forge.llm.providers.ProviderClient` is an abstract base over LiteLLM's `acompletion` and `astream`.

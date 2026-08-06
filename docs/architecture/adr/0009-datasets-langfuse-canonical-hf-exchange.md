@@ -104,7 +104,7 @@ regardless of who constructed them.
 
 - The in-memory store is a first-class implementation, not just a test
   fixture. Users prototyping locally can stand up evals against an
-  `InMemoryDatasetStore` and migrate later. `forge doctor` will
+  `InMemoryDatasetStore` and migrate later. `strata-forge doctor` will
   surface "no production store configured" so it's visible.
 - The HF bridge is bidirectional. A user who refuses Langfuse can run
   the whole eval workflow on HF Datasets — the dataset just doesn't

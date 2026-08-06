@@ -1,4 +1,4 @@
-"""``forge doctor`` — environment, configuration, and service-reachability checks.
+"""``strata-forge doctor`` — environment, configuration, and service-reachability checks.
 
 The command always exits 0; it's a diagnostic, not a gate. Operators read the
 output to confirm everything is wired up; CI can grep it.
@@ -41,7 +41,7 @@ def doctor() -> None:
 
 
 def _render_header(console: Console, snapshot: dict[str, str | None]) -> None:
-    console.print("\n[bold cyan]forge doctor[/bold cyan]")
+    console.print("\n[bold cyan]strata-forge doctor[/bold cyan]")
     console.print(f"Python {snapshot.get('python')} on {snapshot.get('platform')}\n")
 
 

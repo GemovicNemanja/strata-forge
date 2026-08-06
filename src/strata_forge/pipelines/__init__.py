@@ -1,7 +1,7 @@
 """Runnable pipeline entrypoints executed on a compute target.
 
-These modules are launched on the user's VM by the control plane (strata-server),
-not imported by the orchestrator. Each reads an inert run spec from the environment,
-composes the forge primitives (serving / batch / storage), and appends ProgressEvents
-to ``FORGE_PROGRESS_PATH`` for the orchestrator to tail.
+These modules are launched on a compute target by an orchestrator rather than imported
+in-process. Each reads an inert run spec from the environment, composes the library's
+primitives (serving / batch / storage), and appends ProgressEvents to the file named by
+``FORGE_PROGRESS_PATH`` so the orchestrator can tail progress over its own channel.
 """

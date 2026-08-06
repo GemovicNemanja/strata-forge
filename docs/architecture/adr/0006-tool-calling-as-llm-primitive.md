@@ -20,7 +20,7 @@ The same logic applies to **structured output** (Pydantic-typed responses) and *
 
 ## Decision
 
-Tool calling is a first-class feature of `strata_forge.llm`, shipped in `src/forge/llm/tools.py`. The agent module (`strata_forge.agents`, phase 3) reuses these primitives rather than reimplementing them. The same module also ships `strata_forge.llm.schemas` (structured output) and `strata_forge.llm.multimodal` (image input).
+Tool calling is a first-class feature of `strata_forge.llm`, shipped in `src/strata_forge/llm/tools.py`. The agent module (`strata_forge.agents`, phase 3) reuses these primitives rather than reimplementing them. The same module also ships `strata_forge.llm.schemas` (structured output) and `strata_forge.llm.multimodal` (image input).
 
 Concretely, `strata_forge.llm` exposes:
 

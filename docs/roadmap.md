@@ -41,7 +41,7 @@ type, test, docs, agent rules, and the cross-cutting `strata_forge.core` +
   `[compute]`, `[serving]`, `[finetuning]`, `[all]`). Heavy deps are
   gated behind extras so a base install stays slim.
 - `ruff` (lint + format, single config in pyproject) and `pyright`
-  (`strict` mode on `src/forge`) with a uniform line length of 100.
+  (`strict` mode on `src/strata_forge`) with a uniform line length of 100.
 - `pre-commit` hooks: ruff, pyright, trailing-whitespace, EOF-newline,
   no-merge-markers.
 - `Makefile` one-command entrypoints: `fmt`, `lint`, `type`, `test`,
@@ -106,7 +106,7 @@ type, test, docs, agent rules, and the cross-cutting `strata_forge.core` +
 
 **`strata_forge.cli`** — Typer entry point and the `doctor` command
 
-- `forge doctor` validates env-var presence, runs lightweight provider
+- `strata-forge doctor` validates env-var presence, runs lightweight provider
   auth probes (stubbed where the LLM module didn't exist yet), reports
   package versions and service reachability (Langfuse/Redis/Qdrant). It
   *skips* unconfigured providers cleanly instead of failing — a missing
@@ -158,7 +158,7 @@ type, test, docs, agent rules, and the cross-cutting `strata_forge.core` +
 
 `uv sync` works on a fresh clone; `make fmt && make lint && make type
 && make test` are all green; pre-commit hooks are installed and
-passing; `forge doctor` reports cleanly against an empty `.env`;
+passing; `strata-forge doctor` reports cleanly against an empty `.env`;
 `make stack-up` boots the local services.
 
 ---
@@ -351,7 +351,7 @@ Detailed reference: [`docs/modules/llm.md`](modules/llm.md).
 
 `make fmt && make lint && make type && make test && make vcr-replay`
 all green; **752 tests** pass + 48 VCR tests skip with explicit
-"no cassette" reasons; pyright 0 errors; coverage on `src/forge/llm/`
+"no cassette" reasons; pyright 0 errors; coverage on `src/strata_forge/llm/`
 is **96%** (target ≥ 90% per the LLM module's CLAUDE.md); `forge
 doctor` reports the environment without crashing.
 
@@ -464,7 +464,7 @@ Experiment runner over the (model × prompt × dataset × grader) matrix;
 a grader Protocol with deterministic, LLM-judged, pairwise, and
 semantic implementations; metrics (accuracy, F1, BLEU, ROUGE);
 parameter sweeps; trace replay; Markdown + HTML reports; a CI
-eval-regression gate with Wilson CI + cost cap; `forge eval` CLI.
+eval-regression gate with Wilson CI + cost cap; `strata-forge eval` CLI.
 
 | Sub-phase | Deliverable |
 |---|---|
@@ -483,7 +483,7 @@ eval-regression gate with Wilson CI + cost cap; `forge eval` CLI.
 | 2.4.13 | `reports/markdown.py` |
 | 2.4.14 | `reports/html.py` (side-by-side example outputs) |
 | 2.4.15 | `ci_gate.py` — Wilson CI accuracy regression + cost cap |
-| 2.4.16 | `forge eval` CLI wiring |
+| 2.4.16 | `strata-forge eval` CLI wiring |
 | 2.4.17 | Tests |
 | 2.4.18 | Examples + `docs/modules/evals.md` |
 | 2.4.19 | Sign-off |
@@ -567,34 +567,34 @@ heavy deps (`fsspec`, `s3fs`, `gcsfs`, `adlfs`,
 Every Forge module with a useful operator workflow now surfaces
 a `forge` subcommand:
 
-- `forge chat` — one-shot or interactive REPL against an
+- `strata-forge chat` — one-shot or interactive REPL against an
   `LLMClient` with optional `--provider`, `--system`,
   `--temperature`, `--max-tokens`.
-- `forge prompts list/show/render` — wraps `PromptRegistry`,
+- `strata-forge prompts list/show/render` — wraps `PromptRegistry`,
   parses `--vars` as JSON, renders via
   `strata_forge.prompts.rendering.render`.
-- `forge datasets list/show/head` — wraps `DatasetStore`;
+- `strata-forge datasets list/show/head` — wraps `DatasetStore`;
   `head` prints first N items as JSON with a truncation count.
-- `forge eval run/list/show` — runs a quick single-model eval
+- `strata-forge eval run/list/show` — runs a quick single-model eval
   with `exact_match` / `regex:` graders, writes markdown to
   `~/.forge/experiments/<name>.md`.
-- `forge experiments list/show/delete` — mirror group over the
+- `strata-forge experiments list/show/delete` — mirror group over the
   same report directory.
-- `forge compute submit/status/logs/cancel/cleanup/list` over
+- `strata-forge compute submit/status/logs/cancel/cleanup/list` over
   any of `local`, `ssh`, `skypilot`; persists Job + backend
   state to `~/.forge/jobs/<id>.json` so subsequent commands
   reconstruct the right backend automatically.
-- `forge train sft/dpo` — wraps `SFTRunner` and the DPO branch
+- `strata-forge train sft/dpo` — wraps `SFTRunner` and the DPO branch
   of `PreferenceRunner`; supports `--adapter none/lora/qlora`
   with `--adapter-rank`; heavy ML deps lazy-imported behind
   `[finetuning]`.
-- `forge serve vllm/tgi/sglang` — builds the corresponding
+- `strata-forge serve vllm/tgi/sglang` — builds the corresponding
   `strata_forge.compute.serving` task; default `--submit none` prints
   YAML, `--submit local` runs it on `LocalBackend` and hands
-  off monitoring to `forge compute`.
+  off monitoring to `strata-forge compute`.
 
 Shared helpers (`run_async`, `error_exit`, store factories)
-live in `src/forge/cli/helpers.py`. Reference doc:
+live in `src/strata_forge/cli/helpers.py`. Reference doc:
 [`docs/modules/cli.md`](modules/cli.md).
 
 ## Phase 8 — DX maturity ✅

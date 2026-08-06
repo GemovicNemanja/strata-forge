@@ -1,11 +1,11 @@
 ---
 description: strata_forge.llm — provider abstraction, tools, structured output, two-axis fallback, registry.
-globs: ["src/forge/llm/**/*.py", "tests/unit/llm/**/*.py", "tests/vcr/**/*.py"]
+globs: ["src/strata_forge/llm/**/*.py", "tests/unit/llm/**/*.py", "tests/vcr/**/*.py"]
 alwaysApply: false
 ---
 
 - Public surface is `LLMClient` (in `client.py`) plus re-exports in `__init__.py`. Add new capabilities there, not in provider modules.
-- Every provider call routes through LiteLLM via the `ProviderClient` base. **Never import provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) outside `src/forge/llm/providers/`** — the only escape hatch is the `provider_extras={...}` passthrough on `LLMClient.complete`.
+- Every provider call routes through LiteLLM via the `ProviderClient` base. **Never import provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) outside `src/strata_forge/llm/providers/`** — the only escape hatch is the `provider_extras={...}` passthrough on `LLMClient.complete`.
 - New errors raised from this module must subclass `ProviderError` (in `strata_forge.core.errors`). Use `map_litellm_exception()` at the seam — never let raw LiteLLM exceptions bubble out.
 - Pricing and registry edits go in `registry_data.yaml` with the source link in a YAML comment. **Never hard-code pricing or model IDs in Python.**
 - Cache key is provider-agnostic: a hit on `claude-opus-4-7` is valid regardless of which provider route served the original call.

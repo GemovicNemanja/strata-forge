@@ -1,4 +1,4 @@
-"""``forge eval`` — run a quick evaluation over the configured dataset store.
+"""``strata-forge eval`` — run a quick evaluation over the configured dataset store.
 
 The CLI surface is intentionally narrow:
 

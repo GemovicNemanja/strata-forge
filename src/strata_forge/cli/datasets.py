@@ -1,4 +1,4 @@
-"""``forge datasets`` — list, show, and head the configured dataset store.
+"""``strata-forge datasets`` — list, show, and head the configured dataset store.
 
 Subcommands wrap :class:`DatasetStore` (Langfuse when configured,
 otherwise the in-memory fallback). ``head`` prints the first N

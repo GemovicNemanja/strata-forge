@@ -49,7 +49,7 @@ Hold the Pydantic Settings root, the YAML overlay loader, the `.env` integration
 - When adding a new setting:
   1. Add the field to the appropriate sub-model with a sensible default.
   2. Document it in `.env.example` with a leading-comment description.
-  3. Add a `forge doctor` check for it (if it's required for any feature to work).
+  3. Add a `strata-forge doctor` check for it (if it's required for any feature to work).
   4. Update tests covering its env-var and overlay-source precedence.
 
 ## When to update this file

@@ -66,7 +66,7 @@ no-Langfuse-configured path is a silent no-op (never a crash).
 - **No-op when unconfigured.** `LangfuseConfig.enabled` is False when
   either credential is missing. Every public function checks
   `get_client()` and short-circuits cleanly — no warnings, no
-  crashes, no fallback prints. The diagnostic (`forge doctor`) is
+  crashes, no fallback prints. The diagnostic (`strata-forge doctor`) is
   where missing configuration surfaces.
 - **Correlation IDs propagate.** When a trace starts, the trace ID is
   written into `strata_forge.core.ids.correlation_id_var` so subsequent log
@@ -91,7 +91,7 @@ no-Langfuse-configured path is a silent no-op (never a crash).
 
 - **Forgetting to call `install_litellm_callback()`.** No traces
   surface. This is the most common reason a Forge user reports
-  "tracing doesn't work." `forge doctor` reports whether the
+  "tracing doesn't work." `strata-forge doctor` reports whether the
   callback is installed.
 - **Eager import of `langfuse` at module top.** Breaks the
   no-extras-installed import contract. Every Langfuse-touching
@@ -107,7 +107,7 @@ no-Langfuse-configured path is a silent no-op (never a crash).
 ## When to update this file
 
 - Adding a new public function to `__init__.py`.
-- Adding a new file under `src/forge/tracing/`.
+- Adding a new file under `src/strata_forge/tracing/`.
 - Changing the lazy-import pattern.
 - Changing what counts as "configured" (currently `enabled` on
   `LangfuseConfig`).

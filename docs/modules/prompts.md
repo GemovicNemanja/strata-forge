@@ -17,8 +17,8 @@ to declare what's stable and what's per-call, the module makes cache
 hits the default behavior rather than something you remember to opt
 into.
 
-Module rules: [`src/forge/prompts/CLAUDE.md`](../../src/forge/prompts/CLAUDE.md).
-Source: [`src/forge/prompts/`](../../src/forge/prompts/).
+Module rules: [`src/strata_forge/prompts/CLAUDE.md`](../../src/strata_forge/prompts/CLAUDE.md).
+Source: [`src/strata_forge/prompts/`](../../src/strata_forge/prompts/).
 
 ---
 

@@ -29,8 +29,8 @@ Integration points:
   optional system / user messages or sampling params, re-run through
   any `LLMClient`.
 
-Module rules: [`src/forge/evals/CLAUDE.md`](../../src/forge/evals/CLAUDE.md).
-Source: [`src/forge/evals/`](../../src/forge/evals/).
+Module rules: [`src/strata_forge/evals/CLAUDE.md`](../../src/strata_forge/evals/CLAUDE.md).
+Source: [`src/strata_forge/evals/`](../../src/strata_forge/evals/).
 
 ---
 

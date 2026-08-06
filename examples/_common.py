@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 # Load `.env` (if present) into os.environ before any provider check
 # runs. The examples are end-to-end scripts; users expect their
-# repo-root .env to be picked up the same way `forge doctor` and the
+# repo-root .env to be picked up the same way `strata-forge doctor` and the
 # CLI do via strata_forge.config.settings.
 try:
     from dotenv import load_dotenv

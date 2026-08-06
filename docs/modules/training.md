@@ -28,8 +28,8 @@ Integration points:
   :func:`conversation_to_dicts`, :func:`conversation_to_text`,
   :func:`pack_sequences`, :class:`PackedSequence`.
 
-Module rules: [`src/forge/training/CLAUDE.md`](../../src/forge/training/CLAUDE.md).
-Source: [`src/forge/training/`](../../src/forge/training/).
+Module rules: [`src/strata_forge/training/CLAUDE.md`](../../src/strata_forge/training/CLAUDE.md).
+Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
 
 ---
 
