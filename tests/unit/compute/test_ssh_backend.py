@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+import subprocess
 import sys
+import time
 import types
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from strata_forge.compute import Backend, SSHBackend, Task
 
@@ -194,6 +201,106 @@ class TestSubmit:
         )
         with pytest.raises(RuntimeError, match="pid output"):
             await backend.submit(Task(name="t", run="echo"))
+
+
+# ---------------------------------------------------------------------------
+# Launcher detachment
+#
+# sshd holds the session channel open until the command's stdout and stderr reach EOF, and every
+# process in a backgrounded tree inherits them. A launcher that leaves them open therefore keeps
+# submit() blocked for the whole lifetime of the job it just launched.
+#
+# `subprocess.run` reads its pipes to EOF exactly as sshd waits on the channel, so running the
+# generated command under a local shell reproduces the failure without needing an SSH server: an
+# undetached launcher makes the call block until the fake job finishes.
+# ---------------------------------------------------------------------------
+
+
+async def _launch_command(backend: SSHBackend, connection: _FakeSSHConnection) -> tuple[str, str]:
+    """Submit once and return (launch command, remote workdir)."""
+    connection.queue(
+        _FakeProcessResult(),
+        _FakeProcessResult(),
+        _FakeProcessResult(stdout="4242\n"),
+    )
+    job = await backend.submit(Task(name="t", run="echo hi"))
+    return connection.commands[2], str(job.metadata["remote_workdir"])
+
+
+class TestLauncherDetachment:
+    async def test_backgrounded_subshell_redirects_its_own_descriptors(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        command, _ = await _launch_command(backend, fake_connection)
+        # The redirection must sit on the subshell itself, before `&`. Redirecting only the
+        # commands inside it leaves the subshell holding the channel.
+        assert re.search(r"\)\s*<\s*/dev/null\s*>\s*/dev/null\s*2>&1\s*&", command), command
+
+    async def test_launch_is_confined_to_a_brace_group(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        command, _ = await _launch_command(backend, fake_connection)
+        # `&` binds looser than `&&`. Without the brace group the shell backgrounds the entire
+        # `cd … && ( … )` and-list, forking an outer subshell that inherits the channel — the
+        # redirection above is then not enough on its own.
+        assert "&& { " in command, command
+        assert command.rstrip().endswith("; }"), command
+
+    async def test_bookkeeping_subshell_ignores_hangup(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        command, _ = await _launch_command(backend, fake_connection)
+        # nohup protects only the process it execs, so a hangup between launch and completion
+        # would otherwise kill the subshell before it records the exit code.
+        assert "trap '' HUP" in command, command
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell semantics")
+    def test_launcher_returns_before_the_job_finishes(self, tmp_path: Path) -> None:
+        """The regression itself: the launcher must not block for the job's lifetime."""
+        command, workdir = asyncio.run(self._submit_into(tmp_path, sleep_seconds=3, exit_code=7))
+
+        started = time.monotonic()
+        completed = subprocess.run(  # noqa: S603 — the command under test IS the input
+            ["/bin/bash", "-c", command],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+
+        assert completed.returncode == 0, completed.stderr
+        # The fake job sleeps for 3s; an attached launcher returns only after it exits.
+        assert elapsed < 1.5, f"launcher blocked for {elapsed:.2f}s — it is still attached"
+        assert completed.stdout.strip().isdigit(), completed.stdout
+
+        # The handle belongs in the workdir. With `cd` inside the backgrounded list it lands in
+        # the login shell's cwd instead, where concurrent submits overwrite each other's pid.
+        assert (tmp_path / workdir / "forge.pid").is_file()
+        assert not (tmp_path / "forge.pid").exists()
+
+        # Detaching must not cost the bookkeeping: the job still records its exit code and logs.
+        exit_file = tmp_path / workdir / "forge.exit"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not exit_file.is_file():
+            time.sleep(0.1)
+        assert exit_file.is_file(), "the job never recorded an exit code"
+        assert exit_file.read_text().strip() == "7"
+        assert (tmp_path / workdir / "stdout.log").read_text().strip() == "OUT"
+        assert (tmp_path / workdir / "stderr.log").read_text().strip() == "ERR"
+
+    @staticmethod
+    async def _submit_into(root: Path, *, sleep_seconds: int, exit_code: int) -> tuple[str, str]:
+        """Generate a real launch command and stage a fake job for it to run."""
+        connection = _FakeSSHConnection()
+        command, workdir = await _launch_command(SSHBackend(connection=connection), connection)
+        staged = root / workdir
+        staged.mkdir(parents=True)
+        (staged / "wrapper.sh").write_text(
+            f"echo OUT\necho ERR >&2\nsleep {sleep_seconds}\nexit {exit_code}\n"
+        )
+        return command, workdir
 
 
 # ---------------------------------------------------------------------------
