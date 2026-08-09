@@ -23,7 +23,15 @@ credentials + the network):
     ``STRATA_RUN_CONFIG``, is passed EXPLICITLY to the Hub/dataset clients (never the
     VM's ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only).
+    repo id; result rows are ``{custom_id, output, error}`` (model text only). Phase
+    messages go through the same scrub as errors, because ``serving_endpoint``'s phase hook
+    is public API and a caller's phrase is not under this module's control.
+
+Long provisioning steps (downloading the split, installing and starting the model server,
+writing and uploading results) have nothing to count, so each reports itself with a
+``ProgressEvent(kind="phase")``. Without them a run is a single indeterminate wait between
+``start`` and the first ``step`` — which is where a model server that never comes up spends
+its entire timeout, invisibly.
 """
 
 from __future__ import annotations
@@ -35,7 +43,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,6 +55,9 @@ from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import OpenAICompatProvider
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = ["RunSpec", "main", "render_template"]
 
@@ -66,6 +77,9 @@ _MAX_RENDERED_CHARS = 200_000
 # replacing the known token value).
 _TOKEN_RE = re.compile(r"(hf_[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._\-]+)")
 _RESULTS_FILENAME = "results.parquet"
+# A phase message is a short human phrase. Capped because the sink is reachable from public
+# API: a caller's hook must not be able to grow the file the orchestrator tails without bound.
+_MAX_PHASE_CHARS = 200
 
 
 class Hyperparams(BaseModel):
@@ -207,6 +221,23 @@ def _emit(writer: JsonlProgressWriter | None, event: ProgressEvent) -> None:
         writer.emit(event)
 
 
+def _phase_sink(writer: JsonlProgressWriter | None, hf_token: str | None) -> Callable[[str], None]:
+    """Build the one function every phase message goes through.
+
+    A single choke point, so scrubbing is unconditional: the same sink is handed to
+    ``serving_endpoint``, whose ``on_phase`` is public API, and a phrase that came from
+    outside this module gets the treatment the error path already applies.
+    """
+
+    def _phase(message: str) -> None:
+        _emit(
+            writer,
+            ProgressEvent(kind="phase", message=_sanitize(message, hf_token)[:_MAX_PHASE_CHARS]),
+        )
+
+    return _phase
+
+
 async def _run_batches(
     spec: RunSpec,
     client: LLMClient,
@@ -282,8 +313,15 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWriter | None) -> str:
+    phase = _phase_sink(writer, hf_token)
+
+    # The split download is unbounded by row_limit (that only slices during iteration), so it
+    # runs BEFORE the first countable milestone and can take minutes on its own.
+    phase("loading dataset rows")
     rows = _load_rows(spec, hf_token)
     prompts, custom_ids = _build_requests(spec, rows)
+    # `start` stays exactly here: it is the documented milestone that says inference is about
+    # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
     _emit(writer, ProgressEvent(kind="start", total_steps=len(prompts)))
 
     hp = spec.hyperparams
@@ -300,11 +338,13 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         # a bare `vllm` is then "command not found" even though vLLM is installed right here.
         python_executable=sys.executable,
     )
+    phase("starting the model server")
     async with serving_endpoint(
         LocalBackend(),
         task,
         base_url=f"http://{_SERVE_HOST}:{_SERVE_PORT}/v1",
         wait_timeout_s=hp.wait_timeout_s,
+        on_phase=phase,
     ) as endpoint:
         provider = OpenAICompatProvider(OpenAICompatConfig(base_url=endpoint.base_url))
         client = LLMClient(
@@ -312,15 +352,23 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
             provider="openai_compat",
             provider_clients={"openai_compat": provider},  # pins the LOCAL endpoint
         )
+        # The first `step` only lands once a whole progress_chunk has completed, and that
+        # chunk absorbs the client's cold start on top of its generations.
+        phase("generating")
         out = await _run_batches(spec, client, prompts, custom_ids, writer)
 
     # Push to the Hub only when BOTH a write token and an output repo are present (the control
     # plane injects them together). Otherwise keep the results on the VM for the user to retrieve
     # over SSH — written OUTSIDE the per-run workdir so the orchestrator's cleanup leaves them intact.
+    # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
+    # here would otherwise look like it died complete, with no explanation.
     if hf_token and spec.output_repo_id:
+        phase("writing results")
         results_path = _write_results(out, Path.cwd())
+        phase("uploading results to the Hub")
         destination = await _push_results(spec, results_path, hf_token)
     else:
+        phase("writing results")
         results_path = _write_results(out, _local_results_dir(spec.run_id))
         destination = str(results_path)
 

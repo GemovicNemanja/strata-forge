@@ -26,6 +26,15 @@ whichever :class:`Backend` they want and then point a
 The probe-based readiness wait is intentionally simple — Forge
 doesn't run a healthcheck binary, it just polls the ``/v1/models``
 endpoint until it responds.
+
+That wait is also the longest thing a caller does, so both
+:func:`serving_endpoint` and :func:`wait_for_endpoint` accept an
+``on_phase`` sink that receives short phrases ("launching the
+serving task", "waiting for the model server (90s)", "model server
+ready"). The sink takes a plain ``str``: :mod:`strata_forge.compute`
+must not import :mod:`strata_forge.training`, so it is the caller —
+typically a :mod:`strata_forge.pipelines` runner — that turns a
+phrase into a ``ProgressEvent``.
 """
 
 from __future__ import annotations
@@ -72,6 +81,20 @@ def _quote_args(args: Sequence[str]) -> str:
     import shlex
 
     return " ".join(shlex.quote(a) for a in args)
+
+
+def _report(on_phase: Callable[[str], None] | None, message: str) -> None:
+    """Hand one progress phrase to the caller's sink, if any.
+
+    Exceptions are swallowed: ``on_phase`` is caller-supplied, and a broken sink (a progress
+    file closed early, a full disk) must not take down a live serving job. Messages are
+    fixed phrases that never interpolate ``base_url`` — a caller may legitimately pass a URL
+    carrying credentials, and this text is meant to be surfaced to a human.
+    """
+    if on_phase is None:
+        return
+    with contextlib.suppress(Exception):
+        on_phase(message)
 
 
 def build_vllm_task(
@@ -282,6 +305,8 @@ async def wait_for_endpoint(
     timeout_s: float = 600.0,
     poll_interval_s: float = 2.0,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
+    on_phase: Callable[[str], None] | None = None,
+    phase_interval_s: float = 30.0,
 ) -> None:
     """Poll the ``/models`` endpoint until it returns HTTP 200.
 
@@ -291,17 +316,38 @@ async def wait_for_endpoint(
         timeout_s: How long to wait before giving up. Default
             10 minutes.
         poll_interval_s: Seconds between probes.
+        is_alive: Optional liveness probe for the serving process.
+            When it reports the process is gone, the wait fails
+            immediately with :class:`ServingProcessError` instead
+            of running out the timeout.
+        on_phase: Optional sink for short human-readable progress
+            phrases. It is called from the poll loop, so it must
+            not block; exceptions it raises are swallowed.
+        phase_interval_s: Minimum seconds between two heartbeat
+            phrases. Deliberately much coarser than
+            ``poll_interval_s``: an orchestrator persisting these
+            phrases has a finite budget per run, and one row per
+            probe would exhaust it while a large model loads.
 
     Raises:
         TimeoutError: If the endpoint isn't healthy in time.
+        ServingProcessError: If ``is_alive`` reports the serving
+            process is gone before the endpoint answered.
         ImportError: When ``httpx`` is unavailable.
     """
     import httpx  # already a core dep via litellm
 
-    deadline = asyncio.get_event_loop().time() + timeout_s
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    deadline = started + timeout_s
     probe_url = f"{base_url.rstrip('/')}/models"
+    next_phase_at = started  # the first heartbeat goes out before the first probe
     async with httpx.AsyncClient(timeout=5.0) as client:
         while True:
+            now = loop.time()
+            if now >= next_phase_at:
+                _report(on_phase, f"waiting for the model server ({int(now - started)}s)")
+                next_phase_at = now + phase_interval_s
             try:
                 response = await client.get(probe_url)
                 if response.status_code == 200:
@@ -314,7 +360,7 @@ async def wait_for_endpoint(
             if is_alive is not None and not await is_alive():
                 err = f"serving process exited before {probe_url!r} became ready"
                 raise ServingProcessError(err)
-            if asyncio.get_event_loop().time() > deadline:
+            if loop.time() > deadline:
                 err = f"serving endpoint {probe_url!r} not ready after {timeout_s:.0f}s"
                 raise TimeoutError(err)
             await asyncio.sleep(poll_interval_s)
@@ -328,6 +374,8 @@ async def serving_endpoint(
     base_url: str,
     wait_timeout_s: float = 600.0,
     cleanup: bool = True,
+    on_phase: Callable[[str], None] | None = None,
+    phase_interval_s: float = 30.0,
 ) -> AsyncGenerator[ServingEndpoint]:
     """Launch ``task`` on ``backend``, wait for ``base_url`` to respond.
 
@@ -345,11 +393,22 @@ async def serving_endpoint(
             task — the caller knows the port they configured.
         wait_timeout_s: How long to wait for readiness.
         cleanup: When ``True``, call ``backend.cleanup`` on exit.
+        on_phase: Optional sink for short human-readable progress
+            phrases, forwarded to :func:`wait_for_endpoint`.
+            Bringing a server up is the longest uninterruptible
+            step most callers have; without a sink the whole of it
+            is one silent ``await``. The sink must not block, and
+            any exception it raises is swallowed.
+        phase_interval_s: Minimum seconds between two readiness
+            heartbeats. Forwarded to :func:`wait_for_endpoint`.
 
     Yields:
         A :class:`ServingEndpoint` carrying the job handle and
         the verified base URL.
     """
+    # Submitting is not the same as serving: a backend may return the moment the process is
+    # spawned, so report the two separately rather than letting one phrase cover both.
+    _report(on_phase, "launching the serving task")
     job = await backend.submit(task)
 
     async def _alive() -> bool:
@@ -363,7 +422,13 @@ async def serving_endpoint(
 
     try:
         try:
-            await wait_for_endpoint(base_url, timeout_s=wait_timeout_s, is_alive=_alive)
+            await wait_for_endpoint(
+                base_url,
+                timeout_s=wait_timeout_s,
+                is_alive=_alive,
+                on_phase=on_phase,
+                phase_interval_s=phase_interval_s,
+            )
         except ServingProcessError as exc:
             # The process's own output is the diagnosis — a bad command or an unloadable model
             # says so here. Without it the caller only learns that nothing answered.
@@ -371,8 +436,12 @@ async def serving_endpoint(
             with contextlib.suppress(Exception):
                 tail = (await backend.logs(job))[-_FAILURE_LOG_CHARS:]
             raise ServingProcessError(f"{exc}\n\n{tail}".rstrip()) from exc
+        _report(on_phase, "model server ready")
         yield ServingEndpoint(job=job, base_url=base_url)
     finally:
+        # Teardown can hang too (a cancel that waits on an unresponsive process), so it is a
+        # reportable phase rather than another silent stretch.
+        _report(on_phase, "stopping the serving task")
         with contextlib.suppress(Exception):
             await backend.cancel(job)
         if cleanup:

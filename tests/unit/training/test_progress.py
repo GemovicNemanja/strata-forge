@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from strata_forge.training.progress import (
     JsonlProgressWriter,
@@ -43,6 +44,20 @@ class TestProgressEvent:
         assert decoded["loss"] == 0.5
         assert decoded["metrics"] == {"grad_norm": 2.0}
         assert isinstance(decoded["ts"], str)
+
+    def test_phase_is_a_valid_kind(self) -> None:
+        # `phase` reports uncountable work, so it carries a message and no step.
+        ev = ProgressEvent(kind="phase", message="waiting for the model server (90s)")
+        decoded = json.loads(ev.model_dump_json())
+        assert decoded["kind"] == "phase"
+        assert decoded["message"] == "waiting for the model server (90s)"
+        assert decoded["step"] is None
+        assert decoded["total_steps"] is None
+
+    def test_unknown_kind_still_rejected(self) -> None:
+        # The Literal is the contract: widening it for `phase` must not open it to anything.
+        with pytest.raises(ValidationError):
+            ProgressEvent(kind="provisioning")  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

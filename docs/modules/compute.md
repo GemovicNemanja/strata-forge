@@ -282,6 +282,34 @@ async with serving_endpoint(
 The readiness probe hits ``{base_url}/models`` until it returns
 HTTP 200 or the ``wait_timeout_s`` expires.
 
+That wait is the longest thing the caller awaits, and by default
+it is silent. Pass ``on_phase`` — a sink taking one short string
+— to hear what is happening:
+
+```python
+async with serving_endpoint(
+    LocalBackend(), vllm_task,
+    base_url="http://localhost:8000/v1",
+    on_phase=print,          # "launching the serving task"
+    phase_interval_s=30.0,   # "waiting for the model server (90s)"
+) as endpoint:               # "model server ready"
+    ...
+```
+
+``phase_interval_s`` throttles the readiness heartbeat, which is
+otherwise emitted once per probe: an orchestrator persisting
+these phrases has a finite budget per run, and a 2 s poll over a
+30-minute wait would burn ~900 of them. The sink must not block,
+and any exception it raises is swallowed — a broken sink must not
+take down a live serving job.
+
+The sink takes a plain ``str`` rather than a progress event
+because :mod:`strata_forge.compute` must not import
+:mod:`strata_forge.training`; the caller (typically a
+:mod:`strata_forge.pipelines` runner) wraps the phrase into a
+``ProgressEvent(kind="phase", ...)``. Phrases never interpolate
+``base_url``, which is caller-supplied and may carry credentials.
+
 ## Lazy-import contract
 
 - ``asyncssh`` and ``sky.api.sdk`` are behind the ``[compute]``
