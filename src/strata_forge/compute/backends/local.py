@@ -6,9 +6,23 @@ optional deps and ignores ``Task.resources`` (everything runs on
 whatever hardware the parent process has).
 
 Each ``submit`` spawns a child via ``asyncio.create_subprocess_exec``
-with ``bash -lc <run>``; the captured stdout/stderr is appended to
-an in-memory buffer keyed by job id so ``logs`` and ``cleanup`` work
-without touching the filesystem.
+with ``bash -lc <run>``; both pipes are drained continuously into an
+in-memory buffer keyed by job id so ``logs`` works without touching
+the filesystem.
+
+The drain is a stream, not a read-to-EOF: a process that comes up
+wrong and then hangs (a model server that never binds its port) has
+already written the output explaining why, and a reader that only
+yields once the pipes close hands back nothing for exactly the
+failure worth diagnosing. ``logs`` therefore returns partial output
+while a job is still running.
+
+Pass ``log_dir=`` to also tee both streams to
+``serve.stdout.log`` / ``serve.stderr.log`` as the bytes arrive.
+Those files outlive ``cleanup`` and the backend object, which is the
+point: when the process that owned the buffers is gone, the file is
+the only remaining evidence. It is opt-in so that a library user who
+never asks for it never finds log files appearing beside their code.
 """
 
 from __future__ import annotations
@@ -16,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from strata_forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
@@ -25,6 +40,44 @@ if TYPE_CHECKING:
     from strata_forge.compute.task import Task
 
 __all__ = ["LocalBackend"]
+
+# Filenames used under ``log_dir``. Deliberately NOT ``stdout.log`` / ``stderr.log``: a job
+# workdir prepared by another backend (the SSH launcher) already owns those names.
+SERVE_STDOUT_LOG = "serve.stdout.log"
+SERVE_STDERR_LOG = "serve.stderr.log"
+
+_READ_CHUNK_BYTES = 8192
+# Kept in memory per stream. The file (when one is configured) keeps everything; a job that
+# runs for hours must not grow the parent's heap without bound just because it is chatty.
+_MAX_BUFFER_BYTES = 1 << 20
+# How often the child's exit is checked, and how long the drain may keep reading afterwards.
+# A process the child backgrounded holds the write end of the pipe open, so EOF is not
+# guaranteed and neither the drain nor `Process.wait()` can be what ends the job.
+_EXIT_POLL_S = 0.05
+_DRAIN_GRACE_S = 5.0
+
+
+async def _drain(
+    reader: asyncio.StreamReader,
+    buffer: bytearray,
+    path: Path | None,
+) -> None:
+    """Copy one pipe into ``buffer`` (capped) and, when given, append it to ``path``.
+
+    Writes are unbuffered so a tailing reader sees output as it happens — the file exists to
+    be read while the process is still misbehaving, not after it exits.
+    """
+    fh = path.open("ab", buffering=0) if path is not None else None
+    try:
+        while chunk := await reader.read(_READ_CHUNK_BYTES):
+            buffer.extend(chunk)
+            if len(buffer) > _MAX_BUFFER_BYTES:
+                del buffer[: len(buffer) - _MAX_BUFFER_BYTES]
+            if fh is not None:
+                fh.write(chunk)
+    finally:
+        if fh is not None:
+            fh.close()
 
 
 class _JobState:
@@ -40,6 +93,8 @@ class _JobState:
         self.cancelled = False
         # The directory the subprocess ran in — read_file resolves paths under it.
         self.workdir: str | None = None
+        # Where this job's streams were teed, when a log_dir was configured.
+        self.log_paths: tuple[Path, Path] | None = None
 
 
 class LocalBackend:
@@ -51,14 +106,28 @@ class LocalBackend:
         env_inherit: When ``True`` (default), child processes
             inherit the parent's ``os.environ``. When ``False``,
             the child sees only ``Task.env``.
+        log_dir: When set, every job also tees its stdout/stderr
+            to ``serve.stdout.log`` / ``serve.stderr.log`` under
+            this directory, written as the bytes arrive and left
+            in place by ``cleanup``. ``None`` (default) keeps the
+            backend filesystem-free. The filenames are fixed so an
+            orchestrator can find them without knowing the job id,
+            so give concurrent jobs their own directories.
     """
 
-    def __init__(self, *, name: str = "local", env_inherit: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        name: str = "local",
+        env_inherit: bool = True,
+        log_dir: str | Path | None = None,
+    ) -> None:
         if not name:
             err = "LocalBackend: name must be non-empty"
             raise ValueError(err)
         self._name = name
         self._env_inherit = env_inherit
+        self._log_dir = Path(log_dir) if log_dir is not None else None
         self._jobs: dict[str, _JobState] = {}
 
     @property
@@ -73,6 +142,7 @@ class LocalBackend:
         job_id = uuid.uuid4().hex
         state = _JobState()
         state.workdir = task.workdir
+        state.log_paths = self._prepare_log_paths(state)
         self._jobs[job_id] = state
 
         env = self._build_env(task)
@@ -91,10 +161,29 @@ class LocalBackend:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 state.process = process
-                stdout_bytes, stderr_bytes = await process.communicate()
-                state.stdout_buffer.extend(stdout_bytes or b"")
-                state.stderr_buffer.extend(stderr_bytes or b"")
+                stdout_log, stderr_log = state.log_paths or (None, None)
+                drains = [
+                    asyncio.create_task(_drain(reader, buffer, path))
+                    for reader, buffer, path in (
+                        (process.stdout, state.stdout_buffer, stdout_log),
+                        (process.stderr, state.stderr_buffer, stderr_log),
+                    )
+                    if reader is not None
+                ]
+                # NOT `await process.wait()`: asyncio only resolves that once every pipe has
+                # reached EOF, and a process the child backgrounded inherits those descriptors
+                # and can hold them open long after the child is reaped. `returncode` is set
+                # when the child itself exits, so the job's lifecycle hangs off that instead —
+                # otherwise a job whose server orphaned itself never reaches a terminal state.
+                while process.returncode is None:  # noqa: ASYNC110 — asyncio exposes no event
+                    await asyncio.sleep(_EXIT_POLL_S)  # for "child reaped", only this flag
                 state.exit_code = process.returncode
+                if drains:
+                    _, pending = await asyncio.wait(drains, timeout=_DRAIN_GRACE_S)
+                    for drain in pending:
+                        drain.cancel()
+                    if pending:
+                        await asyncio.wait(pending)
             except Exception as exc:
                 state.exit_code = -1
                 state.stderr_buffer.extend(f"local backend exception: {exc!r}".encode())
@@ -110,6 +199,21 @@ class LocalBackend:
             task_name=task.name,
             metadata={"script_preview": script[:120]},
         )
+
+    def _prepare_log_paths(self, state: _JobState) -> tuple[Path, Path] | None:
+        """Resolve (and create) this job's log files, or ``None`` when teeing is off.
+
+        An unusable log directory degrades to in-memory-only logging with a note on the job's
+        stderr — losing the artifact is bad, but failing the job over a log path is worse.
+        """
+        if self._log_dir is None:
+            return None
+        try:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            state.stderr_buffer.extend(f"local backend: log_dir unusable: {exc!r}\n".encode())
+            return None
+        return (self._log_dir / SERVE_STDOUT_LOG, self._log_dir / SERVE_STDERR_LOG)
 
     def _build_env(self, task: Task) -> dict[str, str]:
         import os
@@ -182,6 +286,7 @@ class LocalBackend:
         )
 
     async def logs(self, job: Job, *, tail: int | None = None) -> str:
+        """Return what the job has printed so far — including while it is still running."""
         state = self._require_job(job)
         combined = state.stdout_buffer.decode(
             "utf-8", errors="replace"
@@ -195,8 +300,6 @@ class LocalBackend:
         return "\n".join(lines[-tail:])
 
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
-        from pathlib import Path
-
         state = self._require_job(job)
         rel = safe_workdir_relpath(path)
         if tail is not None:
@@ -244,6 +347,11 @@ class LocalBackend:
         state.cancelled = True
 
     async def cleanup(self, job: Job) -> None:
+        """Drop the job's in-memory state and make sure its process is gone.
+
+        Any ``log_dir`` files are left on disk on purpose: they exist to be read AFTER the
+        buffers they mirror have been discarded.
+        """
         state = self._jobs.pop(job.id, None)
         if state is None:
             return  # already cleaned up — idempotent

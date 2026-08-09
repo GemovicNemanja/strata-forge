@@ -177,14 +177,39 @@ backend-specific knowledge of which methods are no-ops.
 ```python
 from strata_forge.compute import LocalBackend, Task
 
-backend = LocalBackend(workdir="./local-forge-jobs")
+backend = LocalBackend()
 job = await backend.submit(Task(name="t", run="python -m my_script"))
 ```
 
-The local backend spawns each task as an async subprocess and
-tracks them by job id. Each job gets its own workdir
-(``{workdir}/{job_id}/``) with separate ``stdout.log`` and
-``stderr.log``. ``cleanup`` removes the workdir.
+The local backend spawns each task as an async subprocess
+(``bash -lc``) and tracks them by job id. It runs in
+``Task.workdir`` when one is set, and touches no filesystem of
+its own by default.
+
+Both pipes are drained continuously rather than read to EOF, so
+``logs`` returns partial output **while the job is still
+running** — the case worth diagnosing is a process that came up
+wrong and then hung, and its output exists long before it exits.
+The in-memory buffer keeps the last 1 MiB per stream.
+
+```python
+backend = LocalBackend(log_dir="./job-logs")
+```
+
+``log_dir`` additionally tees both streams to
+``serve.stdout.log`` / ``serve.stderr.log`` under that directory,
+written as the bytes arrive. Those files are deliberately left in
+place by ``cleanup``: once the process and its buffers are gone,
+the file is the only remaining evidence. It is opt-in, so a
+caller who never asks for it never finds log files appearing. The
+names are fixed (an orchestrator finds them without knowing the
+job id), so give concurrent jobs their own directories.
+
+A job ends when the child is reaped, not when its pipes close: a
+process the child backgrounded inherits those descriptors and can
+hold them open indefinitely, and gating the lifecycle on EOF
+would leave such a job stuck at ``running``. The drain gets a few
+seconds after the exit to finish reading.
 
 ## SSHBackend
 

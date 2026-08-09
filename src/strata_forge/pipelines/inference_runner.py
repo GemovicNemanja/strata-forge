@@ -338,9 +338,15 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         # a bare `vllm` is then "command not found" even though vLLM is installed right here.
         python_executable=sys.executable,
     )
+    # Unbuffered: the served process writes through a pipe, so CPython would otherwise hold
+    # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves
+    # the log file empty, which is precisely the case the file exists for.
+    task = task.model_copy(update={"env": {**task.env, "PYTHONUNBUFFERED": "1"}})
     phase("starting the model server")
     async with serving_endpoint(
-        LocalBackend(),
+        # Tee the served process's streams into the run workdir. When the runner dies, the
+        # buffers die with it; the files are what is left to explain why the server never came up.
+        LocalBackend(log_dir=Path.cwd()),
         task,
         base_url=f"http://{_SERVE_HOST}:{_SERVE_PORT}/v1",
         wait_timeout_s=hp.wait_timeout_s,

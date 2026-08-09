@@ -259,6 +259,10 @@ async def test_main_happy_path_pushes_and_never_leaks_token(
 # --------------------------- main: provisioning phases ----------------------
 
 
+def _same_dir(left: Any, right: Any) -> bool:
+    return ir.Path(left).resolve() == ir.Path(right).resolve()
+
+
 def _recording_serving(record: dict[str, Any], *, drive: Any = None) -> Any:
     """A `serving_endpoint` stand-in that records its arguments and can drive the phase hook."""
 
@@ -349,7 +353,7 @@ async def test_serving_hook_phrases_are_scrubbed_and_capped(
     assert len(driven[0]["message"]) <= 200
 
 
-async def test_the_phase_hook_reaches_serving_endpoint(
+async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     progress = tmp_path / "progress.jsonl"
@@ -357,10 +361,19 @@ async def test_the_phase_hook_reaches_serving_endpoint(
     monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
     record: dict[str, Any] = {}
     _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+    monkeypatch.chdir(tmp_path)  # on the VM this is the per-run job workdir
 
     assert await ir.main() == 0
     # The hook has to reach the readiness wait — that is where the whole blackout happens.
     assert record["on_phase"] is not None
+    # The served process's streams are teed to disk, because when the runner dies its buffers
+    # die with it and the file is the only thing left that explains why the server never came up.
+    log_dir = record["backend"]._log_dir  # pyright: ignore[reportPrivateUsage]
+    assert log_dir is not None
+    assert _same_dir(log_dir, tmp_path)
+    # Unbuffered, or a hung server's output sits in its own 8 KiB block buffer and the file
+    # stays empty for exactly the failure it exists to explain.
+    assert record["task"].env["PYTHONUNBUFFERED"] == "1"
 
 
 async def test_main_error_path_scrubs_token(
