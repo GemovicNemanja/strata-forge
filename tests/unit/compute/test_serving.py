@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+import shlex
+import sys
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -20,12 +23,14 @@ from strata_forge.compute import (
     serving_endpoint,
     wait_for_endpoint,
 )
+from strata_forge.compute.serving import ServingProcessError
 
 
 class TestBuildVLLMTask:
     def test_defaults(self) -> None:
         task = build_vllm_task("meta-llama/Llama-3.1-8B-Instruct")
         assert task.name == "vllm-serve"
+        # Default stays PATH-based: this spec may be destined for another machine.
         assert "vllm serve" in task.run
         assert "meta-llama/Llama-3.1-8B-Instruct" in task.run
         assert "--port 8000" in task.run
@@ -33,6 +38,47 @@ class TestBuildVLLMTask:
         assert task.resources is not None
         assert task.resources.accelerators == "A100:1"
         assert "pip install" in (task.setup or "")
+
+    def test_named_interpreter_bypasses_path_entirely(self) -> None:
+        """A backend may run the task in a login shell whose PATH lacks the caller's virtualenv.
+
+        A bare `vllm` console script then fails with "command not found" and, because nothing
+        watches the serving job, the caller waits out its entire readiness timeout for a server
+        that never existed. Naming the interpreter is what prevents that.
+        """
+        task = build_vllm_task("m", python_executable=sys.executable)
+        assert task.run.startswith(shlex.quote(sys.executable))
+        assert "vllm.entrypoints.openai.api_server" in task.run
+        # Nothing may fall back to a console script being resolvable.
+        assert not re.search(r"(^|\s)vllm\s+serve\b", task.run)
+        # The model must survive the switch from positional to flag form.
+        assert "--model m" in task.run
+        # The install has to land in the SAME environment the server is started from.
+        assert (task.setup or "").startswith(shlex.quote(sys.executable))
+        assert "-m pip install" in (task.setup or "")
+
+    def test_a_named_interpreter_keeps_every_other_argument(self) -> None:
+        task = build_vllm_task(
+            "m",
+            python_executable="/opt/venv/bin/python",
+            port=9001,
+            tensor_parallel_size=8,
+            max_model_len=4096,
+            dtype="bfloat16",
+            extra_args=["--gpu-memory-utilization", "0.9"],
+        )
+        assert task.run.startswith("/opt/venv/bin/python")
+        assert "--port 9001" in task.run
+        assert "--tensor-parallel-size 8" in task.run
+        assert "--max-model-len 4096" in task.run
+        assert "--dtype bfloat16" in task.run
+        assert "0.9" in task.run
+
+    def test_an_emitted_spec_carries_no_local_path(self) -> None:
+        """The default builds specs for OTHER machines, where this venv's path does not exist."""
+        task = build_vllm_task("m")
+        assert sys.executable not in task.run
+        assert sys.executable not in (task.setup or "")
 
     def test_custom_args(self) -> None:
         task = build_vllm_task(
@@ -300,3 +346,64 @@ class TestServingEndpoint:
         # Body completes cleanly despite cancel/cleanup raising.
         async with serving_endpoint(backend, task, base_url="http://localhost:8000/v1"):
             pass
+
+
+class TestServingProcessDiesEarly:
+    """A server that has already exited is never going to answer.
+
+    Waiting out the readiness timeout turns a fast, legible failure — a bad command, an unloadable
+    model — into a slow, opaque one, and discards the process's own account of what went wrong.
+    """
+
+    async def test_a_dead_job_fails_immediately_and_carries_its_output(
+        self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _dead(job: Job) -> JobStatus:
+            del job
+            return JobStatus(state="failed")
+
+        async def _logs(job: Job, *, tail: int | None = None) -> str:
+            del job, tail
+            return "bash: line 1: vllm: command not found"
+
+        backend.status = _dead  # type: ignore[method-assign]
+        backend.logs = _logs  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "httpx.AsyncClient.get", AsyncMock(side_effect=httpx.ConnectError("refused"))
+        )
+
+        task = build_vllm_task("m")
+        # A generous timeout: the point is that it does NOT wait for it.
+        with pytest.raises(ServingProcessError) as caught:
+            async with serving_endpoint(
+                backend, task, base_url="http://localhost:8000/v1", wait_timeout_s=3600
+            ):
+                pass
+
+        assert "exited before" in str(caught.value)
+        # The diagnosis itself, not merely the fact that nothing answered.
+        assert "command not found" in str(caught.value)
+        assert len(backend.cancelled) == 1
+
+    async def test_an_unreadable_status_does_not_abort_a_slow_start(
+        self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A flaky status probe must not kill a server that is merely slow to come up."""
+
+        async def _explode(job: Job) -> JobStatus:
+            del job
+            err = "transient"
+            raise RuntimeError(err)
+
+        backend.status = _explode  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "httpx.AsyncClient.get", AsyncMock(side_effect=httpx.ConnectError("refused"))
+        )
+
+        task = build_vllm_task("m")
+        # Falls through to the ordinary timeout rather than reporting the process dead.
+        with pytest.raises(TimeoutError):
+            async with serving_endpoint(
+                backend, task, base_url="http://localhost:8000/v1", wait_timeout_s=0.05
+            ):
+                pass

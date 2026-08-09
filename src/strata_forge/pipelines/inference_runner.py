@@ -295,6 +295,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         max_model_len=hp.max_model_len,
         dtype=hp.dtype,
         setup="",  # vLLM is already installed by the server's setup step; don't reinstall
+        # Serve with the interpreter this runner is executing under. LocalBackend runs the task
+        # through a login shell, which re-sources the profile and drops this virtualenv from PATH:
+        # a bare `vllm` is then "command not found" even though vLLM is installed right here.
+        python_executable=sys.executable,
     )
     async with serving_endpoint(
         LocalBackend(),
