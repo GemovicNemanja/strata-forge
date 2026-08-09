@@ -1,4 +1,4 @@
-"""``strata-forge doctor`` — environment, configuration, and service-reachability checks.
+"""``strata-forge doctor`` — environment, configuration, credential, and reachability checks.
 
 The command always exits 0; it's a diagnostic, not a gate. Operators read the
 output to confirm everything is wired up; CI can grep it.
@@ -6,6 +6,7 @@ output to confirm everything is wired up; CI can grep it.
 
 from __future__ import annotations
 
+import os
 import socket
 from contextlib import suppress
 from urllib.parse import urlparse
@@ -21,18 +22,28 @@ __all__ = ["doctor"]
 
 _PROBE_TIMEOUT_SECONDS = 1.0
 
+# Provider → environment variables LiteLLM needs before a live call can work.
+# Only presence is ever reported; values are never read into the output.
+_PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "vertex": ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_PROJECT"),
+    "bedrock": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"),
+    "azure": ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"),
+}
+
 
 def doctor() -> None:
-    """Diagnose the environment, configuration, and reachability of declared services."""
+    """Diagnose the environment, configuration, credentials, and declared services."""
     settings = Settings()
     snapshot = env_snapshot()
     console = Console()
 
     _render_header(console, snapshot)
     _render_settings(console, settings)
+    _render_credentials(console)
     _render_packages(console, snapshot)
     _render_services(console, settings)
-    _render_pending_checks(console)
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +108,30 @@ def _render_services(console: Console, settings: Settings) -> None:
     console.print()
 
 
-def _render_pending_checks(console: Console) -> None:
+def _render_credentials(console: Console) -> None:
+    """Report which provider credentials are present. Values are never printed."""
+    table = Table(title="Provider credentials", title_justify="left")
+    table.add_column("Provider")
+    table.add_column("Environment variables")
+    table.add_column("Status")
+
+    for provider, variables in _PROVIDER_ENV_VARS.items():
+        missing = [name for name in variables if not os.environ.get(name)]
+        if not missing:
+            status = "[green]set[/green]"
+        elif len(missing) == len(variables):
+            status = "[yellow]not set[/yellow]"
+        else:
+            status = "[yellow]partial[/yellow]"
+        table.add_row(provider, ", ".join(variables), status)
+
+    console.print(table)
     console.print(
-        "[dim]Provider auth probes and model-registry consistency checks land "
-        "alongside the LLM module.[/dim]"
+        "[dim]Presence only: doctor reads whether each variable is defined, never its "
+        "value, and a defined key is not proof it is valid. 'partial' means some but "
+        "not all of the listed variables are defined.[/dim]"
     )
+    console.print()
 
 
 # ---------------------------------------------------------------------------
