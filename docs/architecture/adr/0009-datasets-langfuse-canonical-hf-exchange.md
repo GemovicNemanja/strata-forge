@@ -20,9 +20,9 @@ answered before any code lands:
    own, an HF `Dataset`, a Langfuse `DatasetItem` list, or something
    else?
 
-Phase 2.4 (the eval runner) will consume the answers. Picking wrong
-here means the eval module reaches around `strata_forge.datasets` for the
-shape it needs, which defeats the point.
+The eval runner consumes the answers. Picking wrong here means the
+eval module reaches around `strata_forge.datasets` for the shape it
+needs, which defeats the point.
 
 ## Decision
 
@@ -54,7 +54,7 @@ two items with the same input + expected output are the same item
 regardless of who constructed them.
 
 ```
-                     strata_forge.evals  (Phase 2.4)
+                  strata_forge.evals
                           │
                           ▼ consumes
               DatasetItem / Dataset  (strata_forge.datasets.schema)
@@ -81,9 +81,8 @@ regardless of who constructed them.
   No raw dicts; no maybe-this-is-a-list-of-dicts-or-maybe-an-HF-object
   ambiguity.
 - **Content-hash IDs and versions** make dedup, cache-key composition,
-  and diff computation natural — and let Phase 2.4's CI eval-gate
-  detect "the dataset changed between runs" without separate
-  bookkeeping.
+  and diff computation natural — and let the CI eval gate detect
+  "the dataset changed between runs" without separate bookkeeping.
 - **Backends are pluggable.** The same shape moves through the in-memory
   store (tests), Langfuse (production), or the HF bridge (training and
   external consumption). Adding a new backend (a sqlite store, an S3

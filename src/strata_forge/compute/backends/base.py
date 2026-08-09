@@ -4,7 +4,7 @@ Async by design — production backends (SkyPilot, SSH) hit a network
 in nearly every method. In-process backends (:class:`LocalBackend`)
 still implement ``async def`` for shape uniformity.
 
-See [ADR 0013](../../../../docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
+See [ADR 0013](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
 for the lifecycle decision and why every method is mandatory.
 """
 

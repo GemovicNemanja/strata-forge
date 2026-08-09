@@ -71,9 +71,10 @@ Helpers exposed for tests / cross-command reuse:
 
 - Unit tests under ``tests/unit/cli/``, one file per source
   module.
-- Coverage target: ≥ 85 % line (lower than other modules because
-  the interactive REPL loop and live cloud-backend constructors
-  aren't exercised by unit tests).
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (``fail_under`` in ``pyproject.toml``). This module sits closest to
+  it — the interactive REPL loop and live cloud-backend constructors
+  aren't exercised by unit tests.
 - Use Typer's :class:`CliRunner` to invoke commands; never
   import the command function directly.
 - Fake heavy backends (LLMClient, SFTRunner, etc.) via

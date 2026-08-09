@@ -3,11 +3,11 @@
 The :class:`VectorStore` Protocol is the contract any backend must
 satisfy. :class:`InMemoryVectorStore` is a dict-backed, no-dep
 implementation suitable for tests, prototyping, and small-scale
-agent / RAG runs. The Qdrant-backed implementation in Phase 4.2 will
-also satisfy the Protocol.
+agent / RAG runs. The Qdrant-backed implementation lives in
+:mod:`strata_forge.rag.qdrant` and satisfies the same Protocol.
 
-These primitives originally landed in :mod:`strata_forge.agents.memory` for
-Phase 3.3; ADR 0012 moved them here so the dependency arrow points
+These primitives originally lived in :mod:`strata_forge.agents.memory`;
+ADR 0012 moved them here so the dependency arrow points
 the right way (``agents → rag``) and so a single source of truth
 serves both modules. :mod:`strata_forge.agents.memory` re-exports the
 names for back-compatibility.

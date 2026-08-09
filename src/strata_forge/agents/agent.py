@@ -8,7 +8,7 @@ tools are present, or :meth:`LLMClient.complete` otherwise. The
 returned :class:`AgentResult` bundles the final text, the conversation
 that was sent, and the raw :class:`LLMResponse`.
 
-See [ADR 0011](../../../docs/architecture/adr/0011-agents-thin-wrapper-over-forge-llm.md)
+See [ADR 0011](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0011-agents-thin-wrapper-over-forge-llm.md)
 for the no-reimplementation design principle.
 """
 
@@ -58,7 +58,7 @@ class AgentResult(BaseModel):
             them, and capturing them would require re-implementing
             the loop. Callers that need the full trace consult
             ``strata_forge.tracing`` (Langfuse) or the
-            ``FORGE_DIAGNOSTIC`` NDJSON dump.
+            ``FORGE_DIAGNOSTIC_ENABLED`` NDJSON dump.
         final_response: The raw final :class:`LLMResponse` from the
             underlying client. Carries usage, cost, latency, the
             resolved provider route, and ``cache_hit`` exactly as
@@ -96,7 +96,7 @@ class Agent:
 
     Args:
         name: Human-readable identifier. Surfaces in multi-agent
-            handoff messages (Phase 3.4) and report output.
+            handoff messages and report output.
         client: The :class:`LLMClient` the agent uses. Models with
             ``tool_calling=False`` in the registry can still be
             wrapped in an :class:`Agent`, but calling :meth:`run`
@@ -269,10 +269,11 @@ class Agent:
         in this path — the structured-output dispatch in
         :mod:`strata_forge.llm` already uses forced-tool mode internally
         for providers that need it, and combining application tools
-        with that machinery has too many cross-product edge cases
-        for the foundation sub-phase. Run :meth:`Agent.run` first
-        when the agent needs to call tools before producing a
-        structured answer.
+        with that machinery has too many cross-product edge cases to
+        support — structured output and application tools are not
+        combined in a single call. Run :meth:`Agent.run` first when
+        the agent needs to call tools before producing a structured
+        answer.
 
         Args:
             user_input: Same shape as :meth:`run`.

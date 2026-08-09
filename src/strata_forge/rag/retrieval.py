@@ -1,10 +1,9 @@
 """Retriever Protocol and RetrievalResult shape.
 
-Concrete retrievers — :class:`DenseRetriever` (Phase 4.2),
-:class:`BM25Retriever` and :class:`HybridRetriever` (Phase 4.3) —
-all implement this Protocol. The RAG pipeline (Phase 4.4) composes
-retrievers and rerankers through it without caring about the
-specific backend.
+Concrete retrievers — :class:`DenseRetriever`, :class:`BM25Retriever`,
+and :class:`HybridRetriever` — all implement this Protocol.
+:class:`RAGPipeline` composes retrievers and rerankers through it
+without caring about the specific backend.
 """
 
 from __future__ import annotations

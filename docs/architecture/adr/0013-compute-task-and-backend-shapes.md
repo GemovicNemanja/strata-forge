@@ -13,8 +13,8 @@ managed orchestrator (SkyPilot reaching AWS / GCP / Azure / RunPod
 / Lambda / Kubernetes) or directly to a single SSH-accessible host
 (for one-off GPU boxes the user already has).
 
-The phase needs to decide three things up front so the rest of the
-module can hang off a stable seam:
+This ADR decides three things up front so the rest of the module can
+hang off a stable seam:
 
 1. **What shape is a "task"?** A function decorator? A class
    instance? A YAML file? Something serializable?
@@ -24,7 +24,7 @@ module can hang off a stable seam:
 3. **What lifecycle does a job have?** Just "submit and return,"
    or "submit, observe state, fetch logs, cancel, clean up?"
 
-Picking wrong here means later sub-phases (SkyPilot, SSH, batch
+Picking wrong here means later backends (SkyPilot, SSH, batch
 inference, serving) either fork their interfaces or grow a
 parallel runtime — both defeat the layered design.
 
@@ -62,7 +62,7 @@ A YAML loader (`Task.from_yaml(path)` / `from_yaml_str(...)`)
 parses the SkyPilot-compatible task subset so users can drop in
 existing YAML templates without rewriting them. We don't aim for
 full SkyPilot YAML compatibility — only the fields the
-:class:`Task` model carries; unknown fields raise.
+`Task` model carries; unknown fields raise.
 
 ### 2. Backends are an async Protocol with the full lifecycle
 
@@ -83,14 +83,13 @@ five methods. The full lifecycle is mandatory because the absence
 of (say) `logs` or `cleanup` would force higher-level code to
 special-case backends — defeating the point of the abstraction.
 
-Backends ship in :mod:`strata_forge.compute.backends`:
+Backends ship in `strata_forge.compute.backends`:
 
-- **Phase 5.1:** :class:`LocalBackend` — runs the task in a local
+- **`LocalBackend`** — runs the task in a local
   `asyncio.create_subprocess_exec`. Dep-free, primarily for tests
   and ad-hoc local runs.
-- **Phase 5.2:** :class:`SSHBackend` (`asyncssh`, behind
-  `[compute]`) and :class:`SkyPilotBackend` (`sky.api.sdk`,
-  behind `[compute]`).
+- **`SSHBackend`** (`asyncssh`, behind `[compute]`) and
+  **`SkyPilotBackend`** (`sky.api.sdk`, behind `[compute]`).
 
 ### 3. Jobs are opaque handles, JobStatus is a typed state machine
 
@@ -137,7 +136,7 @@ re-implement orchestration we'd rather delegate.
 **Positive**
 
 - **One Protocol covers every backend.** Higher-level modules
-  (the batch inference runner in 5.2, the training runner in 5.3)
+  (the batch inference runner, the training runner)
   bind to `Backend` and accept any concrete implementation. New
   backends (a future Kubernetes-direct backend, a Modal adapter,
   a Slurm cluster) drop in by satisfying the Protocol.
@@ -148,7 +147,7 @@ re-implement orchestration we'd rather delegate.
 - **Lifecycle is uniform.** A CI script doesn't need to know
   whether the backend is SkyPilot or SSH to fetch logs or cancel
   the job.
-- **No runtime dep cost up front.** :class:`LocalBackend` is
+- **No runtime dep cost up front.** `LocalBackend` is
   dep-free; the heavier backends lazy-import their SDKs inside
   the constructor.
 

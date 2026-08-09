@@ -27,9 +27,9 @@ variables interpolated throughout produces different rendered text for
 every request — the prefix shifts a few characters and the cache
 misses every time.
 
-In Phase 1 the registry's `capabilities.prompt_caching` flag tells the
-client whether the model supports it, but Phase 1 has no opinion about
-*how* to author prompts so they're cacheable. That's a Phase-2
+The registry's `capabilities.prompt_caching` flag tells the client
+whether the model supports it, but the client has no opinion about
+*how* to author prompts so they're cacheable. That's a prompt-layer
 decision: either we let prompt authors solve cache-friendliness
 themselves (and watch most of them not), or we make the split
 structural.
@@ -60,8 +60,8 @@ the LLM client uses to populate provider-specific cache hints:
   contiguous at the top, maximizing the prefix the provider's
   auto-cache can match.
 - For Gemini: emit a hint that `strata_forge.llm` can use to construct a
-  `CachedContent` resource (the actual resource lifecycle is a Phase-3
-  concern when the request volume justifies it).
+  `CachedContent` resource (the actual resource lifecycle is a separate
+  concern, taken up when the request volume justifies it).
 
 The `strata_forge.prompts.cache_aware` module owns the split, the
 per-provider marker emission, and the validation that stable
@@ -80,8 +80,8 @@ variables don't leak into dynamic positions (or vice versa).
 - Provider-specific cache mechanics live in one place. Adding a new
   provider with a new caching API is one function in `cache_aware.py`,
   not a change to every prompt.
-- The `strata_forge.evals` Phase-2.4 reports can attribute cost differences
-  to cache-hit rate, because each call's cache markers are deterministic.
+- The `strata_forge.evals` reports can attribute cost differences to
+  cache-hit rate, because each call's cache markers are deterministic.
 
 **Negative**
 

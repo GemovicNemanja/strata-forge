@@ -1,8 +1,8 @@
 # `strata_forge.rag` — embeddings, vector stores, chunking, retrieval, reranking, pipeline
 
 `strata_forge.rag` is the retrieval-augmented generation layer. It ships
-four Protocols, concrete in-process and production-backend
-implementations, and a composable :class:`RAGPipeline` that ties
+five Protocols, concrete in-process and production-backend
+implementations, and a composable `RAGPipeline` that ties
 them together. See
 [ADR 0012](../architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
 for the design rationale (Protocol-based composition, embedder
@@ -24,10 +24,14 @@ Integration points:
 - **Rerankers:** `CohereReranker` (lazy `[rag]` extra),
   `CrossEncoderReranker` (lazy `sentence-transformers`).
 - **Pipeline:** `RAGPipeline` (chunk → retrieve → optional rerank →
-  optional prompt augmentation).
+  optional prompt augmentation), plus the `DEFAULT_AUGMENT_TEMPLATE`
+  string it interpolates into.
+- **Helpers:** `tokenize` (the lower-cased word tokenizer `BM25Retriever`
+  uses — export it to build a matching domain tokenizer) and
+  `cosine_similarity` (over two float sequences).
 
-Module rules: [`src/strata_forge/rag/CLAUDE.md`](../../src/strata_forge/rag/CLAUDE.md).
-Source: [`src/strata_forge/rag/`](../../src/strata_forge/rag/).
+Module rules: [`src/strata_forge/rag/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/rag/CLAUDE.md).
+Source: [`src/strata_forge/rag/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/rag/).
 
 ---
 
@@ -79,11 +83,11 @@ asyncio.run(main())
 
 End-to-end demos:
 
-- [`examples/26_rag_basic.py`](../../examples/26_rag_basic.py)
+- [`examples/27_rag_basic.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/27_rag_basic.py)
   — in-process pipeline.
-- [`examples/27_rag_qdrant.py`](../../examples/27_rag_qdrant.py)
+- [`examples/28_rag_qdrant.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/28_rag_qdrant.py)
   — same pipeline backed by Qdrant.
-- [`examples/28_rag_hybrid_reranked.py`](../../examples/28_rag_hybrid_reranked.py)
+- [`examples/29_rag_hybrid_reranked.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/29_rag_hybrid_reranked.py)
   — dense + BM25 fusion with optional Cohere reranking.
 
 ---
@@ -139,8 +143,8 @@ class Reranker(Protocol):
 `RetrievalResult` likewise. `VectorItem` / `VectorSearchResult` are
 frozen dataclasses (lower overhead at construction). Anything
 satisfying a Protocol — including user-supplied custom
-implementations — drops into the pipeline without inheriting from
-Forge classes.
+implementations — drops into the pipeline without inheriting from any
+strata-forge class.
 
 ---
 
@@ -170,9 +174,10 @@ caching, or fallback at the embedding layer.
 
 ## Chunkers
 
-`RecursiveChunker` is the default. Paragraph-aware, with a
-fallback chain (`"\n\n"` → `"\n"` → `". "` → `" "` → hard split)
-and configurable character-based overlap.
+`RecursiveChunker` is the default — the only chunker in the module.
+Paragraph-aware, with a fallback chain (`"\n\n"` → `"\n"` → `". "` →
+`" "` → hard split) and configurable character-based overlap. It counts
+characters, not tokens.
 
 ```python
 from strata_forge.rag import RecursiveChunker, Document
@@ -185,7 +190,16 @@ chunks = chunker.chunk(Document(id="doc-1", text="..."))
 ```
 
 The default separator chain works well for prose; pass
-`separators=(...)` to tune for code, transcripts, or markup.
+`separators=(...)` to tune for code, transcripts, or markup. Empty
+separators are skipped, and text that no separator splits falls through to
+a fixed-size hard split.
+
+**`chunk_size` is not a hard ceiling.** Overlap extends each chunk's start
+leftwards without moving its end, so the effective maximum length is
+`chunk_size + chunk_overlap` — `RecursiveChunker(chunk_size=100,
+chunk_overlap=30)` emits chunks of up to 130 characters. Size the
+embedder's or model's real limit against the sum, not against
+`chunk_size`.
 
 ---
 
@@ -338,6 +352,13 @@ results = await pipeline.query(
 prompt = await pipeline.augment_prompt("What is X?", top_k=3)
 ```
 
+`augment_prompt` interpolates the retrieved chunks and the query into
+`DEFAULT_AUGMENT_TEMPLATE`, an exported constant that instructs the model
+to say so rather than speculate when the sources don't cover the question.
+Pass your own `template=` (any string with `{context}` and `{query}`
+placeholders) to replace it — the module ships an opinion here, but it is
+a one-argument opinion.
+
 `pipeline.ingest()` requires an `IndexableRetriever` — any
 retriever with an `index(chunks)` coroutine. `DenseRetriever`
 satisfies that. Non-indexable retrievers (`BM25Retriever`,
@@ -368,7 +389,7 @@ the install command explicitly.
 ## Troubleshooting
 
 - **"`The [rag] extra is required for ...`"**: install with
-  `pip install 'ai-forge[rag]'`.
+  `pip install 'strata-forge[rag]'`.
 - **"`RAGPipeline.ingest: retriever of type X doesn't satisfy IndexableRetriever`"**:
   you passed a non-indexable retriever (BM25, hybrid). Either pre-build the
   retriever with its corpus and skip `pipeline.ingest()`, or wire a
@@ -384,3 +405,19 @@ the install command explicitly.
 - **Cross-encoder very slow**: `predict` runs on a single thread.
   Pass `device="cuda"` (or `"mps"` on Apple Silicon) and batch your
   retrieval calls so the reranker amortizes the model load.
+- **Chunks are longer than `chunk_size`**: expected — overlap extends the
+  start without moving the end, so the real ceiling is
+  `chunk_size + chunk_overlap`. See [Chunkers](#chunkers).
+
+---
+
+## See also
+
+- [`strata_forge.agents`](agents.md) — `EpisodicMemory` runs on the same
+  `VectorStore` Protocol; retrieval also makes a natural agent tool.
+- [`strata_forge.llm`](llm.md) — where the augmented prompt goes, and the
+  `LLMClient` this module deliberately does *not* route embeddings through.
+- [`strata_forge.config`](config.md) — `QDRANT_URL` / `QDRANT_API_KEY`.
+- [ADR 0012](../architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
+  — Protocol-based composition, why the embedder bypasses `LLMClient`, and
+  where the `VectorStore` Protocol lives.

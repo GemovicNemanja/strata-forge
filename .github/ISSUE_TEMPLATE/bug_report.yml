@@ -1,0 +1,164 @@
+name: Bug report
+description: Report incorrect or unexpected behaviour in strata-forge.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report. The two things that speed a fix up most are an exact version and
+        a reproduction small enough to run unchanged.
+
+        **Do not report a security vulnerability here.** Use a
+        [private advisory](https://github.com/GemovicNemanja/strata-forge/security/advisories/new)
+        instead — see
+        [SECURITY.md](https://github.com/GemovicNemanja/strata-forge/blob/main/SECURITY.md).
+
+        **Never paste API keys, tokens, or unredacted request headers** into a public issue.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The actual behaviour you observed.
+      placeholder: |
+        `LLMClient.complete` raised RegistryError instead of returning a response.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: The behaviour you were relying on, and where that expectation came from (docs, docstring, type signature).
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        The smallest self-contained snippet or CLI invocation that shows the problem. Async examples
+        need an `asyncio.run` or an await context so they run as written. Redact any credential.
+      render: python
+      placeholder: |
+        import asyncio
+
+        from strata_forge.llm import LLMClient, Message
+
+
+        async def main() -> None:
+            client = LLMClient("claude-opus-4-7")
+            response = await client.complete([Message.user("hello")])
+            print(response.text)
+
+
+        asyncio.run(main())
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or log output
+      description: The full traceback, or the relevant log lines. Redact keys, signatures, and tokens.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: strata-forge version
+      description: 'Output of `python -c "import strata_forge; print(strata_forge.__version__)"`. If you are on a git checkout, give the commit SHA.'
+      placeholder: "0.0.1"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: "3.14.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system
+      description: Name and version, plus the architecture if it is relevant.
+      placeholder: "macOS 15.2 (arm64)"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: extras
+    attributes:
+      label: Installed extras
+      description: Which optional extras are present in the environment you reproduced this in.
+      options:
+        - label: None — base install only
+        - label: redis
+        - label: multimodal
+        - label: inspect
+        - label: langfuse
+        - label: hf
+        - label: evals
+        - label: rag
+        - label: compute
+        - label: serving
+        - label: bedrock
+        - label: storage
+        - label: finetuning
+        - label: all
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider involved
+      description: The provider route the failing call went through, if the bug touches an LLM call at all.
+      options:
+        - Not provider-specific
+        - Anthropic
+        - OpenAI
+        - Azure OpenAI
+        - AWS Bedrock
+        - Google Vertex AI
+        - OpenAI-compatible endpoint (self-hosted or gateway)
+        - Other / more than one
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The logical model name you passed, or the fallback chain if you configured one.
+      placeholder: "claude-opus-4-7"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: |
+        Workarounds you found, when it started, whether it is intermittent, and anything you ruled
+        out. If the behaviour contradicts a specific line of documentation, link it.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am on the latest release, or I have given the exact version or commit above.
+          required: true
+        - label: This is not a security vulnerability, and the report contains no credentials.
+          required: true

@@ -3,7 +3,8 @@
 **Status:** Accepted
 **Date:** Initial scaffolding
 **Supersedes:** —
-**Superseded by:** —
+**Superseded by:** partially — [ADR 0011](0011-agents-thin-wrapper-over-forge-llm.md), which
+rejects PydanticAI for the agent runtime
 
 ## Context
 
@@ -20,7 +21,7 @@ The same logic applies to **structured output** (Pydantic-typed responses) and *
 
 ## Decision
 
-Tool calling is a first-class feature of `strata_forge.llm`, shipped in `src/strata_forge/llm/tools.py`. The agent module (`strata_forge.agents`, phase 3) reuses these primitives rather than reimplementing them. The same module also ships `strata_forge.llm.schemas` (structured output) and `strata_forge.llm.multimodal` (image input).
+Tool calling is a first-class feature of `strata_forge.llm`, shipped in `src/strata_forge/llm/tools.py`. The agent module (`strata_forge.agents`) reuses these primitives rather than reimplementing them. The same module also ships `strata_forge.llm.schemas` (structured output) and `strata_forge.llm.multimodal` (image input).
 
 Concretely, `strata_forge.llm` exposes:
 
@@ -31,7 +32,7 @@ Concretely, `strata_forge.llm` exposes:
 - `LLMClient.run_tool_loop(messages, tools, max_iterations)` — multi-turn loop: completion → if `tool_use`, invoke each tool, append result messages, completion again, until `finish_reason != "tool_use"` or `max_iterations` hit. Cost/token/budget accrue across iterations.
 - Capability gate: requesting tools against a model whose registry entry doesn't support `tool_calling` raises `RegistryError` before any provider call.
 
-The agent module's contribution in phase 3 is: PydanticAI agent builder, built-in tools (`web_search`, `fs_read`, `fetch_url`, `calculator`), `ConversationMemory`, `EpisodicMemory`, multi-agent patterns. The agent module does NOT reimplement `Tool`, `@tool`, `run_tool_loop`, or message types — those are imported from `strata_forge.llm`.
+The agent module's contribution is: PydanticAI agent builder, built-in tools (`web_search`, `fs_read`, `fetch_url`, `calculator`), `ConversationMemory`, `EpisodicMemory`, multi-agent patterns. The agent module does NOT reimplement `Tool`, `@tool`, `run_tool_loop`, or message types — those are imported from `strata_forge.llm`.
 
 ## Consequences
 

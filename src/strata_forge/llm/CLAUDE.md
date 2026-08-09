@@ -36,12 +36,12 @@ The `strata_forge.sync` namespace re-exports `complete`, `stream`, `complete_str
 - Cache keys are **provider-agnostic**: a hit on `claude-opus-4-7` is valid regardless of which provider served the original call. Cache key = SHA256(canonical(logical model, messages, sampling params, response_format, tool schemas hash, provider_extras hash)). Streaming responses are NOT cached.
 - Fallback: provider-level (inner) within a `ModelFallback`; model-level (outer) across entries. See ADR 0005 for the advance/abort rules per error class.
 - Tool capability gate: requesting tools against a model whose registry entry has `capabilities.tool_calling = false` raises `RegistryError` **before** any provider call. An `openai_compat`/OpenRouter model isn't in the registry, so it's let through by default; construct the client with `require_tool_support=True` to instead raise `RegistryError(reason="capability_unknown")` pre-flight for such unconfirmable models.
-- Diagnostic dump: when `FORGE_DIAGNOSTIC=1`, every completed call (including each iteration of a tool loop) appends a JSON record to `${FORGE_DIAGNOSTIC_PATH:-./forge-diagnostic.ndjson}`. Independent of Langfuse.
+- Diagnostic dump: when `FORGE_DIAGNOSTIC_ENABLED=1`, every completed call (including each iteration of a tool loop) appends a JSON record to `${FORGE_DIAGNOSTIC_PATH:-./forge-diagnostic.ndjson}`. Independent of Langfuse.
 
 ## Test expectations
 
 - Unit tests under `tests/unit/llm/`, one file per source module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor (`fail_under` in `pyproject.toml`). Per root CLAUDE.md §5, `llm/` is held to a higher bar by convention — treat a drop below 90 % here as a regression even though no per-module gate enforces it.
 - VCR cassettes under `tests/vcr/cassettes/<provider>/` cover the matrix of (provider × scenario): basic completion, streaming, structured output, multimodal, single tool call, multi-turn tool loop, rate-limit retry, content filter, provider-level fallthrough, model-level fallthrough.
 - Snapshot tests (`syrupy`) for per-provider tool schema serialization and structured-output schema serialization.
 - Hypothesis property tests for cache key stability and token counter monotonicity.

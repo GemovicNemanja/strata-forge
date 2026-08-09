@@ -7,10 +7,10 @@
 
 ## Context
 
-Phase 1 deliberately shipped tool calling, structured output, and the
-multi-turn tool loop inside `strata_forge.llm` (ADR 0006). Phase 3 adds an
-agent layer: a higher-level builder that wires a system prompt, a set
-of tools, and an :class:`LLMClient` into a single object whose
+`strata_forge.llm` deliberately owns tool calling, structured output,
+and the multi-turn tool loop (ADR 0006). The agent layer sits above
+it: a higher-level builder that wires a system prompt, a set of
+tools, and an `LLMClient` into a single object whose
 ``.run(user_input)`` method produces a final answer.
 
 The natural temptation when building agents is to ship a *parallel*
@@ -23,26 +23,26 @@ libraries do this. We're explicitly rejecting that shape.
 `strata_forge.agents` is a **thin, composition-only layer over
 `strata_forge.llm`**. Concretely:
 
-1. **No new tool abstraction.** Agents accept :class:`strata_forge.llm.Tool`
-   instances built with the existing :func:`strata_forge.llm.tool`
+1. **No new tool abstraction.** Agents accept `strata_forge.llm.Tool`
+   instances built with the existing `strata_forge.llm.tool`
    decorator. The agent's tools field is typed as
    ``tuple[Tool, ...]``; nothing else satisfies it.
 2. **No new message types.** Agent input is either a string
-   (wrapped into a :class:`UserMessage`) or a sequence of the
-   existing :data:`strata_forge.llm.AnyMessage` union members. The agent
-   prepends a :class:`SystemMessage` from its system prompt and
+   (wrapped into a `UserMessage`) or a sequence of the
+   existing `strata_forge.llm.AnyMessage` union members. The agent
+   prepends a `SystemMessage` from its system prompt and
    passes the result through verbatim.
 3. **No new tool loop.** Agents delegate to
-   :meth:`LLMClient.run_tool_loop` when tools are present and to
-   :meth:`LLMClient.complete` otherwise. The agent never iterates
+   `LLMClient.run_tool_loop` when tools are present and to
+   `LLMClient.complete` otherwise. The agent never iterates
    over tool calls itself.
 4. **No new structured-output path.** When an agent needs typed
-   output, it calls :meth:`LLMClient.complete_structured` — same
+   output, it calls `LLMClient.complete_structured` — same
    schema reprompt logic, same per-provider dispatch, same
-   :class:`StructuredResponse`.
+   `StructuredResponse`.
 5. **`AgentResult` is the only new shape.** It bundles the final
    text, the conversation that was sent to the LLM, and the raw
-   :class:`LLMResponse`. The raw response is exposed so callers
+   `LLMResponse`. The raw response is exposed so callers
    that already understand `strata_forge.llm` semantics never need to
    learn an agent-specific accounting layer.
 
@@ -61,10 +61,9 @@ libraries do this. We're explicitly rejecting that shape.
                      strata_forge.llm.Tool ◄── @tool decorator ──► Pydantic schema
 ```
 
-Built-in tools (Phase 3.2) are concrete :class:`Tool` instances
-constructed via :func:`tool`; memory (Phase 3.3) is layered on top
-of the message-history shape `LLMClient` already understands;
-multi-agent patterns (Phase 3.4) compose multiple :class:`Agent`
+Built-in tools are concrete `Tool` instances constructed via `tool`;
+memory is layered on top of the message-history shape `LLMClient`
+already understands; multi-agent patterns compose multiple `Agent`
 instances rather than introducing a new orchestration primitive.
 
 ## Consequences
@@ -90,7 +89,7 @@ instances rather than introducing a new orchestration primitive.
 
 - **The agent's view of intermediate tool calls is limited.**
   `LLMClient.run_tool_loop` returns only the final
-  :class:`LLMResponse`; intermediate tool-call / tool-result
+  `LLMResponse`; intermediate tool-call / tool-result
   messages live inside the method. `AgentResult.messages`
   therefore carries the *input* conversation plus the final
   assistant message, not every iteration. Callers that need the
@@ -133,4 +132,4 @@ instances rather than introducing a new orchestration primitive.
    provider seam), and ships a transitive dep on a project we
    don't otherwise depend on. Rejected — Forge already has every
    primitive PydanticAI exposes, plus the registry, fallback
-   chain, and caching layer we built in Phase 1.
+   chain, and caching layer in `strata_forge.llm`.

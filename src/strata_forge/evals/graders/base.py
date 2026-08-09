@@ -6,7 +6,7 @@ required. The Protocol is async because LLM-judge graders need
 ``await`` anything inside their :meth:`grade` body — the
 ``async def`` is there for shape uniformity.
 
-See [ADR 0010](../../../../docs/architecture/adr/0010-evals-experiment-as-data-pluggable-graders.md).
+See [ADR 0010](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0010-evals-experiment-as-data-pluggable-graders.md).
 """
 
 from __future__ import annotations

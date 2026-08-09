@@ -8,7 +8,7 @@ helpers built on `strata_forge.llm` round out the surface. See
 [ADR 0009](../architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md)
 for the canonical-store + exchange-format decision.
 
-Five integration points ship:
+Five integration points make up the public surface:
 
 - `Dataset` / `DatasetItem` — frozen Pydantic models with
   content-hash IDs and tuple-typed item collections (structural
@@ -24,8 +24,16 @@ Five integration points ship:
 - `self_instruct` / `distill` — async synthetic-data helpers built
   on `LLMClient`.
 
-Module rules: [`src/strata_forge/datasets/CLAUDE.md`](../../src/strata_forge/datasets/CLAUDE.md).
-Source: [`src/strata_forge/datasets/`](../../src/strata_forge/datasets/).
+Two smaller surfaces are public but live on their submodules rather than
+the package root: `SelfInstructBatch` / `SelfInstructItem` (the wrapper
+schemas `self_instruct` asks the model to fill) in
+`strata_forge.datasets.synthetic`, and `VERSION_SEPARATOR` /
+`compose_langfuse_name` / `decompose_langfuse_name` (the
+`{name}__v{version}` encoding) in
+`strata_forge.datasets.stores.langfuse`.
+
+Module rules: [`src/strata_forge/datasets/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/datasets/CLAUDE.md).
+Source: [`src/strata_forge/datasets/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/datasets/).
 
 ---
 
@@ -77,11 +85,11 @@ asyncio.run(main())
 
 End-to-end demos:
 
-- [`examples/17_dataset_basics.py`](../../examples/17_dataset_basics.py)
+- [`examples/18_dataset_basics.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/18_dataset_basics.py)
   — schema, store, versioning, diff.
-- [`examples/18_dataset_hf_bridge.py`](../../examples/18_dataset_hf_bridge.py)
-  — Forge ↔ Hugging Face Datasets round-trip.
-- [`examples/19_dataset_synthetic.py`](../../examples/19_dataset_synthetic.py)
+- [`examples/19_dataset_hf_bridge.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/19_dataset_hf_bridge.py)
+  — strata-forge ↔ Hugging Face Datasets round-trip.
+- [`examples/20_dataset_synthetic.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/20_dataset_synthetic.py)
   — `self_instruct` + `distill` against a real LLM.
 
 ---
@@ -197,8 +205,8 @@ assert v == again  # identical content -> same version
 
 ### `LangfuseDatasetStore`
 
-Persists into Langfuse Datasets. Each Forge version is a distinct
-Langfuse dataset named `{forge_name}__v{version}` — visible in the
+Persists into Langfuse Datasets. Each strata-forge version is a distinct
+Langfuse dataset named `{name}__v{version}` — visible in the
 Langfuse UI and addressable via the Langfuse SDK without
 out-of-band bookkeeping.
 
@@ -213,12 +221,24 @@ store = LangfuseDatasetStore()
 store = LangfuseDatasetStore(client=my_langfuse_client)
 ```
 
-The Langfuse SDK is sync; the store wraps every call in
-`asyncio.to_thread` to keep the public surface async-only. Requires
-the `[langfuse]` extra:
+The store uses two transports. `get` and `put` go through the (sync)
+Langfuse SDK wrapped in `asyncio.to_thread`, so the public surface stays
+async-only. `versions`, `list_names`, `delete`, and the latest-version
+lookup inside `get` bypass the SDK entirely and call
+`{host}/api/public/v2/datasets` over `httpx.AsyncClient`, because SDK v4
+dropped the dataset-listing method.
+
+That split has a consequence for `client=`: injecting a client covers the
+SDK half only. The REST half resolves its own credentials from
+`LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` and raises
+`RuntimeError` when they're absent — so an injected client still needs the
+env vars set unless you only ever call `put` and `get(name, version)` with
+an explicit version.
+
+Requires the `[langfuse]` extra:
 
 ```
-pip install 'ai-forge[langfuse]'
+pip install 'strata-forge[langfuse]'
 ```
 
 Importing `strata_forge.datasets.stores.langfuse` works without the extra —
@@ -241,7 +261,7 @@ forge_ds = from_hf_dataset(
     name="my-set",
     description="optional",
     metadata={"source": "hf-hub"},
-    # Custom column names for non-Forge HF datasets:
+    # Custom column names for HF datasets not written by this bridge:
     id_column="uuid",
     input_column="prompt",
     expected_output_column="answer",
@@ -251,13 +271,36 @@ forge_ds = from_hf_dataset(
 
 `to_hf_dataset` produces an HF `Dataset` with four columns —
 `id`, `input`, `expected_output`, `metadata` — and stashes the
-Forge-level `name` / `description` on `Dataset.info`.
+dataset-level `name` / `description` on `Dataset.info`.
 
 `from_hf_dataset` does the inverse. Rows without an `id_column`
 value (missing column OR per-row `None`) get content-hash IDs via
 `DatasetItem.from_input`.
 
-Requires the `[hf]` extra: `pip install 'ai-forge[hf]'`. Importing
+**The round trip is lossy in two places, and both are on you to
+compensate for.** Dataset-level `metadata` is dropped by `to_hf_dataset`
+— only per-item metadata survives, in the `metadata` column. And
+`from_hf_dataset` never reads `info.dataset_name`, so you must pass
+`name=` back in yourself; omitting it produces a differently-named
+dataset and therefore a different `dataset_version`. Round-trip like
+this:
+
+```python
+hf_ds = to_hf_dataset(ds)
+back = from_hf_dataset(hf_ds, name=ds.name, description=ds.description,
+                       metadata=ds.metadata)
+assert dataset_version(back) == dataset_version(ds)   # holds
+assert back == ds                                     # may not
+```
+
+The version survives; strict equality may not. Arrow unifies the
+`metadata` column into a single struct schema across every row, so an item
+that carried no metadata comes back with the union's keys set to `None`.
+That's invisible to `dataset_version` (which hashes name, sorted item IDs,
+and dataset-level metadata only) and to `diff` (which keys on item ID),
+but it will show up if you compare items directly.
+
+Requires the `[hf]` extra: `pip install 'strata-forge[hf]'`. Importing
 `strata_forge.datasets.hf_bridge` works without it; the `ImportError`
 surfaces only when a caller invokes `to_hf_dataset`.
 
@@ -279,9 +322,9 @@ items. Capped by `max_attempts`.
 
 ```python
 from strata_forge.datasets import self_instruct
-from strata_forge.llm.client import LLMClient
+from strata_forge.llm import LLMClient
 
-client = LLMClient(model="claude-opus-4-7", provider="anthropic")
+client = LLMClient(model="claude-haiku-4-5", provider="anthropic")
 new_items = await self_instruct(
     seeds=existing_dataset,
     instructions="produce one-fact trivia Q&A items in the same shape",
@@ -313,6 +356,17 @@ labeled = await distill(
 )
 ```
 
+### Metadata scope on both helpers
+
+The optional `metadata=` argument on `self_instruct` and `distill` sets
+**per-item** metadata on the items they produce. The returned dataset's
+own `metadata` is hardcoded and cannot be overridden:
+`{"synthetic": "self_instruct", "seed_count": N}` and
+`{"synthetic": "distillation", "source_count": N}` respectively. Since
+dataset-level metadata feeds `dataset_version`, a synthetic dataset's
+version moves whenever the seed or source count moves, and it will never
+collide with a hand-built dataset of the same name and items.
+
 ---
 
 ## Lazy-import contract
@@ -326,7 +380,7 @@ The error message names the missing extra so the fix is obvious:
 
 ```
 ImportError: The [hf] extra is required for hf_bridge.
-Install it with: pip install 'ai-forge[hf]'.
+Install it with: pip install 'strata-forge[hf]'.
 ```
 
 ---
@@ -350,3 +404,25 @@ Install it with: pip install 'ai-forge[hf]'.
 - **`distill` raises**: the teacher's `LLMClient.complete` exception
   propagates verbatim. Inspect via `strata_forge.llm.errors` —
   `ProviderError` subclasses tell you exactly what failed.
+- **`RuntimeError` about missing Langfuse credentials even though you
+  passed `client=`**: `versions`, `list_names`, `delete`, and a versionless
+  `get` go over REST rather than the SDK and resolve credentials from the
+  environment. Set `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` /
+  `LANGFUSE_SECRET_KEY` alongside the injected client.
+
+---
+
+## See also
+
+- [`strata_forge.evals`](evals.md) — `run_experiment` takes a `Dataset`
+  directly; this is where datasets get consumed.
+- [`strata_forge.llm`](llm.md) — the `LLMClient` behind `self_instruct` and
+  `distill`.
+- [`strata_forge.storage`](storage.md) — pushing the HF form of a dataset to
+  the Hub.
+- [`strata_forge.training`](training.md) — the HF `Dataset` the trainers
+  expect on the other side of `to_hf_dataset`.
+- [`strata_forge.cli`](cli.md) — `strata-forge datasets` for listing,
+  inspecting, and diffing from a shell.
+- [ADR 0009](../architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md)
+  — why Langfuse is the canonical store and HF the exchange format.

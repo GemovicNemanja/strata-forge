@@ -36,7 +36,7 @@ class InMemoryDatasetStore(DatasetStore):
     Operations are atomic per asyncio scheduling quantum — no internal
     awaits during state mutation — so concurrent puts/gets from the
     same loop won't tear state. For cross-process safety, use the
-    Langfuse store (lands in Phase 2.3.2).
+    Langfuse-backed store in :mod:`strata_forge.datasets.stores.langfuse`.
     """
 
     def __init__(self) -> None:

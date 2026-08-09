@@ -1,24 +1,23 @@
 # `strata_forge.storage` — fsspec gateway, HuggingFace Hub model/dataset push/pull
 
 `strata_forge.storage` is the file-storage and HuggingFace Hub layer.
-Two cooperating clients live here:
-:class:`StorageGateway` for generic fsspec-backed file
-operations across local / S3 / GCS / Azure / HTTP / HF Hub, and
-:class:`HFHubClient` for higher-level model and dataset
+Two cooperating clients live here: `StorageGateway` for generic
+fsspec-backed file operations across local / S3 / GCS / Azure / HTTP /
+HF Hub, and `HFHubClient` for higher-level model and dataset
 push/pull on the HuggingFace Hub.
 
 Integration points:
 
-- **Gateway:** :class:`StorageGateway`, :data:`FileInfo`.
-- **Hub:** :class:`HFHubClient`, :data:`RepoType`.
+- **Gateway:** `StorageGateway`, `FileInfo`.
+- **Hub:** `HFHubClient`, `RepoType`.
 
-Both clients defer their heavy imports — ``fsspec``,
-``s3fs`` / ``gcsfs`` / ``adlfs``, ``huggingface_hub`` — until
-the first network call, so ``import strata_forge.storage`` works
-without the ``[storage]`` extra installed.
+Both clients defer their heavy imports — `fsspec`,
+`s3fs` / `gcsfs` / `adlfs`, `huggingface_hub` — until
+the first network call, so `import strata_forge.storage` works
+without the `[storage]` extra installed.
 
-Module rules: [`src/strata_forge/storage/CLAUDE.md`](../../src/strata_forge/storage/CLAUDE.md).
-Source: [`src/strata_forge/storage/`](../../src/strata_forge/storage/).
+Module rules: [`src/strata_forge/storage/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/storage/CLAUDE.md).
+Source: [`src/strata_forge/storage/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/storage/).
 
 ---
 
@@ -37,43 +36,58 @@ Source: [`src/strata_forge/storage/`](../../src/strata_forge/storage/).
 Cross-target file shuffling:
 
 ```python
+import asyncio
+
 from strata_forge.storage import StorageGateway
 
-gw = StorageGateway(
-    options={
-        "s3": {"key": "...", "secret": "...",
-               "client_kwargs": {"region_name": "us-east-1"}},
-    }
-)
-# Local read, cloud write.
-text = await gw.read_text("./reports/2026-04.txt")
-await gw.write_text("s3://my-bucket/archive/2026-04.txt", text)
 
-# Same-protocol copy uses the filesystem's native operation.
-await gw.copy("s3://my-bucket/a.bin", "s3://my-bucket/b.bin")
+async def main() -> None:
+    gw = StorageGateway(
+        options={
+            "s3": {"key": "...", "secret": "...",
+                   "client_kwargs": {"region_name": "us-east-1"}},
+        }
+    )
+    # Local read, cloud write.
+    text = await gw.read_text("./reports/2026-04.txt")
+    await gw.write_text("s3://my-bucket/archive/2026-04.txt", text)
+
+    # Same-protocol copy uses the filesystem's native operation.
+    await gw.copy("s3://my-bucket/a.bin", "s3://my-bucket/b.bin")
+
+
+asyncio.run(main())
 ```
 
 HF Hub model push/pull:
 
 ```python
+import asyncio
+
 from strata_forge.storage import HFHubClient
 
-hub = HFHubClient(token="hf_xxx")
 
-# Upload a fine-tuned model directory to a new repo.
-commit_url = await hub.push_model(
-    "./checkpoints/llama-3.1-8b-sft",
-    "me/llama-3.1-8b-sft",
-    commit_message="initial release",
-    private=True,
-)
+async def main() -> None:
+    hub = HFHubClient(token="hf_xxx")
 
-# Pull a different revision back down.
-local_path = await hub.pull_model(
-    "me/llama-3.1-8b-sft",
-    "./weights",
-    revision="v0.2.0",
-)
+    # Upload a fine-tuned model directory to a new repo.
+    commit_url = await hub.push_model(
+        "./checkpoints/llama-3.1-8b-sft",
+        "me/llama-3.1-8b-sft",
+        commit_message="initial release",
+        private=True,
+    )
+
+    # Pull a different revision back down.
+    local_path = await hub.pull_model(
+        "me/llama-3.1-8b-sft",
+        "./weights",
+        revision="v0.2.0",
+    )
+    print(commit_url, local_path)
+
+
+asyncio.run(main())
 ```
 
 ## StorageGateway
@@ -117,7 +131,7 @@ accepts.
 - **Recursive copy across protocols** raises
   `NotImplementedError`. Large recursive transfers want
   multipart-aware tooling (`aws s3 sync`, gsutil, `huggingface-cli
-  upload-large-folder`). Forge surfaces the limit explicitly
+  upload-large-folder`). The gateway surfaces the limit explicitly
   rather than degrading silently.
 
 ### Filesystem caching
@@ -128,7 +142,7 @@ use. To rotate credentials, construct a new gateway.
 
 ## HFHubClient
 
-`HFHubClient` covers the high-level operations Forge needs:
+`HFHubClient` covers the operations a training or eval workflow needs:
 repo lifecycle, single-file transfers, whole-repo snapshots, and
 convenience push/pull. It wraps `huggingface_hub.HfApi`
 synchronously off-loaded to a thread.
@@ -144,13 +158,20 @@ HFHubClient(
 )
 ```
 
-- `token`: HuggingFace access token. When `None`, the
-  underlying `HfApi` falls back to `HF_TOKEN` env var or cached
-  login.
+- `token`: HuggingFace access token.
 - `endpoint`: custom Hub URL — useful for the Enterprise tier
   or air-gapped Hub deployments.
 - `api`: pre-built `HfApi` for tests or for sharing across
   multiple clients.
+
+`token` and `endpoint` each resolve through **three** layers, in order:
+the explicit constructor argument; then
+`strata_forge.config.get_settings().huggingface`, which reads `HF_TOKEN`
+and `HF_ENDPOINT` from the process environment or `.env`; then
+`huggingface_hub`'s own resolver (`HF_TOKEN`, cached CLI login). The
+settings layer is loaded lazily and any failure to load it is swallowed,
+so a caller that passes an explicit token — or needs no auth at all — is
+never blocked by a missing `.env`.
 
 ### Repo lifecycle
 
@@ -209,11 +230,18 @@ await hub.pull_dataset("me/preference-pairs", "./data")
 
 ### Escape hatch
 
-Every public method takes an `extras: Mapping[str, Any] | None`
-parameter. Anything you pass flows verbatim to the underlying
-`HfApi` method — `create_pr=True`, `space_sdk="gradio"`,
-`force_download=True`, etc. Forge never blocks access to the
+Five methods take an `extras: Mapping[str, Any] | None` parameter —
+`create_repo`, `download_file`, `upload_file`, `download_snapshot`, and
+`upload_folder`. Anything you pass flows verbatim to the underlying
+`HfApi` method: `create_pr=True`, `space_sdk="gradio"`,
+`force_download=True`, and so on. The client never blocks access to the
 full HF Hub surface.
+
+The other six — `delete_repo`, `list_repo_files`, `push_model`,
+`pull_model`, `push_dataset`, `pull_dataset` — have no `extras`
+parameter, and passing one raises `TypeError`. The push/pull pair are
+thin conveniences over `create_repo` + `upload_folder` and
+`download_snapshot`; drop to those when you need the escape hatch.
 
 ## Lazy-import contract
 
@@ -224,7 +252,7 @@ full HF Hub surface.
   `HFHubClient.download_file` / `HFHubClient.download_snapshot`.
 - When the extra isn't installed, the first networked call
   raises `ImportError` with the install hint
-  `pip install 'ai-forge[storage]'`.
+  `pip install 'strata-forge[storage]'`.
 
 ## Troubleshooting
 
@@ -238,15 +266,30 @@ full HF Hub surface.
   fsspec backend returned something other than a dict. Most
   built-in backends return dicts; custom backends might not.
   Open an issue with the protocol and backend version.
-- **Hub uploads stall:** disable progress bars
-  (`HF_HUB_DISABLE_PROGRESS_BARS=1`) — they can deadlock in
-  some terminal environments. Or pass `extras={"silent": True}`
-  to the relevant method.
-- **Hub 401 / 403:** confirm `HF_TOKEN` is set or pass `token=`
-  to the client. For private repos, the token needs `write`
-  scope.
+- **Hub uploads stall:** disable progress bars by setting
+  `HF_HUB_DISABLE_PROGRESS_BARS=1` in the environment — they can
+  deadlock in some terminal environments. There is no per-call
+  equivalent; `huggingface_hub` has no `silent` kwarg, so passing one
+  through `extras` just forwards an argument the SDK rejects.
+- **Hub 401 / 403:** confirm `HF_TOKEN` is set (in the environment or
+  `.env`) or pass `token=` to the client. For private repos, the token
+  needs `write` scope. A custom Hub needs `HF_ENDPOINT` or
+  `endpoint=`.
 - **Cross-account S3 copy fails:** native fsspec copy uses the
   destination filesystem's credentials. To copy across
   accounts, configure two gateways with different `options=`
   and let the cross-protocol path stream bytes (small files) or
   use `aws s3 cp` for large transfers.
+
+---
+
+## See also
+
+- [`strata_forge.datasets`](datasets.md) — `to_hf_dataset` produces the
+  form `push_dataset` uploads.
+- [`strata_forge.training`](training.md) — the checkpoint directories
+  `push_model` ships to the Hub.
+- [`strata_forge.compute`](compute.md) — moving artifacts to and from the
+  machine a job runs on.
+- [`strata_forge.config`](config.md) — `HF_TOKEN`, `HF_ENDPOINT`, and the
+  settings layer behind the client's credential fallback.

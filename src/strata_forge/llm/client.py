@@ -1180,8 +1180,8 @@ def _structured_payload_for_route(
     _tool_schema, _tool_choice = to_anthropic_forced_tool_schema(schema)
     # We don't have a public "force this tool" knob on `complete()` — the
     # caller passes the tool via tools= and we route via provider_extras.
-    # For Phase 1, surface the forced tool through provider_extras so it
-    # lands directly in LiteLLM's payload.
+    # Surface the forced tool through provider_extras so it lands directly
+    # in LiteLLM's payload.
     extras = {
         route.provider: {
             "tools": [_tool_schema],

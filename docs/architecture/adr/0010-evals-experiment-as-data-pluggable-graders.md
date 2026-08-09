@@ -47,7 +47,7 @@ same bytes, the same hash, and the same cache key — which makes
 "have we already run this experiment?" a one-line dict lookup
 against the result store.
 
-The runner (Phase 2.4.2) consumes the `Experiment` and resolves
+The runner consumes the `Experiment` and resolves
 names against the live registries (`strata_forge.llm`, `strata_forge.prompts`,
 `strata_forge.datasets`). No `Experiment` instance holds an `LLMClient` or
 a `Dataset` directly — those resolve at run time, so a serialized
@@ -181,9 +181,9 @@ generation — those are separate, composable layers downstream.
 **Mitigations**
 
 - The runner gets explicit `Grader` instances passed in (or
-  resolved by name from a `GraderRegistry` once 2.4.3 ships an
-  LLM-judge grader that needs it). Users wiring their own pipelines
-  can bypass the registry entirely.
+  resolved by name from a `GraderRegistry`, should a grader that
+  needs one arrive). Users wiring their own pipelines can bypass
+  the registry entirely.
 - We document the "experiment is data, runner is behavior"
   separation in the module README so the indirection isn't
   surprising.

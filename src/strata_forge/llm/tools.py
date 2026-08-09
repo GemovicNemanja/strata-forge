@@ -11,8 +11,8 @@ provider. The schema converters are also re-exported here for callers who
 already have a Pydantic model and just want the wire format.
 
 :exc:`ToolLoopExceededError` lives here too; it's raised by the
-``LLMClient.run_tool_loop`` helper (Phase 1.20) when the maximum number
-of tool-use iterations is exceeded.
+``LLMClient.run_tool_loop`` helper when the maximum number of tool-use
+iterations is exceeded.
 """
 
 from __future__ import annotations

@@ -20,14 +20,15 @@ Integration points:
   `web_search_tool(backend=)` (factories needing caller config).
 - **Memory:** `ConversationMemory` for in-process turn history with
   token-budget trimming; `EpisodicMemory` against a pluggable
-  `VectorStore` Protocol (concrete `InMemoryVectorStore` ships
-  here; Qdrant backend lands with `strata_forge.rag`).
+  `VectorStore` Protocol (`InMemoryVectorStore` ships here;
+  `strata_forge.rag.QdrantVectorStore` satisfies the same Protocol).
+  Memory is caller-driven — `Agent` holds no state between runs.
 - **Multi-agent patterns:** `handoff(router=, specialists=, ...)`
   and `critic_refiner_run(drafter=, critic=, ...)`. Both are pure
   compositions over `Agent`.
 
-Module rules: [`src/strata_forge/agents/CLAUDE.md`](../../src/strata_forge/agents/CLAUDE.md).
-Source: [`src/strata_forge/agents/`](../../src/strata_forge/agents/).
+Module rules: [`src/strata_forge/agents/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/agents/CLAUDE.md).
+Source: [`src/strata_forge/agents/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/agents/).
 
 ---
 
@@ -48,7 +49,7 @@ Source: [`src/strata_forge/agents/`](../../src/strata_forge/agents/).
 ```python
 import asyncio
 from strata_forge.agents import Agent, calculator
-from strata_forge.llm.client import LLMClient
+from strata_forge.llm import LLMClient
 
 async def main() -> None:
     client = LLMClient(model="claude-opus-4-7", provider="anthropic")
@@ -66,11 +67,11 @@ asyncio.run(main())
 
 End-to-end demos:
 
-- [`examples/23_agent_basic.py`](../../examples/23_agent_basic.py)
+- [`examples/24_agent_basic.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/24_agent_basic.py)
   — agent with the calculator tool.
-- [`examples/24_agent_memory.py`](../../examples/24_agent_memory.py)
+- [`examples/25_agent_memory.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/25_agent_memory.py)
   — multi-turn agent backed by `ConversationMemory`.
-- [`examples/25_agent_critic_refiner.py`](../../examples/25_agent_critic_refiner.py)
+- [`examples/26_agent_critic_refiner.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/26_agent_critic_refiner.py)
   — critic-refiner pattern with drafter + critic agents.
 
 ---
@@ -120,7 +121,7 @@ messages from inside `run_tool_loop` are not included here —
 `LLMClient.run_tool_loop` doesn't expose them. For full iteration
 visibility, install the LiteLLM Langfuse callback via
 `strata_forge.tracing.install_litellm_callback()` or set
-`FORGE_DIAGNOSTIC=1` for the NDJSON dump.
+`FORGE_DIAGNOSTIC_ENABLED=1` for the NDJSON dump.
 
 For *live* visibility, use `Agent.run_streaming()` — the streaming
 counterpart that yields typed `LoopEvent`s (`IterationStart` /
@@ -182,7 +183,7 @@ agent = Agent("doc-bot", client=client, tools=[reader])
 
 ### `web_search_tool`
 
-**Factory.** Forge stays vendor-agnostic about search APIs — pass
+**Factory.** strata-forge stays vendor-agnostic about search APIs — pass
 in a backend (async `(query, max_results) -> Sequence[SearchResult]`)
 that wraps Tavily / SerpAPI / DuckDuckGo / your internal index.
 
@@ -224,12 +225,29 @@ as a tuple; `memory.non_system_messages` returns just the history.
 Both trim modes drop oldest non-system messages first; the system
 message survives every trim.
 
+`Agent` takes no `memory` argument — it is stateless across runs, and
+wiring memory in is the caller's job. The loop is: append the user turn,
+hand the history to `agent.run`, append the reply, trim.
+
+```python
+memory = ConversationMemory(system_message=agent.system_prompt)
+
+for user_input in turns:
+    memory.append_user(user_input)
+    result = await agent.run(memory.non_system_messages)
+    memory.append_assistant(result.text)
+    memory.trim_to_tokens(1_000, model="claude-opus-4-7")
+```
+
+Passing `non_system_messages` (not `messages`) avoids a duplicate system
+message: `Agent.run` prepends its own `system_prompt`.
+
 ### `EpisodicMemory`
 
 Vector-backed long-term memory against a pluggable `VectorStore`
 Protocol. The in-process `InMemoryVectorStore` works for tests and
-prototyping; `strata_forge.rag`'s Qdrant backend (Phase 4) will satisfy
-the same Protocol.
+prototyping; `strata_forge.rag.QdrantVectorStore` satisfies the same
+Protocol and drops in for anything that has to survive the process.
 
 ```python
 from strata_forge.agents import EpisodicMemory, InMemoryVectorStore
@@ -248,8 +266,23 @@ for r in results:
 ```
 
 The `VectorStore` Protocol exposes `add` / `search` / `delete` /
-`clear`. Anything satisfying that shape — including the future
-`QdrantVectorStore` — drops into `EpisodicMemory` unchanged.
+`clear`. Anything satisfying that shape drops into `EpisodicMemory`
+unchanged — swapping the in-process store for Qdrant is a one-line
+change:
+
+```python
+from strata_forge.rag import QdrantVectorStore   # needs the [rag] extra
+
+memory = EpisodicMemory(
+    store=QdrantVectorStore(collection_name="agent-episodes"),
+    embed=my_embed,
+)
+```
+
+The Protocol itself lives in `strata_forge.rag.vector_store` and is
+re-exported from `strata_forge.agents` for convenience — see
+[ADR 0012](../architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
+for why it moved there.
 
 ---
 
@@ -318,9 +351,10 @@ built-in tools' SDK dependencies are minimal:
 - `fs_read` — stdlib `pathlib` + `asyncio.to_thread` for the read.
 - `web_search` — no SDK; the caller supplies the backend.
 
-Memory primitives are likewise stdlib-only. `EpisodicMemory`
-accepts any `VectorStore` Protocol implementation — the concrete
-adapter for Qdrant lands in `strata_forge.rag` (Phase 4).
+Memory primitives are likewise stdlib-only. `EpisodicMemory` accepts any
+`VectorStore` Protocol implementation; the in-process one needs nothing
+extra, and `strata_forge.rag.QdrantVectorStore` needs the `[rag]` extra
+(`pip install 'strata-forge[rag]'`) only at the point you construct it.
 
 ---
 
@@ -332,3 +366,22 @@ adapter for Qdrant lands in `strata_forge.rag` (Phase 4).
 - **`ValueError: handoff: router picked X, which isn't in the specialists catalog`**: the router LLM emitted an unknown specialist name. Make the router's system prompt enumerate the available specialists more explicitly, or run a sanity-check verification of the catalog the router sees.
 - **Critic loops forever / `max_rounds` exhausted**: the critic is too strict, or the drafter can't act on the feedback. Inspect via Langfuse traces (every iteration is captured) and either soften the critic's criteria or improve the drafter's instructions.
 - **Multi-modal `UserMessage` content lost from `ConversationMemory` token counts**: the token extractor counts text parts only; images aren't counted toward `trim_to_tokens`. Image tokens are computed by `strata_forge.llm.tokens` only when paired with a real model.
+
+---
+
+## See also
+
+- [`strata_forge.llm`](llm.md) — every primitive an agent runs on:
+  `LLMClient`, `Tool`, `@tool`, `run_tool_loop`, `stream_tool_loop`, the
+  `LoopEvent` union.
+- [`strata_forge.rag`](rag.md) — `QdrantVectorStore` and the `VectorStore`
+  Protocol behind `EpisodicMemory`, plus retrieval you can hang off a tool.
+- [`strata_forge.evals`](evals.md) — grading agent output across a dataset.
+- [`strata_forge.tracing`](tracing.md) — turning on end-to-end visibility of
+  a multi-iteration run.
+- [ADR 0011](../architecture/adr/0011-agents-thin-wrapper-over-forge-llm.md)
+  — why the agent is a thin composition rather than a PydanticAI wrapper.
+- [ADR 0012](../architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
+  — where the `VectorStore` Protocol lives and why.
+- [ADR 0014](../architecture/adr/0014-streaming-tool-loop-event-protocol.md)
+  — the `LoopEvent` protocol `run_streaming` yields.

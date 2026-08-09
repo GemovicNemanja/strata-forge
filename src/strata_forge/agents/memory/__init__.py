@@ -9,8 +9,8 @@ Two flavours of memory ship:
 - :class:`EpisodicMemory` — vector-backed long-term memory against a
   pluggable :class:`VectorStore` Protocol. A concrete
   :class:`InMemoryVectorStore` ships here for tests and prototyping;
-  :mod:`strata_forge.rag` (Phase 4) will provide a Qdrant-backed
-  implementation that satisfies the same Protocol.
+  :mod:`strata_forge.rag` provides a Qdrant-backed implementation,
+  :class:`QdrantVectorStore`, that satisfies the same Protocol.
 """
 
 from strata_forge.agents.memory.conversation import ConversationMemory

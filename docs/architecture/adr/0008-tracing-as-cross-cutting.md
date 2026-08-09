@@ -7,12 +7,13 @@
 
 ## Context
 
-Phase 1 deliberately left observability as a separate concern. The LLM
-module produces correlation IDs (`strata_forge.core.ids.correlation_id_var`)
-and emits NDJSON diagnostic records when `FORGE_DIAGNOSTIC_ENABLED=1`,
-but it never imports anything from a tracing layer — by design.
+`strata_forge.llm` deliberately leaves observability as a separate
+concern. The LLM module produces correlation IDs
+(`strata_forge.core.ids.correlation_id_var`) and emits NDJSON diagnostic
+records when `FORGE_DIAGNOSTIC_ENABLED=1`, but it never imports
+anything from a tracing layer — by design.
 
-Phase 2.2 introduces that tracing layer. The obvious shape would have
+This ADR introduces that tracing layer. The obvious shape would have
 been to add `from strata_forge.tracing import traced` calls inside `strata_forge.llm`
 so every completion is traced automatically. We're explicitly rejecting
 that shape, for four reasons:
@@ -32,8 +33,8 @@ that shape, for four reasons:
    ImportError` everywhere — neither is clean.
 
 3. **Testing surface.** Unit tests for the LLM client shouldn't have
-   to mock a tracing layer they don't care about. The current 922
-   unit tests pass without any tracing setup; that's a feature.
+   to mock a tracing layer they don't care about. The whole LLM unit
+   suite passes without any tracing setup; that's a feature.
 
 4. **Composition with non-Forge code.** The Langfuse Python SDK
    integrates cleanly into LiteLLM via a callback registered at
@@ -66,7 +67,7 @@ strata_forge.llm    strata_forge.prompts    (strata_forge.evals, strata_forge.ag
 - `strata_forge.config` — for the `LangfuseConfig` sub-model.
 - `strata_forge.llm` — for the message/response types, only for serializing
   trace inputs/outputs into Langfuse's payload shape.
-- `strata_forge.prompts` — for the same reason (when later sub-phases need
+- `strata_forge.prompts` — for the same reason (when later work needs
   to attach prompt metadata to a trace).
 - `langfuse` — lazy-imported behind the `[langfuse]` extra.
 
@@ -98,8 +99,8 @@ configuration crashes a production call.
 
 **Positive**
 
-- The Phase 1 LLM module stays untouched. Its 564 lines and 922 unit
-  tests don't need updates to gain Langfuse tracing — `install_litellm_callback()`
+- The LLM module stays untouched. Neither its code nor its unit suite
+  needs updates to gain Langfuse tracing — `install_litellm_callback()`
   flips it on at process startup.
 - Test isolation: unit tests for any downstream module remain free of
   tracing concerns unless that module explicitly opted in via

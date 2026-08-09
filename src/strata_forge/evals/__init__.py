@@ -1,9 +1,9 @@
 """Typed evaluation primitives: experiments, trials, grader Protocol, results.
 
-The 2.4.1 surface ships the foundation pieces — typed shapes and the
-deterministic graders. The runner (2.4.2), LLM-driven graders + trace
-replay (2.4.3), and reports + CI gate (2.4.4) land in subsequent
-sub-phases.
+The public surface covers the whole eval loop: the declarative
+:class:`Experiment` shape, the :class:`Grader` Protocol, deterministic and
+LLM-driven graders, the async experiment runner, metrics, parameter sweeps,
+trace replay, Markdown/HTML reports, and the CI regression gate.
 """
 
 from strata_forge.evals.ci_gate import (

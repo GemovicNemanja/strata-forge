@@ -7,8 +7,9 @@ discriminator is the ``api_base`` kwarg pointing at the user's deployment.
 The model id after the ``openai/`` prefix is whatever the self-hosted
 server advertises (often the original Hugging Face model name, e.g.
 ``meta-llama/Llama-3.1-70B-Instruct``). The registry doesn't carry these
-because they're operator-specific; callers supply them at the call site
-once ``strata_forge.compute`` ships in Phase 5.
+because they're operator-specific; callers supply them at the call site.
+The serving endpoints in ``strata_forge.compute`` are the common source of
+these ids.
 
 Tool calling: OpenAI-compatible servers that support function calling use
 OpenAI's tool schema verbatim. Callers reuse

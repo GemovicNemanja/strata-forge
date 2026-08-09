@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question, idea, or show and tell
+    url: https://github.com/GemovicNemanja/strata-forge/discussions
+    about: Usage questions, design discussions, and open-ended proposals belong in Discussions rather than the issue tracker.
+  - name: Report a security vulnerability
+    url: https://github.com/GemovicNemanja/strata-forge/security/advisories/new
+    about: Report privately through a draft advisory. Never open a public issue for a vulnerability - see SECURITY.md for the policy and the email fallback.
+  - name: Documentation
+    url: https://github.com/GemovicNemanja/strata-forge/tree/main/docs
+    about: Architecture overview, ADRs, and the per-module API reference. Check here before filing a bug about expected behaviour.

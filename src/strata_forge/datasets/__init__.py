@@ -1,6 +1,6 @@
 """Typed dataset shapes, versioning, and pluggable backends.
 
-The public surface is everything the eval runner (Phase 2.4) and
+The public surface is everything the eval runner and
 downstream user code consume. Backends in :mod:`strata_forge.datasets.stores`
 and the HF bridge in :mod:`strata_forge.datasets.hf_bridge` lazy-import their
 SDKs so :mod:`strata_forge.datasets` is importable without the

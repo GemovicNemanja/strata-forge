@@ -2,9 +2,9 @@
 
 A :class:`Dataset`'s version is the SHA-256 of its canonical content —
 name + sorted item IDs + metadata. Two puts with the same content
-produce the same version, so deduplication is automatic and the CI
-eval gate (Phase 2.4) can detect "the dataset changed between runs"
-without separate bookkeeping.
+produce the same version, so deduplication is automatic and the
+:mod:`strata_forge.evals` CI gate can detect "the dataset changed between
+runs" without separate bookkeeping.
 
 The :func:`diff` helper computes the added / removed / unchanged
 partition between two dataset versions by item ID, returning a

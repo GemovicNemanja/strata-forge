@@ -1,12 +1,33 @@
 ---
-description: strata_forge.config — Pydantic Settings root + YAML overlays + .env.
-globs: ["src/strata_forge/config/**/*.py", "configs/**", ".env*"]
+description: strata_forge.config — Pydantic Settings root, sub-models, .env loading, overlay helpers.
+globs: ["src/strata_forge/config/**/*.py", "tests/unit/config/**/*.py", ".env.example"]
 alwaysApply: false
 ---
 
-- `Settings` (in `strata_forge.config.settings`) is the single source of truth for runtime configuration. **Do not read env vars directly elsewhere** — go through `strata_forge.config.get_settings()`.
-- Provider configs are Pydantic `BaseSettings` subclasses; one per provider, in `strata_forge.llm.providers.config`.
-- Loading order (lowest → highest precedence): defaults → YAML overlay (`configs/<FORGE_PROFILE>.yaml`) → `.env` → process env → in-code override.
-- `strata-forge doctor` validates settings on every run. When adding a new setting, add a doctor check for it (and a row in `.env.example`).
-- Never log a `Settings` instance directly — it contains secrets. Use the redaction helpers.
-- `get_settings()` is cached for the lifetime of the process; `reset_settings()` exists for tests only.
+- `Settings` (in `strata_forge.config.settings`) is the single source of truth for runtime
+  configuration. **Do not read env vars directly elsewhere** — go through
+  `strata_forge.config.get_settings()`.
+- Sub-models partition configuration by concern. Every one except `ProvidersConfig` is a
+  `BaseSettings` in its own right, with its own `env_prefix` and `env_file`, attached to the root by
+  `default_factory`: `langfuse`, `redis`, `qdrant`, `huggingface`, `storage`, `logging`,
+  `diagnostic`.
+- Provider credentials are **not** here. They live in `strata_forge.llm.providers.config` as
+  `ProviderConfig(BaseSettings)` subclasses, one per provider, so the dependency points from `llm`
+  down to `config` and not back. `ProvidersConfig` on the root is an empty placeholder.
+- Loading precedence (lowest → highest): field defaults → `.env` → process environment → in-code
+  overrides passed to `Settings(...)`.
+- The YAML helpers in `overlays.py` (`load_overlay`, `deep_merge`, `overlay_path_for_profile`) are
+  standalone primitives for an application to apply at its own bootstrap. **Nothing layers them into
+  `Settings`**, there is no `configs/` directory, and `FORGE_PROFILE` only populates
+  `Settings.profile`. Do not document or assume an automatic overlay step.
+- When adding a setting: declare the field on the right sub-model, export the type from both
+  `settings.py`'s `__all__` and `config/__init__.py` (they have drifted before), add a commented row
+  to `.env.example` explaining what reads it, cover it in `tests/unit/config/test_settings.py`, and
+  surface it in `strata-forge doctor` if an operator would want to confirm it.
+- `strata-forge doctor` is a diagnostic, not a gate: it prints resolved settings, tracked package
+  versions, and TCP reachability probes, then always exits 0. Never describe it as validating
+  configuration.
+- Secrets are `SecretStr` fields. Call `.get_secret_value()` only at the point of use, and never log
+  a `Settings` instance whole.
+- `get_settings()` is cached for the lifetime of the process; `reset_settings()` exists for tests
+  only and is invoked automatically by the root `conftest.py` around every test.

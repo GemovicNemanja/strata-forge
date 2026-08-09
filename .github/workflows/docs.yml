@@ -1,0 +1,58 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.14"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build site (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group docs
+      # --strict turns MkDocs warnings into failures: a broken cross-page link, a nav entry
+      # pointing at a missing file, or a docs/ page absent from the nav all fail the build.
+      - run: uv run --frozen --group docs mkdocs build --strict
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Serialize deployments and never cancel one in flight: a half-published site is worse
+    # than a stale one.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      # `site_url` is pinned in mkdocs.yml, so the build never depends on this step's
+      # base_url output; it runs here only to assert the Pages site is configured.
+      - uses: actions/configure-pages@v5
+      - id: deployment
+        uses: actions/deploy-pages@v4

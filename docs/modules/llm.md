@@ -2,7 +2,7 @@
 
 The `strata_forge.llm` package is the typed, async LLM surface used by every other
 module that needs to talk to a model. It wraps LiteLLM ([ADR 0001]) and adds
-the layer that Forge actually wants to depend on: Pydantic messages and
+the layer the rest of strata-forge depends on: Pydantic messages and
 responses, structured output, tool calling, multimodal input, streaming,
 two-axis fallback, a provider-agnostic cache, a model registry, cost
 accounting, an NDJSON diagnostic dump, and budget integration.
@@ -10,7 +10,7 @@ accounting, an NDJSON diagnostic dump, and budget integration.
 This document is the canonical API reference for the module. The
 architectural rationale for individual decisions lives in the ADRs linked
 inline. The implementation lives under `src/strata_forge/llm/`; module-specific
-agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/llm/CLAUDE.md).
+agent rules live in [`src/strata_forge/llm/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/llm/CLAUDE.md).
 
 > **TL;DR.** Build an `LLMClient`, call `complete` / `stream` /
 > `complete_structured` / `run_tool_loop` / `stream_tool_loop`. Configure provider-level and
@@ -47,15 +47,22 @@ agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/ll
 ## Quickstart
 
 ```python
+import asyncio
+
 from strata_forge.llm import LLMClient, Message
 
-client = LLMClient("claude-opus-4-7")
-resp = await client.complete([Message.user("Say hello.")])
-print(resp.text, resp.usage.total_tokens, resp.cost_usd)
+
+async def main() -> None:
+    client = LLMClient("claude-opus-4-7")
+    resp = await client.complete([Message.user("Say hello.")])
+    print(resp.text, resp.usage.total_tokens, resp.cost_usd)
+
+
+asyncio.run(main())
 ```
 
 The first positional argument is a logical model name registered in
-`registry_data.yaml`. Without an explicit `provider=`, Forge takes the
+`registry_data.yaml`. Without an explicit `provider=`, the client takes the
 registry's default route for that model. Pin a specific provider when you
 want the call to go through it:
 
@@ -74,22 +81,32 @@ The registry is curated by [ADR 0004]: latest foundation models from
 Anthropic, OpenAI, and Google. Adding new vendors requires a superseding
 ADR. Pricing is in USD per million tokens.
 
-| Logical name | Vendor | Tier | Context | Routes | Input / Output |
-|---|---|---|---|---|---|
-| `claude-opus-4-7` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 |
-| `claude-sonnet-4-6` | Anthropic | balanced | 1 M | anthropic (default), bedrock, vertex | $3.00 / $15.00 |
-| `claude-haiku-4-5` | Anthropic | fast | 200 K | anthropic (default), bedrock, vertex | $1.00 / $5.00 |
-| `gpt-5.5` | OpenAI | flagship | 400 K | openai (default), azure | $5.00 / $30.00 |
-| `gpt-5.5-pro` | OpenAI | reasoning | 400 K | openai (default), azure | $30.00 / $180.00 |
-| `gpt-5.5-thinking` | OpenAI | reasoning | 400 K | openai (default), azure | $5.00 / $30.00 |
-| `gpt-5.5-instant` | OpenAI | fast | 128 K | openai (default), azure | $1.25 / $10.00 |
-| `gemini-3.1-pro` | Google | flagship | 2 M | vertex (default) | $2.00 / $12.00 |
-| `gemini-3.1-flash-lite` | Google | fast | 1 M | vertex (default) | $0.10 / $1.00 |
+| Logical name | Vendor | Tier | Context | Routes | Input / Output | Aliases |
+|---|---|---|---|---|---|---|
+| `claude-opus-4-8` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 | `opus-4.8` |
+| `claude-opus-4-7` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 | `opus`, `opus-4.7` |
+| `claude-sonnet-4-6` | Anthropic | balanced | 1 M | anthropic (default), bedrock, vertex | $3.00 / $15.00 | `sonnet`, `sonnet-4.6` |
+| `claude-haiku-4-5` | Anthropic | fast | 200 K | anthropic (default), bedrock, vertex | $1.00 / $5.00 | `haiku`, `haiku-4.5` |
+| `gpt-5.5` | OpenAI | flagship | 400 K | openai (default), azure | $5.00 / $30.00 | `gpt55` |
+| `gpt-5.5-pro` | OpenAI | reasoning | 400 K | openai (default), azure | $30.00 / $180.00 | `gpt55-pro` |
+| `gpt-5.5-thinking` | OpenAI | reasoning | 400 K | openai (default), azure | $5.00 / $30.00 | `gpt55-thinking` |
+| `gpt-5.5-instant` | OpenAI | fast | 128 K | openai (default), azure | $1.25 / $10.00 | `gpt55-instant` |
+| `gemini-3.1-pro` | Google | flagship | 2 M | vertex (default) | $2.00 / $12.00 | `gemini-pro`, `gemini-3-pro` |
+| `gemini-3.1-flash-lite` | Google | fast | 1 M | vertex (default) | $0.10 / $1.00 | `gemini-flash-lite` |
 
-Aliases (`opus`, `sonnet`, `haiku`, `gpt55`, `gemini-pro`, …) resolve to
-their canonical name before lookup. The source of truth is
-[`src/strata_forge/llm/registry_data.yaml`](../../src/strata_forge/llm/registry_data.yaml);
+Aliases resolve to their canonical name before lookup. The source of truth is
+[`src/strata_forge/llm/registry_data.yaml`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/llm/registry_data.yaml);
 edits to it must keep YAML and this table in sync.
+
+**Two entries are logical placeholders.** `gpt-5.5-thinking` routes to the
+provider model id `o4-mini` and `gpt-5.5-instant` routes to `gpt-5.4-nano`,
+because the named SKUs are not released. The logical name is stable; the
+`provider_model_id` it dispatches to is not the same string, and their
+pricing rows are marked `# TBD verify` in the YAML. Read
+`response.route.provider_model_id` if you need to know what actually
+served a call. `claude-haiku-4-5` is a milder case of the same thing — it
+routes to the dated alias `claude-haiku-4-5-20251001` on Anthropic, which
+is what the provider's model list returns.
 
 Programmatic access:
 
@@ -97,7 +114,7 @@ Programmatic access:
 from strata_forge.llm import registry
 
 model = registry.get("opus")        # alias -> Model("claude-opus-4-7")
-all_models = registry.list_models() # 9 entries
+all_models = registry.list_models() # 10 entries
 default_route = model.default_route()
 ```
 
@@ -169,7 +186,7 @@ parts. See [Multimodal](#multimodal) for the image case.
 `AssistantMessage` carries both `content: str | None` and
 `tool_calls: list[ToolCall]`. `ToolResultMessage` carries
 `tool_call_id`, `content`, and `is_error: bool`. The full hierarchy
-lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
+lives in [`messages.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/llm/messages.py).
 
 ### Responses
 
@@ -320,7 +337,8 @@ resp = await client.complete_structured(
 print(resp.parsed.title, resp.parsed.bullets)
 ```
 
-Dispatch by route:
+The structured-output payload is built for the **head of the fallback
+chain** and then reused verbatim for every attempt:
 
 - **OpenAI / Azure / openai_compat** — sets `response_format` to OpenAI's
   strict `json_schema` payload. The schema is tightened to the strict
@@ -330,6 +348,14 @@ Dispatch by route:
 - **Anthropic / Bedrock / Claude-on-Vertex** — no native channel; emits
   a forced tool call whose `input_schema` mirrors the desired shape, then
   parses the tool-call arguments back through the Pydantic model.
+
+The payload is *not* recomputed per attempt. `complete_structured`
+resolves `self.chain[0]`, builds one payload from that route, and hands it
+to `complete`, which then runs the whole chain. A chain whose head is
+Anthropic and whose tail is OpenAI therefore sends the Anthropic
+forced-tool extras to OpenAI on failover. Keep mixed-vendor chains for
+plain `complete`, or build one client per vendor when you need structured
+output across vendors.
 
 If the model emits text that fails Pydantic validation,
 `complete_structured` reprompts with the parse error included up to
@@ -414,9 +440,19 @@ capability can't be confirmed. By default such a model is let through and
 the provider decides at call time. Pass `require_tool_support=True` to the
 `LLMClient` constructor to instead raise
 `RegistryError(reason="capability_unknown")` pre-flight for any
-unconfirmable model — letting a caller (e.g. a server driving an agent
+unconfirmable model — letting a caller (e.g. a service driving an agent
 loop) cleanly degrade to a tool-less path rather than hit an opaque
 provider rejection mid-stream.
+
+> **Known limitation: `openai_compat` completions do not return.** Routing
+> is happy to pass an unregistered model id through, but every successful
+> response is normalized through `compute_cost(usage, route.model)`, which
+> looks the model up in the registry and raises
+> `RegistryError(reason="unknown_model")`. The provider call succeeds and is
+> billed; the exception surfaces afterwards. To drive a self-hosted
+> OpenAI-compatible endpoint today, register the model id in
+> `registry_data.yaml` first (pricing rows of `0.0` are fine for a local
+> server), or call LiteLLM directly for that path.
 
 ### Provider serialization
 
@@ -456,7 +492,7 @@ which models accept images.
 A `downscale_image(data, *, max_dimension=2048, quality=85)` helper is
 available behind the `[multimodal]` extra (Pillow); the example scripts
 demonstrate basic usage in
-[`examples/03_image_input.py`](../../examples/03_image_input.py).
+[`examples/03_image_input.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/03_image_input.py).
 
 ---
 
@@ -470,7 +506,7 @@ async for chunk in await client.stream([Message.user("Write a haiku.")]):
 Each `ResponseChunk` carries `delta_text`, `delta_tool_calls`, and
 optional `finish_reason` + `usage` (present on the final chunk when the
 provider reports them). The streaming utilities in
-[`streaming.py`](../../src/strata_forge/llm/streaming.py) provide accumulators
+[`streaming.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/llm/streaming.py) provide accumulators
 for the common postprocessing patterns:
 
 - `accumulate_text(chunks)` → the concatenated text.
@@ -576,7 +612,7 @@ load_model = ToolDeclaration(
 ```
 
 A declaration carries a raw JSON-Schema `parameters` dict (passed to the
-provider verbatim — forge does not validate JSON-Schema semantics, and
+provider verbatim — strata-forge does not validate JSON-Schema semantics, and
 unlike `Tool` there is no Pydantic argument validation on the way back).
 When a turn requests at least one declaration-targeted call, the turn's
 executable calls are invoked first (in model call order, with their
@@ -627,7 +663,7 @@ prices when usage reports them. `cache_hit=True` responses report
 ceiling around a block of code:
 
 ```python
-from strata_forge.core.budget import BudgetContext
+from strata_forge.core import BudgetContext
 
 async with BudgetContext(max_usd=1.00) as budget:
     await client.complete([...])
@@ -635,10 +671,19 @@ async with BudgetContext(max_usd=1.00) as budget:
     print(budget.spent_usd, "spent so far")
 ```
 
-`LLMClient` consumes against the active budget after every successful
-call. If the next call would exceed the ceiling, `BudgetExceededError`
-fires *before* the spend happens. Nested budgets share the parent
-ceiling unless explicitly `isolated=True`.
+`LLMClient` consumes against the active budget **after** each successful
+call, using the real `cost_usd` and `usage` the provider reported. There
+is no pre-call estimate: the call that trips the ceiling has already been
+made and billed, and `BudgetExceededError` surfaces from the consume step
+after the response comes back. The ceiling stops the *next* call, not the
+one that crossed it — size it with one call's headroom to spare.
+
+A nested `BudgetContext` starts its own counters at zero and links to its
+parent. `consume()` walks the chain, checks every budget in it, and either
+charges the child and all ancestors or charges none of them — so the
+child's ceiling is a sub-limit inside the parent's, not a copy of the
+parent's remaining spend. Pass `isolated=True` to break the link and
+account independently.
 
 ### Diagnostic NDJSON dump
 
@@ -650,17 +695,26 @@ route, messages, response text, tool calls, finish_reason, usage,
 cost, latency, cache_hit, error (on failure).
 
 The record schema (`DiagnosticRecord` in
-[`diagnostic.py`](../../src/strata_forge/llm/diagnostic.py)) is plain
+[`diagnostic.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/llm/diagnostic.py)) is plain
 JSON-serializable so replay/analytics scripts don't need to import
-Forge.
+strata-forge.
 
 ---
 
 ## Errors
 
-Every exception raised from `strata_forge.llm` is a `ForgeError` subclass — no
-raw LiteLLM exceptions ever bubble out. The seam is
-[`map_litellm_exception`](../../src/strata_forge/llm/errors.py).
+Every *runtime* failure — anything a provider, the cache, the registry, or
+a budget produces — is a `ForgeError` subclass. No raw LiteLLM exception
+ever bubbles out; the seam is
+[`map_litellm_exception`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/llm/errors.py).
+
+Argument mistakes are the exception, and raise builtins on purpose:
+`LLMClient(...)` raises `ValueError` when neither or both of `model=` and
+`chain=` are given, `run_tool_loop` / `stream_tool_loop` raise `ValueError`
+for `max_iterations < 1`, `InMemoryCache` raises `ValueError` for
+`max_size <= 0`, and `@tool` raises `TypeError` for a signature or
+annotation it can't read. Those fire at construction time, before any
+network call, and are programming errors rather than conditions to catch.
 
 | Exception | When it fires |
 |---|---|
@@ -682,8 +736,10 @@ raw LiteLLM exceptions ever bubble out. The seam is
 
 ## Sync wrappers
 
-Every async surface has a sync facade in `strata_forge.sync` for CLI and
-notebook use:
+Four `LLMClient` methods have a sync facade in `strata_forge.sync` for CLI
+and notebook use — `complete`, `complete_structured`, `stream`, and
+`run_tool_loop`. `stream_tool_loop` has none, and nothing outside
+`strata_forge.llm` is wrapped at all; every other module is async-only.
 
 ```python
 from strata_forge import sync
@@ -750,10 +806,46 @@ causes: schema too restrictive, prompt unclear, or the model literally
 can't output JSON reliably — try a stronger model or simplify the schema.
 
 **`ImportError: RedisCache requires the [redis] extra`.**
-Install with `pip install ai-forge[redis]` (or `uv sync --extra redis`)
+Install with `pip install strata-forge[redis]` (or `uv sync --extra redis`)
 before instantiating `RedisCache`.
 
 **No diagnostic file written.**
 The dump is gated on `FORGE_DIAGNOSTIC_ENABLED=true`. Set the env var
 and rerun; the file appears at `FORGE_DIAGNOSTIC_PATH` (default
 `./forge-diagnostic.ndjson`).
+
+**`RegistryError: Unknown model` from an `openai_compat` call that clearly
+reached the server.**
+Cost accounting runs on every normalized response and needs a registry
+entry for the logical model name. An operator-specific id passes routing
+but fails here, *after* the provider has answered — see
+[Capability gate](#capability-gate). Add the id to `registry_data.yaml`
+(zero pricing is fine for a local server) before routing through
+`openai_compat`.
+
+**`BudgetExceededError` even though the ceiling looked generous.**
+The budget is consumed after the response arrives, so a single expensive
+call can cross the ceiling in one step and raise on the way out. Check
+`exc.limit_usd` against `exc.spent_usd` — if they're close, the ceiling was
+crossed by the call you just paid for, not by a runaway loop.
+
+---
+
+## See also
+
+- [`strata_forge.core`](core.md) — `BudgetContext`, the `ForgeError`
+  hierarchy, `@retry`, and the correlation id every log line carries.
+- [`strata_forge.config`](config.md) — where provider keys, the Redis URL,
+  and the diagnostic settings come from.
+- [`strata_forge.prompts`](prompts.md) — building the `messages` list with a
+  cache-friendly stable prefix.
+- [`strata_forge.sync`](sync.md) — the four blocking facades.
+- [`strata_forge.agents`](agents.md) and [`strata_forge.evals`](evals.md) —
+  the two modules that compose this one most heavily.
+- ADRs: [0001 LiteLLM as transport](../architecture/adr/0001-litellm-as-transport.md),
+  [0003 exception hierarchy](../architecture/adr/0003-exception-hierarchy.md),
+  [0004 model registry scope](../architecture/adr/0004-model-registry-scope.md),
+  [0005 two-axis fallback](../architecture/adr/0005-two-axis-fallback.md),
+  [0006 tool calling as an LLM primitive](../architecture/adr/0006-tool-calling-as-llm-primitive.md),
+  [0014 streaming tool-loop event protocol](../architecture/adr/0014-streaming-tool-loop-event-protocol.md),
+  [0015 client-executed tools suspend the streaming loop](../architecture/adr/0015-client-executed-tools-suspend-the-streaming-loop.md).
