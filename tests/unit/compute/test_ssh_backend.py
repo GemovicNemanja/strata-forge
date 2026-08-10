@@ -350,9 +350,16 @@ class TestStatus:
         assert status.state == "failed"
         assert status.exit_code == 1
 
-    async def test_cancelled_when_pid_gone_no_exit_file(
+    async def test_a_process_that_vanished_uncancelled_is_a_failure(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
     ) -> None:
+        """Nothing may claim a death was asked for unless someone asked.
+
+        Pid gone with no exit file and no cancellation marker means the MACHINE took it — an OOM
+        kill, a reboot, a segfault in the interpreter. Reporting that as `cancelled` was not just
+        wrong: an orchestrator that captures diagnostics only for FAILED jobs then discards the
+        logs of exactly the deaths nobody can otherwise explain.
+        """
         fake_connection.queue(
             _FakeProcessResult(),
             _FakeProcessResult(),
@@ -361,7 +368,75 @@ class TestStatus:
         job = await backend.submit(Task(name="t", run="sleep 30"))
         fake_connection.queue(_FakeProcessResult(stdout="MISSING\n"))
         status = await backend.status(job)
+        assert status.state == "failed"
+        assert "without recording an exit code" in (status.message or "")
+
+    async def test_a_cancelled_job_reports_cancelled(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # `cancel` leaves a marker before it signals, which is the only evidence that separates a
+        # cancellation from a kill — afterwards the two are identical: pid gone, no exit file.
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        job = await backend.submit(Task(name="t", run="sleep 30"))
+        fake_connection.queue(_FakeProcessResult(stdout="CANCELLED\n"))
+        status = await backend.status(job)
         assert status.state == "cancelled"
+
+    async def test_cancel_marks_before_it_signals(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # Between the marker and the signal the process is already dying; a status landing in that
+        # window would otherwise read the death as one nobody asked for. So the order is load-bearing.
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        job = await backend.submit(Task(name="t", run="sleep 30"))
+        fake_connection.queue(_FakeProcessResult())
+        await backend.cancel(job)
+        cmd = fake_connection.commands[-1]
+        assert "forge.cancelled" in cmd
+        assert cmd.index("forge.cancelled") < cmd.index("kill -TERM")
+
+    async def test_an_empty_exit_file_is_not_a_verdict(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """The wrapper creates the exit file and writes to it as two steps.
+
+        A poll landing between them sees an empty file, which is not an outcome — it is a race.
+        `splitlines()[-1]` raised IndexError on it, which `except ValueError` never caught, so the
+        exception escaped `status` entirely and reached the caller's poll loop.
+        """
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        job = await backend.submit(Task(name="t", run="echo"))
+        fake_connection.queue(_FakeProcessResult(stdout=""))
+        status = await backend.status(job)
+        # Non-terminal: keep the job alive for one more poll rather than invent an outcome.
+        assert status.state == "running"
+        assert status.exit_code is None
+
+    async def test_a_whitespace_only_exit_file_is_not_a_verdict(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # Same race, one flush later: the newline landed and the digits did not.
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        job = await backend.submit(Task(name="t", run="echo"))
+        fake_connection.queue(_FakeProcessResult(stdout="\n  \n"))
+        status = await backend.status(job)
+        assert status.state == "running"
 
     async def test_unparseable_exit_file(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
