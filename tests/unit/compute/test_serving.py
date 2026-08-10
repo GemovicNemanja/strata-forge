@@ -220,6 +220,85 @@ class TestWaitForEndpoint:
             )
 
 
+class TestWaitForEndpointPhases:
+    """The readiness wait is the longest thing a caller awaits; it must not be silent."""
+
+    async def test_heartbeat_on_every_poll_when_uncapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _OK:
+            status_code = 200
+
+        class _NotYet:
+            status_code = 503
+
+        fake = _FakeAsyncClient([_NotYet(), _NotYet(), _OK()])
+        monkeypatch.setattr(httpx, "AsyncClient", _factory(fake), raising=False)
+        seen: list[str] = []
+        await wait_for_endpoint(
+            "http://localhost:8000/v1",
+            timeout_s=10,
+            poll_interval_s=0,
+            on_phase=seen.append,
+            phase_interval_s=0,  # every iteration is eligible
+        )
+        assert fake.calls == 3
+        assert len(seen) == 3
+        assert all(m.startswith("Loading the model onto the GPU (") for m in seen)
+
+    async def test_heartbeat_is_throttled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The property that protects an orchestrator's per-run event budget: many probes,
+        # one phrase. Without it a 30-minute wait at a 2s poll would emit ~900 rows.
+        class _OK:
+            status_code = 200
+
+        class _NotYet:
+            status_code = 503
+
+        fake = _FakeAsyncClient([_NotYet()] * 20 + [_OK()])
+        monkeypatch.setattr(httpx, "AsyncClient", _factory(fake), raising=False)
+        seen: list[str] = []
+        await wait_for_endpoint(
+            "http://localhost:8000/v1",
+            timeout_s=10,
+            poll_interval_s=0,
+            on_phase=seen.append,
+            phase_interval_s=600,  # far longer than this test can run
+        )
+        assert fake.calls == 21
+        assert len(seen) == 1
+
+    async def test_never_echoes_the_probe_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # base_url is caller-supplied and may carry credentials; phrases are surfaced to a
+        # human, so they must never interpolate it.
+        class _OK:
+            status_code = 200
+
+        fake = _FakeAsyncClient([_OK()])
+        monkeypatch.setattr(httpx, "AsyncClient", _factory(fake), raising=False)
+        seen: list[str] = []
+        await wait_for_endpoint(
+            "http://user:hunter2@localhost:8000/v1",
+            timeout_s=5,
+            on_phase=seen.append,
+            phase_interval_s=0,
+        )
+        assert seen
+        assert not any("hunter2" in m or "localhost" in m for m in seen)
+
+    async def test_broken_sink_cannot_break_the_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _OK:
+            status_code = 200
+
+        def _explode(_message: str) -> None:
+            err = "sink is closed"
+            raise RuntimeError(err)
+
+        fake = _FakeAsyncClient([_OK()])
+        monkeypatch.setattr(httpx, "AsyncClient", _factory(fake), raising=False)
+        await wait_for_endpoint("http://localhost:8000/v1", timeout_s=5, on_phase=_explode)
+
+
 # ---------------------------------------------------------------------------
 # serving_endpoint
 # ---------------------------------------------------------------------------
@@ -327,6 +406,81 @@ class TestServingEndpoint:
                 pass
         # Cleanup still ran.
         assert len(backend.cancelled) == 1
+
+    async def test_reports_launch_ready_and_teardown(
+        self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "strata_forge.compute.serving.wait_for_endpoint",
+            AsyncMock(return_value=None),
+        )
+        seen: list[str] = []
+        async with serving_endpoint(
+            backend, build_vllm_task("m"), base_url="http://localhost:8000/v1", on_phase=seen.append
+        ):
+            # Submitting and serving are separate facts: "launched" must be visible before
+            # readiness, or a server that never binds looks identical to one still starting.
+            assert seen == ["Starting the model server", "Model server ready"]
+        assert seen[-1] == "Stopping the model server"
+
+    async def test_reports_teardown_even_when_readiness_times_out(
+        self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "strata_forge.compute.serving.wait_for_endpoint",
+            AsyncMock(side_effect=TimeoutError("not ready")),
+        )
+        seen: list[str] = []
+        with pytest.raises(TimeoutError, match="not ready"):
+            async with serving_endpoint(
+                backend,
+                build_vllm_task("m"),
+                base_url="http://localhost:8000/v1",
+                on_phase=seen.append,
+            ):
+                pass
+        assert seen == ["Starting the model server", "Stopping the model server"]
+
+    async def test_forwards_the_sink_to_the_readiness_wait(
+        self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def _spy(_base_url: str, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        monkeypatch.setattr("strata_forge.compute.serving.wait_for_endpoint", _spy)
+        seen: list[str] = []
+        async with serving_endpoint(
+            backend,
+            build_vllm_task("m"),
+            base_url="http://localhost:8000/v1",
+            on_phase=seen.append,
+            phase_interval_s=7.5,
+        ):
+            pass
+        # The blackout is INSIDE the wait, so the sink has to reach it — reporting only around
+        # the context manager would leave the whole readiness window silent.
+        assert captured["on_phase"] is not None
+        assert captured["phase_interval_s"] == 7.5
+
+    async def test_broken_sink_cannot_break_the_context_manager(
+        self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "strata_forge.compute.serving.wait_for_endpoint",
+            AsyncMock(return_value=None),
+        )
+
+        def _explode(_message: str) -> None:
+            err = "sink is closed"
+            raise RuntimeError(err)
+
+        async with serving_endpoint(
+            backend, build_vllm_task("m"), base_url="http://localhost:8000/v1", on_phase=_explode
+        ):
+            pass
+        assert len(backend.cleaned) == 1
 
     async def test_swallows_cancel_and_cleanup_errors(
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch

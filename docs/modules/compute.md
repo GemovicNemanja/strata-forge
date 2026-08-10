@@ -177,14 +177,39 @@ backend-specific knowledge of which methods are no-ops.
 ```python
 from strata_forge.compute import LocalBackend, Task
 
-backend = LocalBackend(workdir="./local-forge-jobs")
+backend = LocalBackend()
 job = await backend.submit(Task(name="t", run="python -m my_script"))
 ```
 
-The local backend spawns each task as an async subprocess and
-tracks them by job id. Each job gets its own workdir
-(``{workdir}/{job_id}/``) with separate ``stdout.log`` and
-``stderr.log``. ``cleanup`` removes the workdir.
+The local backend spawns each task as an async subprocess
+(``bash -lc``) and tracks them by job id. It runs in
+``Task.workdir`` when one is set, and touches no filesystem of
+its own by default.
+
+Both pipes are drained continuously rather than read to EOF, so
+``logs`` returns partial output **while the job is still
+running** — the case worth diagnosing is a process that came up
+wrong and then hung, and its output exists long before it exits.
+The in-memory buffer keeps the last 1 MiB per stream.
+
+```python
+backend = LocalBackend(log_dir="./job-logs")
+```
+
+``log_dir`` additionally tees both streams to
+``serve.stdout.log`` / ``serve.stderr.log`` under that directory,
+written as the bytes arrive. Those files are deliberately left in
+place by ``cleanup``: once the process and its buffers are gone,
+the file is the only remaining evidence. It is opt-in, so a
+caller who never asks for it never finds log files appearing. The
+names are fixed (an orchestrator finds them without knowing the
+job id), so give concurrent jobs their own directories.
+
+A job ends when the child is reaped, not when its pipes close: a
+process the child backgrounded inherits those descriptors and can
+hold them open indefinitely, and gating the lifecycle on EOF
+would leave such a job stuck at ``running``. The drain gets a few
+seconds after the exit to finish reading.
 
 ## SSHBackend
 
@@ -281,6 +306,34 @@ async with serving_endpoint(
 
 The readiness probe hits ``{base_url}/models`` until it returns
 HTTP 200 or the ``wait_timeout_s`` expires.
+
+That wait is the longest thing the caller awaits, and by default
+it is silent. Pass ``on_phase`` — a sink taking one short string
+— to hear what is happening:
+
+```python
+async with serving_endpoint(
+    LocalBackend(), vllm_task,
+    base_url="http://localhost:8000/v1",
+    on_phase=print,          # "Starting the model server"
+    phase_interval_s=30.0,   # "Loading the model onto the GPU (90s)"
+) as endpoint:               # "Model server ready"
+    ...
+```
+
+``phase_interval_s`` throttles the readiness heartbeat, which is
+otherwise emitted once per probe: an orchestrator persisting
+these phrases has a finite budget per run, and a 2 s poll over a
+30-minute wait would burn ~900 of them. The sink must not block,
+and any exception it raises is swallowed — a broken sink must not
+take down a live serving job.
+
+The sink takes a plain ``str`` rather than a progress event
+because :mod:`strata_forge.compute` must not import
+:mod:`strata_forge.training`; the caller (typically a
+:mod:`strata_forge.pipelines` runner) wraps the phrase into a
+``ProgressEvent(kind="phase", ...)``. Phrases never interpolate
+``base_url``, which is caller-supplied and may carry credentials.
 
 ## Lazy-import contract
 
