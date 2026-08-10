@@ -236,6 +236,33 @@ def _tools_for_provider(tools: Sequence[AnyTool], provider: ProviderName) -> lis
 # ---------------------------------------------------------------------------
 
 
+def _cost_for_route(usage: Usage, route: ModelRoute) -> float:
+    """The call's USD cost, or ``0.0`` when the route's model has no price to look up.
+
+    ``resolve_route`` deliberately exempts ``openai_compat`` from the registry: its model ids are
+    operator-specific (a vLLM / TGI / SGLang deployment names its own model), so the curated
+    catalog does not — and by design should not — carry them. Pricing then has nothing to look up
+    either, and letting ``compute_cost`` raise ``unknown_model`` HERE discards a response the
+    provider has already produced. A batch run against a local vLLM lost all 2098 of its rows
+    exactly that way: every generation succeeded, and every one was thrown away on the way back
+    because a self-hosted endpoint has no per-token price.
+
+    ``0.0`` is the value a cache hit already reports, and it is the honest one for self-hosted
+    serving, where the cost is the machine rather than the token. The trade-off is that a METERED
+    openai_compat route (OpenRouter, Groq) is likewise not billed into ``BudgetContext`` — its
+    price is unknowable from here, and under-reporting spend beats failing a call that worked.
+
+    Any other provider stays strict: routing already guarantees its model is registered, so an
+    unknown one there is a real defect rather than the documented exemption.
+    """
+    try:
+        return compute_cost(usage, route.model)
+    except RegistryError:
+        if route.provider != "openai_compat":
+            raise
+        return 0.0
+
+
 def _normalize_response(
     raw: Any,
     *,
@@ -261,7 +288,7 @@ def _normalize_response(
         finish_reason = "tool_use"
 
     usage = _parse_usage(_duck_get(raw_any, "usage"))
-    cost = compute_cost(usage, route.model)
+    cost = _cost_for_route(usage, route)
 
     return LLMResponse(
         text=cast("str", text),
