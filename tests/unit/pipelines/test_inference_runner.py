@@ -716,3 +716,72 @@ class TestTemplateCoverage:
             ),
         )
         assert ir.load_spec() is not None
+
+
+# --------------- results must survive the push that was meant to move them ---
+
+
+async def test_results_are_written_outside_the_workdir_even_when_pushing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The orchestrator deletes the per-run workdir on EVERY terminal state.
+
+    Writing the parquet there and pushing from it means a failed upload — an expired token, a
+    rate limit, a network blip — takes the entire run's output with it: hours of generation gone
+    at the last step, with nothing left to retry from.
+    """
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), run_id="run123")
+    )
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    outdirs: list[Path] = []
+
+    def _write(rows: Any, outdir: Path) -> Path:
+        del rows
+        outdirs.append(outdir)
+        return outdir / "results.parquet"
+
+    async def _push(spec: Any, results_path: Any, token: str) -> str:
+        del results_path, token
+        return cast("str", spec.output_repo_id)
+
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+    monkeypatch.setattr(ir, "_write_results", _write)
+    monkeypatch.setattr(ir, "_push_results", _push)
+    monkeypatch.chdir(tmp_path)  # on the VM this is the workdir that gets deleted
+
+    assert await ir.main() == 0
+    assert outdirs, "results were never written"
+    # The cleanup-surviving dir named by the run id — NOT the cwd the orchestrator wipes.
+    assert str(outdirs[-1]).endswith("strata-inference-results/run123")
+    assert outdirs[-1] != tmp_path
+
+
+async def test_a_failed_push_says_where_the_results_are(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The run still fails — they were asked for on the Hub and are not there — but a failure at
+    # the last step of a long run is exactly when it matters that the output was not lost.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), run_id="run123")
+    )
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+
+    async def _push_boom(spec: Any, results_path: Any, token: str) -> str:
+        del spec, results_path, token
+        msg = "429 rate limited"
+        raise RuntimeError(msg)
+
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+    monkeypatch.setattr(ir, "_push_results", _push_boom)
+
+    assert await ir.main() == 1
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    error = [e for e in events if e["kind"] == "error"]
+    assert error
+    # WHERE (the path _write_results returned — the stub's, here) and WHY, in one sentence.
+    assert "results are on the VM at" in error[-1]["message"]
+    assert "results.parquet" in error[-1]["message"]
+    assert "429 rate limited" in error[-1]["message"]
