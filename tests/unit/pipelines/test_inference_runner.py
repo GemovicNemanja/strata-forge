@@ -99,9 +99,37 @@ def test_load_spec_rejects_extra_fields(monkeypatch: pytest.MonkeyPatch) -> None
 
 @pytest.mark.parametrize(
     "bad",
-    ["../evil", "https://x/y", "no-slash", "a b/c", "org/../escape", "org/model\n"],
+    # "no-slash" is deliberately absent: a bare canonical id (gpt2, t5-small) is VALID, and
+    # requiring the slash is what rejected every one of them after a VM had already been spun up.
+    ["../evil", "https://x/y", "a b/c", "org/../escape", "org/model\n"],
 )
 def test_load_spec_rejects_bad_ids(monkeypatch: pytest.MonkeyPatch, bad: str) -> None:
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(model_id=bad))
+    with pytest.raises(ir.RunError, match="invalid model id"):
+        ir.load_spec()
+
+
+@pytest.mark.parametrize("canonical", ["gpt2", "t5-small", "distilgpt2", "bert-base-uncased"])
+def test_load_spec_accepts_a_bare_canonical_id(
+    monkeypatch: pytest.MonkeyPatch, canonical: str
+) -> None:
+    """A canonical Hugging Face id has no owner, and this used to reject every one of them.
+
+    The control plane's own validator accepts them — with a comment saying the two agree — so a
+    run over `gpt2` was accepted at submit, given a VM, bootstrapped, and only THEN rejected here
+    as an "invalid model id".
+    """
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(model_id=canonical))
+    assert ir.load_spec().model_id == canonical
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["/leading", "trailing/", "a//b", ".hidden", "-dash", "a/b/c", "org/model "],
+)
+def test_load_spec_still_rejects_malformed_ids(monkeypatch: pytest.MonkeyPatch, bad: str) -> None:
+    # Accepting the canonical shape must not have opened the door on anything else: this is the
+    # VM's own defence-in-depth check, and the id reaches a Hub client on a box holding a token.
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(model_id=bad))
     with pytest.raises(ir.RunError, match="invalid model id"):
         ir.load_spec()
