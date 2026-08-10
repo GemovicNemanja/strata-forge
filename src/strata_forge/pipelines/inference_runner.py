@@ -341,7 +341,25 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     # Unbuffered: the served process writes through a pipe, so CPython would otherwise hold
     # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves
     # the log file empty, which is precisely the case the file exists for.
-    task = task.model_copy(update={"env": {**task.env, "PYTHONUNBUFFERED": "1"}})
+    # A batch run must not depend on a CUDA build toolchain being present on someone else's box.
+    # vLLM's default sampler is FlashInfer's, which JIT-COMPILES its kernels during warmup: it
+    # shells out to ninja, and a GPU image carrying the driver and runtime but no build tools
+    # fails with "No such file or directory: 'ninja'" — after loading the weights, compiling the
+    # graph, capturing CUDA graphs and allocating the KV cache, so the run has already paid for
+    # everything before it dies. The PyTorch-native sampler is marginally slower per token and
+    # needs no compiler, which is the right default for a machine we do not provision.
+    task = task.model_copy(
+        update={
+            "env": {
+                **task.env,
+                # Unbuffered: the served process writes through a pipe, so CPython would otherwise
+                # hold its output in an 8 KiB block buffer — and a server that hangs before filling
+                # it leaves the log file empty, which is precisely the case the file exists for.
+                "PYTHONUNBUFFERED": "1",
+                "VLLM_USE_FLASHINFER_SAMPLER": "0",
+            }
+        }
+    )
     # serving_endpoint reports "Starting the model server" itself the moment it submits, so
     # announcing it here as well would show the same phrase twice for one step.
     async with serving_endpoint(
