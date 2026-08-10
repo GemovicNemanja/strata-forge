@@ -17,6 +17,7 @@ OpenAI's tool schema verbatim. Callers reuse
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from strata_forge.llm.providers.base import ProviderClient
@@ -25,7 +26,15 @@ from strata_forge.llm.providers.config import OpenAICompatConfig
 if TYPE_CHECKING:
     from strata_forge.llm.registry import ProviderName
 
-__all__ = ["OpenAICompatProvider"]
+__all__ = ["UNAUTHENTICATED_API_KEY", "OpenAICompatProvider"]
+
+# Stands in for a credential when the server wants none. The OpenAI client refuses to build a
+# request without an api_key at all, so "unauthenticated" has to be spelled as a value rather
+# than an omission. vLLM's own documentation uses this string for the same reason.
+UNAUTHENTICATED_API_KEY = "EMPTY"
+# Env vars the OpenAI client reads on its own. If either is set, the caller means it — passing a
+# placeholder would override a real credential aimed at an authenticated deployment.
+_AMBIENT_KEY_VARS = ("OPENAI_API_KEY", "OPENAI_ADMIN_KEY")
 
 
 class OpenAICompatProvider(ProviderClient):
@@ -41,16 +50,39 @@ class OpenAICompatProvider(ProviderClient):
         super().__init__(config or OpenAICompatConfig())
 
     def auth_kwargs(self) -> dict[str, Any]:
-        """Return ``api_base`` (required) and optional ``api_key``.
+        """Return ``api_base`` (required) and an ``api_key``.
 
-        Self-hosted dev deployments often run unauthenticated, so the
-        ``api_key`` is optional. ``api_base`` is the URL of the OpenAI-
-        compatible server's ``/v1`` endpoint and is the only thing that
-        distinguishes this provider from the native ``OpenAIProvider``.
+        Self-hosted deployments commonly run unauthenticated, so the configured ``api_key`` is
+        optional — but OMITTING it does not produce an unauthenticated request. The OpenAI client
+        refuses to build a request without a key at all and fails before anything reaches the
+        network::
+
+            OpenAIException - Missing credentials. Please pass an `api_key` ... or set the
+            OPENAI_API_KEY ... environment variable.
+
+        That is indistinguishable, from the caller's side, from the server rejecting them, and it
+        fails EVERY request identically: a batch run against a local vLLM lost all 2098 of its
+        rows this way without one of them reaching the server. So "no credential" is sent as a
+        placeholder value, which an unauthenticated server ignores.
+
+        ``OPENAI_API_KEY`` / ``OPENAI_ADMIN_KEY`` in the environment are left alone: the client
+        reads them itself, and a caller who set one means it for an authenticated deployment.
+
+        The placeholder is scoped to a configured ``base_url``, i.e. to a server this provider is
+        actually pointed at. With no base_url there is no self-hosted deployment to be
+        unauthenticated against — the call falls through to api.openai.com, where a placeholder
+        would turn a plain "no credentials" into a puzzling rejection of one.
+
+        ``api_base`` is the URL of the OpenAI-compatible server's ``/v1`` endpoint and is the only
+        thing that distinguishes this provider from the native ``OpenAIProvider``.
         """
         kwargs: dict[str, Any] = {}
         if self.config.base_url is not None:
             kwargs["api_base"] = self.config.base_url
         if self.config.api_key is not None:
             kwargs["api_key"] = self.config.api_key.get_secret_value()
+        elif self.config.base_url is not None and not any(
+            os.environ.get(var) for var in _AMBIENT_KEY_VARS
+        ):
+            kwargs["api_key"] = UNAUTHENTICATED_API_KEY
         return kwargs
