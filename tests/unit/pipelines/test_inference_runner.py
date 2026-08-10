@@ -373,6 +373,12 @@ async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
     # Unbuffered, or a hung server's output sits in its own 8 KiB block buffer and the file
     # stays empty for exactly the failure it exists to explain.
     assert record["task"].env["PYTHONUNBUFFERED"] == "1"
+    # No runtime kernel compilation. vLLM's default sampler is FlashInfer's, which JIT-builds its
+    # kernels during warmup by shelling out to ninja — absent on a GPU image that ships the driver
+    # and runtime but no build tools, and the run dies there having already loaded the weights,
+    # compiled the graph and allocated the KV cache. We do not provision the user's box, so the
+    # engine must not require a compiler on it.
+    assert record["task"].env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
 
 
 async def test_main_error_path_scrubs_token(
