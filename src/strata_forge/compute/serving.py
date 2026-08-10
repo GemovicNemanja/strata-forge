@@ -29,8 +29,8 @@ endpoint until it responds.
 
 That wait is also the longest thing a caller does, so both
 :func:`serving_endpoint` and :func:`wait_for_endpoint` accept an
-``on_phase`` sink that receives short phrases ("launching the
-serving task", "waiting for the model server (90s)", "model server
+``on_phase`` sink that receives short phrases ("Starting the
+model server", "Loading the model onto the GPU (90s)", "model server
 ready"). The sink takes a plain ``str``: :mod:`strata_forge.compute`
 must not import :mod:`strata_forge.training`, so it is the caller —
 typically a :mod:`strata_forge.pipelines` runner — that turns a
@@ -346,7 +346,7 @@ async def wait_for_endpoint(
         while True:
             now = loop.time()
             if now >= next_phase_at:
-                _report(on_phase, f"waiting for the model server ({int(now - started)}s)")
+                _report(on_phase, f"Loading the model onto the GPU ({int(now - started)}s)")
                 next_phase_at = now + phase_interval_s
             try:
                 response = await client.get(probe_url)
@@ -408,7 +408,7 @@ async def serving_endpoint(
     """
     # Submitting is not the same as serving: a backend may return the moment the process is
     # spawned, so report the two separately rather than letting one phrase cover both.
-    _report(on_phase, "launching the serving task")
+    _report(on_phase, "Starting the model server")
     job = await backend.submit(task)
 
     async def _alive() -> bool:
@@ -436,12 +436,12 @@ async def serving_endpoint(
             with contextlib.suppress(Exception):
                 tail = (await backend.logs(job))[-_FAILURE_LOG_CHARS:]
             raise ServingProcessError(f"{exc}\n\n{tail}".rstrip()) from exc
-        _report(on_phase, "model server ready")
+        _report(on_phase, "Model server ready")
         yield ServingEndpoint(job=job, base_url=base_url)
     finally:
         # Teardown can hang too (a cancel that waits on an unresponsive process), so it is a
         # reportable phase rather than another silent stretch.
-        _report(on_phase, "stopping the serving task")
+        _report(on_phase, "Stopping the model server")
         with contextlib.suppress(Exception):
             await backend.cancel(job)
         if cleanup:

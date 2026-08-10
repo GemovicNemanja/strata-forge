@@ -316,11 +316,10 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     kinds = [e["kind"] for e in events]
     assert [e["message"] for e in events if e["kind"] == "phase"] == [
-        "loading dataset rows",
-        "starting the model server",
-        "generating",
-        "writing results",
-        "uploading results to the Hub",
+        "Loading the dataset",
+        "Generating responses",
+        "Writing results",
+        "Uploading results to the Hub",
     ]
     # The split download runs before the first countable milestone, so its phase must too.
     assert kinds.index("phase") < kinds.index("start")

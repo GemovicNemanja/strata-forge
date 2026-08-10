@@ -317,7 +317,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
 
     # The split download is unbounded by row_limit (that only slices during iteration), so it
     # runs BEFORE the first countable milestone and can take minutes on its own.
-    phase("loading dataset rows")
+    phase("Loading the dataset")
     rows = _load_rows(spec, hf_token)
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
@@ -342,7 +342,8 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves
     # the log file empty, which is precisely the case the file exists for.
     task = task.model_copy(update={"env": {**task.env, "PYTHONUNBUFFERED": "1"}})
-    phase("starting the model server")
+    # serving_endpoint reports "Starting the model server" itself the moment it submits, so
+    # announcing it here as well would show the same phrase twice for one step.
     async with serving_endpoint(
         # Tee the served process's streams into the run workdir. When the runner dies, the
         # buffers die with it; the files are what is left to explain why the server never came up.
@@ -360,7 +361,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         )
         # The first `step` only lands once a whole progress_chunk has completed, and that
         # chunk absorbs the client's cold start on top of its generations.
-        phase("generating")
+        phase("Generating responses")
         out = await _run_batches(spec, client, prompts, custom_ids, writer)
 
     # Push to the Hub only when BOTH a write token and an output repo are present (the control
@@ -369,12 +370,12 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
     if hf_token and spec.output_repo_id:
-        phase("writing results")
+        phase("Writing results")
         results_path = _write_results(out, Path.cwd())
-        phase("uploading results to the Hub")
+        phase("Uploading results to the Hub")
         destination = await _push_results(spec, results_path, hf_token)
     else:
-        phase("writing results")
+        phase("Writing results")
         results_path = _write_results(out, _local_results_dir(spec.run_id))
         destination = str(results_path)
 

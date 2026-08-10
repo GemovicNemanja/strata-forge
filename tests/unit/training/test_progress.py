@@ -47,10 +47,10 @@ class TestProgressEvent:
 
     def test_phase_is_a_valid_kind(self) -> None:
         # `phase` reports uncountable work, so it carries a message and no step.
-        ev = ProgressEvent(kind="phase", message="waiting for the model server (90s)")
+        ev = ProgressEvent(kind="phase", message="Loading the model onto the GPU (90s)")
         decoded = json.loads(ev.model_dump_json())
         assert decoded["kind"] == "phase"
-        assert decoded["message"] == "waiting for the model server (90s)"
+        assert decoded["message"] == "Loading the model onto the GPU (90s)"
         assert decoded["step"] is None
         assert decoded["total_steps"] is None
 

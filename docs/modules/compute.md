@@ -315,9 +315,9 @@ it is silent. Pass ``on_phase`` — a sink taking one short string
 async with serving_endpoint(
     LocalBackend(), vllm_task,
     base_url="http://localhost:8000/v1",
-    on_phase=print,          # "launching the serving task"
-    phase_interval_s=30.0,   # "waiting for the model server (90s)"
-) as endpoint:               # "model server ready"
+    on_phase=print,          # "Starting the model server"
+    phase_interval_s=30.0,   # "Loading the model onto the GPU (90s)"
+) as endpoint:               # "Model server ready"
     ...
 ```
 

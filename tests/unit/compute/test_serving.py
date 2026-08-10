@@ -244,7 +244,7 @@ class TestWaitForEndpointPhases:
         )
         assert fake.calls == 3
         assert len(seen) == 3
-        assert all(m.startswith("waiting for the model server (") for m in seen)
+        assert all(m.startswith("Loading the model onto the GPU (") for m in seen)
 
     async def test_heartbeat_is_throttled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The property that protects an orchestrator's per-run event budget: many probes,
@@ -420,8 +420,8 @@ class TestServingEndpoint:
         ):
             # Submitting and serving are separate facts: "launched" must be visible before
             # readiness, or a server that never binds looks identical to one still starting.
-            assert seen == ["launching the serving task", "model server ready"]
-        assert seen[-1] == "stopping the serving task"
+            assert seen == ["Starting the model server", "Model server ready"]
+        assert seen[-1] == "Stopping the model server"
 
     async def test_reports_teardown_even_when_readiness_times_out(
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
@@ -439,7 +439,7 @@ class TestServingEndpoint:
                 on_phase=seen.append,
             ):
                 pass
-        assert seen == ["launching the serving task", "stopping the serving task"]
+        assert seen == ["Starting the model server", "Stopping the model server"]
 
     async def test_forwards_the_sink_to_the_readiness_wait(
         self, backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch
