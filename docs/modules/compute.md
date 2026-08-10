@@ -224,17 +224,40 @@ backend = LocalBackend(env_inherit=False)      # child sees only Task.env
 job = await backend.submit(Task(name="t", run="python -m my_script"))
 ```
 
-The local backend spawns each task as an async subprocess and tracks it by
-job id **in memory**. It creates no directories: stdout and stderr are
-buffered in the job's in-process state, the child runs in `task.workdir`
-when the task sets one and in the parent's current directory otherwise,
-and `cleanup` drops the in-memory record and kills a lingering process. A
-`LocalBackend` handle does not survive the process that created it.
+The local backend spawns each task as an async subprocess (`bash -lc`) and tracks
+it by job id **in memory**. The child runs in `task.workdir` when the task sets
+one and in the parent's current directory otherwise, and the backend touches no
+filesystem of its own by default. A `LocalBackend` handle does not survive the
+process that created it. It runs single-node tasks only — `num_nodes != 1` raises.
 
-`env_inherit=True` (the default) gives the child the parent's `os.environ`
-plus `Task.env`; `env_inherit=False` gives it `Task.env` alone, which is
-the safer choice when a task should not see your local provider keys.
-`LocalBackend` runs single-node tasks only — `num_nodes != 1` raises.
+`env_inherit=True` (the default) gives the child the parent's `os.environ` plus
+`Task.env`; `env_inherit=False` gives it `Task.env` alone, which is the safer
+choice when a task should not see your local provider keys.
+
+Both pipes are drained continuously rather than read to EOF, so `logs` returns
+partial output **while the job is still running** — the case worth diagnosing is
+a process that came up wrong and then hung, and its output exists long before it
+exits. The in-memory buffer keeps the last 1 MiB per stream.
+
+```python
+backend = LocalBackend(log_dir="./job-logs")
+```
+
+`log_dir` additionally tees both streams to `serve.stdout.log` /
+`serve.stderr.log` under that directory, written as the bytes arrive. Those files
+are deliberately left in place by `cleanup`: once the process and its buffers are
+gone, the file is the only remaining evidence. It is opt-in, so a caller who never
+asks for it never finds log files appearing. The names are fixed (an orchestrator
+finds them without knowing the job id), so give concurrent jobs their own
+directories.
+
+`cleanup` otherwise drops the in-memory record and terminates a lingering process,
+escalating to a kill if it does not exit within five seconds.
+
+A job ends when the child is reaped, not when its pipes close: a process the child
+backgrounded inherits those descriptors and can hold them open indefinitely, and
+gating the lifecycle on EOF would leave such a job stuck at `running`. The drain
+gets a few seconds after the exit to finish reading.
 
 ## SSHBackend
 
@@ -348,6 +371,34 @@ targets, either because you installed it there or because you passed a
 `setup=` that does. The `[serving]` extra pins `vllm` for the case where
 the machine running strata-forge is also the machine serving the model;
 nothing in this module imports it.
+
+That wait is the longest thing the caller awaits, and by default
+it is silent. Pass ``on_phase`` — a sink taking one short string
+— to hear what is happening:
+
+```python
+async with serving_endpoint(
+    LocalBackend(), vllm_task,
+    base_url="http://localhost:8000/v1",
+    on_phase=print,          # "Starting the model server"
+    phase_interval_s=30.0,   # "Loading the model onto the GPU (90s)"
+) as endpoint:               # "Model server ready"
+    ...
+```
+
+``phase_interval_s`` throttles the readiness heartbeat, which is
+otherwise emitted once per probe: an orchestrator persisting
+these phrases has a finite budget per run, and a 2 s poll over a
+30-minute wait would burn ~900 of them. The sink must not block,
+and any exception it raises is swallowed — a broken sink must not
+take down a live serving job.
+
+The sink takes a plain ``str`` rather than a progress event
+because :mod:`strata_forge.compute` must not import
+:mod:`strata_forge.training`; the caller (typically a
+:mod:`strata_forge.pipelines` runner) wraps the phrase into a
+``ProgressEvent(kind="phase", ...)``. Phrases never interpolate
+``base_url``, which is caller-supplied and may carry credentials.
 
 ## Lazy-import contract
 

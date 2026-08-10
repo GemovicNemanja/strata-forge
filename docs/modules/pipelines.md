@@ -230,28 +230,35 @@ reader tailing the file sees each event the moment it is written and never obser
 rewrite.
 
 ```json
+{"kind":"phase","step":null,"total_steps":null,"epoch":null,"loss":null,"learning_rate":null,"metrics":{},"message":"Loading the dataset","ts":"2026-08-09T17:48:31.204Z"}
 {"kind":"start","step":null,"total_steps":1200,"epoch":null,"loss":null,"learning_rate":null,"metrics":{},"message":"","ts":"2026-08-09T17:49:09.860582Z"}
 {"kind":"step","step":400,"total_steps":1200,"epoch":null,"loss":null,"learning_rate":null,"metrics":{"succeeded":398.0,"failed":2.0},"message":"","ts":"2026-08-09T17:49:12.114Z"}
 {"kind":"end","step":1200,"total_steps":1200,"epoch":null,"loss":null,"learning_rate":null,"metrics":{"succeeded":1196.0,"failed":4.0},"message":"owner/summaries","ts":"2026-08-09T18:02:41.907Z"}
 ```
 
-The event sequence for a successful run is `start`, then one `step` per `progress_chunk` rows
-completed, then `end`:
+The event sequence for a successful run is a `phase` for each uncountable provisioning step,
+`start` once the work can be counted, one `step` per `progress_chunk` rows completed, and `end`:
 
 | Kind | When | What it carries |
 |---|---|---|
+| `phase` | Entering a step that has nothing to count: loading the split, starting the model server, generating, writing and uploading results. | `message` only — a short phrase such as `Loading the dataset`. Never a step count. |
 | `start` | After the split is loaded and prompts are built, before the server launches. | `total_steps` = number of prompts. |
 | `step` | After each chunk of `progress_chunk` prompts completes. | `step` = cumulative rows completed; `metrics` = running `succeeded` / `failed` counts. |
 | `end` | After results are written and, if applicable, pushed. | Final counts, and `message` = where the results landed. |
 | `error` | On any unhandled failure. | `message` = the failure, with credentials scrubbed. |
 
+`phase` is the only kind that can precede `start`, and it exists because the stretches between
+countable milestones are where a run spends most of its wall clock. Without them the interval
+between `start` and the first `step` is one indeterminate wait — which is exactly where a model
+server that never comes up burns its entire timeout, invisibly. Phase messages pass through the
+same credential scrub as `error` and are capped at 200 characters, because `serving_endpoint`'s
+`on_phase` hook is public API and a caller's phrase must not be able to grow the file the
+orchestrator is tailing.
+
 `ProgressEvent` is shared with the training runners, so it has fields this pipeline never
 populates: `epoch`, `loss` and `learning_rate` are always `null`, and the `eval` and `checkpoint`
 kinds are never emitted. Read `metrics` for inference counters. An `error` event can appear with no
 preceding `start` — a spec that fails validation never gets far enough to count anything.
-
-Because `start` is emitted before the model server launches, a run can sit between `start` and its
-first `step` for a long time. That gap is the model loading, not a hang.
 
 ### Why a file and not a socket
 
@@ -412,9 +419,11 @@ is trusted:
   `Qwen/Qwen2.5-7B-Instruct` is not in it. The failure happens after the server has answered, so
   the server, the prompts and the plumbing are all fine. Read the `succeeded` count on the `end`
   event rather than trusting the exit code.
-- **The run hangs between `start` and the first `step`.** That interval is vLLM loading weights,
-  which for a large model on a cold machine is minutes, not seconds. If it exceeds
-  `wait_timeout_s` the run fails with a readiness error; raise it rather than assuming a deadlock.
+- **The run sits between `start` and the first `step`.** That interval is vLLM loading weights,
+  which for a large model on a cold machine is minutes, not seconds. The `phase` events emitted
+  around it say which step is actually in progress, so read those before assuming a deadlock. If it
+  exceeds `wait_timeout_s` the run fails with a readiness error; raise the timeout rather than
+  treating it as a hang.
 - **`column_mapping references columns not in the split`.** The names on the right-hand side of
   `column_mapping` are *dataset column* names, and the names on the left are *template
   placeholder* names. Getting them the wrong way round produces exactly this error.

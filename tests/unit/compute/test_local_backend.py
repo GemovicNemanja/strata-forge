@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from strata_forge.compute import Backend, LocalBackend, Task
+from strata_forge.compute.backends import local as local_backend
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from strata_forge.compute.job import Job
@@ -32,6 +34,26 @@ async def _wait_until_terminal(
             await asyncio.sleep(0.05)
 
     await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+async def _wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 10.0,  # noqa: ASYNC109 — explicit wall-clock budget for test polling
+) -> None:
+    """Poll ``predicate`` until it holds; raises :class:`TimeoutError` if it never does."""
+
+    async def _poll() -> None:
+        while True:
+            if predicate():
+                return
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+def _serve_log_names(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.glob("serve.*.log"))
 
 
 class TestProtocolCompliance:
@@ -318,6 +340,90 @@ class TestEnvInherit:
             assert "MARK=MISSING" in logs
         finally:
             os.environ.pop("FORGE_TEST_MARKER", None)
+
+
+class TestStreamedOutput:
+    """A hung process is the case worth diagnosing, so its output must be reachable early.
+
+    The failure these guard: reading both pipes to EOF yields nothing at all until the
+    process exits, so a model server that comes up wrong and then sits there hands back an
+    empty log for as long as it hangs — and the buffers die with the runner afterwards.
+    """
+
+    async def test_logs_readable_while_the_process_is_still_running(self) -> None:
+        backend = LocalBackend()
+        # `exec` so bash becomes the sleeper: one process, so cancel closes the pipe at once.
+        job = await backend.submit(Task(name="hang", run="echo EARLY-STDOUT; exec sleep 10"))
+        try:
+            captured: list[str] = []
+
+            def _seen() -> bool:
+                captured.append(backend._jobs[job.id].stdout_buffer.decode())  # pyright: ignore[reportPrivateUsage]
+                return "EARLY-STDOUT" in captured[-1]
+
+            await _wait_until(_seen, timeout=5.0)
+            assert "EARLY-STDOUT" in await backend.logs(job)
+            assert (await backend.status(job)).state == "running"
+        finally:
+            await backend.cancel(job)
+
+    async def test_terminal_state_does_not_wait_on_an_orphan_holding_the_pipe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The child exits but a process it backgrounded keeps the write end of the pipe, so
+        # EOF never comes. Gating termination on EOF would pin the job at "running" forever.
+        monkeypatch.setattr(local_backend, "_DRAIN_GRACE_S", 0.2)
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="orphan", run="sleep 10 & echo PARENT-DONE"))
+        await _wait_until_terminal(backend, job, timeout=5.0)
+        assert (await backend.status(job)).state == "succeeded"
+        assert "PARENT-DONE" in await backend.logs(job)
+
+
+class TestServeLogFiles:
+    async def test_no_files_are_written_without_log_dir(self, tmp_path: Path) -> None:
+        # Opt-in: a library user who never asks for logs never finds files beside their code.
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="echo hi", workdir=str(tmp_path)))
+        await _wait_until_terminal(backend, job)
+        assert _serve_log_names(tmp_path) == []
+
+    async def test_streams_to_disk_before_the_process_exits(self, tmp_path: Path) -> None:
+        backend = LocalBackend(log_dir=tmp_path)
+        job = await backend.submit(Task(name="hang", run="echo EARLY-STDOUT; exec sleep 10"))
+        try:
+            out = tmp_path / "serve.stdout.log"
+            await _wait_until(
+                lambda: out.exists() and "EARLY-STDOUT" in out.read_text(), timeout=5.0
+            )
+            assert (await backend.status(job)).state == "running"
+        finally:
+            await backend.cancel(job)
+
+    async def test_files_outlive_cleanup(self, tmp_path: Path) -> None:
+        backend = LocalBackend(log_dir=tmp_path)
+        job = await backend.submit(Task(name="t", run="echo OUT; echo ERR 1>&2"))
+        await _wait_until_terminal(backend, job)
+        await backend.cleanup(job)
+        # The in-memory state is gone; the artifact is the whole point of writing it down.
+        with pytest.raises(ValueError, match="unknown job"):
+            await backend.status(job)
+        assert "OUT" in (tmp_path / "serve.stdout.log").read_text()
+        assert "ERR" in (tmp_path / "serve.stderr.log").read_text()
+
+    async def test_unusable_log_dir_degrades_instead_of_failing_the_job(
+        self, tmp_path: Path
+    ) -> None:
+        # A log path is never worth failing a job over — the job runs, the reason is recorded.
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("x")
+        backend = LocalBackend(log_dir=blocker / "logs")
+        job = await backend.submit(Task(name="t", run="echo STILL-RAN"))
+        await _wait_until_terminal(backend, job)
+        assert (await backend.status(job)).state == "succeeded"
+        logs = await backend.logs(job)
+        assert "STILL-RAN" in logs
+        assert "log_dir unusable" in logs
 
 
 class TestReadFile:

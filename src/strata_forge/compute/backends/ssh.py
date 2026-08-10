@@ -175,12 +175,32 @@ class SSHBackend:
             check=True,
         )
 
-        # Launch under nohup, capture the PID, write the exit code on exit.
+        # Launch detached, capture the PID, write the exit code on exit.
+        #
+        # sshd keeps the session channel open until it sees EOF on the command's stdout AND
+        # stderr, not when the command exits — and every process in a backgrounded tree inherits
+        # those descriptors. asyncssh's run() in turn resolves on channel close rather than on
+        # exit-status, so a launcher that leaves them open makes submit() block for the entire
+        # lifetime of the job it just launched. Redirecting the backgrounded subshell's OWN
+        # descriptors is what releases the channel; the inner per-command redirections still win,
+        # so the job's stdout/stderr keep landing in their log files.
+        #
+        # The brace group is load-bearing, not cosmetic: `&` binds looser than `&&`, so without it
+        # the shell backgrounds the whole `cd … && ( … )` and-list and forks an OUTER subshell that
+        # inherits the channel anyway — the redirection alone does not fix the hang. It also keeps
+        # `cd` in the foreground shell, so the pid file is written inside the workdir instead of
+        # $HOME, where concurrent submits would otherwise overwrite each other's handle.
+        #
+        # `trap '' HUP` covers the bookkeeping subshell at session teardown, which nohup does not:
+        # nohup protects only the process it execs, so without the trap a hangup between launch and
+        # completion loses the exit code and leaves a live job indistinguishable from a cancelled
+        # one. `< /dev/null` detaches stdin so a long bootstrap that reads it sees EOF rather than
+        # EIO once the channel is gone.
         launch_cmd = (
-            f"cd {shlex.quote(remote_workdir)} && "
-            f"(nohup bash wrapper.sh > {_STDOUT_FILE} 2> {_STDERR_FILE}; "
-            f"echo $? > {_EXIT_FILE}) & "
-            f"echo $! > {_PID_FILE}; cat {_PID_FILE}"
+            f"cd {shlex.quote(remote_workdir)} && {{ "
+            f"( trap '' HUP; nohup bash wrapper.sh > {_STDOUT_FILE} 2> {_STDERR_FILE}; "
+            f"echo $? > {_EXIT_FILE} ) < /dev/null > /dev/null 2>&1 & "
+            f"echo $! > {_PID_FILE}; cat {_PID_FILE}; }}"
         )
         _exit, stdout, _stderr = await self._run_remote(launch_cmd, check=True)
         pid = stdout.strip().splitlines()[-1]

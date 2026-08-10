@@ -248,10 +248,131 @@ async def test_main_happy_path_pushes_and_never_leaks_token(
     text = progress.read_text()
     events = [json.loads(line) for line in text.splitlines() if line.strip()]
     kinds = [e["kind"] for e in events]
-    assert kinds[0] == "start"
+    # Phases precede `start` (the dataset download runs before it), so the milestone contract
+    # is about the countable kinds: the first of those is still `start`.
+    assert next(k for k in kinds if k != "phase") == "start"
     assert kinds[-1] == "end"
     assert events[-1]["message"] == "org/out"  # the result location (a repo id, not a secret)
     assert _TOKEN not in text  # the token NEVER appears in any emitted event
+
+
+# --------------------------- main: provisioning phases ----------------------
+
+
+def _same_dir(left: Any, right: Any) -> bool:
+    return ir.Path(left).resolve() == ir.Path(right).resolve()
+
+
+def _recording_serving(record: dict[str, Any], *, drive: Any = None) -> Any:
+    """A `serving_endpoint` stand-in that records its arguments and can drive the phase hook."""
+
+    @contextlib.asynccontextmanager
+    async def _serving(backend: Any, task: Any, **kwargs: Any) -> AsyncGenerator[Any]:
+        record["backend"] = backend
+        record["task"] = task
+        record.update(kwargs)
+        if drive is not None:
+            drive(record)
+        yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1")
+
+    return _serving
+
+
+def _mock_main_deps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, serving: Any) -> None:
+    """Stub the heavy externals so `main` runs its own orchestration end to end."""
+
+    def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
+        del spec, token
+        return [{"question": "a"}]
+
+    def _write(rows: Any, outdir: Any) -> Path:
+        del rows, outdir
+        return tmp_path / "results.parquet"
+
+    async def _push(spec: Any, results_path: Any, token: str) -> str:
+        del results_path, token
+        return cast("str", spec.output_repo_id)
+
+    _FakeRunner.scripted = [_ok("A")]
+    monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "serving_endpoint", serving)
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+    monkeypatch.setattr(ir, "_write_results", _write)
+    monkeypatch.setattr(ir, "_push_results", _push)
+
+
+async def test_main_reports_a_phase_for_every_silent_stretch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Each of these covers a stretch with nothing to count. Without them a run is one
+    # indeterminate wait — which is where a model server that never comes up spends its
+    # entire timeout, leaving the user staring at a spinner.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+
+    assert await ir.main() == 0
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    kinds = [e["kind"] for e in events]
+    assert [e["message"] for e in events if e["kind"] == "phase"] == [
+        "Loading the dataset",
+        "Generating responses",
+        "Writing results",
+        "Uploading results to the Hub",
+    ]
+    # The split download runs before the first countable milestone, so its phase must too.
+    assert kinds.index("phase") < kinds.index("start")
+    phase_events = [e for e in events if e["kind"] == "phase"]
+    assert all(e["step"] is None and e["total_steps"] is None for e in phase_events)
+
+
+async def test_serving_hook_phrases_are_scrubbed_and_capped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `serving_endpoint`'s on_phase is public API, so the phrase reaching the progress file is
+    # not necessarily one this module wrote. It gets the same treatment as an error message.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+
+    def _drive(rec: dict[str, Any]) -> None:
+        rec["on_phase"](f"pulling weights with {_TOKEN} " + "x" * 500)
+
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record, drive=_drive))
+
+    assert await ir.main() == 0
+    text = progress.read_text()
+    assert _TOKEN not in text
+    events = [json.loads(line) for line in text.splitlines() if line.strip()]
+    driven = [e for e in events if e["kind"] == "phase" and "pulling weights" in e["message"]]
+    assert len(driven) == 1
+    assert "***" in driven[0]["message"]
+    assert len(driven[0]["message"]) <= 200
+
+
+async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+    monkeypatch.chdir(tmp_path)  # on the VM this is the per-run job workdir
+
+    assert await ir.main() == 0
+    # The hook has to reach the readiness wait — that is where the whole blackout happens.
+    assert record["on_phase"] is not None
+    # The served process's streams are teed to disk, because when the runner dies its buffers
+    # die with it and the file is the only thing left that explains why the server never came up.
+    log_dir = record["backend"]._log_dir  # pyright: ignore[reportPrivateUsage]
+    assert log_dir is not None
+    assert _same_dir(log_dir, tmp_path)
+    # Unbuffered, or a hung server's output sits in its own 8 KiB block buffer and the file
+    # stays empty for exactly the failure it exists to explain.
+    assert record["task"].env["PYTHONUNBUFFERED"] == "1"
 
 
 async def test_main_error_path_scrubs_token(

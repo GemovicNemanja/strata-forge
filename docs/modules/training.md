@@ -279,11 +279,13 @@ sft = SFTConfig(
 SFTRunner(sft).train(train_dataset=your_dataset)
 ```
 
-Each line is a `ProgressEvent`: `kind` (one of `start`, `step`, `eval`,
-`checkpoint`, `end`, `error`), plus `step`, `total_steps`, `epoch`,
-`loss`, `learning_rate`, a `metrics` dict for anything else numeric, an
-optional `message`, and a UTC `ts`. `step` events land on the
-`logging_steps` cadence.
+Each line is a `ProgressEvent`: `kind` (one of `phase`, `start`, `step`,
+`eval`, `checkpoint`, `end`, `error`), plus `step`, `total_steps`,
+`epoch`, `loss`, `learning_rate`, a `metrics` dict for anything else
+numeric, an optional `message`, and a UTC `ts`. `step` events land on the
+`logging_steps` cadence. A `phase` event is the exception to that shape:
+it carries `kind`, `message` and `ts` alone, and reports what a long
+uncountable step is doing rather than marking a countable milestone.
 
 When `progress_jsonl` is unset, the runners fall back to the
 `FORGE_PROGRESS_PATH` environment variable; when neither is set, no
