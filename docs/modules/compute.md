@@ -147,13 +147,24 @@ Backends return :class:`Job` handles from ``submit``. A
 | ``pending`` | Queued / setting up; not yet running. |
 | ``running`` | Actively executing. |
 | ``succeeded`` | Exit code 0. |
-| ``failed`` | Non-zero exit, infrastructure error, or unparseable status. |
-| ``cancelled`` | Process killed before completion. |
+| ``failed`` | Non-zero exit, infrastructure error, unparseable status, or a process that vanished without recording an exit code (an OOM kill, a reboot). |
+| ``cancelled`` | Killed **by an explicit** :meth:`cancel`. |
 
 The five-state set is intentionally narrow — backend-specific
 nuance (SkyPilot's ``SETTING_UP``, SSH's process-gone-no-exit-file)
 lands in :attr:`JobStatus.message` rather than expanding the state
 machine.
+
+``cancelled`` is reserved for a death somebody **asked for**. A cancelled
+process and one the machine killed look identical afterwards — pid gone,
+no exit code — so ``SSHBackend.cancel`` records a marker in the job's
+workdir *before* it signals, and only that marker earns ``cancelled``.
+Anything else that vanished is ``failed``: it is a real failure, and
+because orchestrators capture diagnostics for failures and not for
+cancellations, mislabelling it also threw away the logs of the one kind
+of death nobody chose. (A ``status`` call after ``cleanup`` has removed
+the workdir has no evidence left to read and reports ``failed``; the
+lifecycle does not define ``status`` after teardown.)
 
 ## Backend protocol
 

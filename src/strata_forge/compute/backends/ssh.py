@@ -32,6 +32,12 @@ __all__ = ["SSHBackend"]
 
 _PID_FILE = "forge.pid"
 _EXIT_FILE = "forge.exit"
+# Written by `cancel` BEFORE it signals, so `status` can tell a cancellation from a process the
+# machine killed. Both look identical afterwards — pid gone, no exit file — and guessing
+# "cancelled" for every such job reported an OOM kill, a reboot, or a segfault as something the
+# user asked for. The lie is not free downstream: an orchestrator that captures diagnostics only
+# for FAILED jobs discards the logs of exactly the deaths nobody chose.
+_CANCELLED_FILE = "forge.cancelled"
 _STDOUT_FILE = "stdout.log"
 _STDERR_FILE = "stderr.log"
 _FORGE_REMOTE_ROOT = ".forge-compute"
@@ -242,9 +248,14 @@ class SSHBackend:
         pid = self._job_pid(job)
         # Probe liveness, then check for the exit-code file the wrapper
         # writes when it terminates.
+        # `cat` of an EMPTY exit file succeeds with no output, so MISSING must not be reached by
+        # `||` alone — the marker is echoed only when the file is absent. Without that, an empty
+        # file produced empty output that matched neither branch below and crashed the parse.
         probe_cmd = (
             f"kill -0 {shlex.quote(pid)} 2>/dev/null && echo RUNNING || "
-            f"cat {shlex.quote(workdir)}/{_EXIT_FILE} 2>/dev/null || echo MISSING"
+            f"{{ test -f {shlex.quote(workdir)}/{_CANCELLED_FILE} && echo CANCELLED; }} || "
+            f"{{ test -f {shlex.quote(workdir)}/{_EXIT_FILE} "
+            f"&& cat {shlex.quote(workdir)}/{_EXIT_FILE}; }} || echo MISSING"
         )
         _exit, stdout, _stderr = await self._run_remote(probe_cmd)
         text = stdout.strip()
@@ -258,17 +269,39 @@ class SSHBackend:
 
         if text == "RUNNING":
             return JobStatus(state="running", started_at=started_at)
-        if text == "MISSING":
-            # Process not alive and no exit file — usually means cancelled
-            # before the wrapper got a chance to write the exit code.
+        if text == "CANCELLED":
+            # `cancel` left its marker, so this death was ASKED FOR. Nothing else may claim that.
             return JobStatus(
                 state="cancelled",
                 started_at=started_at,
-                message="process gone, no exit file",
+                finished_at=datetime.now(UTC),
+                message="cancelled",
             )
-        # text should be a numeric exit code.
+        if text == "MISSING":
+            # Process gone, no exit file, and nobody cancelled it: the machine took it — an OOM
+            # kill, a reboot, a segfault in the interpreter itself. That is a FAILURE, and calling
+            # it "cancelled" both misreported it and (because diagnostics are captured only for
+            # failures) threw away the logs of the one kind of death nobody can otherwise explain.
+            return JobStatus(
+                state="failed",
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                message="process died without recording an exit code (killed, or the host went away)",
+            )
+        # text should be a numeric exit code. An EMPTY read is the write-in-progress race, not a
+        # verdict: the wrapper creates the file and writes to it as two steps, so a poll landing
+        # between them sees an empty file. Reporting non-terminal keeps the job alive for one more
+        # poll rather than inventing an outcome — and rather than crashing, which is what
+        # `splitlines()[-1]` did on empty input (IndexError, which `except ValueError` never caught).
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return JobStatus(
+                state="running",
+                started_at=started_at,
+                message="exit file not written yet",
+            )
         try:
-            exit_code = int(text.splitlines()[-1].strip())
+            exit_code = int(lines[-1].strip())
         except ValueError:
             return JobStatus(
                 state="failed",
@@ -324,8 +357,13 @@ class SSHBackend:
 
     async def cancel(self, job: Job) -> None:
         pid = self._job_pid(job)
-        # Best-effort SIGTERM, brief wait, SIGKILL.
+        workdir = self._job_workdir(job)
+        # The marker is written BEFORE the signal, and deliberately not after: between the two the
+        # process is already dying, and a `status` landing in that window would otherwise read the
+        # death as one nobody asked for.
         cmd = (
+            f"touch {shlex.quote(workdir)}/{_CANCELLED_FILE} 2>/dev/null; "
+            # Best-effort SIGTERM, brief wait, SIGKILL.
             f"kill -TERM {shlex.quote(pid)} 2>/dev/null; "
             "sleep 2; "
             f"kill -KILL {shlex.quote(pid)} 2>/dev/null; "
