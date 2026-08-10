@@ -208,9 +208,14 @@ async def test_run_batches_reconciles_and_emits(
 # ----------------------- main: happy path + no token leak -------------------
 
 
+async def _always_alive() -> bool:
+    """The serving process is up. Tests that kill it mid-batch supply their own probe."""
+    return True
+
+
 @contextlib.asynccontextmanager
 async def _fake_serving(*_a: Any, **_kw: Any) -> AsyncGenerator[Any]:
-    yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1")
+    yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1", is_alive=_always_alive)
 
 
 async def test_main_happy_path_pushes_and_never_leaks_token(
@@ -274,7 +279,7 @@ def _recording_serving(record: dict[str, Any], *, drive: Any = None) -> Any:
         record.update(kwargs)
         if drive is not None:
             drive(record)
-        yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1")
+        yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1", is_alive=_always_alive)
 
     return _serving
 
@@ -785,3 +790,92 @@ async def test_a_failed_push_says_where_the_results_are(
     assert "results are on the VM at" in error[-1]["message"]
     assert "results.parquet" in error[-1]["message"]
     assert "429 rate limited" in error[-1]["message"]
+
+
+# ------------- a model server that dies AFTER it came up ---------------------
+
+
+async def test_a_dead_server_stops_the_batch_instead_of_timing_out_every_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Readiness is checked once, and then nothing watched the server again.
+
+    It can die at any point after that — an OOM on a long prompt, a CUDA fault. Every row from
+    then on fails against a socket nobody is listening on, and the client RETRIES each one, so a
+    dead server became a long expensive silence instead of an error: the rest of the run spent
+    timing out one row at a time, and the failure that eventually surfaced described a connection
+    rather than the crash behind it.
+    """
+    spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"progress_chunk": 2}))
+    prompts, ids = ir._build_requests(  # pyright: ignore[reportPrivateUsage]
+        spec, [{"question": c} for c in "abcdef"]
+    )
+    _FakeRunner.scripted = [_ok("A"), _ok("B")]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+
+    calls = {"n": 0}
+
+    async def _dies_after_the_first_chunk() -> bool:
+        calls["n"] += 1
+        return False
+
+    progress = tmp_path / "progress.jsonl"
+    with (
+        ir.JsonlProgressWriter(str(progress)) as writer,
+        pytest.raises(ir.RunError, match="model server died"),
+    ):
+        await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            is_alive=_dies_after_the_first_chunk,
+        )
+
+    # Stopped at the SECOND chunk: the first one ran before anything could be known about it.
+    assert calls["n"] == 1
+
+
+async def test_a_live_server_runs_every_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The guard must not cost a healthy run anything. A status the backend cannot report counts as
+    # alive upstream, so a flaky probe can never kill a run that is working.
+    spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"progress_chunk": 2}))
+    prompts, ids = ir._build_requests(  # pyright: ignore[reportPrivateUsage]
+        spec, [{"question": c} for c in "abcd"]
+    )
+    _FakeRunner.scripted = [_ok("A"), _ok("B")]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+
+    progress = tmp_path / "progress.jsonl"
+    with ir.JsonlProgressWriter(str(progress)) as writer:
+        out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            is_alive=_always_alive,
+        )
+    assert len(out) == 4
+
+
+async def test_the_batch_runs_without_a_liveness_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `is_alive` is optional: a caller serving its own endpoint elsewhere still gets a batch.
+    spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"progress_chunk": 2}))
+    prompts, ids = ir._build_requests(  # pyright: ignore[reportPrivateUsage]
+        spec, [{"question": c} for c in "abcd"]
+    )
+    _FakeRunner.scripted = [_ok("A"), _ok("B")]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+
+    progress = tmp_path / "progress.jsonl"
+    with ir.JsonlProgressWriter(str(progress)) as writer:
+        out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+        )
+    assert len(out) == 4
