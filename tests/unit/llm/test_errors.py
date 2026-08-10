@@ -43,6 +43,7 @@ from strata_forge.core.errors import (
     ProviderServerError,
     ProviderTimeoutError,
 )
+from strata_forge.llm import errors
 from strata_forge.llm.errors import map_litellm_exception, raise_as_provider_error
 
 
@@ -228,3 +229,53 @@ class TestRaiseAsProviderError:
         # NOT a ProviderError subclass — the exact base type.
         assert type(excinfo.value) is ProviderError
         assert excinfo.value.__cause__ is original
+
+
+class TestLiteLlmVersionCompatibility:
+    """The mapper must not depend on classes a permitted LiteLLM might not define.
+
+    `litellm>=1.55` is a floor with no ceiling, so this module runs against versions predating
+    classes it wants to match. Naming one directly costs an AttributeError raised from INSIDE the
+    mapper — which only runs once something has already failed, so the real diagnosis is replaced
+    by an unrelated one and every call looks like the same bug. A batch run returned 2098 identical
+    `AttributeError: module 'litellm.exceptions' has no attribute
+    'GuardrailInterventionNormalStringError'` and the errors underneath were never recorded.
+    """
+
+    def test_a_missing_class_is_skipped_rather_than_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Stand in for an older LiteLLM: the attribute simply is not there.
+        monkeypatch.delattr(errors.litellm_exc, "RateLimitError", raising=False)
+        resolved = errors._classes(  # pyright: ignore[reportPrivateUsage]
+            "RateLimitError", "AuthenticationError"
+        )
+        assert errors.litellm_exc.AuthenticationError in resolved
+        assert len(resolved) == 1
+
+    def test_a_non_exception_attribute_is_not_collected(self) -> None:
+        # getattr alone would hand isinstance() something it cannot use, and isinstance raises
+        # TypeError on a non-class — inside the mapper, that is the same failure again.
+        assert errors._classes("__name__") == ()  # pyright: ignore[reportPrivateUsage]
+        assert errors._classes("does_not_exist_anywhere") == ()  # pyright: ignore[reportPrivateUsage]
+
+    def test_every_group_resolved_at_least_one_class(self) -> None:
+        # A guard against the opposite failure: silently matching nothing. If a LiteLLM release
+        # renames a whole group, the mapper would quietly downgrade every one of those errors to
+        # the generic fallback, and this says so instead.
+        for name in (
+            "_CONTENT_FILTER",
+            "_AUTH",
+            "_RATE_LIMIT",
+            "_TIMEOUT",
+            "_BAD_REQUEST",
+            "_SERVER",
+        ):
+            assert getattr(errors, name), f"{name} resolved to nothing against this litellm"
+
+    def test_an_unmatched_error_still_maps_instead_of_exploding(self) -> None:
+        # The property that actually matters to a batch run: whatever arrives, the caller gets a
+        # ProviderError describing it rather than an exception about the mapper's own internals.
+        mapped = map_litellm_exception(RuntimeError("the real problem"), model="m", provider="p")
+        assert isinstance(mapped, ProviderError)
+        assert "the real problem" in str(mapped)
