@@ -635,3 +635,84 @@ async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
     assert captured["api_base"] == "http://127.0.0.1:8000/v1"
     assert captured["api_key"] == "EMPTY"  # not omitted, and not the ambient key
     assert captured["api_key"] != "sk-the-users-real-key"
+
+
+# ------------------- the template must actually use the dataset ---------------
+
+
+class TestTemplateCoverage:
+    """A placeholder with no mapping renders literally, which silently ruins a whole run.
+
+    Every row then gets the byte-identical, row-independent prompt; the model answers it N times;
+    every row succeeds; and the run reports `succeeded` with N copies of an answer to the literal
+    text. Nothing downstream can notice — the results file holds {custom_id, output, error}, so
+    neither the rendered prompt nor the source row is in it.
+    """
+
+    def test_a_braced_mapping_key_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The exact trap: the launch form's key field hinted "{placeholder}", so the mapping was
+        # written with braces. `_PLACEHOLDER_RE` captures the name WITHOUT them, so the key can
+        # never match -- while the old validation passed, because it only checked that the mapping's
+        # VALUE ("question") was a real column.
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG",
+            _spec_json(template="Q: {question}", column_mapping={"{question}": "question"}),
+        )
+        with pytest.raises(ir.RunError, match="no column_mapping entry"):
+            ir.load_spec()
+
+    def test_an_empty_mapping_with_a_placeholder_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The launch form permits submitting with no mapping rows filled in at all.
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG", _spec_json(template="Q: {question}", column_mapping={})
+        )
+        with pytest.raises(ir.RunError, match="no column_mapping entry"):
+            ir.load_spec()
+
+    def test_the_error_names_what_is_missing_and_what_is_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # It fails before the dataset download and before the GPU, so the message is the whole
+        # diagnosis -- it has to say enough to fix the run without a second launch.
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG",
+            _spec_json(template="{a} and {b}", column_mapping={"a": "col_a"}),
+        )
+        with pytest.raises(ir.RunError) as info:
+            ir.load_spec()
+        assert "'b'" in str(info.value)  # the unmapped one
+        assert "'a'" in str(info.value)  # what IS mapped
+        assert "without braces" in str(info.value).lower()
+
+    def test_a_fully_mapped_template_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG",
+            _spec_json(template="Q: {question}", column_mapping={"question": "question"}),
+        )
+        assert ir.load_spec().template == "Q: {question}"
+
+    def test_a_template_with_no_placeholders_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Row-independent by INTENT is a different thing from row-independent by accident, and
+        # only the accident is worth refusing.
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG", _spec_json(template="Say hello.", column_mapping={})
+        )
+        assert ir.load_spec().template == "Say hello."
+
+    def test_brace_shapes_that_are_not_placeholders_do_not_trip_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `_PLACEHOLDER_RE` only matches a bare {name}, so JSON-ish instructions in a prompt are
+        # not placeholders and must not be demanded of the mapping.
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG",
+            _spec_json(
+                template='Reply as {"answer": str} for {q}. Not {a b} nor {}.',
+                column_mapping={"q": "question"},
+            ),
+        )
+        assert ir.load_spec() is not None
