@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 
 from strata_forge.compute.batch import BatchInferenceResult
+from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
 from strata_forge.pipelines import inference_runner as ir
 
 if TYPE_CHECKING:
@@ -600,3 +601,37 @@ async def test_the_stderr_failure_reason_is_scrubbed(
     err = capsys.readouterr().err
     assert _TOKEN not in err
     assert "***" in err
+
+
+async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The runner names its own credential rather than inheriting the VM's.
+
+    The vLLM server it just launched is on loopback and takes no credential. Leaving the key
+    unset does NOT mean "send none": the OpenAI client refuses to build a request without one,
+    which failed every row of a 2098-row run before any of them reached the server. Saying
+    "unauthenticated" explicitly also keeps an OPENAI_API_KEY that happens to be exported on the
+    VM from being sent to a local server that never asked for one.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-the-users-real-key")
+    captured: dict[str, Any] = {}
+
+    async def _fake_acompletion(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        raise RuntimeError("stop here — the kwargs are the assertion")
+
+    monkeypatch.setattr("litellm.acompletion", _fake_acompletion)
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    # The REAL BatchInferenceRunner + LLMClient, so the provider wiring is exercised end to end.
+    # Restored from its own import: by this point `ir.BatchInferenceRunner` is the stub.
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _RealBatchRunner)
+
+    await ir.main()
+
+    assert captured["api_base"] == "http://127.0.0.1:8000/v1"
+    assert captured["api_key"] == "EMPTY"  # not omitted, and not the ambient key
+    assert captured["api_key"] != "sk-the-users-real-key"

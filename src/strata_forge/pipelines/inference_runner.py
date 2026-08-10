@@ -51,14 +51,17 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
-from strata_forge.llm.providers.openai_compat import OpenAICompatProvider
+from strata_forge.llm.providers.openai_compat import (
+    UNAUTHENTICATED_API_KEY,
+    OpenAICompatProvider,
+)
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
@@ -407,7 +410,15 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         wait_timeout_s=hp.wait_timeout_s,
         on_phase=phase,
     ) as endpoint:
-        provider = OpenAICompatProvider(OpenAICompatConfig(base_url=endpoint.base_url))
+        # The endpoint this runner just launched is on loopback and takes no credential, and
+        # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back
+        # to whatever OPENAI_API_KEY the VM happens to carry, which would send the user's real
+        # provider key to a local server that never asked for one.
+        provider = OpenAICompatProvider(
+            OpenAICompatConfig(
+                base_url=endpoint.base_url, api_key=SecretStr(UNAUTHENTICATED_API_KEY)
+            )
+        )
         client = LLMClient(
             model=spec.model_id,
             provider="openai_compat",
