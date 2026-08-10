@@ -354,9 +354,13 @@ def _check_produced_output(rows: list[dict[str, Any]], ok: int) -> None:
 
 
 def _local_results_dir(run_id: str | None) -> Path:
-    """A stable, cleanup-surviving location for results when NOT pushing to the Hub: outside the
-    per-run workdir the orchestrator deletes, named by the run id so the user can retrieve it over
-    SSH. Falls back to the cwd when no usable run id was provided (degraded — may be cleaned — but
+    """A stable, cleanup-surviving location for a run's results: outside the per-run workdir the
+    orchestrator deletes, named by the run id so the user can retrieve it over SSH.
+
+    Used whether or not the results are then pushed. Writing them inside the workdir and pushing
+    from there would mean a failed upload destroys the whole run's output along with it.
+
+    Falls back to the cwd when no usable run id was provided (degraded — may be cleaned — but
     never crashes; the run id is validated as a single safe path segment)."""
     if run_id and _SAFE_NAME_RE.fullmatch(run_id):
         return Path.home() / "strata-inference-results" / run_id
@@ -467,19 +471,28 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         phase("Generating responses")
         out = await _run_batches(spec, client, prompts, custom_ids, writer)
 
-    # Push to the Hub only when BOTH a write token and an output repo are present (the control
-    # plane injects them together). Otherwise keep the results on the VM for the user to retrieve
-    # over SSH — written OUTSIDE the per-run workdir so the orchestrator's cleanup leaves them intact.
+    # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
+    # The orchestrator deletes that workdir on every terminal state, so writing there and pushing
+    # from it means a failed upload — an expired token, a rate limit, a network blip — takes the
+    # entire run's output with it. Hours of generation, gone at the last step, with nothing left to
+    # retry from. Outside it, the parquet survives for the user to retrieve over SSH (or push by
+    # hand) exactly as in the no-push case.
+    #
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
+    phase("Writing results")
+    results_path = _write_results(out, _local_results_dir(spec.run_id))
     if hf_token and spec.output_repo_id:
-        phase("Writing results")
-        results_path = _write_results(out, Path.cwd())
         phase("Uploading results to the Hub")
-        destination = await _push_results(spec, results_path, hf_token)
+        try:
+            destination = await _push_results(spec, results_path, hf_token)
+        except Exception as exc:
+            # Name WHERE the results are. The run still fails — the user asked for them on the Hub
+            # and they are not there — but a failure at the last step of a long run is the moment
+            # it matters most that the output was not lost with it.
+            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
+            raise RunError(msg) from exc
     else:
-        phase("Writing results")
-        results_path = _write_results(out, _local_results_dir(spec.run_id))
         destination = str(results_path)
 
     ok = sum(1 for r in out if r["error"] is None)
