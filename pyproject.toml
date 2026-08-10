@@ -7,7 +7,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
-    { name = "Nemanja Gemovic", email = "nemanja.gemovic@wonder.so" },
+    { name = "Nemanja Gemovic", email = "gemovic@strataml.com" },
 ]
 keywords = [
     "llm",
