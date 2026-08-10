@@ -76,8 +76,11 @@ _SERVE_HOST = "127.0.0.1"
 _SERVE_PORT = 8000
 # A bare ``{name}`` placeholder only — no attribute/index access, no format mini-language.
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
-# An HF repo id: ``owner/name``, each segment alphanumeric-led, no traversal/scheme/space.
-_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
+# traversal/scheme/space. The canonical form is not an edge case — `gpt2`, `t5-small`,
+# `distilgpt2` and `bert-base-uncased` all live at the root of the Hub with no owner, and every
+# one of them was accepted by the control plane, given a VM, and only then rejected here.
+_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 # A safe single path segment for the on-VM results dir name (no slash / traversal / shell chars).
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
