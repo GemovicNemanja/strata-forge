@@ -167,7 +167,45 @@ def load_spec() -> RunSpec:
     _validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
         _validate_repo_id(spec.output_repo_id, "output repo")
+    _validate_template_coverage(spec)
     return spec
+
+
+def _validate_template_coverage(spec: RunSpec) -> None:
+    """Reject a template whose ``{placeholder}`` has no entry in ``column_mapping``.
+
+    An unmapped placeholder renders LITERALLY (see ``render_template``), which is the right
+    behaviour for the primitive but a catastrophe for a run: every row gets the byte-identical,
+    row-independent prompt, the model answers it N times, every row SUCCEEDS, and the run reports
+    `succeeded` with N copies of an answer to the literal text ``{question}``. Nothing downstream
+    can notice — the results file records ``{custom_id, output, error}``, so neither the rendered
+    prompt nor the source row is in it.
+
+    The one check that existed validated the mapping's VALUES against the split's columns, which
+    passes in exactly this case: with ``{"q": "question"}`` against a template of ``{question}``,
+    the column ``question`` really does exist. It is the KEYS that fail to cover the template, and
+    nobody was looking at them.
+
+    That mistake is easy to make and expensive to discover, so it fails here — before the dataset
+    download, before the GPU, within seconds of launch — naming both what is missing and what is
+    available.
+
+    The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
+    to survive to the model. That reading is rare, and it is not worth the run this protects.
+    """
+    placeholders = {m.group(1) for m in _PLACEHOLDER_RE.finditer(spec.template)}
+    unmapped = sorted(placeholders - set(spec.column_mapping))
+    if not unmapped:
+        return
+    known = sorted(spec.column_mapping) or ["(none)"]
+    msg = (
+        f"template placeholders have no column_mapping entry: {unmapped}. "
+        f"Mapped placeholders: {known}. "
+        "A placeholder is named WITHOUT braces on the left of the mapping "
+        '(template "{question}" needs the entry "question" -> the column name); '
+        "an unmapped one would be sent to the model literally, identically for every row."
+    )
+    raise RunError(msg)
 
 
 def render_template(template: str, row: dict[str, Any], column_mapping: dict[str, str]) -> str:
