@@ -66,7 +66,7 @@ from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 __all__ = ["RunSpec", "main", "render_template"]
 
@@ -294,14 +294,32 @@ async def _run_batches(
     prompts: list[list[UserMessage]],
     custom_ids: list[str],
     writer: JsonlProgressWriter | None,
+    is_alive: Callable[[], Awaitable[bool]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run the prompts in progress-chunked batches; reconcile results positionally."""
+    """Run the prompts in progress-chunked batches; reconcile results positionally.
+
+    ``is_alive`` is checked between chunks. The model server is verified once before the batch
+    starts and then never again, but it can die at any point after that — an OOM on a long prompt,
+    a CUDA fault. Every row from then on fails against a socket nobody is listening on, and the
+    client RETRIES each one, so a dead server turns into a long expensive silence instead of an
+    error: the rest of the run is spent timing out one row at a time, and the failure that
+    eventually surfaces describes a connection, not the crash that caused it.
+    """
     hp = spec.hyperparams
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
     total = len(prompts)
     out: list[dict[str, Any]] = []
     ok = failed = 0
     for start in range(0, total, hp.progress_chunk):
+        # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
+        # the granularity the run already reports at. It bounds the waste at one chunk rather than
+        # the whole remaining batch.
+        if start and is_alive is not None and not await is_alive():
+            msg = (
+                f"the model server died after {len(out)} of {total} rows "
+                "(its log is beside the results on the VM)"
+            )
+            raise RunError(msg)
         chunk = prompts[start : start + hp.progress_chunk]
         ids = custom_ids[start : start + hp.progress_chunk]
         results = await runner.run(
@@ -469,7 +487,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         # The first `step` only lands once a whole progress_chunk has completed, and that
         # chunk absorbs the client's cold start on top of its generations.
         phase("Generating responses")
-        out = await _run_batches(spec, client, prompts, custom_ids, writer)
+        out = await _run_batches(spec, client, prompts, custom_ids, writer, endpoint.is_alive)
 
     # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
     # The orchestrator deletes that workdir on every terminal state, so writing there and pushing

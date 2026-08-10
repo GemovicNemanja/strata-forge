@@ -293,10 +293,28 @@ class ServingEndpoint:
         base_url: The OpenAI-compatible URL to point an
             :class:`LLMClient` at (e.g.
             ``http://localhost:8000/v1``).
+        is_alive: Awaitable probe reporting whether the serving
+            process is still up.
+
+            Readiness is checked before the endpoint is yielded,
+            and then nothing watches it again — but a model server
+            can die at any point AFTER it came up (an OOM on a long
+            prompt, a CUDA fault). Every request from then on fails
+            against a socket nobody is listening on, and a client
+            that retries turns a dead server into a long, expensive
+            silence rather than an error: a batch of thousands of
+            rows spends the rest of its run timing out one row at a
+            time. A long-running consumer should call this at a
+            natural checkpoint (between batches) and stop when it
+            reports ``False``.
+
+            A status the backend cannot report counts as alive, so
+            a flaky probe cannot kill a healthy run.
     """
 
     job: Job
     base_url: str
+    is_alive: Callable[[], Awaitable[bool]]
 
 
 async def wait_for_endpoint(
@@ -437,7 +455,7 @@ async def serving_endpoint(
                 tail = (await backend.logs(job))[-_FAILURE_LOG_CHARS:]
             raise ServingProcessError(f"{exc}\n\n{tail}".rstrip()) from exc
         _report(on_phase, "Model server ready")
-        yield ServingEndpoint(job=job, base_url=base_url)
+        yield ServingEndpoint(job=job, base_url=base_url, is_alive=_alive)
     finally:
         # Teardown can hang too (a cancel that waits on an unresponsive process), so it is a
         # reportable phase rather than another silent stretch.

@@ -315,6 +315,17 @@ async with serving_endpoint(
     ...
 ```
 
+Readiness is verified once, before the endpoint is yielded, and then
+nothing watches it again — but a model server can die at any point
+AFTER it came up (an OOM on a long prompt, a CUDA fault). Every request
+from then on fails against a socket nobody is listening on, and a client
+that retries turns a dead server into a long, expensive silence rather
+than an error. ``endpoint.is_alive()`` is the probe for that: a
+long-running consumer should call it at a natural checkpoint (between
+batches, not between requests — it costs a backend status probe) and
+stop when it reports ``False``. A status the backend cannot report counts
+as alive, so a flaky probe can never kill a healthy run.
+
 The readiness probe hits ``{base_url}/models`` until it returns
 HTTP 200 or the ``wait_timeout_s`` expires.
 
