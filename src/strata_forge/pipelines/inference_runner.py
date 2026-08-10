@@ -27,6 +27,12 @@ credentials + the network):
     messages go through the same scrub as errors, because ``serving_endpoint``'s phase hook
     is public API and a caller's phrase is not under this module's control.
 
+The exit code is the run's VERDICT, and the control plane reads it as such. Individual row
+failures are collected rather than fatal (a few filtered rows must not discard thousands of good
+generations) and reported as succeeded/failed counts, but a run that produced no usable row at
+all exits nonzero: there is no reading under which it did its job, and the results file it
+leaves behind holds only errors.
+
 Long provisioning steps (downloading the split, installing and starting the model server,
 writing and uploading results) have nothing to count, so each reports itself with a
 ``ProgressEvent(kind="phase")``. Without them a run is a single indeterminate wait between
@@ -80,6 +86,9 @@ _RESULTS_FILENAME = "results.parquet"
 # A phase message is a short human phrase. Capped because the sink is reachable from public
 # API: a caller's hook must not be able to grow the file the orchestrator tails without bound.
 _MAX_PHASE_CHARS = 200
+# How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
+# provider/status/class, short enough that the run's message stays a message.
+_MAX_SAMPLE_ERROR_CHARS = 500
 
 
 class Hyperparams(BaseModel):
@@ -276,6 +285,33 @@ async def _run_batches(
     return out
 
 
+def _check_produced_output(rows: list[dict[str, Any]], ok: int) -> None:
+    """Fail a run that reached the end without producing a single usable row.
+
+    Row failures are COLLECTED rather than fatal on purpose: a handful of rows tripping a
+    content filter must not throw away thousands of good generations. But that must not decide
+    the run's VERDICT, which the control plane reads from this process's exit code. A run whose
+    every row failed produced nothing, and calling it succeeded tells the user their results are
+    ready when the file holds only errors — a staging run reported `succeeded` with exit 0 over
+    2098 failed rows and zero generations, and nothing on the run said otherwise.
+
+    A partial failure is deliberately still a success: it produced usable output, and the
+    succeeded/failed counts on the run describe it. Only "nothing at all" is a failure, because
+    only that has no reading under which the run did its job.
+
+    The results file is written and pushed BEFORE this runs, so the failure keeps its evidence:
+    the per-row `error` column is the record of what went wrong, for every row.
+    """
+    if ok:
+        return
+    if not rows:
+        msg = "the run produced no rows: the dataset split was empty"
+        raise RunError(msg)
+    sample = next((str(row["error"]) for row in rows if row["error"]), "")
+    msg = f"all {len(rows)} rows failed. First error: {sample[:_MAX_SAMPLE_ERROR_CHARS]}"
+    raise RunError(msg)
+
+
 def _local_results_dir(run_id: str | None) -> Path:
     """A stable, cleanup-surviving location for results when NOT pushing to the Hub: outside the
     per-run workdir the orchestrator deletes, named by the run id so the user can retrieve it over
@@ -408,6 +444,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
             message=destination,  # WHERE results landed: a repo id (pushed) or a VM path (local)
         ),
     )
+    # AFTER `end`: the counts and the destination are true whichever way the verdict falls, and
+    # for a run that failed this way they are the diagnosis — they say every row failed and where
+    # the per-row errors can be read.
+    _check_produced_output(out, ok)
     return destination
 
 
@@ -431,7 +471,13 @@ async def main() -> int:
         spec = load_spec()
         await _execute(spec, hf_token, writer)
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
-        _emit(writer, ProgressEvent(kind="error", message=_sanitize(str(exc), hf_token)))
+        detail = _sanitize(str(exc), hf_token)
+        _emit(writer, ProgressEvent(kind="error", message=detail))
+        # Also to stderr, because that is where the control plane reads a failed run's reason
+        # from. Catching the exception here means no traceback is printed, so without this the
+        # run's own account of why it failed exists only in the progress file, and the record
+        # explains the failure with whatever unrelated output happened to be last in the stream.
+        print(f"run failed: {detail}", file=sys.stderr, flush=True)
         return 1
     else:
         return 0

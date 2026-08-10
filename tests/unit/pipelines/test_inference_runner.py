@@ -278,22 +278,38 @@ def _recording_serving(record: dict[str, Any], *, drive: Any = None) -> Any:
     return _serving
 
 
-def _mock_main_deps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, serving: Any) -> None:
-    """Stub the heavy externals so `main` runs its own orchestration end to end."""
+def _mock_main_deps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    serving: Any,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+    scripted: list[BatchInferenceResult] | None = None,
+    written: list[list[dict[str, Any]]] | None = None,
+) -> None:
+    """Stub the heavy externals so `main` runs its own orchestration end to end.
+
+    `rows`/`scripted` drive the input split and the per-row outcomes; `written`, when given,
+    collects what `_write_results` was handed, so a test can assert the evidence a failed run
+    leaves behind.
+    """
+    the_rows = [{"question": "a"}] if rows is None else rows
 
     def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
         del spec, token
-        return [{"question": "a"}]
+        return the_rows
 
     def _write(rows: Any, outdir: Any) -> Path:
-        del rows, outdir
+        del outdir
+        if written is not None:
+            written.append(list(cast("list[dict[str, Any]]", rows)))
         return tmp_path / "results.parquet"
 
     async def _push(spec: Any, results_path: Any, token: str) -> str:
         del results_path, token
         return cast("str", spec.output_repo_id)
 
-    _FakeRunner.scripted = [_ok("A")]
+    _FakeRunner.scripted = [_ok("A")] if scripted is None else scripted
     monkeypatch.setattr(ir, "_load_rows", _rows)
     monkeypatch.setattr(ir, "serving_endpoint", serving)
     monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
@@ -456,3 +472,131 @@ def test_local_results_dir_validates_run_id() -> None:
     # Traversal / unsafe / empty / missing names fall back to the cwd — never an escaping path.
     for bad in ("../../etc", "a/b", "", None):
         assert ir._local_results_dir(bad) == ir.Path.cwd()  # pyright: ignore[reportPrivateUsage]
+
+
+# --------------------- the verdict: did the run produce anything? -----------
+
+
+async def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    rows: list[dict[str, Any]],
+    scripted: list[BatchInferenceResult],
+    written: list[list[dict[str, Any]]] | None = None,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Drive `main` over a scripted split; return its exit code and the progress events."""
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _mock_main_deps(
+        monkeypatch, tmp_path, _fake_serving, rows=rows, scripted=scripted, written=written
+    )
+    code = await ir.main()
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    return code, events
+
+
+async def test_a_run_whose_every_row_failed_reports_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The verdict has to describe the outcome.
+
+    Row errors are collected, not fatal — but the control plane reads this process's exit code
+    as the run's verdict, so collecting them all and exiting 0 tells the user their results are
+    ready when the file holds nothing but errors. A staging run reported `succeeded` over 2098
+    failed rows and zero generations, and nothing anywhere on the run contradicted it.
+    """
+    code, events = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}, {"question": "b"}],
+        scripted=[
+            _fail(RuntimeError("provider exploded")),
+            _fail(RuntimeError("provider exploded")),
+        ],
+    )
+
+    assert code == 1
+    # The counts and the destination are still recorded: for this failure they ARE the diagnosis.
+    end = [e for e in events if e["kind"] == "end"]
+    assert end, "the counts must survive the failure"
+    assert end[-1]["metrics"] == {"succeeded": 0.0, "failed": 2.0}
+    error = [e for e in events if e["kind"] == "error"]
+    assert error, "the run must say why it failed, not just that it did"
+    # A representative row error, so the reason is legible without downloading the parquet.
+    assert "all 2 rows failed" in error[-1]["message"]
+    assert "provider exploded" in error[-1]["message"]
+    # Reported on stderr too: that is where the control plane reads a failed run's reason from,
+    # and a caught exception prints no traceback of its own.
+    assert "provider exploded" in capsys.readouterr().err
+
+
+async def test_a_partially_failed_run_still_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Deliberate: it produced usable output, and the counts describe the rest. Only "nothing at
+    # all" is a failure, because only that has no reading under which the run did its job.
+    code, events = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}, {"question": "b"}],
+        scripted=[_ok("A"), _fail(RuntimeError("just this one"))],
+    )
+
+    assert code == 0
+    assert events[-1]["kind"] == "end"
+    assert events[-1]["metrics"] == {"succeeded": 1.0, "failed": 1.0}
+
+
+async def test_a_run_over_an_empty_split_reports_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Same bug class, different cause: zero rows also means zero output, and an empty parquet
+    # reported as success is the same lie with no error column to explain it.
+    code, events = await _run_main(monkeypatch, tmp_path, rows=[], scripted=[])
+
+    assert code == 1
+    error = [e for e in events if e["kind"] == "error"]
+    assert error, "an empty split must be reported, not silently accepted"
+    assert "no rows" in error[-1]["message"]
+
+
+async def test_a_failed_run_still_writes_its_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The per-row `error` column is the record of what went wrong. Failing the run BEFORE
+    # writing it would throw away the only evidence of why every row failed.
+    written: list[list[dict[str, Any]]] = []
+    code, _ = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}],
+        scripted=[_fail(RuntimeError("kaboom"))],
+        written=written,
+    )
+
+    assert code == 1
+    assert written, "the results file must be written before the run is failed"
+    assert written[-1] == [
+        {"custom_id": "row-0", "output": None, "error": "RuntimeError('kaboom')"}
+    ]
+
+
+async def test_the_stderr_failure_reason_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # stderr is a NEW egress for an error message, and the run's console log is captured and
+    # stored. A row error carrying the write token must be scrubbed on the way out, like the
+    # progress file already was.
+    code, _ = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}],
+        scripted=[_fail(RuntimeError(f"upstream rejected {_TOKEN}"))],
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert _TOKEN not in err
+    assert "***" in err
