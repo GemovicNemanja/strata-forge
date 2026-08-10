@@ -2,8 +2,8 @@
 
 These are the canonical in-memory types every other piece of
 :mod:`strata_forge.datasets` produces or consumes. The Langfuse and HF
-backends are converters into and out of them; the eval runner
-(Phase 2.4) consumes them directly.
+backends are converters into and out of them;
+:mod:`strata_forge.evals` consumes them directly.
 
 Both models are frozen Pydantic v2 with ``extra="forbid"`` so wire
 shapes are stable. Items default to content-hash IDs derived from

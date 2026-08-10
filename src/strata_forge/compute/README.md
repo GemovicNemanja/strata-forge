@@ -1,19 +1,18 @@
 # strata_forge.compute
 
-Remote compute orchestration. The module ships typed `Task` /
-`ResourceSpec` / `Job` / `JobStatus` shapes, a YAML task loader for
-the SkyPilot-task-YAML subset, a `Backend` Protocol that every
-implementation satisfies, and an in-process `LocalBackend` for
-tests and ad-hoc local runs.
+Remote compute orchestration. A unit of work is inert data — `Task` and `ResourceSpec`, which
+round-trip through the SkyPilot-task-YAML subset — and every backend satisfies one `Backend`
+Protocol (`submit`, `status`, `logs`, `read_file`, `cancel`, `cleanup`) returning `Job` and
+`JobStatus`. See
+[ADR 0013](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
+for the task-as-data plus Protocol design.
 
-Phase 5.1 ships the foundation; Phase 5.2 adds the SSH and
-SkyPilot backends (lazy `[compute]` extra) plus a batch inference
-runner that consumes any `Backend`. Phase 5.3 adds the training
-runners (SFT, DPO/ORPO/KTO, PEFT/LoRA/QLoRA) under
-`strata_forge.training`. Phase 5.4 closes out with vLLM / TGI / SGLang
-serving adapters that present as `strata_forge.llm` `openai_compat`
-providers, plus examples and module docs.
+Three backends ship: `LocalBackend` (subprocess, for tests and ad-hoc runs), `SSHBackend` and
+`SkyPilotBackend`. On top of them sit `BatchInferenceRunner` for concurrency-bounded fan-out, and
+`build_vllm_task` / `build_tgi_task` / `build_sglang_task` plus `serving_endpoint` for standing up
+a self-hosted inference server that `strata_forge.llm` talks to over its `openai_compat` route.
 
-See [ADR 0013](../../../docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
-for the task-as-data + Protocol design rationale, and
-`docs/roadmap.md` for the current status.
+`SSHBackend` and `SkyPilotBackend` need the `[compute]` extra; `LocalBackend` does not.
+
+Reference:
+[docs/modules/compute.md](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/compute.md).

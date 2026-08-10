@@ -78,7 +78,9 @@ Treat anything not in `__init__.py` as internal.
 ## Test expectations
 
 - Unit tests under `tests/unit/prompts/`, one file per source module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (`fail_under` in `pyproject.toml`); treat a drop in this module as
+  a regression.
 - Jinja2 sandbox tests: forbidden filters / extensions raise
   `PromptError` at compile time.
 - Cache-marker tests assert byte-exact stable prefixes across renders

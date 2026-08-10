@@ -1,7 +1,7 @@
 # Agent rules — strata_forge.datasets
 
-`strata_forge.datasets` is the typed dataset layer Phase 2.4's eval runner
-consumes. See
+`strata_forge.datasets` is the typed dataset layer the
+`strata_forge.evals` runner consumes. See
 [ADR 0009](../../../docs/architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md)
 for the canonical-store + exchange-format design: Langfuse is the
 default persistent store, Hugging Face Datasets is the exchange
@@ -15,17 +15,18 @@ shape every other piece converts into and out of.
 - Content-hash versioning + dataset diffing
   (`dataset_version`, `diff`, `DatasetDelta`).
 - A pluggable async `DatasetStore` interface with an
-  `InMemoryDatasetStore` baseline and (Phase 2.3.2) a Langfuse-backed
-  store.
-- A bidirectional Hugging Face Datasets bridge (Phase 2.3.2) behind
-  the `[hf]` extra.
-- Synthetic-data primitives (Phase 2.3.3): self-instruct + teacher-
-  student distillation built on `strata_forge.llm`.
+  `InMemoryDatasetStore` baseline and a Langfuse-backed
+  `LangfuseDatasetStore`.
+- A bidirectional Hugging Face Datasets bridge behind the `[hf]`
+  extra.
+- Synthetic-data primitives: `self_instruct` and `distill`
+  (teacher-student distillation), both built on `strata_forge.llm`.
 
 ## Boundaries
 
-- **Owns:** `schema.py`, `store.py`, `versioning.py`, `stores/`,
-  `hf_bridge.py` (2.3.2), `synthetic/` (2.3.3).
+- **Owns:** `schema.py`, `store.py`, `versioning.py`,
+  `stores/` (`memory.py`, `langfuse.py`), `hf_bridge.py`,
+  `synthetic/` (`self_instruct.py`, `distillation.py`).
 - **Imports from inside `forge`:** `strata_forge.core` (errors, content_hash)
   and `strata_forge.llm` (for the synthetic primitives). Does NOT import
   `strata_forge.tracing`, `strata_forge.prompts`, or any higher-level module.
@@ -42,8 +43,7 @@ The module's `__init__.py` re-exports the supported surface:
 - Store interface + error: `DatasetStore`, `DatasetNotFoundError`.
 - Backends: `InMemoryDatasetStore`, `LangfuseDatasetStore`.
 - HF bridge: `to_hf_dataset`, `from_hf_dataset`.
-- Synthetic-data primitives land alongside the rest of the synthetic
-  helpers (see roadmap).
+- Synthetic-data primitives: `self_instruct`, `distill`.
 
 Lower-level helpers (e.g. `compose_langfuse_name` /
 `decompose_langfuse_name` in the Langfuse store) are exported from
@@ -79,7 +79,9 @@ Anything raised from this module is a `ForgeError` subclass.
 ## Test expectations
 
 - Unit tests under `tests/unit/datasets/`, one file per source module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (`fail_under` in `pyproject.toml`); treat a drop in this module as
+  a regression.
 - Mocked Langfuse client + mocked HF `datasets` module for unit tests;
   no live network.
 - Hypothesis property tests on `dataset_version` (sort-independence,

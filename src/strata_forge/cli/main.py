@@ -23,7 +23,7 @@ __all__ = ["app"]
 
 app = typer.Typer(
     name="forge",
-    help="AI Forge — typed, async-first baseline for AI/LLM experiments.",
+    help="strata-forge — typed, async-first baseline for AI/LLM experiments.",
     no_args_is_help=True,
     add_completion=False,
 )

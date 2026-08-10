@@ -52,3 +52,6 @@ forge-diagnostic*.ndjson
 # --- Notebooks (Marimo handles state in-source; ignore exports) ---
 notebooks/*.html
 notebooks/exports/
+
+# --- Docs (MkDocs build output) ---
+site/

@@ -1,16 +1,16 @@
 """Typed shapes for evaluation experiments and their results.
 
 An :class:`Experiment` is the declarative description of an eval
-run — pure data, frozen, with content-hash identity. The runner
-(Phase 2.4.2) resolves the named references against live registries
-at execution time.
+run — pure data, frozen, with content-hash identity.
+:func:`strata_forge.evals.run_experiment` resolves the named references
+against live registries at execution time.
 
 A :class:`Trial` is one row in the experiment matrix —
 ``(model, prompt, item)`` plus the LLM response that came back. A
 :class:`GraderResult` is one grader's verdict on a Trial. An
 :class:`Outcome` binds the two together.
 
-See [ADR 0010](../../../docs/architecture/adr/0010-evals-experiment-as-data-pluggable-graders.md).
+See [ADR 0010](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0010-evals-experiment-as-data-pluggable-graders.md).
 """
 
 from __future__ import annotations

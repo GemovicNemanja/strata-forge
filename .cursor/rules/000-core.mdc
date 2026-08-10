@@ -1,16 +1,51 @@
 ---
-description: Cross-cutting rules for AI Forge — always-on. Defers to `CLAUDE.md` for the full source of truth.
+description: Cross-cutting rules for strata-forge — always-on. Defers to `CLAUDE.md` for the full source of truth.
 alwaysApply: true
 ---
 
-AI Forge is a typed, async-first, vendor-neutral baseline for AI/LLM experiments. **Read [`CLAUDE.md`](mdc:CLAUDE.md) before suggesting non-trivial changes.** Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`.
+strata-forge is a typed, async-first, vendor-neutral toolkit for AI/LLM work. The distribution is
+`strata-forge`; the import package is `strata_forge`. **Read [`CLAUDE.md`](mdc:CLAUDE.md) before
+suggesting non-trivial changes.** Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`;
+[`docs/agent-guide.md`](mdc:docs/agent-guide.md) is the long-form playbook for orientation, task
+recipes, and the verification loop.
 
 Always-on rules:
 
-- Public API is async. Sync wrappers live only in `strata_forge.sync`.
-- pyright strict on `src/strata_forge`. No `Any` without `# pyright: ignore[...]` justification.
-- Errors are exception-based: every Forge-raised error subclasses `strata_forge.core.errors.ForgeError`. Never `except:`.
-- Heavy deps (torch, transformers, trl, peft, skypilot, asyncssh, qdrant-client, vllm, pillow, redis, inspect-ai) are imported **inside the function that uses them**, never at module load. Each gates behind a PyPI extra in `pyproject.toml`.
-- Commits MUST follow Conventional Commits: `<type>(<optional-scope>): <imperative summary>`. Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`. Scope is the module name (e.g. `feat(llm):`, `docs(rag):`) when the change is local to one module; omit it for cross-cutting work. Commit messages describe changes in **time-stable terms** — never reference phase numbers, sub-phase numbers, step numbers, or scaffolding metadata. See `CLAUDE.md` §8 for the full table.
-- **Self-maintenance protocol** (CLAUDE.md §7): when you spot a stale `CLAUDE.md` / MDC rule / ADR / module README, propose the fix in the same PR. Never silently ignore a stale rule.
-- Provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) are imported **only inside `src/strata_forge/llm/providers/`**. Everything else goes through `LLMClient` or the `provider_extras` passthrough.
+- Every public function that performs I/O is `async`. Pure helpers (`get_settings`, `render`,
+  `content_hash`, registry lookups, `Chunker.chunk`) stay synchronous. Sync wrappers live **only** in
+  `strata_forge.sync`, which covers four `LLMClient` methods; the CLI bridges through its own
+  `run_async` helper in `cli/helpers.py`. `SFTRunner.train` / `PreferenceRunner.train` are the one
+  documented sync exception, because TRL's loop is blocking.
+- pyright strict on `src/strata_forge`. No `Any` without a `# pyright: ignore[reportXxx] — reason` on
+  the same line. Ruff line length 100; `ruff format` is authoritative.
+- Errors are exception-based. Runtime failures a caller might catch subclass
+  `strata_forge.core.errors.ForgeError`; a bad argument at the call boundary stays `ValueError` /
+  `TypeError`. Never `except:`, never swallow — the one sanctioned swallow is `strata_forge.tracing`,
+  which must never break a caller's hot path.
+- Heavy deps (`torch`, `transformers`, `trl`, `peft`, `datasets`, `skypilot`, `asyncssh`,
+  `qdrant-client`, `cohere`, `sentence-transformers`, `fsspec` + cloud filesystems,
+  `huggingface_hub`, `langfuse`, `redis`, `pillow`, `nltk`, `boto3`) are imported **inside the
+  function that uses them**, never at module load. Each gates behind an extra in `pyproject.toml`,
+  and the enclosing function raises `ImportError` naming the real distribution:
+  `pip install 'strata-forge[<extra>]'`. `ai-forge` is a different project and must never appear in a
+  hint, a doc, or an example.
+- Model-provider SDKs (`anthropic`, `openai`, `boto3`, Google's clients) are imported **only inside
+  `src/strata_forge/llm/providers/`** — plus one deliberate exception, `llm/errors.py`, which imports
+  `openai` to name the exception classes LiteLLM re-raises. Everything else goes through `LLMClient`
+  or the `provider_extras={...}` passthrough.
+- Configuration flows through `strata_forge.config.get_settings()`. Do not read `os.environ`
+  elsewhere.
+- No emojis anywhere in the repository — source, docs, headings, tables, or commit messages. The
+  badges at the top of the root `README.md` are the only exception.
+- Every symbol written into a doc, example, or error message must exist. Verify against
+  `src/strata_forge` before writing an import or a call.
+- Commits MUST follow Conventional Commits: `<type>(<optional-scope>): <imperative summary>`. Allowed
+  types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+  Scope is the module name (`feat(llm):`, `docs(rag):`) when the change is local to one module; omit
+  it for cross-cutting work. Commit messages, branch names, and PR titles use **time-stable
+  language** — never phase numbers, step numbers, or plan-file slugs. See `CLAUDE.md` §8.
+- Topic branch off `dev`, PR into `dev`. `main` only ever receives `dev`, through a promotion PR.
+  Never `--no-verify`, never force-push a shared branch.
+- **Self-maintenance protocol** (CLAUDE.md §7): when you spot a stale `CLAUDE.md` / MDC rule / ADR /
+  module README, fix it in the same PR. Merged code wins over a stale rule; the rule file wins over
+  in-flight code. ADRs are immutable — supersede, never edit. Never silently ignore a stale rule.

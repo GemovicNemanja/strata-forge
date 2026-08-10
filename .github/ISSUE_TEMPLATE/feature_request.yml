@@ -1,0 +1,114 @@
+name: Feature request
+description: Propose a new capability or an extension to an existing one.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        strata-forge ships primitives, not opinions. The proposals that land easiest are the ones
+        that make an existing seam more useful to more callers, rather than encoding one workflow.
+
+        Open-ended ideas are welcome in
+        [Discussions](https://github.com/GemovicNemanja/strata-forge/discussions) — use this form
+        once you have a concrete shape in mind.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What are you trying to do, and what stops you today? Describe the situation, not the
+        solution — the constraint is what determines whether a different design fits better.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Which module
+      description: Where this would live. Pick the closest one if it spans several.
+      options:
+        - strata_forge.core
+        - strata_forge.config
+        - strata_forge.llm
+        - strata_forge.prompts
+        - strata_forge.tracing
+        - strata_forge.datasets
+        - strata_forge.evals
+        - strata_forge.agents
+        - strata_forge.rag
+        - strata_forge.storage
+        - strata_forge.compute
+        - strata_forge.training
+        - strata_forge.pipelines
+        - strata_forge.cli
+        - strata_forge.sync
+        - A new module
+        - Documentation, packaging, or tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: |
+        What the public surface would look like. Function and class names, signatures, and a snippet
+        of how a caller uses it. A rough sketch is fine; a concrete one is easier to argue with.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: |
+        What you tried instead, and why it fell short — including anything the library already
+        exposes (the escape hatches, `provider_extras`, injecting your own Protocol implementation).
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: |
+        The project's non-goals, from
+        [CLAUDE.md](https://github.com/GemovicNemanja/strata-forge/blob/main/CLAUDE.md). Confirming
+        these up front saves a round trip.
+      options:
+        - label: This does not require the library to become a hosted service.
+        - label: This does not tie the library to one provider — it works, or degrades cleanly, across providers.
+        - label: This is a general primitive rather than one project's workflow encoded in the library.
+        - label: This is not production inference serving (which strata_forge.compute orchestrates rather than implements).
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Would you implement it
+      options:
+        - "Yes, I would open the PR"
+        - "Yes, with guidance on the design"
+        - "No, but I would test and review it"
+        - "No"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Prior art in other libraries, links to provider documentation, or a sketch of the tests this would need.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions and this is not a duplicate.
+          required: true

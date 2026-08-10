@@ -1,14 +1,14 @@
 # `strata_forge.tracing` — Langfuse observability layered above every other module
 
 `strata_forge.tracing` is the cross-cutting Langfuse layer. It wraps every
-other Forge module *from above* — no other `strata_forge.*` module imports
-`strata_forge.tracing`, which keeps the dependency arrow clean, the
+other strata-forge module *from above* — no other `strata_forge.*` module
+imports `strata_forge.tracing`, which keeps the dependency arrow clean, the
 `[langfuse]` extra truly optional, and the unit-test surface free of
 tracing concerns. See
 [ADR 0008](../architecture/adr/0008-tracing-as-cross-cutting.md) for
 the design rationale.
 
-Five integration points ship in Phase 2.2:
+Five integration points make up the public surface:
 
 - `install_litellm_callback()` — wire LiteLLM's built-in Langfuse
   callback so every LLM call through `strata_forge.llm` (or any other
@@ -25,8 +25,8 @@ When Langfuse isn't configured, every public function is a silent
 no-op. Tracing failures are swallowed so they never break a
 production call path.
 
-Module rules: [`src/strata_forge/tracing/CLAUDE.md`](../../src/strata_forge/tracing/CLAUDE.md).
-Source: [`src/strata_forge/tracing/`](../../src/strata_forge/tracing/).
+Module rules: [`src/strata_forge/tracing/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/tracing/CLAUDE.md).
+Source: [`src/strata_forge/tracing/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/tracing/).
 
 ---
 
@@ -69,11 +69,11 @@ async def my_workflow(query: str) -> str:
 
 For end-to-end runnable demos:
 
-- [`examples/14_tracing_basic.py`](../../examples/14_tracing_basic.py)
+- [`examples/15_tracing_basic.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/15_tracing_basic.py)
   — `@traced` sync + async.
-- [`examples/15_tracing_spans_and_scores.py`](../../examples/15_tracing_spans_and_scores.py)
+- [`examples/16_tracing_spans_and_scores.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/16_tracing_spans_and_scores.py)
   — `traced` + `traced_span` + score + metric.
-- [`examples/16_tracing_litellm.py`](../../examples/16_tracing_litellm.py)
+- [`examples/17_tracing_litellm.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/17_tracing_litellm.py)
   — full path through `LLMClient` with the callback installed.
 
 ---
@@ -81,15 +81,20 @@ For end-to-end runnable demos:
 ## Configuration + the lazy import contract
 
 Tracing reads its credentials from
-[`strata_forge.config.LangfuseConfig`](../../src/strata_forge/config/settings.py):
+[`strata_forge.config.LangfuseConfig`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/config/settings.py):
 
 | Env var | Field | Default |
 |---|---|---|
 | `LANGFUSE_HOST` | `host` | `http://localhost:3000` |
 | `LANGFUSE_PUBLIC_KEY` | `public_key` | unset |
 | `LANGFUSE_SECRET_KEY` | `secret_key` | unset |
+| `LANGFUSE_TRACING_ENVIRONMENT` | `tracing_environment` | unset |
 
 `LangfuseConfig.enabled` is `True` only when **both** keys are set.
+`tracing_environment` is passed to the Langfuse constructor as
+`environment=`, so traces from different deployments (production,
+staging, a laptop) stay separable in the Langfuse UI. Leaving it unset
+keeps the SDK on its built-in `default` environment.
 
 The `langfuse` Python SDK is behind the `[langfuse]` extra. The
 **lazy-import contract** is structural: `import strata_forge.tracing` works
@@ -125,11 +130,13 @@ Internally this appends `"langfuse"` to `litellm.success_callback` and
 `litellm.failure_callback`. LiteLLM's built-in callback then reads
 `LANGFUSE_*` env vars on each call and ships traces.
 
-`is_litellm_callback_installed()` is the diagnostic counterpart;
-`strata-forge doctor` uses it to surface the "I configured Langfuse but I'm
-not seeing traces" failure mode. It reports `True` only when
-`"langfuse"` appears in **both** lists — the half-installed asymmetric
-state reports `False` so the diagnostic isn't misleading.
+`is_litellm_callback_installed()` is the diagnostic counterpart — call it
+yourself to answer the "I configured Langfuse but I'm not seeing traces"
+question. It reports `True` only when `"langfuse"` appears in **both**
+lists; the half-installed asymmetric state reports `False` so the
+diagnostic isn't misleading. `strata-forge doctor` does not check the
+callback: it probes Langfuse host reachability and whether the keys are
+set, nothing more.
 
 The constant `LITELLM_CALLBACK_NAME` is the string LiteLLM matches
 against. It's exposed so tests can pin the value; if LiteLLM ever
@@ -185,29 +192,36 @@ async with traced_span("preprocessing") as span:
     # span is not None.
 ```
 
-`traced_span` reads `correlation_id_var` to discover the active trace
-ID and passes it as `trace_id` to `client.span(...)`. When no trace is
-active, the span is created without a `trace_id` (Langfuse treats it
-as standalone). The block runs to completion regardless of whether
-Langfuse is configured.
+`traced_span` reads `correlation_id_var` to discover the active trace ID
+and opens the observation with
+`client.start_observation(name=..., as_type="span", trace_context={"trace_id": ...})`
+— the Langfuse SDK v4 shape, which replaced the older `client.span(...)`
+call and its top-level `trace_id` kwarg. When no trace is active, the
+span is created without `trace_context` (Langfuse treats it as
+standalone). The block runs to completion regardless of whether Langfuse
+is configured.
 
 On exit, the span records its elapsed wall-clock time in metadata. On
 normal completion: `span.end(output={"status": "ok"}, metadata={"duration_ms": ...})`.
 On exception: `span.end(output={"error": ...}, level="ERROR", ...)` then
 re-raises. Span-end failures are swallowed.
 
-Span nesting is intentionally flat in Phase 2 — sequential
-`traced_span` calls inside one `@traced` function appear as siblings
-under the trace, not nested within each other. Nested-spans-within-
-spans is a later refinement.
+Span nesting is intentionally flat: sequential `traced_span` calls inside
+one `@traced` function appear as siblings under the trace, not nested
+within each other. A span links to the trace, never to an enclosing
+span.
 
 ---
 
 ## Scores
 
-Scores are the way the eval module (Phase 2.4) will persist grader
-output to Langfuse. `score_trace` attaches to a trace; `score_observation`
-attaches to a specific observation (span):
+Scores are how grader output gets persisted to Langfuse. `strata_forge.evals`
+deliberately does not call these helpers — it never imports
+`strata_forge.tracing` (see
+[ADR 0008](../architecture/adr/0008-tracing-as-cross-cutting.md)), so
+pushing an eval verdict to Langfuse is an explicit call you make with a
+`GraderResult` in hand. `score_trace` attaches to a trace;
+`score_observation` attaches to a specific observation (span):
 
 ```python
 await score_trace(trace_id, "helpfulness", 4.2)
@@ -231,9 +245,9 @@ client errors via `contextlib.suppress`.
 Adjacent to scores but with different intent: metrics capture *facts*
 about a call (token count, latency, cost, which model was selected)
 rather than grader judgments about quality. The underlying Langfuse
-mechanism is the same `client.score` API with the wire-format
-`data_type` set explicitly, so downstream queries can filter "what
-happened" from "how well it went":
+mechanism is the same `client.create_score` API that scores use, with
+the wire-format `data_type` set explicitly, so downstream queries can
+filter "what happened" from "how well it went":
 
 ```python
 await record_numeric_metric("input_tokens", 512, trace_id=trace_id)
@@ -251,7 +265,7 @@ instead of silently dropping data only in production.
 ## Correlation IDs
 
 The active Langfuse trace ID is published on
-[`strata_forge.core.ids.correlation_id_var`](../../src/strata_forge/core/ids.py)
+[`strata_forge.core.ids.correlation_id_var`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/core/ids.py)
 while a `@traced` function is running. The structlog logger
 (configured by `strata_forge.core.logging.configure_logging`) has a
 processor that injects this value into every log record under
@@ -287,13 +301,15 @@ programmer error, not a runtime tracing failure.
 ## Troubleshooting
 
 **"I configured Langfuse but I'm not seeing traces."**
-Most often the LiteLLM callback wasn't installed. Run `strata-forge doctor`
-to check; it reports whether `is_litellm_callback_installed()` is
-True. If not, add `install_litellm_callback()` once at process
-startup.
+Most often the LiteLLM callback wasn't installed. Check with
+`from strata_forge.tracing import is_litellm_callback_installed;
+print(is_litellm_callback_installed())`. If it prints `False`, add
+`install_litellm_callback()` once at process startup. (`strata-forge
+doctor` will not tell you this — it only reports whether the keys are
+set and whether the host answers.)
 
 **`ImportError: ... requires the [langfuse] extra`.**
-Install with `pip install ai-forge[langfuse]` (or
+Install with `pip install strata-forge[langfuse]` (or
 `uv sync --extra langfuse`). `strata_forge.tracing` itself imports without
 the extra; only constructing or using the client requires it.
 
@@ -311,10 +327,9 @@ land under `<lambda>` — wrap them or use `@traced(name="...")`.
 
 **Spans aren't nested the way I expected.**
 Sequential `traced_span` calls inside one `@traced` function appear
-as siblings under the trace, not nested within each other. This is
-intentional for Phase 2; nesting spans within spans is a later
-refinement. For now, organize sub-work as sibling spans with
-distinct names.
+as siblings under the trace, not nested within each other. Every span
+links to the trace, never to an enclosing span. Organize sub-work as
+sibling spans with distinct names.
 
 **Correlation ID shows up as `None` in my logs.**
 The `correlation_id_var` is only set inside a `@traced` function (or
@@ -322,3 +337,19 @@ when you explicitly call `strata_forge.core.ids.set_correlation_id`).
 Outside those, log records emit with `correlation_id=null`. If you
 want a request-scoped correlation ID independent of Langfuse, set
 one manually at the start of your handler.
+
+---
+
+## See also
+
+- [`strata_forge.llm`](llm.md) — the client whose calls auto-trace once
+  `install_litellm_callback()` has run.
+- [`strata_forge.core`](core.md) — `correlation_id_var`, `set_correlation_id`,
+  and the structlog processor that stamps the ID onto every log record.
+- [`strata_forge.evals`](evals.md) — where grader output comes from when you
+  want to push it through `score_trace`.
+- [`strata_forge.config`](config.md) — how `LANGFUSE_*` env vars reach
+  `LangfuseConfig`.
+- [ADR 0008](../architecture/adr/0008-tracing-as-cross-cutting.md) — why
+  tracing wraps the other modules from above instead of being imported by
+  them.

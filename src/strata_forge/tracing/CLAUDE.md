@@ -79,7 +79,9 @@ no-Langfuse-configured path is a silent no-op (never a crash).
 ## Test expectations
 
 - Unit tests under `tests/unit/tracing/`, one file per source module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (`fail_under` in `pyproject.toml`); treat a drop in this module as
+  a regression.
 - Mocked Langfuse client for every unit test — no live network.
 - One `@pytest.mark.integration` test runs against the
   docker-compose Langfuse stack: starts a trace, runs an LLM call,

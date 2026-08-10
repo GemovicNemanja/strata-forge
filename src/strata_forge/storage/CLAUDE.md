@@ -77,8 +77,9 @@ a shape we can't make sense of), or :class:`NotImplementedError`
 
 - Unit tests under ``tests/unit/storage/``, one file per source
   module.
-- Coverage target: ≥ 90 % line. Currently 95 % (gateway 100 %,
-  hf_hub 92 %).
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (``fail_under`` in ``pyproject.toml``); treat a drop in this module
+  as a regression.
 - Both clients are unit-tested against ``sys.modules``-injected
   fakes (``_FakeFilesystem``, ``_FakeApi``) — no real fsspec or
   hf_hub imports in the test suite.

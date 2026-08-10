@@ -9,7 +9,7 @@ model working in real time.
 
 Usage::
 
-    uv run python examples/07_streaming_tool_loop.py            # claude-opus-4-7 @ anthropic
+    uv run python examples/07_streaming_tool_loop.py            # claude-haiku-4-5 @ anthropic
     uv run python examples/07_streaming_tool_loop.py --model gpt-5.5 --provider openai
 """
 

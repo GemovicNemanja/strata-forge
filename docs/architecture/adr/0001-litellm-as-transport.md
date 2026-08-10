@@ -7,7 +7,7 @@
 
 ## Context
 
-AI Forge must reach six provider surfaces from day one: OpenAI, Anthropic, Google Vertex AI (Gemini and Anthropic-on-Vertex), AWS Bedrock (Anthropic-on-Bedrock), Azure OpenAI, and OpenAI-compatible servers (vLLM, TGI, SGLang). Each provider has its own SDK with idiosyncratic auth flows, request shapes, streaming protocols, error classes, and feature surfaces. Hand-rolling adapters per provider would mean six independent migration treadmills — every provider release nudges the abstraction.
+strata-forge must reach six provider surfaces from day one: OpenAI, Anthropic, Google Vertex AI (Gemini and Anthropic-on-Vertex), AWS Bedrock (Anthropic-on-Bedrock), Azure OpenAI, and OpenAI-compatible servers (vLLM, TGI, SGLang). Each provider has its own SDK with idiosyncratic auth flows, request shapes, streaming protocols, error classes, and feature surfaces. Hand-rolling adapters per provider would mean six independent migration treadmills — every provider release nudges the abstraction.
 
 Forge needs:
 - Typed Pydantic in/out (the abstraction we own)

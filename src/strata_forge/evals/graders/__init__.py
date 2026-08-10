@@ -1,9 +1,9 @@
 """Grader implementations for :mod:`strata_forge.evals`.
 
-The :class:`Grader` Protocol lives in :mod:`strata_forge.evals.graders.base`;
-concrete deterministic graders ship here in 2.4.1
-(``ExactMatch``, ``Regex``, ``JSONStructure``, ``JSONField``).
-LLM-driven graders (judge, pairwise, semantic) land in 2.4.3.
+The :class:`Grader` Protocol lives in :mod:`strata_forge.evals.graders.base`.
+Deterministic graders (``ExactMatch``, ``Regex``, ``JSONStructure``,
+``JSONField``) and LLM-driven graders (``LLMJudge``, ``PairwiseGrader``,
+``SemanticSimilarity``) both ship here.
 """
 
 from strata_forge.evals.graders.base import Grader

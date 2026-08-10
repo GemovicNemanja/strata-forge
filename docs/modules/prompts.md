@@ -3,9 +3,9 @@
 `strata_forge.prompts` is where prompts live: a Jinja2-driven template layer
 backed by a sandboxed environment, a store-agnostic registry with
 in-memory and Langfuse backends, and a renderer that compiles
-`(template, variables)` into `list[strata_forge.llm.AnyMessage]` plus the
-cache hints `strata_forge.llm.LLMClient` uses to populate provider-specific
-prompt caching.
+`(template, variables)` into `list[strata_forge.llm.AnyMessage]` plus a
+provider-agnostic `CacheHints` record describing whether the stable prefix
+is worth caching.
 
 The module's organizing principle is the **structural split between a
 stable prefix and a dynamic suffix** — see
@@ -17,8 +17,8 @@ to declare what's stable and what's per-call, the module makes cache
 hits the default behavior rather than something you remember to opt
 into.
 
-Module rules: [`src/strata_forge/prompts/CLAUDE.md`](../../src/strata_forge/prompts/CLAUDE.md).
-Source: [`src/strata_forge/prompts/`](../../src/strata_forge/prompts/).
+Module rules: [`src/strata_forge/prompts/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/prompts/CLAUDE.md).
+Source: [`src/strata_forge/prompts/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/prompts/).
 
 ---
 
@@ -33,7 +33,7 @@ Source: [`src/strata_forge/prompts/`](../../src/strata_forge/prompts/).
   - [`StableDynamicSplit` + `CacheHints`](#stabledynamicsplit--cachehints)
 - [Variable validation](#variable-validation)
 - [The Jinja2 sandbox](#the-jinja2-sandbox)
-- [Cache integration with `strata_forge.llm`](#cache-integration-with-forgellm)
+- [Cache hints and what consumes them](#cache-hints-and-what-consumes-them)
 - [Stores](#stores)
 - [Errors](#errors)
 - [Troubleshooting](#troubleshooting)
@@ -60,11 +60,11 @@ rendered = render(template, {"persona": "a physicist", "topic": "entropy"})
 ```
 
 For end-to-end usage including the LLM client, see
-[`examples/13_prompt_with_llm.py`](../../examples/13_prompt_with_llm.py).
+[`examples/14_prompt_with_llm.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/14_prompt_with_llm.py).
 For local-only rendering see
-[`examples/11_prompt_template.py`](../../examples/11_prompt_template.py).
+[`examples/12_prompt_template.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/12_prompt_template.py).
 For version-tracked storage see
-[`examples/12_prompt_registry.py`](../../examples/12_prompt_registry.py).
+[`examples/13_prompt_registry.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/13_prompt_registry.py).
 
 ---
 
@@ -156,9 +156,9 @@ The pipeline:
 
 - `messages: list[AnyMessage]` — ready to hand to `LLMClient`.
 - `cache_hints: CacheHints` — provider-agnostic cache decision.
-- `split: StableDynamicSplit` — surfaced so the eval runner can
-  re-fingerprint without re-rendering when it sweeps the same template
-  across models.
+- `split: StableDynamicSplit` — the rendered halves and the stable
+  digest, surfaced so a caller sweeping one template across models can
+  re-fingerprint without re-rendering.
 
 ### `PromptRegistry` + `PromptStore`
 
@@ -228,8 +228,8 @@ don't count.
 
 `create_sandboxed_environment()` returns a `SandboxedEnvironment` with:
 
-- **No filesystem access.** `loader=None`; `include`/`import`
-  extensions disabled.
+- **No filesystem access.** `loader=None`, so `{% include %}` and
+  `{% import %}` have nothing to resolve against and fail at render time.
 - **No autoescape.** Prompts are not HTML.
 - **`StrictUndefined`.** Referencing a variable that wasn't provided at
   render time raises immediately (instead of silently substituting
@@ -252,25 +252,41 @@ environment each call so per-call state doesn't leak.
 
 ---
 
-## Cache integration with `strata_forge.llm`
+## Cache hints and what consumes them
 
-The hints `render` returns are provider-agnostic. When `LLMClient`
-consumes them (Phase 3+ wiring), it'll dispatch per provider:
+`CacheHints` is an **informational value the caller reads**, not a wire
+directive. `render` hands back `messages` and `cache_hints` side by side;
+`LLMClient.complete` takes only the messages. Nothing in
+`strata_forge.llm` reads `CacheHints`, and no `cache_control` block is
+inserted on your behalf.
 
-- **Anthropic / Bedrock (Claude with explicit `cache_control`):** when
-  `cache_stable_prefix=True`, insert
-  `cache_control: {"type": "ephemeral"}` on the last content block of
-  the stable portion.
-- **OpenAI / Azure / openai_compat:** the flag is informational —
-  caching is automatic on prefixes ≥ ~1024 tokens. The message-
-  composition layer keeps the stable content contiguous at the top so
-  the auto-cache can match the longest possible prefix.
-- **Vertex Gemini:** `cache_stable_prefix=True` is a hint that the
-  stable portion is a good candidate for a `CachedContent` resource;
-  resource lifecycle is out of scope for this module.
+What the module actually guarantees is the property that makes provider
+caching work at all: the stable section is rendered from stable variables
+only, so it is byte-identical across calls that share those values, and it
+is composed first, contiguously, at the top of the message list. That is
+what OpenAI's and Azure's automatic prefix cache matches on — no opt-in
+needed on either side.
 
-The `stable_digest` field is exposed so the eval runner and the
-diagnostic dump can correlate cache hits across calls.
+For providers with an explicit cache directive (Anthropic and Bedrock
+Claude `cache_control`, Vertex Gemini `CachedContent`), read the hint and
+pass the directive yourself through the escape hatch:
+
+```python
+rendered = render(template, variables, model="claude-opus-4-7")
+
+extras = {}
+if rendered.cache_hints.cache_stable_prefix:
+    extras = {"anthropic": {"cache_control": {"type": "ephemeral"}}}
+
+response = await client.complete(rendered.messages, provider_extras=extras)
+```
+
+`provider_extras` is forwarded verbatim to LiteLLM — see
+[`LLMClient`](llm.md#llmclient).
+
+The `stable_digest` field is the correlation key: log it alongside a call
+and you can group requests that should have shared a cached prefix, then
+check whether the provider's reported cache-read tokens agree.
 
 ---
 
@@ -286,14 +302,14 @@ the Langfuse store for that.
 ### `LangfusePromptStore`
 
 Backed by Langfuse's prompt management API. Requires the `[langfuse]`
-extra (`pip install ai-forge[langfuse]`). The constructor lazy-imports
+extra (`pip install strata-forge[langfuse]`). The constructor lazy-imports
 `langfuse`; importing `strata_forge.prompts` without the extra is safe.
 
 `PromptTemplate` serializes into Langfuse's prompt model by packing
 both Jinja sections into a JSON blob in the `prompt` field and the
 typed metadata (declared variables, description, `metadata`, plus a
 `forge_template_v1` flag) into the `config` dict. The flag lets
-external readers identify prompts written by Forge.
+external readers identify prompts written by strata-forge.
 
 `delete` raises `NotImplementedError` — the Langfuse Python SDK
 doesn't ship a deletion endpoint. Use the Langfuse UI to remove
@@ -305,7 +321,10 @@ prompts created through this store; UI edits may produce gaps).
 
 ## Errors
 
-Every exception raised from `strata_forge.prompts` is a `ForgeError` subclass.
+Template, render, and lookup failures all raise `ForgeError` subclasses.
+The two exceptions are structural rather than semantic: the Langfuse store
+raises a plain `ImportError` when the `[langfuse]` extra is missing, and
+`NotImplementedError` from `delete` (see [Stores](#stores)).
 
 | Exception | When it fires |
 |---|---|
@@ -347,12 +366,31 @@ multi-sentence persona, exemplars) or collapse to
 `PromptTemplate.simple` to opt out of caching explicitly.
 
 **`ImportError: LangfusePromptStore requires the [langfuse] extra`.**
-Install with `pip install ai-forge[langfuse]` (or `uv sync --extra
+Install with `pip install strata-forge[langfuse]` (or `uv sync --extra
 langfuse`) before instantiating `LangfusePromptStore`.
 
 **Cache hits aren't happening even with a long stable section.**
-Verify the stable section is byte-identical across calls — render two
-calls and compare `rendered.split.stable_text`. If they differ, a
-stable variable is changing per call (it shouldn't be — that's why
-`stable_variables` is structurally separate). The `stable_digest` is
-the canonical comparison.
+First check the obvious one: on Anthropic, Bedrock and Vertex nothing is
+cached unless *you* send the provider's cache directive — `CacheHints` is
+advisory and the client does not act on it (see
+[Cache hints and what consumes them](#cache-hints-and-what-consumes-them)).
+If the directive is going out, verify the stable section is byte-identical
+across calls: render twice and compare `rendered.split.stable_text`. If
+they differ, a stable variable is changing per call (it shouldn't be —
+that's why `stable_variables` is structurally separate). The
+`stable_digest` is the canonical comparison.
+
+---
+
+## See also
+
+- [`strata_forge.llm`](llm.md) — where `rendered.messages` goes, and the
+  `provider_extras` escape hatch for provider cache directives.
+- [`strata_forge.evals`](evals.md) — the `PromptRenderer` callable an
+  experiment injects to turn a dataset item into messages.
+- [`strata_forge.tracing`](tracing.md) — the Langfuse client the prompt
+  store shares credentials with.
+- [`strata_forge.cli`](cli.md) — `strata-forge prompts` for listing,
+  rendering, and pushing templates from a shell.
+- [ADR 0007](../architecture/adr/0007-stable-prefix-dynamic-suffix-prompts.md)
+  — why templates are split into a stable prefix and a dynamic suffix.

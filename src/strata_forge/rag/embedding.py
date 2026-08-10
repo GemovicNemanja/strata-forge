@@ -4,7 +4,7 @@ The :class:`Embedder` Protocol is the contract any concrete embedder
 must satisfy. :class:`LiteLLMEmbedder` calls ``litellm.aembedding``
 under the hood, giving Forge a provider-agnostic surface (OpenAI's
 ``text-embedding-3-*``, Cohere's ``embed-*``, Voyage, etc.) with one
-import. See [ADR 0012](../../../docs/architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
+import. See [ADR 0012](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
 for why embeddings live on their own seam rather than as a method
 on :class:`LLMClient`.
 """

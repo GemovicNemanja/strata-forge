@@ -7,7 +7,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
-    { name = "Nemanja Gemovic", email = "nemanja.gemovic@wonder.so" },
+    { name = "Nemanja Gemovic", email = "gemovic@strataml.com" },
 ]
 keywords = [
     "llm",
@@ -123,6 +123,14 @@ dev = [
     # multimodal helpers, the Redis cache backend, etc. without forcing
     # users to install them in production.
     "pillow>=11.0",
+]
+# Opt-in group for building the MkDocs site: `uv run --group docs mkdocs build --strict`.
+# Deliberately outside `default-groups` so a normal `uv sync` stays lean.
+# MkDocs 2.0 removes the plugin system outright and offers no migration path, so the
+# major version is capped until Material ships a build that targets it.
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.5,<10",
 ]
 
 # ----------------------------- ruff -----------------------------

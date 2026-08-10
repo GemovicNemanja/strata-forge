@@ -80,10 +80,26 @@ class TestDoctorOutput:
         result = runner.invoke(app, ["doctor"])
         assert "keys not set" in result.output
 
-    def test_pending_checks_announced(self) -> None:
+    def test_renders_credentials_section(self) -> None:
         result = runner.invoke(app, ["doctor"])
-        assert "Provider auth probes" in result.output
-        assert "model-registry" in result.output
+        assert "Provider credentials" in result.output
+        assert "anthropic" in result.output
+        assert "ANTHROPIC_API_KEY" in result.output
+
+    def test_credentials_reported_as_unset_when_env_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        result = runner.invoke(app, ["doctor"])
+        assert "not set" in result.output
+
+    def test_credentials_never_print_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-supersecret")
+        result = runner.invoke(app, ["doctor"])
+        assert "supersecret" not in result.output
+        assert "set" in result.output
 
     def test_reports_unreachable_when_probe_refused(self) -> None:
         result = runner.invoke(app, ["doctor"])

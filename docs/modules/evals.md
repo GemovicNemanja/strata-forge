@@ -29,8 +29,8 @@ Integration points:
   optional system / user messages or sampling params, re-run through
   any `LLMClient`.
 
-Module rules: [`src/strata_forge/evals/CLAUDE.md`](../../src/strata_forge/evals/CLAUDE.md).
-Source: [`src/strata_forge/evals/`](../../src/strata_forge/evals/).
+Module rules: [`src/strata_forge/evals/CLAUDE.md`](https://github.com/GemovicNemanja/strata-forge/blob/main/src/strata_forge/evals/CLAUDE.md).
+Source: [`src/strata_forge/evals/`](https://github.com/GemovicNemanja/strata-forge/tree/main/src/strata_forge/evals/).
 
 ---
 
@@ -62,8 +62,7 @@ from strata_forge.evals import (
     render_markdown,
     run_experiment,
 )
-from strata_forge.llm.client import LLMClient
-from strata_forge.llm.messages import UserMessage
+from strata_forge.llm import LLMClient
 
 async def main() -> None:
     dataset = Dataset(
@@ -73,10 +72,10 @@ async def main() -> None:
             DatasetItem.from_input({"q": "2 + 2?"}, expected_output="4"),
         ),
     )
-    client = LLMClient(model="claude-opus-4-7", provider="anthropic")
+    client = LLMClient(model="claude-haiku-4-5", provider="anthropic")
     experiment = Experiment(
         name="trivia-baseline",
-        models=("claude-opus-4-7",),
+        models=("claude-haiku-4-5",),
         dataset_name=dataset.name,
         grader_names=("exact_match",),
         sampling=SamplingParams(temperature=0.0, max_tokens=50),
@@ -84,7 +83,7 @@ async def main() -> None:
     outcomes = await run_experiment(
         experiment,
         dataset=dataset,
-        clients={"claude-opus-4-7": client},
+        clients={"claude-haiku-4-5": client},
         graders=[ExactMatch(case_sensitive=False)],
     )
     print(render_markdown(outcomes))
@@ -94,11 +93,11 @@ asyncio.run(main())
 
 End-to-end demos:
 
-- [`examples/20_eval_basic.py`](../../examples/20_eval_basic.py) —
+- [`examples/21_eval_basic.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/21_eval_basic.py) —
   full experiment with `ExactMatch` + Markdown report.
-- [`examples/21_eval_llm_judge.py`](../../examples/21_eval_llm_judge.py)
+- [`examples/22_eval_llm_judge.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/22_eval_llm_judge.py)
   — `LLMJudge` grading open-ended summaries.
-- [`examples/22_eval_ci_gate.py`](../../examples/22_eval_ci_gate.py)
+- [`examples/23_eval_ci_gate.py`](https://github.com/GemovicNemanja/strata-forge/blob/main/examples/23_eval_ci_gate.py)
   — CI-gate workflow on synthetic outcomes (no provider keys).
 
 ---
@@ -129,10 +128,12 @@ class Trial(BaseModel):            # one (model, prompt, item) + response
     prompt_name: str | None; item_id: str
     response_text: str; usage: Usage; cost_usd: float
     cache_hit: bool; latency_ms: float
+    metadata: dict[str, Any] = {}
 
 class GraderResult(BaseModel):     # one grader's verdict on one trial
     grader_name: str; score: float; passed: bool
     explanation: str = ""
+    metadata: dict[str, Any] = {}
 
 class Outcome(BaseModel):          # trial + all grader verdicts for it
     trial: Trial
@@ -141,6 +142,19 @@ class Outcome(BaseModel):          # trial + all grader verdicts for it
 
 The runner returns `tuple[Outcome, ...]` — that's the shape every
 downstream consumer (metrics, reports, CI gate) iterates over.
+
+The two `metadata` fields are where per-run diagnostics live. On a
+`continue_on_error` failure the runner writes `{"error": repr(exc)}` onto
+both the synthetic trial and its grader result; `LLMJudge` and
+`PairwiseGrader` record the judge call's cost and latency there, and
+`SemanticSimilarity` records the raw cosine.
+
+**`Trial.model` is the *canonical* model name**, taken from
+`response.route.model` after alias resolution — not the string you put in
+`Experiment.models`. Declaring `models=("opus",)` produces trials reported
+under `claude-opus-4-7`, which is what `pass_rate_by_model` and the report
+tables group by. The `clients` mapping is still keyed by the name as
+declared.
 
 ---
 
@@ -169,13 +183,14 @@ class Grader(Protocol):
 
 ### LLM-driven graders
 
-`LLMJudge(client, criteria, pass_threshold=0.7)` asks an LLM via
+`LLMJudge(client, *, criteria, pass_threshold=0.7)` asks an LLM via
 `complete_structured` to score the response on a `JudgeVerdict`
 schema (`score: float in [0,1]`, `reasoning: str`). Pass a custom
 `verdict_schema` for richer rubrics; override `system_prompt` /
-`user_template` to control wording.
+`user_template` to control wording. `criteria` is keyword-only on both
+LLM-driven graders — only `client` is positional.
 
-`PairwiseGrader(client, criteria)` puts the candidate side-by-side
+`PairwiseGrader(client, *, criteria)` puts the candidate side-by-side
 with the item's `expected_output` and asks the judge to pick
 `A` / `B` / `tie`. Position bias is mitigated by
 `secrets.randbelow`-based slot randomization (toggle with
@@ -187,8 +202,10 @@ with the item's `expected_output` and asks the judge to pick
 similarity between embeddings of the response and the reference.
 Pass a user-supplied async `embed(text) -> Sequence[float]` —
 typically a thin wrapper over your provider's embedding endpoint.
-The raw cosine is stored in `result.metadata`; the `score` field is
-clamped to `[0, 1]` for metric composability.
+The raw cosine is stored in `result.metadata["cosine_similarity"]`; the
+`score` field applies a floor of `0.0` so an anti-correlated pair doesn't
+drag a mean negative. There is no upper clamp — cosine can't exceed 1.0
+for the vectors an embedder returns.
 
 `cosine_similarity(a, b) -> float` is exposed if you want to compute
 similarities yourself.
@@ -315,6 +332,11 @@ Wilson-bound dicts on the `CIGateResult`.
 `wilson_lower_bound(passed, total, z=1.96) -> float` is exposed for
 custom rules.
 
+An empty outcome tuple fails the gate outright — `passed=False` with the
+single issue `"no outcomes provided to evaluate"`. A run that produced
+nothing is a broken run, not a vacuously passing one, so a CI job whose
+experiment silently collected zero trials goes red.
+
 ---
 
 ## Trace replay
@@ -324,7 +346,7 @@ from strata_forge.evals import ReplayOverrides, replay_trace
 
 result = await replay_trace(
     trace_id="abc-123",
-    client=LLMClient(model="claude-opus-4-7", provider="anthropic"),
+    client=LLMClient(model="claude-haiku-4-5", provider="anthropic"),
     overrides=ReplayOverrides(
         system_message="rewritten system prompt",
         temperature=0.0,
@@ -380,6 +402,31 @@ the extra explicitly so the fix is obvious.
   calibrate.
 - **`replay_trace` raises `ValueError: Unsupported trace.input shape`**:
   the Langfuse trace's input doesn't match the supported shapes
-  (`list[{"role": ..., "content": ...}]` or a single string). The
-  helper `extract_messages_from_trace` is exposed if you need to
-  pre-process traces with a different shape before replay.
+  (`list[{"role": ..., "content": ...}]` or a single string). Use
+  `extract_messages_from_trace` to pre-process traces with a different
+  shape before replay — it is not re-exported from the package root, so
+  import it as
+  `from strata_forge.evals.trace_replay import extract_messages_from_trace`.
+- **Reports group under a model name I didn't write**: `Trial.model` is the
+  canonical name after alias resolution. `models=("opus",)` reports as
+  `claude-opus-4-7`. Declare canonical names in the `Experiment` if you
+  want the two to match.
+
+---
+
+## See also
+
+- [`strata_forge.datasets`](datasets.md) — the `Dataset` and `DatasetItem`
+  every trial is built from.
+- [`strata_forge.llm`](llm.md) — the `LLMClient` instances the runner
+  dispatches through, and the `LLMResponse` graders receive.
+- [`strata_forge.prompts`](prompts.md) — what a `PromptRenderer` callable
+  usually wraps.
+- [`strata_forge.tracing`](tracing.md) — pushing grader verdicts to Langfuse
+  with `score_trace`, and the source of the traces `replay_trace` reads.
+- [`strata_forge.cli`](cli.md) — `strata-forge eval` and
+  `strata-forge experiments` for running and inspecting from a shell.
+- [ADR 0010](../architecture/adr/0010-evals-experiment-as-data-pluggable-graders.md)
+  — experiment-as-data and the pluggable-grader Protocol.
+- [ADR 0008](../architecture/adr/0008-tracing-as-cross-cutting.md) — why
+  this module does not import `strata_forge.tracing`.

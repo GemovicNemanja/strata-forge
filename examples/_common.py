@@ -51,7 +51,7 @@ _PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
 def parse_args(
     *,
     description: str,
-    default_model: str = "claude-opus-4-7",
+    default_model: str = "claude-haiku-4-5",
     default_provider: str = "anthropic",
     extra_args: list[tuple[str, dict[str, object]]] | None = None,
 ) -> argparse.Namespace:

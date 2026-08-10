@@ -89,9 +89,11 @@ input validation or :class:`ImportError` when the
   module. ``transformers`` / ``trl`` / ``peft`` / ``torch`` /
   ``datasets`` are faked via ``sys.modules`` injection — no
   real ML imports in unit tests.
-- Coverage target: ≥ 90 % line.
-- Live integration tests (``@pytest.mark.live``) that exercise
-  TRL against a tiny model can land in Phase 9.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (``fail_under`` in ``pyproject.toml``); treat a drop in this module
+  as a regression.
+- Live integration tests (``@pytest.mark.live``) that exercise TRL
+  against a tiny model are not part of the suite today.
 
 ## Gotchas
 

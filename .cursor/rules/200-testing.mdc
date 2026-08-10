@@ -1,16 +1,37 @@
 ---
-description: Testing discipline — pytest + asyncio + VCR; cassettes-as-contract; coverage thresholds.
+description: Testing discipline — pytest + asyncio + VCR; cassettes-as-contract; coverage floor.
 globs: ["tests/**/*.py", "src/strata_forge/**/*.py"]
 alwaysApply: false
 ---
 
 - Every new code path gets a test in the same PR.
-- Unit tests (`tests/unit/`) are fast and offline. Default to mocking at the seam (LiteLLM client, fsspec, etc.).
-- Provider-touching tests use VCR cassettes (`tests/vcr/cassettes/`). Recording requires `RECORD=1` plus live keys; CI replays only.
-- VCR cassettes MUST scrub API keys, AWS signatures, GCP tokens via `before_record_request` filter — leaked credentials must be rotated.
+- Unit tests (`tests/unit/<module>/`) are fast and offline — the default home for a new test. Mock at
+  the seam (LiteLLM, fsspec, the Langfuse SDK). Heavy optional SDKs (`asyncssh`, `sky`, `trl`,
+  `transformers`) are injected as fakes through `sys.modules` so the suite runs on a bare install.
+- `tests/integration/` holds cross-module tests: the `test_cross_module.py` files need no services,
+  the `integration`-marked ones need `make stack-up`. `tests/e2e/` imports every file under
+  `examples/` and `notebooks/` and is what catches drift between them and the public API — fix it
+  when it fires, never skip it.
+- `make test` runs the unit suite; `make test-all` runs everything and is what you run before a PR
+  that moves the public API.
+- Provider-touching tests use VCR cassettes (`tests/vcr/cassettes/<provider>/<scenario>.yaml`).
+  Recording requires `RECORD=1` plus live keys; CI replays with `record_mode="none"`. Tests skip
+  gracefully when the matching cassette is absent.
+- VCR cassettes MUST scrub API keys, AWS signatures, and GCP tokens via the `before_record_request`
+  filter in `tests/vcr/conftest.py`. Inspect the produced YAML before committing — a leaked
+  credential must be rotated.
 - Live tests (`@pytest.mark.live`) are env-gated and run only nightly. Never on PR.
-- Coverage thresholds enforced in CI: `src/strata_forge/llm/` ≥ 90 %; `src/strata_forge/core/` & `src/strata_forge/config/` ≥ 85 %.
+- Coverage: one package-wide floor of 85 % line coverage (`fail_under` in `pyproject.toml`), measured
+  by CI over `tests/unit`. `llm/`, `core/`, and `config/` are held to a higher bar by convention —
+  treat a drop there as a regression even though no per-module gate enforces it. Never lower the
+  floor to make a build pass.
 - No skipped tests without a tracking issue link in the skip reason.
-- Snapshot tests (`syrupy`) for provider schema serializations — failing snapshots are early-warning signals; re-record intentionally, don't suppress.
-- Pytest markers: `live`, `redis`, `slow`, `integration` — declared in `pyproject.toml`. New markers go there.
+- Snapshot tests (`syrupy`) cover provider schema serialization and token accounting — a failing
+  snapshot is an early-warning signal. Read the diff and re-record deliberately; never regenerate to
+  get green.
+- Property tests (`hypothesis`) exist for cache keys, tokenization, metrics, and prompt rendering.
+  Extend them rather than replacing a property with an example when a counterexample shows up.
+- Pytest markers: `live`, `redis`, `slow`, `integration` — declared in `pyproject.toml`. New markers
+  go there (`--strict-markers` is on).
 - `asyncio_mode = "auto"` — async tests don't need `@pytest.mark.asyncio`.
+- Never weaken an assertion, a threshold, or a type to make a test pass. A red check is information.

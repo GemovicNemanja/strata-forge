@@ -1,9 +1,10 @@
 # Agent rules — strata_forge.rag
 
 `strata_forge.rag` is the retrieval-augmented generation layer. It owns
-four Protocols — :class:`Embedder`, :class:`VectorStore`,
-:class:`Chunker`, :class:`Retriever` — plus concrete in-process
-implementations and (later) production backends. See
+five Protocols — :class:`Embedder`, :class:`VectorStore`,
+:class:`Chunker`, :class:`Retriever`, :class:`Reranker` — plus the
+:class:`IndexableRetriever` refinement in ``pipeline.py`` and concrete
+in-process and production implementations of each. See
 [ADR 0012](../../../docs/architecture/adr/0012-rag-protocols-and-vector-store-relocation.md)
 for the design rationale.
 
@@ -13,24 +14,30 @@ for the design rationale.
   provider-agnostic embedding via ``litellm.aembedding``.
 - :class:`Document` + :class:`Chunk` shapes + :class:`Chunker`
   Protocol + :class:`RecursiveChunker` — chunking primitives.
-- :class:`Retriever` Protocol + :class:`RetrievalResult` —
-  retrieval contract.
+- :class:`Retriever` Protocol + :class:`RetrievalResult` — the
+  retrieval contract, implemented by :class:`DenseRetriever`
+  (embedding similarity over a vector store), :class:`BM25Retriever`
+  (dep-free Okapi BM25 over an in-process corpus), and
+  :class:`HybridRetriever` (reciprocal-rank fusion of the two).
 - :class:`VectorStore` Protocol + :class:`InMemoryVectorStore` +
-  :class:`VectorItem` / :class:`VectorSearchResult` — vector
-  storage primitives. Relocated from :mod:`strata_forge.agents.memory`
-  per ADR 0012; the original module re-exports them for
-  back-compatibility.
-- Phase 4.2: :class:`QdrantVectorStore`, :class:`DenseRetriever`.
-- Phase 4.3: :class:`BM25Retriever`, :class:`HybridRetriever`,
-  :class:`Reranker` Protocol + Cohere / cross-encoder rerankers.
-- Phase 4.4: :class:`RAGPipeline` — composable chunk → embed →
-  store → retrieve → rerank flow.
+  :class:`QdrantVectorStore` + :class:`VectorItem` /
+  :class:`VectorSearchResult` — vector storage primitives. Relocated
+  from :mod:`strata_forge.agents.memory` per ADR 0012; the original
+  module re-exports them for back-compatibility.
+- :class:`Reranker` Protocol + :class:`CohereReranker` and
+  :class:`CrossEncoderReranker` — second-stage reordering.
+- :class:`RAGPipeline` — composable chunk → embed → store →
+  retrieve → rerank → augment flow, plus
+  :data:`DEFAULT_AUGMENT_TEMPLATE`.
 
 ## Boundaries
 
-- **Owns:** ``embedding.py``, ``chunking.py``, ``retrieval.py``,
-  ``vector_store.py``, ``stores/`` (Phase 4.2), ``rerankers/``
-  (Phase 4.3), ``pipeline.py`` (Phase 4.4).
+- **Owns:** a flat file layout — ``embedding.py``, ``chunking.py``,
+  ``retrieval.py``, ``vector_store.py``, ``dense.py``, ``bm25.py``,
+  ``hybrid.py``, ``qdrant.py``, ``rerankers.py``, ``pipeline.py``.
+  There is no ``stores/`` or ``rerankers/`` package — a new
+  retriever, store, or reranker is a new top-level
+  ``rag/<name>.py``.
 - **Imports from inside ``forge``:** :mod:`strata_forge.core` (errors,
   ids), :mod:`strata_forge.config` (settings for production backends
   when they need them). May import :mod:`strata_forge.llm` for token
@@ -41,24 +48,34 @@ for the design rationale.
   :mod:`strata_forge.agents`, :mod:`strata_forge.evals`,
   :mod:`strata_forge.datasets`. The dependency arrow points downward:
   ``agents → rag``, not the reverse.
-- **External deps:** Pydantic at module load; ``litellm`` (in
-  core) for :class:`LiteLLMEmbedder`. Phase 4.2 adds
-  ``qdrant-client`` behind the ``[rag]`` extra. Phase 4.3 adds
-  ``rank-bm25`` (or pure-Python BM25), ``cohere``,
-  ``sentence-transformers`` — each lazy-imported behind ``[rag]``.
+- **External deps:** Pydantic at module load; ``litellm`` (in core)
+  for :class:`LiteLLMEmbedder`. The ``[rag]`` extra carries
+  ``qdrant-client`` (:class:`QdrantVectorStore`) and ``cohere``
+  (:class:`CohereReranker`), both lazy-imported inside the methods
+  that use them. :class:`CrossEncoderReranker` lazy-imports
+  ``sentence-transformers``, which is *not* in ``[rag]`` — it
+  transitively pulls torch, so it is installed separately.
+  :class:`BM25Retriever` is pure Python with no dependency at all.
 
 ## Public API
 
-The module's ``__init__.py`` re-exports:
+The module's ``__init__.py`` re-exports exactly these symbols
+(mirror any change here into ``__all__``):
 
 - Protocols: :class:`Embedder`, :class:`Chunker`,
-  :class:`Retriever`, :class:`VectorStore`.
+  :class:`Retriever`, :class:`VectorStore`, :class:`Reranker`,
+  :class:`IndexableRetriever`.
 - Shapes: :class:`Document`, :class:`Chunk`,
   :class:`RetrievalResult`, :class:`VectorItem`,
   :class:`VectorSearchResult`.
-- Implementations: :class:`LiteLLMEmbedder`,
-  :class:`RecursiveChunker`, :class:`InMemoryVectorStore`.
-- Helpers: :func:`cosine_similarity`.
+- Embedders: :class:`LiteLLMEmbedder`.
+- Chunkers: :class:`RecursiveChunker`.
+- Stores: :class:`InMemoryVectorStore`, :class:`QdrantVectorStore`.
+- Retrievers: :class:`DenseRetriever`, :class:`BM25Retriever`,
+  :class:`HybridRetriever`.
+- Rerankers: :class:`CohereReranker`, :class:`CrossEncoderReranker`.
+- Pipeline: :class:`RAGPipeline`, :data:`DEFAULT_AUGMENT_TEMPLATE`.
+- Helpers: :func:`cosine_similarity`, :func:`tokenize`.
 
 Errors raised from this module are :class:`ForgeError` subclasses
 or :class:`ValueError` for input-validation failures.
@@ -78,8 +95,8 @@ or :class:`ValueError` for input-validation failures.
   network; in-process backends still implement ``async`` for
   shape uniformity.
 - **Sync chunkers.** Chunking is CPU-bound and benefits from the
-  GIL-free path. Async variants land if LLM-based chunkers are
-  added later.
+  GIL-free path; the :class:`Chunker` Protocol is deliberately
+  synchronous.
 - **No new LLM client.** Embeddings call ``litellm.aembedding``
   directly through :class:`LiteLLMEmbedder`; the chat-completion
   path on :class:`strata_forge.llm.LLMClient` is untouched.
@@ -88,13 +105,15 @@ or :class:`ValueError` for input-validation failures.
 
 - Unit tests under ``tests/unit/rag/``, one file per source
   module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (``fail_under`` in ``pyproject.toml``); treat a drop in this module
+  as a regression.
 - :class:`LiteLLMEmbedder` is tested with a mocked
   ``litellm.aembedding`` via :func:`monkeypatch.setattr`. No live
   network in unit tests.
-- Phase 4.2's :class:`QdrantVectorStore` is tested with a mocked
-  Qdrant client; one optional ``@pytest.mark.integration`` test
-  exercises a live Qdrant from ``docker compose``.
+- :class:`QdrantVectorStore` is tested with a mocked Qdrant client;
+  one optional ``@pytest.mark.integration`` test exercises a live
+  Qdrant from ``docker compose``.
 
 ## Gotchas
 

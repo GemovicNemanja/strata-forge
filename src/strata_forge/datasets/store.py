@@ -3,8 +3,8 @@
 Backends (in-memory, Langfuse) subclass :class:`DatasetStore`. The
 store is store-agnostic by design — anything that satisfies the
 async ``get`` / ``put`` / ``versions`` / ``list_names`` / ``delete``
-shape is interchangeable. Phase 2.4's eval runner depends on the
-abstract surface, not on any specific backend.
+shape is interchangeable. The :mod:`strata_forge.evals` runner depends on
+the abstract surface, not on any specific backend.
 """
 
 from __future__ import annotations

@@ -4,8 +4,10 @@
 Pydantic schema. ``JSONField`` passes when a dotted path inside the
 parsed JSON equals an expected value.
 
-Both graders are deterministic — no LLM calls. LLM-judge graders
-land in 2.4.3.
+Both graders are deterministic — no LLM calls. The LLM-driven graders
+live in :mod:`strata_forge.evals.graders.llm_judge`,
+:mod:`strata_forge.evals.graders.pairwise`, and
+:mod:`strata_forge.evals.graders.semantic`.
 """
 
 from __future__ import annotations

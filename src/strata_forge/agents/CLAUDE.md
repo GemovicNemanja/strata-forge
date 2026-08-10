@@ -19,25 +19,34 @@ for the rationale.
 - :class:`AgentResult` — the output shape: text + input messages
   + raw :class:`LLMResponse` (so callers see Forge-canonical
   accounting fields, not an agent-specific wrapper).
-- Built-in tools (Phase 3.2): ``web_search``, ``fetch_url``,
-  ``fs_read``, ``calculator``. Each is a concrete :class:`Tool`
-  built via :func:`strata_forge.llm.tool`.
-- Memory (Phase 3.3): :class:`ConversationMemory` for in-process
-  message-history trimming; :class:`EpisodicMemory` against a
-  pluggable vector store (concrete adapter lands when
-  :mod:`strata_forge.rag` ships in Phase 4).
-- Multi-agent patterns (Phase 3.4): hand-off, critic-refiner.
+- Built-in tools: ``web_search_tool``, ``fetch_url``,
+  ``fs_read_tool``, ``calculator``. Each is a concrete :class:`Tool`
+  built via :func:`strata_forge.llm.tool`, with a Pydantic args model
+  (:class:`WebSearchArgs`, :class:`FetchURLArgs`,
+  :class:`FSReadArgs`, :class:`CalculatorArgs`).
+- Memory: :class:`ConversationMemory` for in-process message-history
+  trimming; :class:`EpisodicMemory` against the pluggable
+  :class:`VectorStore` Protocol. The Protocol,
+  :class:`InMemoryVectorStore`, :class:`VectorItem`, and
+  :class:`VectorSearchResult` live in :mod:`strata_forge.rag` per
+  ADR 0012 — ``memory/vector_store.py`` is a re-export shim, and
+  :class:`strata_forge.rag.QdrantVectorStore` is the persistent
+  implementation of the same Protocol.
+- Multi-agent patterns: :func:`handoff` (router-driven delegation,
+  returning a :class:`RouterChoice`) and :func:`critic_refiner_run`
+  (critique/refine loop over a :class:`CritiqueVerdict`).
 
 ## Boundaries
 
-- **Owns:** `agent.py`, `tools/` (Phase 3.2), `memory/`
-  (Phase 3.3), multi-agent helpers (Phase 3.4).
+- **Owns:** `agent.py`, `multi_agent.py`, `tools/`
+  (`web_search.py`, `fetch_url.py`, `fs_read.py`, `calculator.py`),
+  `memory/` (`conversation.py`, `episodic.py`, `vector_store.py`).
 - **Imports from inside `forge`:** :mod:`strata_forge.core` (errors),
   :mod:`strata_forge.config` (settings if built-in tools need them),
   :mod:`strata_forge.llm` (everything tool/message/response-related),
   optionally :mod:`strata_forge.prompts` (when rendering structured
-  prompts as system messages), and :mod:`strata_forge.rag` when its
-  vector-store Protocol lands.
+  prompts as system messages), and :mod:`strata_forge.rag` for the
+  vector-store Protocol.
 - **Does NOT import** :mod:`strata_forge.tracing` (that module wraps
   every Forge module from above; the dependency arrow points
   one way — see ADR 0008).
@@ -47,15 +56,30 @@ for the rationale.
   invocation goes through :meth:`Tool.invoke`. The multi-turn
   loop goes through :meth:`LLMClient.run_tool_loop`. Structured
   output goes through :meth:`LLMClient.complete_structured`.
-- **External deps:** Pydantic. No optional extras at the
-  foundation sub-phase; built-in tools (Phase 3.2) may add
-  lazy imports.
+- **External deps:** Pydantic and ``httpx`` (both in the core
+  install) — ``fetch_url`` uses ``httpx.AsyncClient``. No optional
+  extras: ``web_search_tool`` is a factory that takes a
+  caller-supplied :data:`SearchBackend` callable rather than
+  depending on a search SDK.
 
 ## Public API
 
-The module's ``__init__.py`` re-exports:
+The module's ``__init__.py`` re-exports exactly these symbols
+(mirror any change here into ``__all__``):
 
 - Agent runtime: :class:`Agent`, :class:`AgentResult`.
+- Built-in tools: :func:`web_search_tool`, :func:`fs_read_tool`,
+  :data:`fetch_url`, :data:`calculator`, plus their args models
+  :class:`WebSearchArgs`, :class:`FSReadArgs`,
+  :class:`FetchURLArgs`, :class:`CalculatorArgs` and the
+  web-search shapes :data:`SearchBackend`, :class:`SearchResult`.
+- Memory: :class:`ConversationMemory`, :class:`EpisodicMemory`,
+  :data:`EmbedFn`, and the vector-store names re-exported from
+  :mod:`strata_forge.rag`: :class:`VectorStore`,
+  :class:`InMemoryVectorStore`, :class:`VectorItem`,
+  :class:`VectorSearchResult`.
+- Multi-agent: :func:`handoff`, :func:`critic_refiner_run`,
+  :class:`RouterChoice`, :class:`CritiqueVerdict`.
 - Message types and tool primitives forwarded from
   :mod:`strata_forge.llm` for convenience:
   :data:`AnyMessage`, :class:`SystemMessage`,
@@ -100,7 +124,7 @@ The agent itself raises:
   inside the method. Callers that need it post-hoc consult
   Langfuse (when :mod:`strata_forge.tracing` is wired in via
   ``install_litellm_callback``) or the
-  ``FORGE_DIAGNOSTIC`` NDJSON dump; callers that need it *live*
+  ``FORGE_DIAGNOSTIC_ENABLED`` NDJSON dump; callers that need it *live*
   use :meth:`Agent.run_streaming`, which surfaces every
   iteration's calls and results as :data:`LoopEvent`s without a
   second loop implementation.
@@ -109,10 +133,13 @@ The agent itself raises:
 
 - Unit tests under ``tests/unit/agents/``, one file per source
   module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (``fail_under`` in ``pyproject.toml``); treat a drop in this module
+  as a regression.
 - Tests use ``AsyncMock`` against the :class:`LLMClient` surface
   — no live network.
-- Built-in tools (Phase 3.2) get one mocked-SDK test each.
+- Each built-in tool gets its own test file with the network /
+  filesystem seam mocked.
 - The agent's behavior with real LiteLLM-backed clients is
   covered by VCR cassettes in :mod:`strata_forge.llm`'s test suite;
   there's nothing agent-specific to record at the seam.
@@ -131,10 +158,10 @@ The agent itself raises:
   :mod:`strata_forge.llm`: agents see arbitrary user content, much
   of which may be PII. Use DEBUG, or rely on Langfuse / the
   diagnostic dump for full payloads.
-- **Memory state lives outside Agent.** When Phase 3.3 ships
-  :class:`ConversationMemory`, agents take a memory instance as
-  a constructor argument; the agent itself stays stateless
-  across runs.
+- **Memory state lives outside Agent.** A memory instance
+  (:class:`ConversationMemory`, :class:`EpisodicMemory`) is passed
+  in by the caller and owned by the caller; :class:`Agent` itself
+  holds no conversation state across runs.
 
 ## When to update this file
 

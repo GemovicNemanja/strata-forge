@@ -1,14 +1,40 @@
 ---
-description: Documentation discipline — ADRs, module guides, READMEs, CLAUDE.md, MDC rules.
-globs: ["docs/**/*.md", "**/CLAUDE.md", "**/README.md", "AGENTS.md", ".cursor/rules/**/*.mdc"]
+description: Documentation discipline — ADRs, module guides, READMEs, CHANGELOG, CLAUDE.md, MDC rules.
+globs: ["docs/**/*.md", "**/CLAUDE.md", "**/README.md", "AGENTS.md", "CHANGELOG.md", "mkdocs.yml", ".cursor/rules/**/*.mdc"]
 alwaysApply: false
 ---
 
-- Architectural decisions go into `docs/architecture/adr/NNNN-short-slug.md`. Numbered sequentially, **immutable once merged** — supersede via a new ADR that links back to the old one.
+- Architectural decisions go into `docs/architecture/adr/NNNN-short-slug.md`. Numbered sequentially,
+  **immutable once merged** — supersede via a new ADR that links back to the old one.
 - ADR template: **Context → Decision → Consequences**. Keep under ~200 lines.
-- Every module has a `docs/modules/<name>.md` kept in sync with its public API — update it in the same PR as the API change.
-- Module READMEs describe what the module does/will do in product terms. **Never reference phase / sub-phase numbers** — those live only in `docs/roadmap.md`.
-- The root `CLAUDE.md` is authoritative for cross-cutting rules. Module-level `CLAUDE.md` files are authoritative for module-specific rules. **When a module rule conflicts with root, fix the conflict** before merging.
+- Every module has a `docs/modules/<name>.md` kept in sync with its public API — update it in the
+  same PR as the API change. Module `README.md` files describe the module in product terms and
+  **ship inside the wheel**, so they must stay present-tense and true.
+- `CHANGELOG.md` gets an entry under `## [Unreleased]` for every user-visible change (Keep a
+  Changelog format, newest first).
+- **Never write status hedges or scaffolding into a long-lived file**: no "implementation pending",
+  no "coming soon", no phase / sub-phase / step numbers, no links to a roadmap. There is no roadmap
+  document in this repository and none is planned; describe what the code does today.
+- **Link policy.** `docs/` is the MkDocs `docs_dir`, so a relative path that climbs above it does not
+  resolve on the rendered site. Links between files **inside** `docs/` are relative `.md` links;
+  links to anything **outside** `docs/` (`src/`, `examples/`, `tests/`, `CONTRIBUTING.md`,
+  `CLAUDE.md`) are absolute
+  `https://github.com/GemovicNemanja/strata-forge/blob/main/...` URLs. Adding or renaming a page
+  under `docs/` means updating the `mkdocs.yml` nav; `make docs-build` runs `--strict` and fails on a
+  broken link.
+- Every code snippet must use symbols that actually exist — verify against `src/strata_forge` before
+  writing an import or a call. Async examples need `asyncio.run` or an `await` context. A snippet
+  that does not run is worse than no snippet.
+- Install hints name the real distribution: `pip install 'strata-forge[<extra>]'`. `ai-forge` is a
+  different project on PyPI.
+- No emojis in documentation — headings, tables, or prose. The badges at the top of the root
+  `README.md` are the only exception.
+- The root `CLAUDE.md` is authoritative for cross-cutting rules; module-level `CLAUDE.md` files are
+  authoritative for module-specific rules. **When a module rule conflicts with root, fix the
+  conflict** before merging. `docs/agent-guide.md` is the how-to companion — navigation, task
+  recipes, the verification loop — and must not restate the rules.
 - `AGENTS.md` is a symlink to `CLAUDE.md` — do not turn it into a separate file.
-- `.cursor/rules/*.mdc` files mirror specific sections of `CLAUDE.md` with `globs:` for scoped activation. Keep them brief — defer to `CLAUDE.md` for full rationale.
-- See `CLAUDE.md` §7 for the self-maintenance protocol — when a rule drifts from code, propose the update in the same PR.
+- `.cursor/rules/*.mdc` files mirror specific sections of `CLAUDE.md` with `globs:` for scoped
+  activation. Keep them brief and defer to `CLAUDE.md` for the full rationale.
+- See `CLAUDE.md` §7 for the self-maintenance protocol — when a rule drifts from code, fix it in the
+  same PR. Merged code wins over a stale rule; the rule file wins over in-flight code.

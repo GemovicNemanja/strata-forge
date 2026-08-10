@@ -1,16 +1,37 @@
 ---
 description: Python style — ruff, pyright, naming, docstrings, comments.
-globs: ["src/strata_forge/**/*.py", "tests/**/*.py", "examples/**/*.py", "scripts/**/*.py"]
+globs: ["src/strata_forge/**/*.py", "tests/**/*.py", "examples/**/*.py", "notebooks/**/*.py", "scripts/**/*.py"]
 alwaysApply: false
 ---
 
 - Line length 100. `ruff format` is authoritative — do not reformat manually.
-- pyright strict on `src/strata_forge`. `Any` requires `# pyright: ignore[reportXxx]` with a reason in the comment.
-- Names: `snake_case` for functions / variables / modules; `PascalCase` for classes; `SCREAMING_SNAKE` for constants.
-- Pydantic models follow `XxxConfig`, `XxxRequest`, `XxxResponse`, `XxxError` conventions.
-- Imports sorted by ruff isort. First-party is `strata_forge`. Avoid star re-exports without explicit `__all__`.
-- Docstrings: module-level summary mandatory. Public APIs: a one-line summary; multi-line only when the *why* is non-obvious. Long-form docs live in `docs/modules/<name>.md`.
-- Comments are rare — only when *why* is non-obvious. Never describe *what* (names do that already). Never reference current tasks, PRs, or scaffolding metadata in comments.
+- pyright strict on `src/strata_forge`; tests are typed but not strict. `Any` requires a
+  `# pyright: ignore[reportXxx]` with the reason on the same line. The legitimate source of `Any` is
+  a lazily imported third-party SDK: annotate the boundary and narrow immediately.
+- A suppression carries its reason: `# noqa: S307 — AST-whitelisted`, `# pyright: ignore[reportDeprecated]`.
+  A bare code with no explanation is not acceptable.
+- Names: `snake_case` for functions / variables / modules; `PascalCase` for classes;
+  `SCREAMING_SNAKE` for constants.
+- Pydantic models follow `XxxConfig`, `XxxRequest`, `XxxResponse`, `XxxError` conventions. Data
+  shapes are Pydantic v2 (usually `frozen=True`, `extra="forbid"`); behaviour contracts are
+  `Protocol`; narrow boundaries are `TypedDict`.
+- Imports sorted by ruff isort. First-party is `strata_forge`. Avoid star re-exports without an
+  explicit `__all__` — the package `__init__.py` `__all__` is the public-surface contract.
+- `from __future__ import annotations` at the top of modules using generics in signatures. Type-only
+  imports go in `if TYPE_CHECKING:`, **except** where a Pydantic field or a Typer parameter needs the
+  annotation resolved at runtime — those keep the runtime import with
+  `# noqa: TC001 — Pydantic needs runtime resolution` (or `TC003`).
+- Paths use `pathlib` (ruff PTH). `strata_forge.core.types.PathLike` is the parameter type for
+  caller-supplied paths.
+- Docstrings: module-level summary mandatory. Public APIs get a one-line summary; multi-line only
+  when the *why* is non-obvious. Long-form documentation lives in `docs/modules/<name>.md`.
+  Docstrings ship inside the wheel and sdist, so write them for a reader who has only the installed
+  package: no status hedges, no build-order language, no internal infrastructure, no links into
+  `docs/` (which is not packaged).
+- Comments are rare — only when *why* is non-obvious. Never describe *what* (names do that already).
+  Never reference current tasks, PRs, or scaffolding metadata in comments.
 - No emojis in source.
-- `from __future__ import annotations` at the top of modules using generics in signatures.
-- HTTP I/O uses `httpx.AsyncClient` (often via LiteLLM). No sync `requests` / `httpx.Client` in production code paths.
+- HTTP I/O uses `httpx.AsyncClient` (often via LiteLLM). No sync `requests` / `httpx.Client` in
+  production code paths.
+- Every symbol you write into an example, a docstring, or an error message must exist — grep
+  `src/strata_forge` first.

@@ -1,7 +1,7 @@
-# Local dev stack: Postgres + Qdrant + Redis.
-# The Langfuse v3 service stack (web + worker + ClickHouse + MinIO) is wired in when
-# `strata_forge.tracing` lands; today this file is enough to bring up the services Phase 0
-# foundations actually use.
+# Local dev stack: Postgres + Qdrant + Redis — the services the integration tests and local
+# runs need beside a checkout.
+# The full Langfuse v3 service stack (web + worker + ClickHouse + MinIO) is not bundled here;
+# point `LANGFUSE_HOST` at your own instance, self-hosted or cloud.
 #
 # Usage: `make stack-up` / `make stack-down`.
 

@@ -1,0 +1,155 @@
+site_name: strata-forge
+site_url: https://gemovicnemanja.github.io/strata-forge/
+site_description: >-
+  Typed, async-first Python library for LLM inference, prompting, evaluation, agents, RAG,
+  fine-tuning, and remote compute.
+copyright: Licensed under Apache-2.0.
+
+repo_url: https://github.com/GemovicNemanja/strata-forge
+repo_name: GemovicNemanja/strata-forge
+edit_uri: edit/main/docs/
+
+# MkDocs resolves README.md to the directory index, so docs/README.md is both the GitHub folder
+# index and the site home page, and docs/modules/README.md is both the folder index and the
+# Modules landing page. There is deliberately no docs/index.md — it would collide.
+docs_dir: docs
+site_dir: site
+
+# Directory placeholders are not content; keep them out of the published site.
+exclude_docs: |
+  .gitkeep
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.action.edit
+    - content.tooltips
+  palette:
+    - media: "(prefers-color-scheme)"
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+# Kept to the built-in search plugin: mkdocs-material and its own dependencies are the whole
+# build surface, so `uv run --group docs mkdocs build --strict` needs nothing else.
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  # GitHub's slug algorithm, not Python-Markdown's: every page here is also read as raw
+  # Markdown on github.com, so a heading anchor must resolve identically in both renderers.
+  # The two differ whenever punctuation collapses into a double space (`render` + `Rendered`
+  # -> #render--rendered on GitHub, #render-rendered by default here).
+  - toc:
+      permalink: true
+      toc_depth: 3
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+# Under `--strict` every `warn` below is a build failure. `omitted_files` makes the nav
+# authoritative, so a new page under docs/ fails the build until it is listed rather than being
+# silently dropped from navigation; `anchors` guards the heading links the slugify setting above
+# keeps identical between GitHub and this site. `unrecognized_links` stays informational because
+# a directory-style link (`../architecture/adr/`) resolves correctly in both renderers even
+# though MkDocs cannot match it to a source file.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: info
+
+nav:
+  - Home: README.md
+  - Agent guide: agent-guide.md
+  - Modules:
+      - Overview: modules/README.md
+      - strata_forge.core: modules/core.md
+      - strata_forge.config: modules/config.md
+      - strata_forge.llm: modules/llm.md
+      - strata_forge.sync: modules/sync.md
+      - strata_forge.prompts: modules/prompts.md
+      - strata_forge.tracing: modules/tracing.md
+      - strata_forge.datasets: modules/datasets.md
+      - strata_forge.evals: modules/evals.md
+      - strata_forge.agents: modules/agents.md
+      - strata_forge.rag: modules/rag.md
+      - strata_forge.storage: modules/storage.md
+      - strata_forge.compute: modules/compute.md
+      - strata_forge.training: modules/training.md
+      - strata_forge.pipelines: modules/pipelines.md
+      - strata_forge.cli: modules/cli.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Module boundaries: architecture/module-boundaries.md
+      - Decision records:
+          - Index: architecture/adr/README.md
+          - 0001 — LiteLLM as the provider transport: architecture/adr/0001-litellm-as-transport.md
+          - 0002 — Async-only public API: architecture/adr/0002-async-only-public-api.md
+          - 0003 — Exception-based error model: architecture/adr/0003-exception-hierarchy.md
+          - 0004 — Model registry scope: architecture/adr/0004-model-registry-scope.md
+          - 0005 — Two-axis fallback: architecture/adr/0005-two-axis-fallback.md
+          - 0006 — Tool calling as an LLM primitive: architecture/adr/0006-tool-calling-as-llm-primitive.md
+          - 0007 — Stable-prefix / dynamic-suffix prompts: architecture/adr/0007-stable-prefix-dynamic-suffix-prompts.md
+          - 0008 — Tracing as a cross-cutting layer: architecture/adr/0008-tracing-as-cross-cutting.md
+          - 0009 — Langfuse canonical, HF Datasets as exchange: architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md
+          - 0010 — Experiments as data, pluggable graders: architecture/adr/0010-evals-experiment-as-data-pluggable-graders.md
+          - 0011 — Agents as a thin wrapper over the LLM module: architecture/adr/0011-agents-thin-wrapper-over-forge-llm.md
+          - 0012 — RAG Protocols and vector-store relocation: architecture/adr/0012-rag-protocols-and-vector-store-relocation.md
+          - 0013 — Task-as-data and the Backend Protocol: architecture/adr/0013-compute-task-and-backend-shapes.md
+          - 0014 — Streaming tool loop as an event protocol: architecture/adr/0014-streaming-tool-loop-event-protocol.md
+          - 0015 — Client-executed tools suspend the streaming loop: architecture/adr/0015-client-executed-tools-suspend-the-streaming-loop.md
+          - 0016 — Workdir-confined Backend.read_file: architecture/adr/0016-backend-read-file.md
+  - Recipes:
+      - Overview: recipes/README.md
+      - Evaluate a model with a custom grader: recipes/evaluate-a-model-with-a-custom-grader.md
+      - Build a RAG pipeline over Qdrant: recipes/build-a-rag-pipeline-over-qdrant.md
+      - Run a tool-calling agent: recipes/run-a-tool-calling-agent.md
+      - Control cost and reliability in production: recipes/control-cost-and-reliability.md
+      - Fine-tune on remote compute and serve the result: recipes/fine-tune-on-remote-compute-and-serve.md

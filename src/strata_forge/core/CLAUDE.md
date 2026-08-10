@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cross-cutting concerns that every module needs: exception hierarchy, retry decorator, structured logging with `trace_id` propagation, cost budgets, reproducibility helpers, UUIDv7 ids, shared type aliases. None of it is LLM-specific.
+Cross-cutting concerns that every module needs: exception hierarchy, retry decorator, structured logging with `correlation_id` propagation, cost budgets, reproducibility helpers, UUIDv7 ids, shared type aliases. None of it is LLM-specific.
 
 ## Boundaries
 
@@ -20,7 +20,7 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - Exception types from `errors.py`: `ForgeError`, `ConfigError`, `ProviderError` + subclasses, `BudgetExceededError`, `ValidationError`, `CacheError`, `RegistryError`, `FallbackExhaustedError`.
 - `@retry` decorator and `DEFAULT_RETRY_ON` from `retry.py` (works for async + sync).
 - `configure_logging`, `get_logger`, `traced_span` from `logging.py`.
-- `BudgetContext` from `budget.py`.
+- `BudgetContext` and `current_budget` from `budget.py`.
 - `set_seed`, `content_hash`, `env_snapshot` from `repro.py`.
 - `uuid7`, `new_correlation_id`, `get_correlation_id`, `set_correlation_id`, `correlation_id_var` from `ids.py`.
 - Shared type aliases from `types.py` (e.g. `JSONValue`, `PathLike`).
@@ -40,7 +40,7 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - Coverage target: ≥ 85 % line.
 - Hypothesis property tests for `content_hash` (stability under reorderings, sensitivity to value changes).
 - Tests must run without optional heavy deps installed; `set_seed` tests exercise the no-numpy and no-torch paths.
-- The structlog setup test verifies that `trace_id` propagates across `await` by spawning a task and checking the logger output.
+- The structlog setup test verifies that `correlation_id` propagates across `await` by spawning a task and checking the logger output.
 
 ## Gotchas
 
@@ -54,5 +54,5 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - Adding a new sub-module (e.g. `strata_forge.core.profiling`).
 - Adding or renaming exception classes.
 - Changing the default `@retry` policy or predicate set.
-- Changing the `trace_id` propagation mechanism.
+- Changing the `correlation_id` propagation mechanism.
 - Tightening or loosening dependency rules (e.g. lifting the no-`strata_forge.*`-imports rule, which would require an ADR).

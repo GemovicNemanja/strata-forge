@@ -1,9 +1,12 @@
 .DEFAULT_GOAL := help
-.PHONY: help install fmt lint type check test test-cov integration vcr-replay vcr-record \
-        doctor stack-up stack-down stack-logs eval refresh-cassettes sync-langfuse clean
+.PHONY: help install fmt lint type check test test-cov test-all integration vcr-replay vcr-record \
+        doctor stack-up stack-down stack-logs eval-gate refresh-cassettes docs-serve docs-build \
+        clean
 
 UV ?= uv run
-PY_DIRS := $(wildcard src tests examples scripts)
+PY_DIRS := $(wildcard src tests examples notebooks scripts)
+# Model the eval gate runs against; overrides the script's own default.
+MODEL ?=
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -29,7 +32,10 @@ test: ## Run unit tests
 test-cov: ## Run unit tests with coverage report
 	$(UV) pytest tests/unit --cov=strata_forge --cov-report=term-missing
 
-integration: ## Run integration tests (requires `make stack-up` first)
+test-all: ## Run every test (unit + e2e + cross-module; service-backed ones skip)
+	$(UV) pytest
+
+integration: ## Run tests marked `integration` (need live services — see docker/README.md)
 	$(UV) pytest -m integration
 
 vcr-replay: ## Replay committed VCR cassettes (no live keys needed)
@@ -41,7 +47,7 @@ vcr-record: ## Record fresh VCR cassettes (requires live keys, RECORD=1)
 doctor: ## Run the `strata-forge doctor` diagnostic command
 	$(UV) strata-forge doctor
 
-stack-up: ## Start the local dev stack (Langfuse + Postgres + Qdrant + Redis)
+stack-up: ## Start the local dev stack (Postgres + Qdrant + Redis)
 	docker compose -f docker/compose.yaml up -d
 
 stack-down: ## Stop the local dev stack
@@ -50,15 +56,18 @@ stack-down: ## Stop the local dev stack
 stack-logs: ## Tail logs from the local dev stack
 	docker compose -f docker/compose.yaml logs -f
 
-eval: ## Run the evaluation suite (Phase 2.4)
-	@echo "[forge] eval suite not yet implemented — lands in Phase 2.4"
+eval-gate: ## Run the eval-regression gate (live LLM calls; MODEL=<name> to override)
+	$(UV) python scripts/run_eval_gate.py $(if $(MODEL),--model $(MODEL))
 
 refresh-cassettes: vcr-record ## Re-record every VCR cassette (alias for `vcr-record`)
 
-sync-langfuse: ## Sync prompts/datasets to Langfuse (Phase 2)
-	@echo "[forge] Langfuse sync not yet implemented — lands in Phase 2"
+docs-serve: ## Serve the docs site locally with live reload
+	uv run --group docs mkdocs serve
+
+docs-build: ## Build the docs site (warnings are errors)
+	uv run --group docs mkdocs build --strict
 
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .pyright .mypy_cache .hypothesis \
-	       .coverage htmlcov build dist *.egg-info
+	       .coverage htmlcov build dist *.egg-info site
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

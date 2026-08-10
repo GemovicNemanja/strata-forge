@@ -1,16 +1,40 @@
 ---
 description: strata_forge.llm — provider abstraction, tools, structured output, two-axis fallback, registry.
-globs: ["src/strata_forge/llm/**/*.py", "tests/unit/llm/**/*.py", "tests/vcr/**/*.py"]
+globs: ["src/strata_forge/llm/**/*.py", "src/strata_forge/llm/registry_data.yaml", "tests/unit/llm/**/*.py", "tests/vcr/**/*.py"]
 alwaysApply: false
 ---
 
-- Public surface is `LLMClient` (in `client.py`) plus re-exports in `__init__.py`. Add new capabilities there, not in provider modules.
-- Every provider call routes through LiteLLM via the `ProviderClient` base. **Never import provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) outside `src/strata_forge/llm/providers/`** — the only escape hatch is the `provider_extras={...}` passthrough on `LLMClient.complete`.
-- New errors raised from this module must subclass `ProviderError` (in `strata_forge.core.errors`). Use `map_litellm_exception()` at the seam — never let raw LiteLLM exceptions bubble out.
-- Pricing and registry edits go in `registry_data.yaml` with the source link in a YAML comment. **Never hard-code pricing or model IDs in Python.**
-- Cache key is provider-agnostic: a hit on `claude-opus-4-7` is valid regardless of which provider route served the original call.
-- Streaming responses are NOT cached.
-- Structured output and tool calling can be combined; when both are requested, structured output is exposed as a single forced tool internally for best fidelity across providers.
-- `run_tool_loop` validates tools against the active model's capabilities before any provider call — consult `registry.get(model).capabilities.tool_calling`.
-- Initial registry scope (per ADR): latest OpenAI, Anthropic, Google foundation models only. New vendors require an ADR.
-- Fallback is two-axis: `ModelFallback(model, providers=[...])` failover within (same model, different provider) + the outer list failover across (different model). Content-filter errors short-circuit the entire chain.
+- Public surface is `LLMClient` (in `client.py`) plus the re-exports in `__init__.py`. Add new
+  capabilities there, not in provider modules.
+- Every provider call routes through LiteLLM via the `ProviderClient` base in `providers/base.py`.
+  **Never import provider SDKs (`anthropic`, `openai`, `boto3`, Google's clients) outside
+  `src/strata_forge/llm/providers/`** — the one exception is `errors.py`, which imports `openai` to
+  name the exception classes LiteLLM re-raises. The caller-facing escape hatch is
+  `provider_extras={...}` on `LLMClient.complete`, forwarded verbatim to LiteLLM.
+- Provider faults raise `ProviderError` subclasses from `strata_forge.core.errors`; map them at the
+  seam with `map_litellm_exception()` and never let a raw LiteLLM or SDK exception bubble out. Other
+  module-level failures subclass `ForgeError` directly (`StructuredOutputError`,
+  `ToolLoopExceededError`, `RegistryError`); argument mistakes stay `ValueError` / `TypeError`.
+- Pricing and registry edits go in `registry_data.yaml` with the source link in a YAML comment.
+  **Never hard-code pricing or model IDs in Python.** Registry scope is the latest Anthropic, OpenAI,
+  and Google foundation models (ADR 0004) — a new vendor needs a superseding ADR.
+- Cache keys are provider-agnostic: a hit on `claude-opus-4-7` is valid regardless of which provider
+  route served the original call. Streaming bypasses both the cache and the fallback loop.
+- Structured output dispatches by provider family: `response_format` on OpenAI-shaped routes,
+  `response_schema` on Gemini, forced-tool emulation on Anthropic / Bedrock / Claude-on-Vertex. The
+  payload is built once from the head of the chain, so a mixed-family fallback chain sends the head's
+  shape downstream — keep chains within one family when you rely on structured output.
+- `run_tool_loop` and `stream_tool_loop` gate on the registry before any provider call: a model whose
+  entry says `capabilities.tool_calling` is false raises `RegistryError`, and an unregistered model
+  is let through unless the client was built with `require_tool_support=True`.
+- Fallback is two-axis: `ModelFallback(model, providers=[...])` fails over within one logical model
+  (same model, different provider); the outer list fails over across models. A content-filter refusal
+  short-circuits the entire chain — retrying it elsewhere only spends money (ADR 0005).
+- Budget accounting is post-call: the client consumes against the active `BudgetContext` once a call
+  returns, so a ceiling stops the next call rather than the one in flight. Never truncate a prompt to
+  fit — raise `BudgetExceededError`.
+- The NDJSON diagnostic dump is gated by `FORGE_DIAGNOSTIC_ENABLED` with the destination in
+  `FORGE_DIAGNOSTIC_PATH` (`strata_forge.config.DiagnosticConfig`). There is no `FORGE_DIAGNOSTIC`
+  variable.
+- Tool plumbing (`Tool`, `@tool`, `ToolDeclaration`, the loop, the provider tool schemas) belongs to
+  this module. `strata_forge.agents` composes it and must never reimplement it (ADR 0006, ADR 0011).

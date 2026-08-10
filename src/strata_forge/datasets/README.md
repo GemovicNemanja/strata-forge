@@ -1,22 +1,16 @@
 # strata_forge.datasets
 
-Typed dataset shapes plus pluggable storage and synthetic-data
-primitives. The canonical persistent store is Langfuse (so eval datasets
-live alongside the traces they grade); Hugging Face Datasets is the
-exchange format (training + external consumption). Forge-owned Pydantic
-models — `DatasetItem` and `Dataset` — are the canonical in-memory shape
-that every other piece converts into and out of. See
-[ADR 0009](../../../docs/architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md)
-for the rationale.
+Typed dataset shapes plus pluggable storage and synthetic-data primitives. The frozen Pydantic
+models `DatasetItem` and `Dataset` are the canonical in-memory shape every other piece converts
+into and out of; `dataset_version` derives a content hash so runs can name exactly what they
+evaluated, and `diff` reports what changed between two versions. See
+[ADR 0009](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/architecture/adr/0009-datasets-langfuse-canonical-hf-exchange.md)
+for why Langfuse is the persistent store and Hugging Face Datasets the exchange format.
 
-Phase 2.3.1 ships the data model, content-hash versioning + diffing,
-and an `InMemoryDatasetStore` backend. Subsequent sub-phases add the
-Langfuse store + HF bridge (2.3.2) and synthetic-data primitives
-(2.3.3).
+`DatasetStore` is the async storage interface, with `InMemoryDatasetStore` and
+`LangfuseDatasetStore` (`[langfuse]` extra) as backends. `to_hf_dataset` / `from_hf_dataset` bridge
+to Hugging Face Datasets (`[hf]` extra), and `self_instruct` / `distill` generate datasets from an
+`LLMClient`.
 
-> **Status.** Implementation in progress as part of Phase 2.3. See
-> [`docs/roadmap.md`](../../../docs/roadmap.md) for the per-sub-phase
-> deliverable list.
-
-Module rules: [`CLAUDE.md`](CLAUDE.md). Full reference once shipped:
-`docs/modules/datasets.md`.
+Reference:
+[docs/modules/datasets.md](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/datasets.md).

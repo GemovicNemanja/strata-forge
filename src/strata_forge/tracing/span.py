@@ -7,11 +7,11 @@ its wall-clock duration, captures success / error outcome, and yields
 the span object so callers can attach additional fields via
 ``span.update(...)`` if they want.
 
-Spans are flat within their trace in this implementation — sequential
-spans inside a single ``@traced`` function appear as siblings under
-the trace, not nested within each other. Nesting spans within spans
-is a refinement for later; for now keeping the model simple matches
-Phase 2.2's scope.
+Spans are flat within their trace — sequential spans inside a single
+``@traced`` function appear as siblings under the trace, not nested
+within each other. Span-within-span nesting is deliberately out of
+scope: a flat model keeps the parenting rules unambiguous when spans
+open and close across ``await`` boundaries.
 
 Like the rest of :mod:`strata_forge.tracing`, the context manager is a
 transparent no-op when Langfuse isn't configured or span creation

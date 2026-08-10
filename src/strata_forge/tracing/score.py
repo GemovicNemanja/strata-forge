@@ -1,8 +1,8 @@
 """Attach grader feedback to a Langfuse trace or observation.
 
 A "score" in Langfuse is a named, typed value attached to a trace or
-to a specific observation (span) inside a trace. Scores are how the
-eval module (Phase 2.4) will record grader output —
+to a specific observation (span) inside a trace. Scores are how
+:mod:`strata_forge.evals` records grader output —
 ``score_trace(trace_id, "helpfulness", 4.2)`` writes the value
 into Langfuse where it's queryable for analytics and CI eval gates.
 

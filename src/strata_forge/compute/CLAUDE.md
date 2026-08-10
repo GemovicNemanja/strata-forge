@@ -93,10 +93,12 @@ or :class:`ValueError` for input validation.
 
 - Unit tests under ``tests/unit/compute/``, one file per source
   module.
-- Coverage target: ≥ 90 % line.
+- Coverage: the enforced gate is the repo-wide 85 % line floor
+  (``fail_under`` in ``pyproject.toml``); treat a drop in this module
+  as a regression.
 - :class:`LocalBackend` is exercised with real subprocesses
   (cheap, deterministic).
-- Phase 5.2 backends use ``sys.modules``-injected fake
+- The SSH and SkyPilot backends use ``sys.modules``-injected fake
   ``asyncssh`` / ``sky.api.sdk`` for unit tests; one
   ``@pytest.mark.integration`` test per backend exercises a live
   target.
