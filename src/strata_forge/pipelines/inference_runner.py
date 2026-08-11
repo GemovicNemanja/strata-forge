@@ -43,6 +43,7 @@ its entire timeout, invisibly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 import os
@@ -55,7 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
-from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.compute.serving import build_vllm_task, format_elapsed, serving_endpoint
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
@@ -66,7 +67,7 @@ from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable
 
 __all__ = ["RunSpec", "main", "render_template"]
 
@@ -95,6 +96,9 @@ _MAX_PHASE_CHARS = 200
 # How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
 # provider/status/class, short enough that the run's message stays a message.
 _MAX_SAMPLE_ERROR_CHARS = 500
+# How often a long uncountable phase re-stamps itself with its elapsed time. Matches the
+# serving heartbeat, so one run does not narrate two different cadences.
+_PHASE_TICK_SECONDS = 10.0
 
 
 class Hyperparams(BaseModel):
@@ -291,6 +295,38 @@ def _phase_sink(writer: JsonlProgressWriter | None, hf_token: str | None) -> Cal
     return _phase
 
 
+@contextlib.asynccontextmanager
+async def _ticking_phase(
+    phase: Callable[[str], None], message: str, interval_s: float = _PHASE_TICK_SECONDS
+) -> AsyncGenerator[None]:
+    """Report ``message`` for as long as the block runs, re-stamping it with its elapsed time.
+
+    A one-shot phase says a step BEGAN and never that it is still going. "Installing the inference
+    engine" and "Loading the dataset" then sit unchanged for minutes, indistinguishable from a run
+    that has hung — which is the question anyone watching is actually asking.
+
+    The ticker is an asyncio task, so it only ticks while the event loop is free: every blocking
+    call it wraps is handed to a thread for exactly that reason. Cancelled in a ``finally``, so a
+    step that raises does not leave a caption ticking forever underneath the error.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    phase(message)  # immediately, with no elapsed: zero is noise, and this marks the start
+
+    async def _tick() -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            phase(f"{message} ({format_elapsed(loop.time() - started)})")
+
+    task = asyncio.create_task(_tick())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def _run_batches(
     spec: RunSpec,
     client: LLMClient,
@@ -419,8 +455,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
 
     # The split download is unbounded by row_limit (that only slices during iteration), so it
     # runs BEFORE the first countable milestone and can take minutes on its own.
-    phase("Loading the dataset")
-    rows = _load_rows(spec, hf_token)
+    # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
+    # blocked event loop cannot tick the caption that says it is still going.
+    async with _ticking_phase(phase, "Loading the dataset"):
+        rows = await asyncio.to_thread(_load_rows, spec, hf_token)
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
@@ -489,8 +527,8 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         )
         # The first `step` only lands once a whole progress_chunk has completed, and that
         # chunk absorbs the client's cold start on top of its generations.
-        phase("Generating responses")
-        out = await _run_batches(spec, client, prompts, custom_ids, writer, endpoint.is_alive)
+        async with _ticking_phase(phase, "Generating responses"):
+            out = await _run_batches(spec, client, prompts, custom_ids, writer, endpoint.is_alive)
 
     # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
     # The orchestrator deletes that workdir on every terminal state, so writing there and pushing
@@ -501,12 +539,12 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     #
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
-    phase("Writing results")
-    results_path = _write_results(out, _local_results_dir(spec.run_id))
+    async with _ticking_phase(phase, "Writing results"):
+        results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
     if hf_token and spec.output_repo_id:
-        phase("Uploading results to the Hub")
         try:
-            destination = await _push_results(spec, results_path, hf_token)
+            async with _ticking_phase(phase, "Uploading results to the Hub"):
+                destination = await _push_results(spec, results_path, hf_token)
         except Exception as exc:
             # Name WHERE the results are. The run still fails — the user asked for them on the Hub
             # and they are not there — but a failure at the last step of a long run is the moment

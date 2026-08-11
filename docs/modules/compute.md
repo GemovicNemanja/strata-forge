@@ -315,6 +315,14 @@ async with serving_endpoint(
     ...
 ```
 
+Every long uncountable phase re-stamps itself with its elapsed time every
+10 seconds (``_PHASE_INTERVAL_SECONDS``), rendered by ``format_elapsed``
+as ``45s`` -> ``1m 30s`` -> ``1h 01m`` — rolling into a larger unit while
+keeping the smaller one, since both matter, and zero-padded so the caption
+does not jitter as it is re-rendered in place. A one-shot phase says a step
+BEGAN and never that it is still going, which is indistinguishable from a
+run that has hung.
+
 Readiness is verified once, before the endpoint is yielded, and then
 nothing watches it again — but a model server can die at any point
 AFTER it came up (an OOM on a long prompt, a CUDA fault). Every request
