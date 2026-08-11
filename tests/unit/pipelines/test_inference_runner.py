@@ -9,8 +9,10 @@ provider are kept, so the provider_clients= seam is validated at runtime.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import time
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -907,3 +909,64 @@ async def test_the_batch_runs_without_a_liveness_probe(
             spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
         )
     assert len(out) == 4
+
+
+# --------------- a long phase keeps saying it is still going -----------------
+
+
+class TestTickingPhase:
+    """A one-shot phase says a step BEGAN and never that it is still going.
+
+    "Loading the dataset" then sits unchanged for minutes, indistinguishable from a run that has
+    hung — which is the question anyone watching is actually asking.
+    """
+
+    async def test_it_reports_immediately_without_an_elapsed(self) -> None:
+        # Zero is noise; the bare phrase marks the start.
+        seen: list[str] = []
+        async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=10):  # pyright: ignore[reportPrivateUsage]
+            pass
+        assert seen == ["Loading the dataset"]
+
+    async def test_it_re_stamps_the_phase_while_the_block_runs(self) -> None:
+        seen: list[str] = []
+        async with ir._ticking_phase(seen.append, "Writing results", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
+            await asyncio.sleep(0.05)
+        assert len(seen) > 1, "a long step must re-report itself"
+        assert seen[0] == "Writing results"
+        assert all(m.startswith("Writing results (") for m in seen[1:])
+
+    async def test_it_stops_when_the_block_ends(self) -> None:
+        # A caption still ticking after its step finished would describe work that is not running.
+        seen: list[str] = []
+        async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
+            await asyncio.sleep(0.03)
+        settled = len(seen)
+        await asyncio.sleep(0.05)
+        assert len(seen) == settled
+
+    async def test_it_stops_when_the_block_raises(self) -> None:
+        # Otherwise a failed step leaves a caption ticking forever underneath the error.
+        seen: list[str] = []
+        with contextlib.suppress(RuntimeError):
+            async with ir._ticking_phase(seen.append, "Uploading results", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
+                await asyncio.sleep(0.03)
+                raise RuntimeError("push failed")
+        settled = len(seen)
+        await asyncio.sleep(0.05)
+        assert len(seen) == settled
+
+    async def test_it_ticks_through_a_blocking_step_handed_to_a_thread(self) -> None:
+        """The reason the runner uses `to_thread` for its blocking work.
+
+        The ticker is an asyncio task, so a step that blocks the event loop stops the very caption
+        that says it is still running — the exact stretch where it is needed most.
+        """
+        seen: list[str] = []
+
+        def _blocking() -> None:
+            time.sleep(0.05)
+
+        async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
+            await asyncio.to_thread(_blocking)
+        assert len(seen) > 1, "a blocking step must still tick when handed to a thread"

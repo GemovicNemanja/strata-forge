@@ -71,9 +71,15 @@ __all__ = [
     "build_sglang_task",
     "build_tgi_task",
     "build_vllm_task",
+    "format_elapsed",
     "serving_endpoint",
     "wait_for_endpoint",
 ]
+
+# How often a long uncountable phase re-reports itself. Coarser than the readiness probe, because
+# an orchestrator persists every one of these and a run has a finite event budget — but fine
+# enough that a stalled step is obvious rather than something the watcher has to time themselves.
+_PHASE_INTERVAL_SECONDS = 10.0
 
 
 def _quote_args(args: Sequence[str]) -> str:
@@ -81,6 +87,25 @@ def _quote_args(args: Sequence[str]) -> str:
     import shlex
 
     return " ".join(shlex.quote(a) for a in args)
+
+
+def format_elapsed(seconds: float) -> str:
+    """Render an elapsed duration for a human watching a phase that has not finished.
+
+    Rolls into larger units while keeping the smaller one, because both matter: at 90 seconds a
+    bare ``90s`` reads as "still early" and ``1m 30s`` reads as "a minute and a half", and past an
+    hour the seconds stop carrying information at all. Minutes and seconds are zero-padded inside
+    a larger unit so the width stops jittering as the number climbs — the caption is re-rendered
+    every few seconds in place.
+
+        45 -> "45s"      90 -> "1m 30s"      3660 -> "1h 01m"
+    """
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60:02d}s"
+    return f"{total // 3600}h {(total % 3600) // 60:02d}m"
 
 
 def _report(on_phase: Callable[[str], None] | None, message: str) -> None:
@@ -324,7 +349,7 @@ async def wait_for_endpoint(
     poll_interval_s: float = 2.0,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
     on_phase: Callable[[str], None] | None = None,
-    phase_interval_s: float = 30.0,
+    phase_interval_s: float = _PHASE_INTERVAL_SECONDS,
 ) -> None:
     """Poll the ``/models`` endpoint until it returns HTTP 200.
 
@@ -364,7 +389,9 @@ async def wait_for_endpoint(
         while True:
             now = loop.time()
             if now >= next_phase_at:
-                _report(on_phase, f"Loading the model onto the GPU ({int(now - started)}s)")
+                _report(
+                    on_phase, f"Loading the model onto the GPU ({format_elapsed(now - started)})"
+                )
                 next_phase_at = now + phase_interval_s
             try:
                 response = await client.get(probe_url)
@@ -393,7 +420,7 @@ async def serving_endpoint(
     wait_timeout_s: float = 600.0,
     cleanup: bool = True,
     on_phase: Callable[[str], None] | None = None,
-    phase_interval_s: float = 30.0,
+    phase_interval_s: float = _PHASE_INTERVAL_SECONDS,
 ) -> AsyncGenerator[ServingEndpoint]:
     """Launch ``task`` on ``backend``, wait for ``base_url`` to respond.
 

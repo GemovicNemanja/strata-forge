@@ -23,7 +23,7 @@ from strata_forge.compute import (
     serving_endpoint,
     wait_for_endpoint,
 )
-from strata_forge.compute.serving import ServingProcessError
+from strata_forge.compute.serving import ServingProcessError, format_elapsed
 
 
 class TestBuildVLLMTask:
@@ -561,3 +561,44 @@ class TestServingProcessDiesEarly:
                 backend, task, base_url="http://localhost:8000/v1", wait_timeout_s=0.05
             ):
                 pass
+
+
+# ------------------------------ elapsed formatting ---------------------------
+
+
+class TestFormatElapsed:
+    """Both units matter: at 90s a bare "90s" reads as early, "1m 30s" reads as a minute and a
+    half; past an hour the seconds stop carrying information at all."""
+
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [
+            (0, "0s"),
+            (1, "1s"),
+            (59, "59s"),
+            (60, "1m 00s"),
+            (61, "1m 01s"),
+            (90, "1m 30s"),
+            (599, "9m 59s"),
+            (3599, "59m 59s"),
+            (3600, "1h 00m"),
+            (3660, "1h 01m"),
+            (7325, "2h 02m"),
+            (86_400, "24h 00m"),
+        ],
+    )
+    def test_rolls_up_while_keeping_the_smaller_unit(self, seconds: int, expected: str) -> None:
+        assert format_elapsed(seconds) == expected
+
+    def test_pads_so_the_caption_does_not_jitter(self) -> None:
+        # It is re-rendered in place every few seconds; an unpadded 1m 5s -> 1m 10s would shift.
+        assert format_elapsed(65) == "1m 05s"
+        assert len(format_elapsed(65)) == len(format_elapsed(70))
+
+    def test_a_fractional_second_truncates(self) -> None:
+        # loop.time() deltas are floats; the caption should never read "1.9992s".
+        assert format_elapsed(1.9992) == "1s"
+
+    def test_a_negative_clock_delta_never_renders(self) -> None:
+        # Defensive: a clock adjustment mid-run must not produce "-3s".
+        assert format_elapsed(-3) == "0s"
