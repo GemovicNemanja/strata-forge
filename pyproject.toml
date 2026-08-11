@@ -1,6 +1,6 @@
 [project]
 name = "strata-forge"
-version = "0.0.1"
+version = "0.1.0"
 description = "Typed, async-first baseline for AI/LLM experiments across major foundation-model providers."
 requires-python = ">=3.14"
 readme = "README.md"
