@@ -2,8 +2,11 @@
 
 Submits :class:`Task` instances to a remote host via ``asyncssh``.
 The remote side runs the task as a background process under
-``nohup``; Forge captures the PID and uses ``kill -0`` to poll
-liveness. Stdout / stderr land in files inside a per-job remote
+``nohup``, in a process GROUP of its own, and Forge polls that group
+with ``kill -0``. The group is the unit because a job is not one
+process: the recorded pid is a bookkeeping shell, and the work below
+it is what holds the hardware — so ``cancel`` signals the group, not
+the pid. Stdout / stderr land in files inside a per-job remote
 working directory.
 
 The ``asyncssh`` SDK is imported lazily inside the constructor
@@ -41,6 +44,32 @@ _CANCELLED_FILE = "forge.cancelled"
 _STDOUT_FILE = "stdout.log"
 _STDERR_FILE = "stderr.log"
 _FORGE_REMOTE_ROOT = ".forge-compute"
+# Prefixes the launcher's structured report so it can be picked out of whatever the login shell
+# printed first — a banner, an rc file's chatter, a motd. Parsing the last line was fragile for
+# the same reason.
+_REPORT_MARKER = "__forge_launch__"
+# How long a cancelled job's group may take to honour SIGTERM before SIGKILL. The runner spends
+# it shutting the model server down; the server runs in its own session, so a SIGKILL that
+# preempted that teardown would leave the GPU held by the very process cancel exists to stop.
+_CANCEL_GRACE_S = 10
+
+
+def _report_fields(stdout: str) -> dict[str, str]:
+    """Parse the launcher's ``key=value`` report out of the remote's chatter.
+
+    A login shell may print a banner or motd before anything of ours runs, so the report is
+    found by its marker rather than by position.
+    """
+    for line in reversed(stdout.splitlines()):
+        if not line.startswith(_REPORT_MARKER):
+            continue
+        fields: dict[str, str] = {}
+        for token in line[len(_REPORT_MARKER) :].split():
+            key, _, value = token.partition("=")
+            fields[key] = value
+        return fields
+    return {}
+
 
 # Bound every SSH op so an unresponsive / black-holed host can't stall a caller (e.g. a polling
 # loop) indefinitely. Connect/login cap the handshake; the command timeout caps each remote command
@@ -202,17 +231,44 @@ class SSHBackend:
         # completion loses the exit code and leaves a live job indistinguishable from a cancelled
         # one. `< /dev/null` detaches stdin so a long bootstrap that reads it sees EOF rather than
         # EIO once the channel is gone.
-        launch_cmd = (
+        # `set -m` (job control) is what gives the job a process group of its OWN, whose id equals
+        # the pid recorded here — so cancel can stop the entire tree with a single kill. Without
+        # it the subshell just joins the sshd session's group and the recorded pid names no group
+        # at all, so `kill -- -PID` fails with ESRCH and stops nothing. That is the whole bug:
+        # the recorded pid is a bookkeeper, and the work — the wrapper, the runner, the inference
+        # engine holding the GPU — lives below it.
+        #
+        # It runs under an explicit `bash -c` because sshd hands the command to the user's LOGIN
+        # shell, and job control does not survive that lottery: dash and sh accept `set -m` but
+        # still leave background jobs in the session's group, and zsh rejects the option outright
+        # and exits without launching anything. bash is already required here (the job runs as
+        # `bash wrapper.sh`), so naming it adds no new dependency.
+        launch_script = (
+            "set -m; "
             f"cd {shlex.quote(remote_workdir)} && {{ "
-            f"( trap '' HUP; nohup bash wrapper.sh > {_STDOUT_FILE} 2> {_STDERR_FILE}; "
+            f'( trap "" HUP; nohup bash wrapper.sh > {_STDOUT_FILE} 2> {_STDERR_FILE}; '
             f"echo $? > {_EXIT_FILE} ) < /dev/null > /dev/null 2>&1 & "
-            f"echo $! > {_PID_FILE}; cat {_PID_FILE}; }}"
+            f"p=$!; echo $p > {_PID_FILE}; "
+            # Job control is REPORTED, not assumed. `$-` carries `m` only if the shell really
+            # enabled it, and `ps` corroborates that the job actually landed in a group of its
+            # own. A shell built without job control therefore marks the job legacy and keeps the
+            # single-pid probe instead of group-signalling into nothing. `ps` may find the job
+            # already gone (a task that outran the probe), which says nothing either way, so an
+            # empty reading defers to `$-`.
+            "case $- in *m*) m=1;; *) m=0;; esac; "
+            'g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -dc 0-9); '
+            f'printf "{_REPORT_MARKER} pid=%s m=%s g=%s\\n" "$p" "$m" "$g"; }}'
         )
-        _exit, stdout, _stderr = await self._run_remote(launch_cmd, check=True)
-        pid = stdout.strip().splitlines()[-1]
+        _exit, stdout, _stderr = await self._run_remote(
+            f"bash -c {shlex.quote(launch_script)}", check=True
+        )
+        fields = _report_fields(stdout)
+        pid = fields.get("pid", "")
         if not pid.isdigit():
             err = f"SSHBackend: unexpected pid output from remote: {stdout!r}"
             raise RuntimeError(err)
+        measured_pgid = fields.get("g", "")
+        own_group = fields.get("m") == "1" and measured_pgid in ("", pid)
 
         return Job(
             id=job_id,
@@ -220,6 +276,11 @@ class SSHBackend:
             task_name=task.name,
             metadata={
                 "pid": pid,
+                # Whether `pid` also names the job's process GROUP. Jobs submitted before this
+                # existed carry no flag, and must keep the single-pid probe: their pid is not a
+                # pgid, so a group probe would report a live job as gone and a group signal would
+                # stop nothing. Drop the flag and the legacy branches once such jobs have drained.
+                "pgroup": own_group,
                 "remote_workdir": remote_workdir,
                 "host": self._host,
                 "submitted_at": datetime.now(UTC).isoformat(),
@@ -243,9 +304,22 @@ class SSHBackend:
             raise ValueError(err)
         return pid
 
+    def _signal_target(self, job: Job) -> str:
+        """What `kill` should address: the job's whole process group, or just its pid.
+
+        A leading `-` makes `kill` treat the number as a process GROUP, which is what reaches the
+        wrapper, the runner and the engine below it. Only jobs whose launcher CONFIRMED it got
+        its own group are addressed that way — see the `pgroup` marker in submit.
+        """
+        pid = self._job_pid(job)
+        return f"-{pid}" if job.metadata.get("pgroup") is True else pid
+
     async def status(self, job: Job) -> JobStatus:
         workdir = self._job_workdir(job)
-        pid = self._job_pid(job)
+        # Liveness is asked of the GROUP where there is one. The bookkeeping subshell can die
+        # while the runner it launched keeps holding the GPU, and a pid-only probe calls that
+        # job finished — so a partially-killed job would read terminal while its work continues.
+        pid = self._signal_target(job)
         # Probe liveness, then check for the exit-code file the wrapper
         # writes when it terminates.
         # `cat` of an EMPTY exit file succeeds with no output, so MISSING must not be reached by
@@ -356,17 +430,27 @@ class SSHBackend:
         return stdout
 
     async def cancel(self, job: Job) -> None:
-        pid = self._job_pid(job)
+        target = self._signal_target(job)
         workdir = self._job_workdir(job)
         # The marker is written BEFORE the signal, and deliberately not after: between the two the
         # process is already dying, and a `status` landing in that window would otherwise read the
-        # death as one nobody asked for.
+        # death as one nobody asked for. Signalling the group also takes the bookkeeping subshell
+        # with it, so no exit code is ever written on this path — the marker is the ONLY evidence
+        # that this death was asked for.
+        #
+        # SIGTERM first, then SIGKILL, and the grace period is not merely politeness: the runner
+        # uses it to tear down the model server it started, which lives in a session of its own
+        # and is therefore not in this group. Killing outright would strand exactly the process
+        # that holds the GPU.
+        quoted = shlex.quote(target)
         cmd = (
             f"touch {shlex.quote(workdir)}/{_CANCELLED_FILE} 2>/dev/null; "
-            # Best-effort SIGTERM, brief wait, SIGKILL.
-            f"kill -TERM {shlex.quote(pid)} 2>/dev/null; "
-            "sleep 2; "
-            f"kill -KILL {shlex.quote(pid)} 2>/dev/null; "
+            f"kill -TERM -- {quoted} 2>/dev/null; "
+            # Poll rather than sleeping the full grace: a job that goes down promptly should not
+            # hold the caller open, and one that needs the time still gets it.
+            f"for _ in $(seq 1 {_CANCEL_GRACE_S * 2}); do "
+            f"kill -0 -- {quoted} 2>/dev/null || break; sleep 0.5; done; "
+            f"kill -KILL -- {quoted} 2>/dev/null; "
             "true"
         )
         await self._run_remote(cmd)

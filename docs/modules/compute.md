@@ -166,6 +166,45 @@ of death nobody chose. (A ``status`` call after ``cleanup`` has removed
 the workdir has no evidence left to read and reports ``failed``; the
 lifecycle does not define ``status`` after teardown.)
 
+### Cancel stops the whole tree
+
+A job is not one process. The pid a launcher records belongs to a
+bookkeeping shell; the work — the wrapper, the runner, an inference
+engine and its workers — lives below it, and that is what holds the
+GPU. Signalling only the recorded pid therefore reparents the run onto
+init, where it keeps the device busy for whatever runs next, while the
+job reports ``cancelled``.
+
+Both launchers give a job a process group of its own and both cancels
+signal that **group**:
+
+- ``SSHBackend`` asserts job control (``set -m``) inside an explicit
+  ``bash -c``, because sshd hands the command to the user's login shell
+  and that lottery decides whether the job gets its own group at all —
+  ``dash``/``sh`` accept the option but still leave background jobs in
+  the session's group, and ``zsh`` rejects it outright. Job control is
+  then **verified, not assumed**: the launcher reports ``$-`` and the
+  pgid ``ps`` measured, and only a job whose group is confirmed is
+  group-signalled. Jobs submitted before this carry no such marker and
+  keep the single-pid path, since their pid names no group.
+- ``LocalBackend`` spawns with ``start_new_session``, without which the
+  child would share the orchestrator's group and the signal would come
+  back at the caller.
+
+Liveness is asked of the group too: the bookkeeper can die while the
+runner it launched keeps running, and a pid-only probe calls that job
+finished.
+
+Cancellation is ``SIGTERM``, a grace period, then ``SIGKILL``. The grace
+is load-bearing rather than polite: a runner that started a model server
+through a backend put that server in a session of **its own**, so the
+group signal never reaches it, and the only thing that stops it is the
+runner's own teardown. ``strata_forge.pipelines.inference_runner``
+therefore turns ``SIGTERM`` into an ordinary cancellation so its
+``finally`` blocks unwind — Python's default handling would terminate
+the interpreter where it stands and strand exactly the process the
+cancel existed to stop.
+
 ## Backend protocol
 
 ```python

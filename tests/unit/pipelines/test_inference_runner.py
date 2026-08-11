@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import subprocess
+import sys
 import time
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -970,3 +972,57 @@ class TestTickingPhase:
         async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
             await asyncio.to_thread(_blocking)
         assert len(seen) > 1, "a blocking step must still tick when handed to a thread"
+
+
+class TestTerminationTeardown:
+    """A cancelled run must shut its model server down on the way out.
+
+    Cancelling signals the job's process group, which contains this runner. The model server
+    does NOT run in that group — the backend puts it in a session of its own so that killing
+    the server's tree cannot signal the orchestrator — so the group signal never reaches it.
+    The only thing that stops it is `serving_endpoint`'s teardown in this process's `finally`,
+    and Python's default SIGTERM handling terminates the interpreter where it stands, without
+    unwinding. That leaves the GPU held by the very process the cancel existed to stop.
+
+    Driven in a SUBPROCESS on purpose: the failure mode of the mechanism is "SIGTERM kills the
+    interpreter", which in-process would take the whole test run with it.
+    """
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+    def test_sigterm_unwinds_the_stack_so_finally_blocks_run(self, tmp_path: Path) -> None:
+        marker = tmp_path / "torn-down"
+        script = f"""
+import asyncio, os, signal, sys
+from strata_forge.pipelines.inference_runner import _install_termination_handlers
+
+async def main():
+    _install_termination_handlers()
+    try:
+        await asyncio.sleep(60)          # stands in for the batch, with the server up
+    finally:
+        open({str(marker)!r}, "w").write("torn down")   # stands in for serving teardown
+
+async def driver():
+    task = asyncio.create_task(main())
+    await asyncio.sleep(0.5)             # let the handler install and the sleep begin
+    os.kill(os.getpid(), signal.SIGTERM)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+asyncio.run(driver())
+"""
+        completed = subprocess.run(  # noqa: S603 — fixed interpreter, generated script
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert marker.is_file(), (
+            "SIGTERM killed the runner outright — the teardown that stops the model server "
+            f"never ran.\nstdout={completed.stdout!r}\nstderr={completed.stderr!r}"
+        )
+        assert marker.read_text() == "torn down"
