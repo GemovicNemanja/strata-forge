@@ -7,13 +7,20 @@ from typing import Any
 import pytest
 
 from strata_forge.llm.providers.config import OpenAICompatConfig
-from strata_forge.llm.providers.openai_compat import OpenAICompatProvider
+from strata_forge.llm.providers.openai_compat import (
+    UNAUTHENTICATED_API_KEY,
+    OpenAICompatProvider,
+)
 
 
 @pytest.fixture(autouse=True)
 def _strip_env(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
     monkeypatch.delenv("FORGE_OPENAI_COMPAT_BASE_URL", raising=False)
     monkeypatch.delenv("FORGE_OPENAI_COMPAT_API_KEY", raising=False)
+    # The OpenAI client reads these itself, so auth_kwargs consults them — a developer who
+    # happens to export one must not get a different result from CI.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
 
 
 class TestProviderShape:
@@ -56,7 +63,12 @@ class TestAuthKwargs:
     def test_base_url_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FORGE_OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
         client = OpenAICompatProvider()
-        assert client.auth_kwargs() == {"api_base": "http://localhost:8000/v1"}
+        # The placeholder rides along with a configured base_url and no credential — see
+        # test_unauthenticated_dev_deployment for why omitting the key is not an option.
+        assert client.auth_kwargs() == {
+            "api_base": "http://localhost:8000/v1",
+            "api_key": UNAUTHENTICATED_API_KEY,
+        }
 
     def test_base_url_and_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FORGE_OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
@@ -74,12 +86,43 @@ class TestAuthKwargs:
         assert client.auth_kwargs()["api_key"] == "extract-me"
 
     def test_unauthenticated_dev_deployment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # vLLM / TGI / SGLang in dev mode often run without auth.
+        """An unauthenticated server gets a PLACEHOLDER key, not an omitted one.
+
+        vLLM / TGI / SGLang commonly run without auth, but omitting the key does not produce an
+        unauthenticated request — the OpenAI client refuses to build a request without one and
+        fails before anything reaches the network ("Missing credentials. Please pass an
+        `api_key` ..."). Because the failure is identical every time, it takes out an entire
+        batch: a run against a local vLLM lost all 2098 rows without one reaching the server.
+        """
         monkeypatch.setenv("FORGE_OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
         client = OpenAICompatProvider()
         kwargs = client.auth_kwargs()
-        assert "api_base" in kwargs
-        assert "api_key" not in kwargs
+        assert kwargs["api_base"] == "http://localhost:8000/v1"
+        assert kwargs["api_key"] == UNAUTHENTICATED_API_KEY
+
+    @pytest.mark.parametrize("var", ["OPENAI_API_KEY", "OPENAI_ADMIN_KEY"])
+    def test_an_ambient_key_is_not_overridden(
+        self, monkeypatch: pytest.MonkeyPatch, var: str
+    ) -> None:
+        # The OpenAI client reads these itself. A caller who exported one means it for an
+        # authenticated deployment, and sending a placeholder would replace a real credential
+        # with a string that cannot possibly work.
+        monkeypatch.setenv("FORGE_OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv(var, "sk-a-real-credential")
+        assert "api_key" not in OpenAICompatProvider().auth_kwargs()
+
+    def test_a_configured_key_wins_over_the_placeholder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FORGE_OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+        monkeypatch.setenv("FORGE_OPENAI_COMPAT_API_KEY", "configured")
+        assert OpenAICompatProvider().auth_kwargs()["api_key"] == "configured"
+
+    def test_no_placeholder_without_a_base_url(self) -> None:
+        # With no base_url there is no self-hosted server to be unauthenticated against: the call
+        # falls through to api.openai.com, where a placeholder would turn a plain "no credentials"
+        # into a puzzling rejection of one.
+        assert OpenAICompatProvider().auth_kwargs() == {}
 
 
 class TestAcompletionWiring:

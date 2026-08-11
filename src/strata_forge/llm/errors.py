@@ -44,6 +44,57 @@ from strata_forge.core.errors import (
 __all__ = ["map_litellm_exception", "raise_as_provider_error"]
 
 
+def _classes(*names: str) -> tuple[type[BaseException], ...]:
+    """Resolve LiteLLM exception classes by NAME, skipping any this LiteLLM does not define.
+
+    ``litellm>=1.55`` is a floor with no ceiling, so this module runs against versions that
+    predate classes it would like to match. Naming one directly costs an ``AttributeError`` —
+    raised from inside the mapper, which only runs when something has ALREADY failed. The
+    original diagnosis is then replaced by an unrelated one about a missing attribute, and every
+    call looks like the same bug regardless of what actually went wrong. That is far worse than
+    declining to classify: a batch run reported 2098 identical
+    ``AttributeError: module 'litellm.exceptions' has no attribute ...`` and the real errors
+    behind them were never recorded anywhere.
+
+    Resolving by name at import turns a version difference into a class this build simply cannot
+    match — the fallback then applies, and the caller still learns what went wrong.
+    """
+    found: list[type[BaseException]] = []
+    for name in names:
+        candidate = getattr(litellm_exc, name, None)
+        if isinstance(candidate, type) and issubclass(candidate, BaseException):
+            found.append(candidate)
+    return tuple(found)
+
+
+# Matched FIRST: several of these inherit from BadRequestError, so the broader group below would
+# otherwise swallow the more specific semantics.
+_CONTENT_FILTER = _classes(
+    "ContentPolicyViolationError",
+    "BlockedPiiEntityError",
+    "RejectedRequestError",
+    "GuardrailRaisedException",
+    "GuardrailInterventionNormalStringError",
+)
+_AUTH = _classes("AuthenticationError", "PermissionDeniedError")
+_RATE_LIMIT = _classes("RateLimitError")
+_TIMEOUT = _classes("Timeout", "APIConnectionError")
+_BAD_REQUEST = _classes(
+    "BadRequestError",
+    "UnprocessableEntityError",
+    "NotFoundError",
+    "APIResponseValidationError",
+)
+_SERVER = _classes(
+    "InternalServerError",
+    "ServiceUnavailableError",
+    "BadGatewayError",
+    "APIError",
+    "OpenAIError",
+)
+_BUDGET = _classes("BudgetExceededError")
+
+
 def map_litellm_exception(
     exc: BaseException,
     *,
@@ -77,30 +128,23 @@ def map_litellm_exception(
     # --- Content policy / guardrails ---------------------------------------
     # Several of these inherit from BadRequestError, so they must be matched
     # first to preserve the more specific semantics.
-    if isinstance(
-        exc,
-        litellm_exc.ContentPolicyViolationError
-        | litellm_exc.BlockedPiiEntityError
-        | litellm_exc.RejectedRequestError
-        | litellm_exc.GuardrailRaisedException
-        | litellm_exc.GuardrailInterventionNormalStringError,
-    ):
+    if isinstance(exc, _CONTENT_FILTER):
         return ProviderContentFilterError(
             message, model=model, provider=provider, status_code=status_code
         )
 
     # --- Auth / permission --------------------------------------------------
-    if isinstance(exc, litellm_exc.AuthenticationError | litellm_exc.PermissionDeniedError):
+    if isinstance(exc, _AUTH):
         return ProviderAuthError(message, model=model, provider=provider, status_code=status_code)
 
     # --- Rate limit ---------------------------------------------------------
-    if isinstance(exc, litellm_exc.RateLimitError):
+    if isinstance(exc, _RATE_LIMIT):
         return ProviderRateLimitError(
             message, model=model, provider=provider, status_code=status_code
         )
 
     # --- Timeout / network --------------------------------------------------
-    if isinstance(exc, litellm_exc.Timeout | litellm_exc.APIConnectionError):
+    if isinstance(exc, _TIMEOUT):
         return ProviderTimeoutError(
             message, model=model, provider=provider, status_code=status_code
         )
@@ -110,14 +154,7 @@ def map_litellm_exception(
     # Note: some LiteLLM classes (e.g. InvalidRequestError) inherit directly
     # from openai.BadRequestError without going through litellm.BadRequestError,
     # so we check against both bases.
-    if isinstance(
-        exc,
-        litellm_exc.BadRequestError
-        | openai.BadRequestError
-        | litellm_exc.UnprocessableEntityError
-        | litellm_exc.NotFoundError
-        | litellm_exc.APIResponseValidationError,
-    ):
+    if isinstance(exc, (*_BAD_REQUEST, openai.BadRequestError)):
         return ProviderBadRequestError(
             message, model=model, provider=provider, status_code=status_code
         )
@@ -125,21 +162,14 @@ def map_litellm_exception(
     # --- Server errors (5xx) ------------------------------------------------
     # MidStreamFallbackError inherits from ServiceUnavailableError; it's
     # caught here for free.
-    if isinstance(
-        exc,
-        litellm_exc.InternalServerError
-        | litellm_exc.ServiceUnavailableError
-        | litellm_exc.BadGatewayError
-        | litellm_exc.APIError
-        | litellm_exc.OpenAIError,
-    ):
+    if isinstance(exc, _SERVER):
         return ProviderServerError(message, model=model, provider=provider, status_code=status_code)
 
     # --- LiteLLM's own budget tracker --------------------------------------
     # Name-collides with strata_forge.core.errors.BudgetExceededError but is a
     # different concept (LiteLLM proxy budget vs. Forge BudgetContext).
     # Treat as a generic provider rejection.
-    if isinstance(exc, litellm_exc.BudgetExceededError):
+    if isinstance(exc, _BUDGET):
         return ProviderError(
             f"LiteLLM budget tracker rejected the call: {message}",
             model=model,

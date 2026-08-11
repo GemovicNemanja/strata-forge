@@ -26,6 +26,15 @@ whichever :class:`Backend` they want and then point a
 The probe-based readiness wait is intentionally simple — Forge
 doesn't run a healthcheck binary, it just polls the ``/v1/models``
 endpoint until it responds.
+
+That wait is also the longest thing a caller does, so both
+:func:`serving_endpoint` and :func:`wait_for_endpoint` accept an
+``on_phase`` sink that receives short phrases ("Starting the
+model server", "Loading the model onto the GPU (90s)", "model server
+ready"). The sink takes a plain ``str``: :mod:`strata_forge.compute`
+must not import :mod:`strata_forge.training`, so it is the caller —
+typically a :mod:`strata_forge.pipelines` runner — that turns a
+phrase into a ``ProgressEvent``.
 """
 
 from __future__ import annotations
@@ -37,20 +46,40 @@ from typing import TYPE_CHECKING
 
 from strata_forge.compute.task import ResourceSpec, Task
 
+# How much of a dead server's output to carry in the error. Enough for a traceback or a
+# "command not found", not so much that it swamps whatever surfaces the message.
+_FAILURE_LOG_CHARS = 2000
+
+
+class ServingProcessError(RuntimeError):
+    """The serving process exited before its endpoint became reachable.
+
+    Distinct from :class:`TimeoutError`: the server did not merely take too long, it is gone —
+    so the caller should report the process's own output rather than a duration.
+    """
+
+
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
     from strata_forge.compute.backends.base import Backend
     from strata_forge.compute.job import Job
 
 __all__ = [
     "ServingEndpoint",
+    "ServingProcessError",
     "build_sglang_task",
     "build_tgi_task",
     "build_vllm_task",
+    "format_elapsed",
     "serving_endpoint",
     "wait_for_endpoint",
 ]
+
+# How often a long uncountable phase re-reports itself. Coarser than the readiness probe, because
+# an orchestrator persists every one of these and a run has a finite event budget — but fine
+# enough that a stalled step is obvious rather than something the watcher has to time themselves.
+_PHASE_INTERVAL_SECONDS = 10.0
 
 
 def _quote_args(args: Sequence[str]) -> str:
@@ -58,6 +87,39 @@ def _quote_args(args: Sequence[str]) -> str:
     import shlex
 
     return " ".join(shlex.quote(a) for a in args)
+
+
+def format_elapsed(seconds: float) -> str:
+    """Render an elapsed duration for a human watching a phase that has not finished.
+
+    Rolls into larger units while keeping the smaller one, because both matter: at 90 seconds a
+    bare ``90s`` reads as "still early" and ``1m 30s`` reads as "a minute and a half", and past an
+    hour the seconds stop carrying information at all. Minutes and seconds are zero-padded inside
+    a larger unit so the width stops jittering as the number climbs — the caption is re-rendered
+    every few seconds in place.
+
+        45 -> "45s"      90 -> "1m 30s"      3660 -> "1h 01m"
+    """
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60:02d}s"
+    return f"{total // 3600}h {(total % 3600) // 60:02d}m"
+
+
+def _report(on_phase: Callable[[str], None] | None, message: str) -> None:
+    """Hand one progress phrase to the caller's sink, if any.
+
+    Exceptions are swallowed: ``on_phase`` is caller-supplied, and a broken sink (a progress
+    file closed early, a full disk) must not take down a live serving job. Messages are
+    fixed phrases that never interpolate ``base_url`` — a caller may legitimately pass a URL
+    carrying credentials, and this text is meant to be surfaced to a human.
+    """
+    if on_phase is None:
+        return
+    with contextlib.suppress(Exception):
+        on_phase(message)
 
 
 def build_vllm_task(
@@ -71,7 +133,8 @@ def build_vllm_task(
     extra_args: Sequence[str] = (),
     resources: ResourceSpec | None = None,
     name: str = "vllm-serve",
-    setup: str = "pip install 'vllm>=0.7'",
+    setup: str | None = None,
+    python_executable: str | None = None,
 ) -> Task:
     """Build a Forge :class:`Task` that launches a vLLM server.
 
@@ -89,21 +152,45 @@ def build_vllm_task(
         resources: Optional :class:`ResourceSpec`. Default targets
             a single GPU.
         name: Task name.
-        setup: Setup command run before the server starts. Pass
-            an empty string when the host already has vLLM
-            installed.
+        setup: Setup command run before the server starts.
+            Defaults to installing vLLM with ``python_executable``'s
+            own pip. Pass an empty string when the host already
+            has vLLM installed.
+        python_executable: Interpreter to serve with. When ``None``
+            the task invokes the ``vllm`` console script and relies
+            on ``PATH``, which is right for a task that will run on
+            some other machine (an emitted spec, a cloud backend).
+            Pass :data:`sys.executable` when the task runs on THIS
+            host: a backend may execute it through a login shell,
+            which re-sources the profile and drops the caller's
+            virtualenv from ``PATH`` — the bare command then fails
+            with "command not found". Naming the interpreter removes
+            that dependency, and keeps the install and the server in
+            the same environment.
     """
-    cli_args: list[str] = [
-        "vllm",
-        "serve",
-        model,
-        "--host",
-        host,
-        "--port",
-        str(port),
-        "--tensor-parallel-size",
-        str(tensor_parallel_size),
-    ]
+    # Deliberately NOT defaulting to sys.executable: this function also builds specs destined for
+    # another machine, where an absolute path into the local virtualenv does not exist. The caller
+    # knows where the task will run; this does not.
+    if python_executable is None:
+        cli_args: list[str] = ["vllm", "serve", model]
+        install = "pip install 'vllm>=0.7'" if setup is None else setup
+    else:
+        quoted = _quote_args([python_executable])
+        cli_args = [python_executable, "-m", "vllm.entrypoints.openai.api_server", "--model", model]
+        # Same reasoning for the install: `pip` is not on a login shell's PATH either, and
+        # installing with the wrong pip puts vLLM where the served interpreter cannot import it.
+        install = f"{quoted} -m pip install 'vllm>=0.7'" if setup is None else setup
+
+    cli_args.extend(
+        [
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tensor_parallel_size),
+        ]
+    )
     if max_model_len is not None:
         cli_args.extend(["--max-model-len", str(max_model_len)])
     if dtype is not None:
@@ -113,7 +200,7 @@ def build_vllm_task(
     return Task(
         name=name,
         run=_quote_args(cli_args),
-        setup=setup,
+        setup=install,
         resources=resources or ResourceSpec(accelerators="A100:1"),
     )
 
@@ -231,10 +318,28 @@ class ServingEndpoint:
         base_url: The OpenAI-compatible URL to point an
             :class:`LLMClient` at (e.g.
             ``http://localhost:8000/v1``).
+        is_alive: Awaitable probe reporting whether the serving
+            process is still up.
+
+            Readiness is checked before the endpoint is yielded,
+            and then nothing watches it again — but a model server
+            can die at any point AFTER it came up (an OOM on a long
+            prompt, a CUDA fault). Every request from then on fails
+            against a socket nobody is listening on, and a client
+            that retries turns a dead server into a long, expensive
+            silence rather than an error: a batch of thousands of
+            rows spends the rest of its run timing out one row at a
+            time. A long-running consumer should call this at a
+            natural checkpoint (between batches) and stop when it
+            reports ``False``.
+
+            A status the backend cannot report counts as alive, so
+            a flaky probe cannot kill a healthy run.
     """
 
     job: Job
     base_url: str
+    is_alive: Callable[[], Awaitable[bool]]
 
 
 async def wait_for_endpoint(
@@ -242,6 +347,9 @@ async def wait_for_endpoint(
     *,
     timeout_s: float = 600.0,
     poll_interval_s: float = 2.0,
+    is_alive: Callable[[], Awaitable[bool]] | None = None,
+    on_phase: Callable[[str], None] | None = None,
+    phase_interval_s: float = _PHASE_INTERVAL_SECONDS,
 ) -> None:
     """Poll the ``/models`` endpoint until it returns HTTP 200.
 
@@ -251,24 +359,53 @@ async def wait_for_endpoint(
         timeout_s: How long to wait before giving up. Default
             10 minutes.
         poll_interval_s: Seconds between probes.
+        is_alive: Optional liveness probe for the serving process.
+            When it reports the process is gone, the wait fails
+            immediately with :class:`ServingProcessError` instead
+            of running out the timeout.
+        on_phase: Optional sink for short human-readable progress
+            phrases. It is called from the poll loop, so it must
+            not block; exceptions it raises are swallowed.
+        phase_interval_s: Minimum seconds between two heartbeat
+            phrases. Deliberately much coarser than
+            ``poll_interval_s``: an orchestrator persisting these
+            phrases has a finite budget per run, and one row per
+            probe would exhaust it while a large model loads.
 
     Raises:
         TimeoutError: If the endpoint isn't healthy in time.
+        ServingProcessError: If ``is_alive`` reports the serving
+            process is gone before the endpoint answered.
         ImportError: When ``httpx`` is unavailable.
     """
     import httpx  # already a core dep via litellm
 
-    deadline = asyncio.get_event_loop().time() + timeout_s
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    deadline = started + timeout_s
     probe_url = f"{base_url.rstrip('/')}/models"
+    next_phase_at = started  # the first heartbeat goes out before the first probe
     async with httpx.AsyncClient(timeout=5.0) as client:
         while True:
+            now = loop.time()
+            if now >= next_phase_at:
+                _report(
+                    on_phase, f"Loading the model onto the GPU ({format_elapsed(now - started)})"
+                )
+                next_phase_at = now + phase_interval_s
             try:
                 response = await client.get(probe_url)
                 if response.status_code == 200:
                     return
             except httpx.RequestError, httpx.HTTPStatusError:
                 pass
-            if asyncio.get_event_loop().time() > deadline:
+            # A server that has already exited is never going to answer. Without this the caller
+            # waits out the entire timeout, turning a fast and legible failure — a bad command, a
+            # missing weight, an unusable GPU — into a slow and opaque one.
+            if is_alive is not None and not await is_alive():
+                err = f"serving process exited before {probe_url!r} became ready"
+                raise ServingProcessError(err)
+            if loop.time() > deadline:
                 err = f"serving endpoint {probe_url!r} not ready after {timeout_s:.0f}s"
                 raise TimeoutError(err)
             await asyncio.sleep(poll_interval_s)
@@ -282,6 +419,8 @@ async def serving_endpoint(
     base_url: str,
     wait_timeout_s: float = 600.0,
     cleanup: bool = True,
+    on_phase: Callable[[str], None] | None = None,
+    phase_interval_s: float = _PHASE_INTERVAL_SECONDS,
 ) -> AsyncGenerator[ServingEndpoint]:
     """Launch ``task`` on ``backend``, wait for ``base_url`` to respond.
 
@@ -299,16 +438,55 @@ async def serving_endpoint(
             task — the caller knows the port they configured.
         wait_timeout_s: How long to wait for readiness.
         cleanup: When ``True``, call ``backend.cleanup`` on exit.
+        on_phase: Optional sink for short human-readable progress
+            phrases, forwarded to :func:`wait_for_endpoint`.
+            Bringing a server up is the longest uninterruptible
+            step most callers have; without a sink the whole of it
+            is one silent ``await``. The sink must not block, and
+            any exception it raises is swallowed.
+        phase_interval_s: Minimum seconds between two readiness
+            heartbeats. Forwarded to :func:`wait_for_endpoint`.
 
     Yields:
         A :class:`ServingEndpoint` carrying the job handle and
         the verified base URL.
     """
+    # Submitting is not the same as serving: a backend may return the moment the process is
+    # spawned, so report the two separately rather than letting one phrase cover both.
+    _report(on_phase, "Starting the model server")
     job = await backend.submit(task)
+
+    async def _alive() -> bool:
+        # Anything but a live job means the server is gone. A status the backend cannot report is
+        # treated as alive, so a flaky probe cannot abort a server that is merely slow to start.
+        try:
+            status = await backend.status(job)
+        except Exception:  # a status probe must never decide the run's fate
+            return True
+        return status.state in {"pending", "running"}
+
     try:
-        await wait_for_endpoint(base_url, timeout_s=wait_timeout_s)
-        yield ServingEndpoint(job=job, base_url=base_url)
+        try:
+            await wait_for_endpoint(
+                base_url,
+                timeout_s=wait_timeout_s,
+                is_alive=_alive,
+                on_phase=on_phase,
+                phase_interval_s=phase_interval_s,
+            )
+        except ServingProcessError as exc:
+            # The process's own output is the diagnosis — a bad command or an unloadable model
+            # says so here. Without it the caller only learns that nothing answered.
+            tail = ""
+            with contextlib.suppress(Exception):
+                tail = (await backend.logs(job))[-_FAILURE_LOG_CHARS:]
+            raise ServingProcessError(f"{exc}\n\n{tail}".rstrip()) from exc
+        _report(on_phase, "Model server ready")
+        yield ServingEndpoint(job=job, base_url=base_url, is_alive=_alive)
     finally:
+        # Teardown can hang too (a cancel that waits on an unresponsive process), so it is a
+        # reportable phase rather than another silent stretch.
+        _report(on_phase, "Stopping the model server")
         with contextlib.suppress(Exception):
             await backend.cancel(job)
         if cleanup:

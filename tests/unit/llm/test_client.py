@@ -337,18 +337,14 @@ class TestRequireToolSupport:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Default require_tool_support=False: the gate is permissive — the
-        # call proceeds past it and succeeds. (Cost is stubbed because the
-        # untracked model has no registry pricing, which is orthogonal to the
-        # capability gate under test.)
+        # Default require_tool_support=False: the gate is permissive — the call proceeds past it
+        # and succeeds. compute_cost used to be stubbed out here "because the untracked model has
+        # no registry pricing", which was the production defect in disguise: the real client hit
+        # the same wall and turned a completed generation into RegistryError. It is left unstubbed
+        # so this test exercises the path a caller actually takes.
         monkeypatch.setattr(
             "litellm.acompletion", AsyncMock(return_value=_fake_response(text="ok"))
         )
-
-        def _zero_cost(*_a: object, **_k: object) -> float:
-            return 0.0
-
-        monkeypatch.setattr("strata_forge.llm.client.compute_cost", _zero_cost)
         client = LLMClient("some/unknown-model", provider="openai_compat")
         resp = await client.complete([Message.user("hi")], tools=[_get_weather])
         assert resp.text == "ok"
@@ -1773,3 +1769,45 @@ class TestProviderClientInjection:
         client = LLMClient("claude-opus-4-7", provider_clients=custom_dict)
         resp = await client.complete([Message.user("hi")])
         assert resp.text == "hello"
+
+
+class TestUnpricedOpenAICompatResponse:
+    """A response the provider already produced must not be discarded for lack of a price.
+
+    `resolve_route` exempts `openai_compat` from the registry because its model ids are
+    operator-specific — a vLLM / TGI deployment names its own model. Pricing had no matching
+    exemption, so `_normalize_response` looked the same id up and raised `unknown_model` AFTER
+    the call succeeded. A batch run against a local vLLM lost all 2098 of its rows that way:
+    every generation succeeded and every one was thrown away on the way back.
+    """
+
+    async def test_an_unregistered_openai_compat_model_completes_at_zero_cost(
+        self, mock_litellm: AsyncMock
+    ) -> None:
+        client = LLMClient("Qwen/Qwen2.5-0.5B-Instruct", provider="openai_compat")
+        resp = await client.complete([Message.user("hi")])
+        assert resp.text == "hello"  # the generation survives
+        # 0.0 is what a cache hit already reports, and it is honest for self-hosted serving:
+        # the cost there is the machine, not the token.
+        assert resp.cost_usd == 0.0
+        assert resp.usage.total_tokens == 7  # usage is still real
+
+    async def test_a_registered_model_is_still_priced(self, mock_litellm: AsyncMock) -> None:
+        # The fallback must not quietly zero out real spend on a model that HAS a price.
+        client = LLMClient("claude-opus-4-7")
+        resp = await client.complete([Message.user("hi")])
+        assert resp.cost_usd > 0.0
+
+    def test_a_non_exempt_provider_still_raises_on_an_unknown_model(self) -> None:
+        # Routing guarantees a registered model for every other provider, so an unknown one there
+        # is a real defect rather than the documented exemption — it must stay loud.
+        from strata_forge.llm.client import _cost_for_route  # pyright: ignore[reportPrivateUsage]
+        from strata_forge.llm.responses import Usage
+        from strata_forge.llm.routing import ModelRoute
+
+        route = ModelRoute(
+            model="not/in-the-registry", provider="openai", provider_model_id="not/in-the-registry"
+        )
+        with pytest.raises(RegistryError) as info:
+            _cost_for_route(Usage(input_tokens=1, output_tokens=1), route)
+        assert info.value.reason == "unknown_model"

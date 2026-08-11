@@ -23,30 +23,51 @@ credentials + the network):
     ``STRATA_RUN_CONFIG``, is passed EXPLICITLY to the Hub/dataset clients (never the
     VM's ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only).
+    repo id; result rows are ``{custom_id, output, error}`` (model text only). Phase
+    messages go through the same scrub as errors, because ``serving_endpoint``'s phase hook
+    is public API and a caller's phrase is not under this module's control.
+
+The exit code is the run's VERDICT, and the control plane reads it as such. Individual row
+failures are collected rather than fatal (a few filtered rows must not discard thousands of good
+generations) and reported as succeeded/failed counts, but a run that produced no usable row at
+all exits nonzero: there is no reading under which it did its job, and the results file it
+leaves behind holds only errors.
+
+Long provisioning steps (downloading the split, installing and starting the model server,
+writing and uploading results) have nothing to count, so each reports itself with a
+``ProgressEvent(kind="phase")``. Without them a run is a single indeterminate wait between
+``start`` and the first ``step`` — which is where a model server that never comes up spends
+its entire timeout, invisibly.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
-from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.compute.serving import build_vllm_task, format_elapsed, serving_endpoint
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
-from strata_forge.llm.providers.openai_compat import OpenAICompatProvider
+from strata_forge.llm.providers.openai_compat import (
+    UNAUTHENTICATED_API_KEY,
+    OpenAICompatProvider,
+)
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Awaitable, Callable
 
 __all__ = ["RunSpec", "main", "render_template"]
 
@@ -56,8 +77,11 @@ _SERVE_HOST = "127.0.0.1"
 _SERVE_PORT = 8000
 # A bare ``{name}`` placeholder only — no attribute/index access, no format mini-language.
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
-# An HF repo id: ``owner/name``, each segment alphanumeric-led, no traversal/scheme/space.
-_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
+# traversal/scheme/space. The canonical form is not an edge case — `gpt2`, `t5-small`,
+# `distilgpt2` and `bert-base-uncased` all live at the root of the Hub with no owner, and every
+# one of them was accepted by the control plane, given a VM, and only then rejected here.
+_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 # A safe single path segment for the on-VM results dir name (no slash / traversal / shell chars).
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
@@ -66,6 +90,15 @@ _MAX_RENDERED_CHARS = 200_000
 # replacing the known token value).
 _TOKEN_RE = re.compile(r"(hf_[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._\-]+)")
 _RESULTS_FILENAME = "results.parquet"
+# A phase message is a short human phrase. Capped because the sink is reachable from public
+# API: a caller's hook must not be able to grow the file the orchestrator tails without bound.
+_MAX_PHASE_CHARS = 200
+# How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
+# provider/status/class, short enough that the run's message stays a message.
+_MAX_SAMPLE_ERROR_CHARS = 500
+# How often a long uncountable phase re-stamps itself with its elapsed time. Matches the
+# serving heartbeat, so one run does not narrate two different cadences.
+_PHASE_TICK_SECONDS = 10.0
 
 
 class Hyperparams(BaseModel):
@@ -141,7 +174,45 @@ def load_spec() -> RunSpec:
     _validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
         _validate_repo_id(spec.output_repo_id, "output repo")
+    _validate_template_coverage(spec)
     return spec
+
+
+def _validate_template_coverage(spec: RunSpec) -> None:
+    """Reject a template whose ``{placeholder}`` has no entry in ``column_mapping``.
+
+    An unmapped placeholder renders LITERALLY (see ``render_template``), which is the right
+    behaviour for the primitive but a catastrophe for a run: every row gets the byte-identical,
+    row-independent prompt, the model answers it N times, every row SUCCEEDS, and the run reports
+    `succeeded` with N copies of an answer to the literal text ``{question}``. Nothing downstream
+    can notice — the results file records ``{custom_id, output, error}``, so neither the rendered
+    prompt nor the source row is in it.
+
+    The one check that existed validated the mapping's VALUES against the split's columns, which
+    passes in exactly this case: with ``{"q": "question"}`` against a template of ``{question}``,
+    the column ``question`` really does exist. It is the KEYS that fail to cover the template, and
+    nobody was looking at them.
+
+    That mistake is easy to make and expensive to discover, so it fails here — before the dataset
+    download, before the GPU, within seconds of launch — naming both what is missing and what is
+    available.
+
+    The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
+    to survive to the model. That reading is rare, and it is not worth the run this protects.
+    """
+    placeholders = {m.group(1) for m in _PLACEHOLDER_RE.finditer(spec.template)}
+    unmapped = sorted(placeholders - set(spec.column_mapping))
+    if not unmapped:
+        return
+    known = sorted(spec.column_mapping) or ["(none)"]
+    msg = (
+        f"template placeholders have no column_mapping entry: {unmapped}. "
+        f"Mapped placeholders: {known}. "
+        "A placeholder is named WITHOUT braces on the left of the mapping "
+        '(template "{question}" needs the entry "question" -> the column name); '
+        "an unmapped one would be sent to the model literally, identically for every row."
+    )
+    raise RunError(msg)
 
 
 def render_template(template: str, row: dict[str, Any], column_mapping: dict[str, str]) -> str:
@@ -207,20 +278,87 @@ def _emit(writer: JsonlProgressWriter | None, event: ProgressEvent) -> None:
         writer.emit(event)
 
 
+def _phase_sink(writer: JsonlProgressWriter | None, hf_token: str | None) -> Callable[[str], None]:
+    """Build the one function every phase message goes through.
+
+    A single choke point, so scrubbing is unconditional: the same sink is handed to
+    ``serving_endpoint``, whose ``on_phase`` is public API, and a phrase that came from
+    outside this module gets the treatment the error path already applies.
+    """
+
+    def _phase(message: str) -> None:
+        _emit(
+            writer,
+            ProgressEvent(kind="phase", message=_sanitize(message, hf_token)[:_MAX_PHASE_CHARS]),
+        )
+
+    return _phase
+
+
+@contextlib.asynccontextmanager
+async def _ticking_phase(
+    phase: Callable[[str], None], message: str, interval_s: float = _PHASE_TICK_SECONDS
+) -> AsyncGenerator[None]:
+    """Report ``message`` for as long as the block runs, re-stamping it with its elapsed time.
+
+    A one-shot phase says a step BEGAN and never that it is still going. "Installing the inference
+    engine" and "Loading the dataset" then sit unchanged for minutes, indistinguishable from a run
+    that has hung — which is the question anyone watching is actually asking.
+
+    The ticker is an asyncio task, so it only ticks while the event loop is free: every blocking
+    call it wraps is handed to a thread for exactly that reason. Cancelled in a ``finally``, so a
+    step that raises does not leave a caption ticking forever underneath the error.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    phase(message)  # immediately, with no elapsed: zero is noise, and this marks the start
+
+    async def _tick() -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            phase(f"{message} ({format_elapsed(loop.time() - started)})")
+
+    task = asyncio.create_task(_tick())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def _run_batches(
     spec: RunSpec,
     client: LLMClient,
     prompts: list[list[UserMessage]],
     custom_ids: list[str],
     writer: JsonlProgressWriter | None,
+    is_alive: Callable[[], Awaitable[bool]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run the prompts in progress-chunked batches; reconcile results positionally."""
+    """Run the prompts in progress-chunked batches; reconcile results positionally.
+
+    ``is_alive`` is checked between chunks. The model server is verified once before the batch
+    starts and then never again, but it can die at any point after that — an OOM on a long prompt,
+    a CUDA fault. Every row from then on fails against a socket nobody is listening on, and the
+    client RETRIES each one, so a dead server turns into a long expensive silence instead of an
+    error: the rest of the run is spent timing out one row at a time, and the failure that
+    eventually surfaces describes a connection, not the crash that caused it.
+    """
     hp = spec.hyperparams
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
     total = len(prompts)
     out: list[dict[str, Any]] = []
     ok = failed = 0
     for start in range(0, total, hp.progress_chunk):
+        # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
+        # the granularity the run already reports at. It bounds the waste at one chunk rather than
+        # the whole remaining batch.
+        if start and is_alive is not None and not await is_alive():
+            msg = (
+                f"the model server died after {len(out)} of {total} rows "
+                "(its log is beside the results on the VM)"
+            )
+            raise RunError(msg)
         chunk = prompts[start : start + hp.progress_chunk]
         ids = custom_ids[start : start + hp.progress_chunk]
         results = await runner.run(
@@ -245,10 +383,41 @@ async def _run_batches(
     return out
 
 
+def _check_produced_output(rows: list[dict[str, Any]], ok: int) -> None:
+    """Fail a run that reached the end without producing a single usable row.
+
+    Row failures are COLLECTED rather than fatal on purpose: a handful of rows tripping a
+    content filter must not throw away thousands of good generations. But that must not decide
+    the run's VERDICT, which the control plane reads from this process's exit code. A run whose
+    every row failed produced nothing, and calling it succeeded tells the user their results are
+    ready when the file holds only errors — a staging run reported `succeeded` with exit 0 over
+    2098 failed rows and zero generations, and nothing on the run said otherwise.
+
+    A partial failure is deliberately still a success: it produced usable output, and the
+    succeeded/failed counts on the run describe it. Only "nothing at all" is a failure, because
+    only that has no reading under which the run did its job.
+
+    The results file is written and pushed BEFORE this runs, so the failure keeps its evidence:
+    the per-row `error` column is the record of what went wrong, for every row.
+    """
+    if ok:
+        return
+    if not rows:
+        msg = "the run produced no rows: the dataset split was empty"
+        raise RunError(msg)
+    sample = next((str(row["error"]) for row in rows if row["error"]), "")
+    msg = f"all {len(rows)} rows failed. First error: {sample[:_MAX_SAMPLE_ERROR_CHARS]}"
+    raise RunError(msg)
+
+
 def _local_results_dir(run_id: str | None) -> Path:
-    """A stable, cleanup-surviving location for results when NOT pushing to the Hub: outside the
-    per-run workdir the orchestrator deletes, named by the run id so the user can retrieve it over
-    SSH. Falls back to the cwd when no usable run id was provided (degraded — may be cleaned — but
+    """A stable, cleanup-surviving location for a run's results: outside the per-run workdir the
+    orchestrator deletes, named by the run id so the user can retrieve it over SSH.
+
+    Used whether or not the results are then pushed. Writing them inside the workdir and pushing
+    from there would mean a failed upload destroys the whole run's output along with it.
+
+    Falls back to the cwd when no usable run id was provided (degraded — may be cleaned — but
     never crashes; the run id is validated as a single safe path segment)."""
     if run_id and _SAFE_NAME_RE.fullmatch(run_id):
         return Path.home() / "strata-inference-results" / run_id
@@ -282,8 +451,17 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWriter | None) -> str:
-    rows = _load_rows(spec, hf_token)
+    phase = _phase_sink(writer, hf_token)
+
+    # The split download is unbounded by row_limit (that only slices during iteration), so it
+    # runs BEFORE the first countable milestone and can take minutes on its own.
+    # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
+    # blocked event loop cannot tick the caption that says it is still going.
+    async with _ticking_phase(phase, "Loading the dataset"):
+        rows = await asyncio.to_thread(_load_rows, spec, hf_token)
     prompts, custom_ids = _build_requests(spec, rows)
+    # `start` stays exactly here: it is the documented milestone that says inference is about
+    # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
     _emit(writer, ProgressEvent(kind="start", total_steps=len(prompts)))
 
     hp = spec.hyperparams
@@ -295,29 +473,85 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         max_model_len=hp.max_model_len,
         dtype=hp.dtype,
         setup="",  # vLLM is already installed by the server's setup step; don't reinstall
+        # Serve with the interpreter this runner is executing under. LocalBackend runs the task
+        # through a login shell, which re-sources the profile and drops this virtualenv from PATH:
+        # a bare `vllm` is then "command not found" even though vLLM is installed right here.
+        python_executable=sys.executable,
     )
+    # Unbuffered: the served process writes through a pipe, so CPython would otherwise hold
+    # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves
+    # the log file empty, which is precisely the case the file exists for.
+    # A batch run must not depend on a CUDA build toolchain being present on someone else's box.
+    # vLLM's default sampler is FlashInfer's, which JIT-COMPILES its kernels during warmup: it
+    # shells out to ninja, and a GPU image carrying the driver and runtime but no build tools
+    # fails with "No such file or directory: 'ninja'" — after loading the weights, compiling the
+    # graph, capturing CUDA graphs and allocating the KV cache, so the run has already paid for
+    # everything before it dies. The PyTorch-native sampler is marginally slower per token and
+    # needs no compiler, which is the right default for a machine we do not provision.
+    task = task.model_copy(
+        update={
+            "env": {
+                **task.env,
+                # Unbuffered: the served process writes through a pipe, so CPython would otherwise
+                # hold its output in an 8 KiB block buffer — and a server that hangs before filling
+                # it leaves the log file empty, which is precisely the case the file exists for.
+                "PYTHONUNBUFFERED": "1",
+                "VLLM_USE_FLASHINFER_SAMPLER": "0",
+            }
+        }
+    )
+    # serving_endpoint reports "Starting the model server" itself the moment it submits, so
+    # announcing it here as well would show the same phrase twice for one step.
     async with serving_endpoint(
-        LocalBackend(),
+        # Tee the served process's streams into the run workdir. When the runner dies, the
+        # buffers die with it; the files are what is left to explain why the server never came up.
+        LocalBackend(log_dir=Path.cwd()),
         task,
         base_url=f"http://{_SERVE_HOST}:{_SERVE_PORT}/v1",
         wait_timeout_s=hp.wait_timeout_s,
+        on_phase=phase,
     ) as endpoint:
-        provider = OpenAICompatProvider(OpenAICompatConfig(base_url=endpoint.base_url))
+        # The endpoint this runner just launched is on loopback and takes no credential, and
+        # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back
+        # to whatever OPENAI_API_KEY the VM happens to carry, which would send the user's real
+        # provider key to a local server that never asked for one.
+        provider = OpenAICompatProvider(
+            OpenAICompatConfig(
+                base_url=endpoint.base_url, api_key=SecretStr(UNAUTHENTICATED_API_KEY)
+            )
+        )
         client = LLMClient(
             model=spec.model_id,
             provider="openai_compat",
             provider_clients={"openai_compat": provider},  # pins the LOCAL endpoint
         )
-        out = await _run_batches(spec, client, prompts, custom_ids, writer)
+        # The first `step` only lands once a whole progress_chunk has completed, and that
+        # chunk absorbs the client's cold start on top of its generations.
+        async with _ticking_phase(phase, "Generating responses"):
+            out = await _run_batches(spec, client, prompts, custom_ids, writer, endpoint.is_alive)
 
-    # Push to the Hub only when BOTH a write token and an output repo are present (the control
-    # plane injects them together). Otherwise keep the results on the VM for the user to retrieve
-    # over SSH — written OUTSIDE the per-run workdir so the orchestrator's cleanup leaves them intact.
+    # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
+    # The orchestrator deletes that workdir on every terminal state, so writing there and pushing
+    # from it means a failed upload — an expired token, a rate limit, a network blip — takes the
+    # entire run's output with it. Hours of generation, gone at the last step, with nothing left to
+    # retry from. Outside it, the parquet survives for the user to retrieve over SSH (or push by
+    # hand) exactly as in the no-push case.
+    #
+    # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
+    # here would otherwise look like it died complete, with no explanation.
+    async with _ticking_phase(phase, "Writing results"):
+        results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
     if hf_token and spec.output_repo_id:
-        results_path = _write_results(out, Path.cwd())
-        destination = await _push_results(spec, results_path, hf_token)
+        try:
+            async with _ticking_phase(phase, "Uploading results to the Hub"):
+                destination = await _push_results(spec, results_path, hf_token)
+        except Exception as exc:
+            # Name WHERE the results are. The run still fails — the user asked for them on the Hub
+            # and they are not there — but a failure at the last step of a long run is the moment
+            # it matters most that the output was not lost with it.
+            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
+            raise RunError(msg) from exc
     else:
-        results_path = _write_results(out, _local_results_dir(spec.run_id))
         destination = str(results_path)
 
     ok = sum(1 for r in out if r["error"] is None)
@@ -331,6 +565,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
             message=destination,  # WHERE results landed: a repo id (pushed) or a VM path (local)
         ),
     )
+    # AFTER `end`: the counts and the destination are true whichever way the verdict falls, and
+    # for a run that failed this way they are the diagnosis — they say every row failed and where
+    # the per-row errors can be read.
+    _check_produced_output(out, ok)
     return destination
 
 
@@ -354,7 +592,13 @@ async def main() -> int:
         spec = load_spec()
         await _execute(spec, hf_token, writer)
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
-        _emit(writer, ProgressEvent(kind="error", message=_sanitize(str(exc), hf_token)))
+        detail = _sanitize(str(exc), hf_token)
+        _emit(writer, ProgressEvent(kind="error", message=detail))
+        # Also to stderr, because that is where the control plane reads a failed run's reason
+        # from. Catching the exception here means no traceback is printed, so without this the
+        # run's own account of why it failed exists only in the progress file, and the record
+        # explains the failure with whatever unrelated output happened to be last in the stream.
+        print(f"run failed: {detail}", file=sys.stderr, flush=True)
         return 1
     else:
         return 0

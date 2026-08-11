@@ -181,7 +181,7 @@ lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
 | `tool_calls` | `list[ToolCall]` | One per tool call requested. |
 | `finish_reason` | `FinishReason` | `"stop"` / `"tool_use"` / `"length"` / `"content_filter"` / `"error"`. |
 | `usage` | `Usage` | `input_tokens`, `output_tokens`, plus cache read/write counters. |
-| `cost_usd` | `float` | Computed against the registry's per-million rates. `0.0` on a cache hit. |
+| `cost_usd` | `float` | Computed against the registry's per-million rates. `0.0` on a cache hit, and on an unpriced `openai_compat` route. |
 | `route` | `ModelRoute` | The `(model, provider, provider_model_id)` actually used. |
 | `cache_hit` | `bool` | `True` when served from cache. |
 | `latency_ms` | `float` | Wall-clock latency of the provider call. |
@@ -620,6 +620,14 @@ Every `LLMResponse` carries `cost_usd` computed against the registry's
 per-million-token rates, taking into account cache-read / cache-write
 prices when usage reports them. `cache_hit=True` responses report
 `cost_usd=0.0`.
+
+**`openai_compat` routes are unpriced and report `cost_usd=0.0`.** Their
+model ids are operator-specific, so the curated registry has no entry and
+therefore no rates — the same exemption routing makes. For a self-hosted
+vLLM / TGI / SGLang deployment that is the honest figure: the cost is the
+machine, not the token. For a *metered* OpenAI-compatible endpoint
+(OpenRouter, Groq) the real spend is simply unknowable from here, so it is
+not billed into `BudgetContext` — track it at the provider instead.
 
 ### Budgets
 

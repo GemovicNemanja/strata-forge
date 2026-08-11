@@ -7,6 +7,10 @@ write one :class:`ProgressEvent` per training event to a JSONL file
 (:class:`JsonlProgressWriter`) that the orchestrator tails (e.g. ``tail -F`` over
 SSH).
 
+Work that has no step to count (downloading a split, launching a model server, uploading
+results) reports itself with ``kind="phase"`` events, so the orchestrator can say what is
+happening instead of showing an indeterminate wait between two countable milestones.
+
 The file is plain JSONL — one ``ProgressEvent`` per line — so it needs no extra
 runtime dependency and degrades gracefully even if a line lands in stdout.
 :func:`trainer_callback` bridges TRL / ``transformers`` ``Trainer`` events onto a
@@ -34,7 +38,11 @@ __all__ = [
 ]
 
 
-type ProgressKind = Literal["start", "step", "eval", "checkpoint", "end", "error"]
+# ``phase`` is listed first because it is the only kind that can precede ``start``: it reports
+# what a long provisioning step is doing (downloading data, launching a model server, uploading
+# results) so the stretches between countable milestones are not a silent gap to whoever tails
+# the JSONL. A ``phase`` event carries ``message`` only — never a step count.
+type ProgressKind = Literal["phase", "start", "step", "eval", "checkpoint", "end", "error"]
 
 # Keys promoted to dedicated :class:`ProgressEvent` fields, so they aren't
 # duplicated inside ``metrics``.
@@ -44,8 +52,12 @@ _PROMOTED = frozenset({"loss", "eval_loss", "learning_rate", "epoch"})
 class ProgressEvent(BaseModel):
     """One structured training-progress record.
 
+    A ``phase`` event is the exception to the shape below: it carries only ``kind``,
+    ``message`` and ``ts``, because it marks work that has no step to count.
+
     Attributes:
-        kind: The lifecycle phase this event marks.
+        kind: The lifecycle milestone this event marks, or ``phase`` for a free-form
+            report of what a long uncountable step is currently doing.
         step: Global optimizer step, when known.
         total_steps: Total planned optimizer steps, when known.
         epoch: Fractional epoch, when known.
@@ -53,7 +65,8 @@ class ProgressEvent(BaseModel):
         learning_rate: LR at this step, when reported.
         metrics: Any additional numeric values (eval metrics, grad norm, …),
             excluding the values already promoted to their own fields.
-        message: Free-form human-readable detail (used mainly by ``error``).
+        message: Free-form human-readable detail (the payload of ``phase``, and used by
+            ``error``).
         ts: Event timestamp (UTC).
     """
 

@@ -32,6 +32,12 @@ __all__ = ["SSHBackend"]
 
 _PID_FILE = "forge.pid"
 _EXIT_FILE = "forge.exit"
+# Written by `cancel` BEFORE it signals, so `status` can tell a cancellation from a process the
+# machine killed. Both look identical afterwards — pid gone, no exit file — and guessing
+# "cancelled" for every such job reported an OOM kill, a reboot, or a segfault as something the
+# user asked for. The lie is not free downstream: an orchestrator that captures diagnostics only
+# for FAILED jobs discards the logs of exactly the deaths nobody chose.
+_CANCELLED_FILE = "forge.cancelled"
 _STDOUT_FILE = "stdout.log"
 _STDERR_FILE = "stderr.log"
 _FORGE_REMOTE_ROOT = ".forge-compute"
@@ -175,12 +181,32 @@ class SSHBackend:
             check=True,
         )
 
-        # Launch under nohup, capture the PID, write the exit code on exit.
+        # Launch detached, capture the PID, write the exit code on exit.
+        #
+        # sshd keeps the session channel open until it sees EOF on the command's stdout AND
+        # stderr, not when the command exits — and every process in a backgrounded tree inherits
+        # those descriptors. asyncssh's run() in turn resolves on channel close rather than on
+        # exit-status, so a launcher that leaves them open makes submit() block for the entire
+        # lifetime of the job it just launched. Redirecting the backgrounded subshell's OWN
+        # descriptors is what releases the channel; the inner per-command redirections still win,
+        # so the job's stdout/stderr keep landing in their log files.
+        #
+        # The brace group is load-bearing, not cosmetic: `&` binds looser than `&&`, so without it
+        # the shell backgrounds the whole `cd … && ( … )` and-list and forks an OUTER subshell that
+        # inherits the channel anyway — the redirection alone does not fix the hang. It also keeps
+        # `cd` in the foreground shell, so the pid file is written inside the workdir instead of
+        # $HOME, where concurrent submits would otherwise overwrite each other's handle.
+        #
+        # `trap '' HUP` covers the bookkeeping subshell at session teardown, which nohup does not:
+        # nohup protects only the process it execs, so without the trap a hangup between launch and
+        # completion loses the exit code and leaves a live job indistinguishable from a cancelled
+        # one. `< /dev/null` detaches stdin so a long bootstrap that reads it sees EOF rather than
+        # EIO once the channel is gone.
         launch_cmd = (
-            f"cd {shlex.quote(remote_workdir)} && "
-            f"(nohup bash wrapper.sh > {_STDOUT_FILE} 2> {_STDERR_FILE}; "
-            f"echo $? > {_EXIT_FILE}) & "
-            f"echo $! > {_PID_FILE}; cat {_PID_FILE}"
+            f"cd {shlex.quote(remote_workdir)} && {{ "
+            f"( trap '' HUP; nohup bash wrapper.sh > {_STDOUT_FILE} 2> {_STDERR_FILE}; "
+            f"echo $? > {_EXIT_FILE} ) < /dev/null > /dev/null 2>&1 & "
+            f"echo $! > {_PID_FILE}; cat {_PID_FILE}; }}"
         )
         _exit, stdout, _stderr = await self._run_remote(launch_cmd, check=True)
         pid = stdout.strip().splitlines()[-1]
@@ -222,9 +248,14 @@ class SSHBackend:
         pid = self._job_pid(job)
         # Probe liveness, then check for the exit-code file the wrapper
         # writes when it terminates.
+        # `cat` of an EMPTY exit file succeeds with no output, so MISSING must not be reached by
+        # `||` alone — the marker is echoed only when the file is absent. Without that, an empty
+        # file produced empty output that matched neither branch below and crashed the parse.
         probe_cmd = (
             f"kill -0 {shlex.quote(pid)} 2>/dev/null && echo RUNNING || "
-            f"cat {shlex.quote(workdir)}/{_EXIT_FILE} 2>/dev/null || echo MISSING"
+            f"{{ test -f {shlex.quote(workdir)}/{_CANCELLED_FILE} && echo CANCELLED; }} || "
+            f"{{ test -f {shlex.quote(workdir)}/{_EXIT_FILE} "
+            f"&& cat {shlex.quote(workdir)}/{_EXIT_FILE}; }} || echo MISSING"
         )
         _exit, stdout, _stderr = await self._run_remote(probe_cmd)
         text = stdout.strip()
@@ -238,17 +269,39 @@ class SSHBackend:
 
         if text == "RUNNING":
             return JobStatus(state="running", started_at=started_at)
-        if text == "MISSING":
-            # Process not alive and no exit file — usually means cancelled
-            # before the wrapper got a chance to write the exit code.
+        if text == "CANCELLED":
+            # `cancel` left its marker, so this death was ASKED FOR. Nothing else may claim that.
             return JobStatus(
                 state="cancelled",
                 started_at=started_at,
-                message="process gone, no exit file",
+                finished_at=datetime.now(UTC),
+                message="cancelled",
             )
-        # text should be a numeric exit code.
+        if text == "MISSING":
+            # Process gone, no exit file, and nobody cancelled it: the machine took it — an OOM
+            # kill, a reboot, a segfault in the interpreter itself. That is a FAILURE, and calling
+            # it "cancelled" both misreported it and (because diagnostics are captured only for
+            # failures) threw away the logs of the one kind of death nobody can otherwise explain.
+            return JobStatus(
+                state="failed",
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                message="process died without recording an exit code (killed, or the host went away)",
+            )
+        # text should be a numeric exit code. An EMPTY read is the write-in-progress race, not a
+        # verdict: the wrapper creates the file and writes to it as two steps, so a poll landing
+        # between them sees an empty file. Reporting non-terminal keeps the job alive for one more
+        # poll rather than inventing an outcome — and rather than crashing, which is what
+        # `splitlines()[-1]` did on empty input (IndexError, which `except ValueError` never caught).
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return JobStatus(
+                state="running",
+                started_at=started_at,
+                message="exit file not written yet",
+            )
         try:
-            exit_code = int(text.splitlines()[-1].strip())
+            exit_code = int(lines[-1].strip())
         except ValueError:
             return JobStatus(
                 state="failed",
@@ -304,8 +357,13 @@ class SSHBackend:
 
     async def cancel(self, job: Job) -> None:
         pid = self._job_pid(job)
-        # Best-effort SIGTERM, brief wait, SIGKILL.
+        workdir = self._job_workdir(job)
+        # The marker is written BEFORE the signal, and deliberately not after: between the two the
+        # process is already dying, and a `status` landing in that window would otherwise read the
+        # death as one nobody asked for.
         cmd = (
+            f"touch {shlex.quote(workdir)}/{_CANCELLED_FILE} 2>/dev/null; "
+            # Best-effort SIGTERM, brief wait, SIGKILL.
             f"kill -TERM {shlex.quote(pid)} 2>/dev/null; "
             "sleep 2; "
             f"kill -KILL {shlex.quote(pid)} 2>/dev/null; "
