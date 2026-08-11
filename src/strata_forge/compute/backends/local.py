@@ -28,6 +28,9 @@ never asks for it never finds log files appearing beside their code.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -78,6 +81,68 @@ async def _drain(
     finally:
         if fh is not None:
             fh.close()
+
+
+# How long the group gets to honour SIGTERM before SIGKILL, and how often liveness is re-asked.
+_TERM_GRACE_S = 5.0
+_GROUP_POLL_S = 0.05
+
+
+def _group_is_alive(pgid: int) -> bool:
+    """Is any process still in ``pgid``?
+
+    Signal 0 performs the permission and existence checks without delivering anything, which is
+    the actual question — and unlike waiting on the process, it cannot block. A group we are not
+    allowed to signal counts as alive: it exists, and reporting it dead would be a lie that ends
+    the retry loop early.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _reap_group(process: asyncio.subprocess.Process) -> None:
+    """Stop everything in ``process``'s group: SIGTERM, a grace period, then SIGKILL.
+
+    Deliberately NOT ``await process.wait()``. asyncio resolves that only once every pipe has hit
+    EOF, and any descendant inherits those pipes — so waiting on a process whose child is holding
+    stdout open waits for the child, which is exactly the thing being killed. That turned cancel
+    into a hang, and the serving teardown's ``contextlib.suppress`` could not break it because a
+    hang raises nothing. Liveness is asked of the group instead.
+
+    The group is signalled even when the direct child has already exited: it may have left the
+    real work running, which is the leak this exists to close.
+    """
+    pgid = process.pid  # start_new_session makes the child its own group leader
+    loop = asyncio.get_running_loop()
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break  # nothing left in the group
+        except PermissionError:
+            break  # not ours to signal; escalating would not change that
+        if sig is signal.SIGKILL:
+            break
+        deadline = loop.time() + _TERM_GRACE_S
+        # Polled rather than awaited: the OS offers no "this process group is now empty" event.
+        # Only the direct child is waitable, and the descendants that actually hold the GPU are
+        # not ours to wait on — signal 0 is the only question that can be asked about a group.
+        while loop.time() < deadline and _group_is_alive(pgid):  # noqa: ASYNC110
+            await asyncio.sleep(_GROUP_POLL_S)
+        if not _group_is_alive(pgid):
+            break
+
+    # Reap the direct child so it does not linger as a zombie holding its pid. It has been
+    # signalled, so this resolves promptly; the timeout covers the pipe-EOF case above.
+    if process.returncode is None:
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(process.wait(), timeout=_TERM_GRACE_S)
 
 
 class _JobState:
@@ -159,6 +224,15 @@ class LocalBackend:
                     env=env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    # The child leads its own process group, so cancel can signal the whole tree
+                    # with one killpg. The tree is the point: a served model is not one process.
+                    # vLLM runs its engine in SEPARATE worker processes, and those are what hold
+                    # the GPU — terminating only the shell child leaves them resident, so the next
+                    # run finds the device occupied by a job the user already cancelled.
+                    #
+                    # Without a new session the group would be the ORCHESTRATOR's, and killpg
+                    # would signal the caller that asked for the cancel.
+                    start_new_session=True,
                 )
                 state.process = process
                 stdout_log, stderr_log = state.log_paths or (None, None)
@@ -329,22 +403,23 @@ class LocalBackend:
 
     async def cancel(self, job: Job) -> None:
         state = self._require_job(job)
-        if state.finished_at is not None:
-            return
         process = state.process
         if process is None:
             # Process hasn't been spawned yet; mark cancelled so the
             # next status() reports it.
             state.cancelled = True
             return
-        process.terminate()
-        # Wait briefly for graceful shutdown; SIGKILL if it doesn't comply.
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-        state.cancelled = True
+        # The SWEEP is not gated on `finished_at`: the job's own process exiting does not mean its
+        # work stopped. A launcher that starts a server and returns reports success while the
+        # server keeps running, and the teardown path calls cancel precisely to collect that.
+        # Sweeping an empty group is a no-op, so the old early return bought nothing but a live
+        # server left behind.
+        finished = state.finished_at is not None
+        await _reap_group(process)
+        # The VERDICT is gated: a job that already reached a terminal state keeps it. Cancelling
+        # a job that succeeded is a tidy-up, not a retroactive re-run of how it ended.
+        if not finished:
+            state.cancelled = True
 
     async def cleanup(self, job: Job) -> None:
         """Drop the job's in-memory state and make sure its process is gone.
@@ -355,12 +430,10 @@ class LocalBackend:
         state = self._jobs.pop(job.id, None)
         if state is None:
             return  # already cleaned up — idempotent
-        # Make sure any lingering process is gone before we drop the state.
+        # Make sure any lingering process is gone before we drop the state. Once this returns,
+        # the state is dropped and nothing can name the group again, so it sweeps unconditionally
+        # for the same reason cancel does — a job whose own process exited may still have left
+        # the work running.
         process = state.process
-        if process is not None and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
+        if process is not None:
+            await _reap_group(process)
