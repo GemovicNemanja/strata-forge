@@ -309,6 +309,24 @@ equally. A `label` cell is coerced to a real boolean rather than trusted: a colu
 strings would otherwise read as every-row-true, which trains a model on the premise that nothing
 is bad — silently wrong rather than failed.
 
+**A spec's `hyperparams` reach the method's config verbatim, with three exceptions.** The config's
+own `extra="forbid"` decides what each method accepts, so an inapplicable knob is a named error
+rather than a silent drop, and no second list of field names has to be kept in sync. But
+`extra="forbid"` only rejects keys the config does not declare — it waves through
+**`model_id`, `output_dir` and `progress_jsonl`**, which the runner *derives*: `model_id` is the
+value it validated and the value the run is recorded as, `output_dir` is the artifact directory the
+push/merge/cleanup paths address, and `progress_jsonl` is the orchestrator's channel. A spec naming
+one of them is refused (`hyperparams may not set …: the runner derives these`), because otherwise a
+submitted hyperparam could train a different model than the record names and write checkpoints and
+the progress log to any absolute path — walking past the very `validate_repo_id` re-check the VM
+side exists to perform. `extra_trainer_args` is checked for the same three keys, since
+`to_trl_kwargs` applies it last and it reaches TRL's own `output_dir`.
+
+This bounds only the **declaration** path. `extra_trainer_args` remains an unrestricted escape
+hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the
+operator, and Forge does not block access to the underlying TRL surface. The distinction is who
+submitted the values, not what they are.
+
 ## Lazy-import contract
 
 Importing ``strata_forge.training`` works without the ``[finetuning]``
