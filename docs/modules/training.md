@@ -27,6 +27,12 @@ Integration points:
 - **Helpers:** :func:`apply_chat_template`,
   :func:`conversation_to_dicts`, :func:`conversation_to_text`,
   :func:`pack_sequences`, :class:`PackedSequence`.
+- **Declaration layer:** :data:`METHODS` / :func:`pick_method` /
+  :func:`enabled_methods` / :func:`check_format` and
+  :data:`FORMATS` / :func:`validate_mapping` /
+  :func:`build_training_rows` — for callers that hold a job spec
+  rather than Python. See
+  [Driving training from a declaration](#driving-training-from-a-declaration).
 
 Module rules: [`src/strata_forge/training/CLAUDE.md`](../../src/strata_forge/training/CLAUDE.md).
 Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
@@ -41,6 +47,7 @@ Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
 - [PEFT (LoRA / QLoRA)](#peft-lora--qlora)
 - [Chat-template formatting](#chat-template-formatting)
 - [Sequence packing](#sequence-packing)
+- [Driving training from a declaration](#driving-training-from-a-declaration)
 - [Lazy-import contract](#lazy-import-contract)
 - [Troubleshooting](#troubleshooting)
 
@@ -244,6 +251,63 @@ sequences are truncated to ``max_length - 1`` to leave room for
 the EOS. The remaining slack at the end of each pack is filled
 with pad tokens, and ``attention_mask`` is 1 for real tokens, 0
 for pad.
+
+## Driving training from a declaration
+
+The API above assumes a caller writing Python: it picks a config class, constructs a runner, and
+hands it a `Dataset`. An orchestrator cannot do any of that — it holds a JSON job spec that was
+allowed to carry data and nothing else. Two small modules close that gap, and
+[`strata_forge.pipelines.finetune_runner`](../../src/strata_forge/pipelines/finetune_runner.py) is
+their first consumer.
+
+**The method registry** (`methods.py`) is the single table mapping a method NAME to what it is:
+its config class, its runner class, the head it trains (`task_type`), and the dataset formats it
+accepts. `pick_method(name)` is the only supported way in.
+
+```python
+from strata_forge.training import pick_method, check_format, enabled_methods
+
+spec = pick_method("dpo")          # UnsupportedMethodError for an unknown method
+check_format(spec, "preference")   # ...or one the method cannot train on
+[m.name for m in enabled_methods()]  # ["sft", "dpo", "orpo", "kto"]
+```
+
+`GRPO` is registered with `enabled=False`. It is fully implemented in
+:class:`PreferenceRunner`, but it needs `reward_funcs` — callables — and a spec that carries no
+code cannot supply one. `pick_method("grpo")` therefore raises with that explanation rather than
+behaving like an unknown method. Reach for :class:`PreferenceRunner` directly to use it.
+
+**The dataset formats** (`dataset_format.py`) declare which of a dataset's columns plays which
+role, because TRL decides what kind of run it is doing by looking at the column NAMES it was
+handed and real datasets never use those names.
+
+| Format | Required roles | Optional | Methods |
+|---|---|---|---|
+| `text` | `text` | — | sft |
+| `prompt_completion` | `prompt`, `completion` | — | sft |
+| `conversational` | `messages` | — | sft |
+| `preference` | `chosen`, `rejected` | `prompt` | dpo, orpo |
+| `unpaired_preference` | `prompt`, `completion`, `label` | — | kto |
+
+```python
+from strata_forge.training import validate_mapping, build_training_rows
+
+mapping = {"prompt": "question", "completion": "answer"}
+validate_mapping("prompt_completion", mapping, dataset.column_names)  # before anything expensive
+rows = build_training_rows(dataset, "prompt_completion", mapping)
+```
+
+`validate_mapping` is the point of the whole thing: it checks the declaration against the split's
+real columns and names the missing role, the bad column and what is available. Without it a wrong
+mapping is a TRL `KeyError` on a rented GPU, minutes into a job that has already downloaded a
+model. `build_training_rows` then projects each row onto the roles and **drops every other
+column** — a leftover `id` or `source` is not inert, it can change the format TRL infers.
+
+`preference` keeps `prompt` optional because TRL accepts both spellings (an explicit prompt beside
+the two completions, or the prompt embedded in both) and datasets in the wild use each about
+equally. A `label` cell is coerced to a real boolean rather than trusted: a column of non-empty
+strings would otherwise read as every-row-true, which trains a model on the premise that nothing
+is bad — silently wrong rather than failed.
 
 ## Lazy-import contract
 
