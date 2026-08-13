@@ -48,6 +48,7 @@ import itertools
 import json
 import os
 import re
+import signal
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -583,14 +584,49 @@ def _progress_path() -> str | None:
     return from_spec or os.environ.get("FORGE_PROGRESS_PATH")
 
 
+def _install_termination_handlers() -> None:
+    """Turn SIGTERM/SIGINT into an ordinary cancellation, so teardown actually runs.
+
+    This is what stops a cancelled run from stranding its GPU. Cancelling a run signals the
+    job's process group, which includes this process — and Python's default SIGTERM handling
+    terminates immediately, without unwinding. The model server is started through a backend
+    that puts it in a session of ITS OWN (so that killing the server's tree cannot signal us),
+    which means the group signal never reaches it: the only thing that stops it is the
+    `serving_endpoint` teardown in this process's `finally`, and that never runs if the
+    interpreter dies where it stands.
+
+    Cancelling the running task raises `CancelledError` at the current await instead, so every
+    `finally` on the stack unwinds and the server is asked to stop. The caller's SIGKILL follows
+    a grace period, which is the budget this teardown has.
+    """
+    task = asyncio.current_task()
+    if task is None:  # pragma: no cover — main() always runs as a task under asyncio.run
+        return
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(NotImplementedError, ValueError):
+            # NotImplementedError: signal handlers are POSIX-only. ValueError: not the main
+            # thread. Neither is worth failing a run over — the run simply keeps the default
+            # behaviour it had before.
+            loop.add_signal_handler(sig, task.cancel)
+
+
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
     hf_token = os.environ.get("HF_WRITE_TOKEN") or None
     path = _progress_path()
     writer = JsonlProgressWriter(path) if path else None
+    _install_termination_handlers()
     try:
         spec = load_spec()
         await _execute(spec, hf_token, writer)
+    except asyncio.CancelledError:
+        # Asked to stop. The `finally` blocks unwinding beneath this are the point — they are
+        # what shut the model server down. Report it as a distinct outcome rather than as a
+        # failure of the work, and do not re-raise: the exit code is the caller's answer.
+        _emit(writer, ProgressEvent(kind="error", message="run cancelled"))
+        print("run cancelled", file=sys.stderr, flush=True)
+        return 1
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
         detail = _sanitize(str(exc), hf_token)
         _emit(writer, ProgressEvent(kind="error", message=detail))

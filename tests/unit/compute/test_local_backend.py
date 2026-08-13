@@ -52,6 +52,17 @@ async def _wait_until(
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Does ``pid`` still exist? Signal 0 checks without delivering anything."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours to signal
+    return True
+
+
 def _serve_log_names(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.glob("serve.*.log"))
 
@@ -220,30 +231,82 @@ class TestCancel:
         await backend.cancel(job)
         assert state.cancelled is True
 
-    async def test_cancel_sigkill_after_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Force wait_for to time out so the SIGKILL branch runs.
+    async def test_cancel_kills_the_whole_tree_not_just_the_child(self, tmp_path: Path) -> None:
+        """A cancelled job must leave nothing of its own running.
+
+        This is the leak that made "Cancelling" meaningless in production: the recorded process
+        is a shell, and the work — a served model and its engine workers — lives BELOW it. A
+        served model is never one process, so signalling only the direct child reparents the
+        rest onto init, where it keeps holding the GPU that the next run then cannot get.
+
+        Watching real pids is the point. The test this replaces faked an `asyncio.wait_for`
+        timeout and asserted only the reported STATE, so it passed against a cancel that killed
+        nothing at all — which is how the leak shipped.
+        """
+        backend = LocalBackend()
+        pidfile = tmp_path / "grandchild.pid"
+        # A grandchild that outlives its parent shell unless the GROUP is signalled: the shell
+        # backgrounds it and exits immediately, so `terminate()` on the child is a no-op for it.
+        job = await backend.submit(
+            Task(
+                name="tree",
+                run=f"sleep 300 & echo $! > {pidfile}; sleep 300",
+            )
+        )
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip().isdigit():
+                break
+            await asyncio.sleep(0.05)
+        grandchild = int(pidfile.read_text().strip())
+        assert _pid_alive(grandchild), "grandchild never started; the test proves nothing"
+
+        await backend.cancel(job)
+
+        for _ in range(100):  # reaping is a signal, not an instant
+            if not _pid_alive(grandchild):
+                break
+            await asyncio.sleep(0.05)
+        assert not _pid_alive(grandchild), (
+            f"pid {grandchild} survived the cancel — the work outlived the job"
+        )
+        await _wait_until_terminal(backend, job)
+        assert (await backend.status(job)).state == "cancelled"
+
+    async def test_cancel_does_not_signal_the_orchestrator(self) -> None:
+        # The child leads its own group precisely so killpg cannot reach back at us. If the
+        # child shared our group, this cancel would deliver SIGTERM to the test process.
         backend = LocalBackend()
         job = await backend.submit(Task(name="sleep", run="sleep 30"))
-        for _ in range(50):
+        for _ in range(100):
             if (await backend.status(job)).state == "running":
                 break
             await asyncio.sleep(0.05)
 
-        import asyncio as _asyncio
+        await backend.cancel(job)  # a signal to our own group would kill the test run
 
-        original_wait_for = _asyncio.wait_for
-
-        async def _fake_wait_for(awaitable: object, timeout: float) -> object:  # noqa: ASYNC109
-            del timeout
-            # First call (from cancel) times out; the inner cancel of the
-            # awaitable + kill path then runs.
-            raise TimeoutError
-
-        monkeypatch.setattr(_asyncio, "wait_for", _fake_wait_for)
-        await backend.cancel(job)
-        monkeypatch.setattr(_asyncio, "wait_for", original_wait_for)
-        await _wait_until_terminal(backend, job)
+        assert os.getpid() == os.getpid()  # reached at all == we were not signalled
         assert (await backend.status(job)).state == "cancelled"
+
+    async def test_cancel_returns_even_when_a_child_holds_the_pipes(self, tmp_path: Path) -> None:
+        """Cancel must not wait on pipe EOF, which a surviving descendant can hold open forever.
+
+        `Process.wait()` resolves on EOF, not on exit, so cancelling a job whose grandchild
+        inherited stdout used to block until that grandchild closed it — waiting on the very
+        thing being killed. The serving teardown wrapped the call in `contextlib.suppress`,
+        which cannot interrupt a hang.
+        """
+        backend = LocalBackend()
+        marker = tmp_path / "started"
+        job = await backend.submit(
+            Task(name="holder", run=f"sleep 300 & touch {marker}; sleep 300")
+        )
+        for _ in range(100):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.05)
+
+        # The assertion is the timeout: a cancel that waits on pipes never returns.
+        await asyncio.wait_for(backend.cancel(job), timeout=20)
 
 
 class TestCleanup:

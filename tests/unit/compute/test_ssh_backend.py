@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -17,6 +20,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from strata_forge.compute import Backend, SSHBackend, Task
+from strata_forge.compute.backends.ssh import (
+    _REPORT_MARKER,  # pyright: ignore[reportPrivateUsage]
+)
 
 # ---------------------------------------------------------------------------
 # Fake asyncssh connection
@@ -56,6 +62,17 @@ class _FakeSSHConnection:
         self.commands.append(command)
         self.last_timeout = timeout
         result = self.script.pop(0) if self.script else _FakeProcessResult()
+        # The real launcher prints a structured report, not a bare pid. A test that queues a
+        # number is naming the PID, not describing the wire format, so render it the way the
+        # remote shell would — including the job landing in a group of its own, which is the
+        # normal case. A test about the legacy (no-group) path queues the report itself.
+        if _REPORT_MARKER in command and result.stdout.strip().isdigit():
+            pid = result.stdout.strip()
+            result = _FakeProcessResult(
+                result.exit_status,
+                f"{_REPORT_MARKER} pid={pid} m=1 g={pid}\n",
+                result.stderr,
+            )
         if check and result.exit_status != 0:
             err = f"command failed (exit {result.exit_status}): {command!r}"
             raise RuntimeError(err)
@@ -227,6 +244,36 @@ async def _launch_command(backend: SSHBackend, connection: _FakeSSHConnection) -
     return connection.commands[2], str(job.metadata["remote_workdir"])
 
 
+def _pid_alive(pid: int) -> bool:
+    """Does `pid` still exist? Signal 0 checks without delivering anything."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _inner_script(command: str) -> str:
+    """The script the launcher hands to its explicit `bash -c`."""
+    parts = shlex.split(command)
+    assert parts[:2] == ["bash", "-c"], command
+    return parts[2]
+
+
+def _report_line(stdout: str) -> dict[str, str]:
+    """Parse the launcher's `key=value` report out of a real shell's output."""
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(_REPORT_MARKER):
+            fields: dict[str, str] = {}
+            for token in line[len(_REPORT_MARKER) :].split():
+                key, _, value = token.partition("=")
+                fields[key] = value
+            return fields
+    raise AssertionError(f"no launch report in output: {stdout!r}")
+
+
 class TestLauncherDetachment:
     async def test_backgrounded_subshell_redirects_its_own_descriptors(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
@@ -240,11 +287,12 @@ class TestLauncherDetachment:
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
     ) -> None:
         command, _ = await _launch_command(backend, fake_connection)
+        script = _inner_script(command)
         # `&` binds looser than `&&`. Without the brace group the shell backgrounds the entire
         # `cd … && ( … )` and-list, forking an outer subshell that inherits the channel — the
         # redirection above is then not enough on its own.
-        assert "&& { " in command, command
-        assert command.rstrip().endswith("; }"), command
+        assert "&& { " in script, script
+        assert script.rstrip().endswith("; }"), script
 
     async def test_bookkeeping_subshell_ignores_hangup(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
@@ -252,7 +300,21 @@ class TestLauncherDetachment:
         command, _ = await _launch_command(backend, fake_connection)
         # nohup protects only the process it execs, so a hangup between launch and completion
         # would otherwise kill the subshell before it records the exit code.
-        assert "trap '' HUP" in command, command
+        assert 'trap "" HUP' in _inner_script(command), command
+
+    async def test_launcher_asserts_job_control_under_an_explicit_bash(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """Job control is what gives the job a process group cancel can signal.
+
+        It has to be requested explicitly AND under a named bash: sshd hands the command to the
+        user's LOGIN shell, and that lottery decides whether the job gets its own group at all —
+        dash and sh accept `set -m` but still leave background jobs in the session's group, and
+        zsh rejects the option outright and would launch nothing.
+        """
+        command, _ = await _launch_command(backend, fake_connection)
+        assert command.startswith("bash -c "), command
+        assert _inner_script(command).startswith("set -m; "), command
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell semantics")
     def test_launcher_returns_before_the_job_finishes(self, tmp_path: Path) -> None:
@@ -273,7 +335,12 @@ class TestLauncherDetachment:
         assert completed.returncode == 0, completed.stderr
         # The fake job sleeps for 3s; an attached launcher returns only after it exits.
         assert elapsed < 1.5, f"launcher blocked for {elapsed:.2f}s — it is still attached"
-        assert completed.stdout.strip().isdigit(), completed.stdout
+        report = _report_line(completed.stdout)
+        assert report["pid"].isdigit(), completed.stdout
+        # Run under a real bash, the launcher must actually get job control and land the job in
+        # a group of its own — the property the whole cancel path depends on.
+        assert report["m"] == "1", completed.stdout
+        assert report["g"] == report["pid"], completed.stdout
 
         # The handle belongs in the workdir. With `cd` inside the backgrounded list it lands in
         # the login shell's cwd instead, where concurrent submits overwrite each other's pid.
@@ -747,3 +814,158 @@ class TestClose:
         backend = SSHBackend(connection=conn)
         await backend.close()
         assert conn.closed is False
+
+
+class TestCancelReachesTheWholeTree:
+    """Cancel must stop the WORK, not the bookkeeper that launched it.
+
+    The pid the launcher records belongs to a bookkeeping subshell; the run — the wrapper, the
+    Python runner, the inference engine holding the GPU — lives below it. Signalling that pid
+    alone reparents all of it onto init, where it keeps the device busy for the next run. These
+    drive real bash against real process trees, because the property is about process groups and
+    signal delivery, which no assertion on a command string can establish.
+    """
+
+    async def test_the_signal_target_is_the_group(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        fake_connection.queue(
+            _FakeProcessResult(), _FakeProcessResult(), _FakeProcessResult(stdout="4242\n")
+        )
+        job = await backend.submit(Task(name="t", run="sleep 1"))
+        assert job.metadata["pgroup"] is True
+
+        await backend.cancel(job)
+        cancel_cmd = fake_connection.commands[-1]
+        # A leading `-` is what makes kill address the GROUP. `--` keeps it an argument rather
+        # than an option, which is why it is spelled this way and not `kill -TERM -4242`.
+        assert "kill -TERM -- -4242" in cancel_cmd, cancel_cmd
+        assert "kill -KILL -- -4242" in cancel_cmd, cancel_cmd
+
+    async def test_a_job_without_its_own_group_keeps_the_single_pid_path(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """A shell that could not give the job its own group must not be group-signalled.
+
+        Its pid names no group, so `kill -- -PID` fails with ESRCH and stops nothing at all —
+        and the same probe would report a live job as gone. Jobs submitted before this existed
+        are in exactly that position, which is why the marker is recorded rather than assumed.
+        """
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout=f"{_REPORT_MARKER} pid=77 m=0 g=1\n"),
+        )
+        job = await backend.submit(Task(name="t", run="sleep 1"))
+        assert job.metadata["pgroup"] is False
+
+        await backend.cancel(job)
+        assert "kill -TERM -- 77" in fake_connection.commands[-1]
+        assert "-- -77" not in fake_connection.commands[-1]
+
+    async def test_a_disagreeing_pgid_is_not_trusted(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # The shell claimed job control, but ps measured the job in a DIFFERENT group. Believing
+        # the claim would group-signal a pid that leads no group.
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout=f"{_REPORT_MARKER} pid=77 m=1 g=1234\n"),
+        )
+        job = await backend.submit(Task(name="t", run="sleep 1"))
+        assert job.metadata["pgroup"] is False
+
+    async def test_liveness_is_asked_of_the_group(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # The bookkeeper can die while the runner it launched still holds the GPU. A pid-only
+        # probe calls that finished, so a half-killed job would read terminal while it runs on.
+        fake_connection.queue(
+            _FakeProcessResult(), _FakeProcessResult(), _FakeProcessResult(stdout="4242\n")
+        )
+        job = await backend.submit(Task(name="t", run="sleep 1"))
+        fake_connection.queue(_FakeProcessResult(stdout="RUNNING\n"))
+        await backend.status(job)
+        assert "kill -0 -4242" in fake_connection.commands[-1], fake_connection.commands[-1]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+    def test_the_launched_group_really_contains_the_whole_tree(self, tmp_path: Path) -> None:
+        """End to end against real bash: signal the group, and the descendants die.
+
+        This is the regression. The old launcher recorded a pid that named no group, so the
+        only thing a cancel could reach was the subshell — every process doing the actual work
+        survived it.
+        """
+        connection = _FakeSSHConnection()
+        command, workdir = asyncio.run(
+            _launch_command(SSHBackend(connection=connection), connection)
+        )
+        staged = tmp_path / workdir
+        staged.mkdir(parents=True)
+        # A wrapper whose real work is a GRANDCHILD, like the runner's model server.
+        (staged / "wrapper.sh").write_text(
+            "sleep 300 &\necho $! > deep.pid\nsleep 300\n",
+        )
+
+        completed = subprocess.run(  # noqa: S603 — the command under test IS the input
+            ["/bin/bash", "-c", command],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        report = _report_line(completed.stdout)
+        pgid = int(report["pid"])
+
+        deep_pid_file = staged / "deep.pid"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not deep_pid_file.is_file():
+            time.sleep(0.1)
+        assert deep_pid_file.is_file(), "the grandchild never started; the test proves nothing"
+        deep_pid = int(deep_pid_file.read_text().strip())
+        assert _pid_alive(deep_pid)
+
+        # Exactly what cancel does: signal the GROUP.
+        os.killpg(pgid, signal.SIGKILL)
+
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and _pid_alive(deep_pid):
+            time.sleep(0.1)
+        assert not _pid_alive(deep_pid), (
+            f"pid {deep_pid} survived the group kill — the work outlived the cancel"
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+    def test_the_group_holds_the_job_and_not_the_launching_shell(self, tmp_path: Path) -> None:
+        # The group must be the JOB's. If the job merely joined the caller's group, cancelling
+        # it would signal the shell that launched it — on a real host, sshd's session.
+        connection = _FakeSSHConnection()
+        command, workdir = asyncio.run(
+            _launch_command(SSHBackend(connection=connection), connection)
+        )
+        staged = tmp_path / workdir
+        staged.mkdir(parents=True)
+        (staged / "wrapper.sh").write_text("sleep 5\n")
+
+        completed = subprocess.run(  # noqa: S603 — the command under test IS the input
+            ["/bin/bash", "-c", f"echo launcher_pgid=$(ps -o pgid= -p $$ | tr -dc 0-9); {command}"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        launcher_pgid = next(
+            line.split("=", 1)[1].strip()
+            for line in completed.stdout.splitlines()
+            if line.startswith("launcher_pgid=")
+        )
+        report = _report_line(completed.stdout)
+        assert report["g"] != launcher_pgid, (
+            f"the job joined the launcher's group {launcher_pgid} — cancelling it would "
+            "signal the shell that started it"
+        )
