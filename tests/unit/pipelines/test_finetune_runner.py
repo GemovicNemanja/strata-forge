@@ -13,7 +13,9 @@ a validation error and a TRL stack trace is minutes of provisioning and the cost
 
 from __future__ import annotations
 
+import contextlib
 import json
+import time
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
@@ -26,6 +28,16 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _TOKEN = "hf_secretwritetoken1234567890"
+
+
+@contextlib.asynccontextmanager
+async def _fast_ticking_phase(phase: Any, message: str, interval_s: float = 0.0) -> Any:
+    """`ticking_phase` at a millisecond cadence, so a short test step still re-stamps."""
+    del interval_s
+    from strata_forge.pipelines._common import ticking_phase
+
+    async with ticking_phase(phase, message, interval_s=0.005):
+        yield
 
 
 def _spec_json(**overrides: Any) -> str:
@@ -47,12 +59,8 @@ def _spec(**overrides: Any) -> fr.FinetuneSpec:
     return fr.FinetuneSpec.model_validate_json(_spec_json(**overrides))
 
 
-class _FakeResult:
-    """Stands in for SFTRunResult / PreferenceRunResult."""
-
-    def __init__(self, steps: int | None = 12) -> None:
-        self.steps = steps
-        self.metrics: dict[str, float] = {"train_loss": 0.5}
+# What `_train` returns: the trainer's own numbers, extracted where the phase boundary needs them.
+_TRAINED: tuple[dict[str, float], int | None] = ({"train_loss": 0.5}, 12)
 
 
 # ------------------------------ the inert spec ------------------------------
@@ -327,14 +335,18 @@ def _drive(
     def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return rows
 
-    def _fake_train(*_a: Any, **_k: Any) -> _FakeResult:
-        return _FakeResult()
+    def _fake_build(*_a: Any, **_k: Any) -> object:
+        return object()
+
+    def _fake_train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+        return _TRAINED
 
     def _dir(_run_id: str | None, *, name: str) -> Path:
         return tmp_path / name
 
     monkeypatch.setattr(fr, "_load_split", _rows)
     monkeypatch.setattr(fr, "_to_dataset", _identity)
+    monkeypatch.setattr(fr, "_build_trainer", _fake_build)
     monkeypatch.setattr(fr, "_train", train or _fake_train)
     monkeypatch.setattr(fr, "results_dir", _dir)
     if push is not None:
@@ -451,14 +463,18 @@ class TestExecute:
         def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return rows
 
-        def _fake_train(*_a: Any, **_k: Any) -> _FakeResult:
-            return _FakeResult()
+        def _fake_build(*_a: Any, **_k: Any) -> object:
+            return object()
+
+        def _fake_train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+            return _TRAINED
 
         def _dir(_run_id: str | None, *, name: str) -> Path:
             return tmp_path / name
 
         monkeypatch.setattr(fr, "_load_split", _record)
         monkeypatch.setattr(fr, "_to_dataset", _identity)
+        monkeypatch.setattr(fr, "_build_trainer", _fake_build)
         monkeypatch.setattr(fr, "_train", _fake_train)
         monkeypatch.setattr(fr, "results_dir", _dir)
         import asyncio
@@ -483,3 +499,72 @@ class TestExecute:
         )
         assert merged == [True]
         assert any("Merging the adapter" in e.get("message", "") for e in events)
+
+
+class TestPhaseBoundary:
+    """The loop narrates itself; the runner narrates only the silence around it.
+
+    Building the trainer (downloading the model, quantising it, wiring the adapter) is silent and
+    can take many minutes, so it gets an elapsed-stamping caption. The loop that follows must NOT:
+    the trainer's own callback writes steps, loss and eval to this same file, and a caption
+    re-stamped over that is a stale sentence on top of live progress — and on a multi-day run, tens
+    of thousands of rows of it, enough to exhaust the orchestrator's per-run event budget and cut
+    off the run's own outcome.
+    """
+
+    def test_the_caption_covers_building_and_stops_before_the_loop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import asyncio
+
+        progress = tmp_path / "progress.jsonl"
+        writer = JsonlProgressWriter(progress)
+        captions_during_build: list[int] = []
+
+        def _slow_build(*_a: Any, **_k: Any) -> object:
+            time.sleep(0.05)  # stands in for the model download
+            return object()
+
+        def _slow_train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+            # Record how many phase rows existed when the loop began, then take just as long.
+            captions_during_build.append(len(progress.read_text().splitlines()))
+            time.sleep(0.05)
+            return _TRAINED
+
+        def _dir(_run_id: str | None, *, name: str) -> Path:
+            return tmp_path / name
+
+        monkeypatch.setattr(
+            fr, "_load_split", lambda *_a, **_k: [{"prompt": "q", "completion": "a"}]
+        )
+        monkeypatch.setattr(fr, "_to_dataset", lambda rows: rows)
+        monkeypatch.setattr(fr, "_build_trainer", _slow_build)
+        monkeypatch.setattr(fr, "_train", _slow_train)
+        monkeypatch.setattr(fr, "results_dir", _dir)
+        # A fast tick, so an equally-long build and loop are told apart by their row counts.
+        monkeypatch.setattr(fr, "ticking_phase", _fast_ticking_phase)
+
+        asyncio.run(fr._execute(_spec(output_repo_id=None), None, writer))  # pyright: ignore[reportPrivateUsage]
+        writer.close()
+
+        events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
+        loading = [e for e in events if e["message"].startswith("Loading the model onto the GPU")]
+        assert len(loading) > 1, "the build step must re-stamp its elapsed time"
+
+        # The row count did not grow across the loop: every event after the build is the
+        # terminal one.
+        before_loop = captions_during_build[0]
+        assert len(events) == before_loop + 1
+        assert events[-1]["kind"] == "end"
+
+    def test_build_and_train_are_separate_steps(self) -> None:
+        # The seam itself. `SFTRunner.train()` bundles building, running and saving into one call;
+        # this module needs the boundary between the first two, which is why it does not use it.
+        import inspect
+
+        source = inspect.getsource(fr._execute)  # pyright: ignore[reportPrivateUsage]
+        assert "_build_trainer" in source
+        build_at = source.index("_build_trainer")
+        train_at = source.index("_train, trainer")
+        caption_at = source.index('"Loading the model onto the GPU"')
+        assert caption_at < build_at < train_at

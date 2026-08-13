@@ -30,9 +30,11 @@ Security boundary (the VM is where allow-listed config meets real credentials + 
 What a training run reports differs from a batch in one way that matters: the trainer emits its
 own ``step``/``eval``/``checkpoint`` events through
 :func:`strata_forge.training.progress.attach`, so once training starts there is nothing for this
-module to count. Its job is the stretches around that — downloading a split, loading a model onto
-the GPU, saving and uploading — which have nothing to count and would otherwise be an
-indeterminate wait.
+module to add. Its job is the stretches AROUND the loop — downloading a split, loading a model
+onto the GPU, merging and uploading — which have nothing to count and would otherwise be an
+indeterminate wait. Those get an elapsed-stamping phase caption; the loop itself deliberately gets
+none, which is why building the trainer and running it are two separate steps here rather than the
+one call :meth:`SFTRunner.train` offers.
 """
 
 from __future__ import annotations
@@ -67,15 +69,13 @@ from strata_forge.training.methods import (
     pick_method,
 )
 from strata_forge.training.peft import LoRAConfig, QLoRAConfig
-from strata_forge.training.progress import ProgressEvent
+from strata_forge.training.progress import ProgressEvent, coerce_int, numeric_metrics
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from strata_forge.training.methods import MethodSpec
-    from strata_forge.training.preference import PreferenceRunResult
     from strata_forge.training.progress import JsonlProgressWriter
-    from strata_forge.training.sft import SFTRunResult
 
 __all__ = ["FinetuneSpec", "load_spec", "main"]
 
@@ -235,19 +235,37 @@ def _to_dataset(rows: list[dict[str, Any]]) -> Any:
     return datasets_mod.Dataset.from_list(rows)
 
 
-def _train(
+def _build_trainer(
     method: MethodSpec,
     config: Any,
     peft_config: LoRAConfig | QLoRAConfig | None,
     train_rows: list[dict[str, Any]],
     eval_rows: list[dict[str, Any]] | None,
-) -> SFTRunResult | PreferenceRunResult:
-    """Run the trainer. Blocking and CPU/GPU-bound — always call it in a worker thread."""
+) -> Any:
+    """Construct the trainer WITHOUT starting it. Blocking — call it in a worker thread.
+
+    Split from the training loop because the two report themselves completely differently: this
+    step is silent (downloading the model, quantising it, wiring the adapter) and needs a phase
+    caption, while the loop that follows narrates its own steps. Running them under one caption
+    was the bug — see :func:`_train`.
+    """
     runner = method.build_runner(config, peft_config=peft_config)
-    return runner.train(
+    return runner.build_trainer(
         train_dataset=_to_dataset(train_rows),
         eval_dataset=_to_dataset(eval_rows) if eval_rows else None,
     )
+
+
+def _train(trainer: Any, output_dir: Path) -> tuple[dict[str, float], int | None]:
+    """Run the loop and save the result. Blocking — call it in a worker thread.
+
+    Returns the trainer's own numbers rather than a ``RunResult``: the runner classes' ``train()``
+    bundles building, running and saving into one call, and this module needs the phase boundary
+    between the first two. The two lines that differ from ``train()`` are these.
+    """
+    output = trainer.train()
+    trainer.save_model(str(output_dir))
+    return numeric_metrics(output), coerce_int(getattr(output, "global_step", None))
 
 
 def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path) -> Path:
@@ -314,11 +332,20 @@ async def _execute(
     # the total step count that only it can know — and two starts would make the orchestrator's
     # "has this run actually begun" gate fire on the wrong one.
     #
-    # This phase covers everything between: downloading the model, quantising it for QLoRA, and
-    # building the trainer. On a cold box with a large model that is the longest silent stretch of
-    # the run, and the trainer says nothing until it is over.
+    # This phase covers everything BEFORE that: downloading the model, quantising it for QLoRA, and
+    # wiring the adapter. On a cold box with a large model that is the longest silent stretch of
+    # the run, and nothing else reports it.
     async with ticking_phase(phase, "Loading the model onto the GPU"):
-        result = await asyncio.to_thread(_train, method, config, peft_config, train_rows, eval_rows)
+        trainer = await asyncio.to_thread(
+            _build_trainer, method, config, peft_config, train_rows, eval_rows
+        )
+
+    # And deliberately NO phase around the loop itself. From here the trainer's own callback
+    # reports steps, loss and eval on this same stream, so a caption re-stamped over that would be
+    # a stale sentence sitting on top of live progress — and on a multi-day run, tens of thousands
+    # of rows of it, enough to exhaust the orchestrator's per-run event budget and cut off the
+    # run's own outcome.
+    metrics, steps = await asyncio.to_thread(_train, trainer, artifact_dir)
 
     if spec.merge_adapter:
         async with ticking_phase(phase, "Merging the adapter into the base model"):
@@ -344,9 +371,9 @@ async def _execute(
         writer,
         ProgressEvent(
             kind="end",
-            step=result.steps,
-            total_steps=result.steps,
-            metrics=result.metrics,
+            step=steps,
+            total_steps=steps,
+            metrics=metrics,
             message=destination,  # WHERE it landed: a repo id (pushed) or a VM path (local)
         ),
     )
