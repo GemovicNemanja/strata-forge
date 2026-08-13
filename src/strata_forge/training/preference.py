@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.training.progress import attach as _attach_progress
+from strata_forge.training.progress import coerce_int, numeric_metrics
 
 if TYPE_CHECKING:
     from strata_forge.training.peft import LoRAConfig, QLoRAConfig
@@ -189,6 +190,9 @@ class PreferenceRunResult(BaseModel):
     train_loss: float | None = None
     train_runtime_s: float | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
+    # Optimizer steps actually taken. TRL reports it beside the metrics rather than inside them,
+    # so an orchestrator summarising a finished run has no other way to say how far it got.
+    steps: int | None = None
 
 
 _TRAINER_CLASS: dict[str, str] = {
@@ -318,18 +322,12 @@ class PreferenceRunner:
         )
         train_output: Any = trainer.train()
         trainer.save_model(self._config.output_dir)
-        metrics: dict[str, float] = {}
-        train_metrics: Any = getattr(train_output, "metrics", None)
-        if isinstance(train_metrics, dict):
-            for k, v in train_metrics.items():  # pyright: ignore[reportUnknownVariableType]
-                try:
-                    metrics[str(k)] = float(v)  # pyright: ignore[reportUnknownArgumentType]
-                except TypeError, ValueError:
-                    continue
+        metrics = numeric_metrics(train_output)
         return PreferenceRunResult(
             method=self._config.method,
             output_dir=self._config.output_dir,
             train_loss=metrics.get("train_loss"),
             train_runtime_s=metrics.get("train_runtime"),
             metrics=metrics,
+            steps=coerce_int(getattr(train_output, "global_step", None)),
         )

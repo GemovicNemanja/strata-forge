@@ -199,11 +199,23 @@ Cancellation is ``SIGTERM``, a grace period, then ``SIGKILL``. The grace
 is load-bearing rather than polite: a runner that started a model server
 through a backend put that server in a session of **its own**, so the
 group signal never reaches it, and the only thing that stops it is the
-runner's own teardown. ``strata_forge.pipelines.inference_runner``
-therefore turns ``SIGTERM`` into an ordinary cancellation so its
-``finally`` blocks unwind — Python's default handling would terminate
-the interpreter where it stands and strand exactly the process the
-cancel existed to stop.
+runner's own teardown. Every ``strata_forge.pipelines`` runner therefore
+turns ``SIGTERM`` into an ordinary cancellation so its ``finally`` blocks
+unwind — Python's default handling would terminate the interpreter where
+it stands and strand exactly the process the cancel existed to stop. That
+handling lives once, in ``strata_forge.pipelines._common``, alongside the
+rest of the plumbing every VM-side runner shares (token scrubbing, repo-id
+re-validation, the elapsed-stamping phase ticker, and the entry point that
+reports an outcome exactly once).
+
+The package ships two runners over that plumbing:
+``inference_runner`` (serve a model with vLLM, run a batch over a dataset)
+and ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
+adapter or merged model to the Hub). Both read an inert JSON spec from
+``STRATA_RUN_CONFIG``, take the HF write token only from its own
+``HF_WRITE_TOKEN`` env var, and append the same ``ProgressEvent`` stream to
+``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
+of which is running.
 
 ## Backend protocol
 

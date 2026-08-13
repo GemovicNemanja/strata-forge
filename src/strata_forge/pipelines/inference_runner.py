@@ -43,12 +43,8 @@ its entire timeout, invisibly.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import itertools
-import json
-import os
 import re
-import signal
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -57,18 +53,28 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
-from strata_forge.compute.serving import build_vllm_task, format_elapsed, serving_endpoint
+from strata_forge.compute.serving import build_vllm_task, serving_endpoint
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
 )
+from strata_forge.pipelines._common import (
+    RunError,
+    emit,
+    load_config,
+    phase_sink,
+    results_dir,
+    runner_main,
+    ticking_phase,
+    validate_repo_id,
+)
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import Awaitable, Callable
 
 __all__ = ["RunSpec", "main", "render_template"]
 
@@ -78,28 +84,14 @@ _SERVE_HOST = "127.0.0.1"
 _SERVE_PORT = 8000
 # A bare ``{name}`` placeholder only — no attribute/index access, no format mini-language.
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
-# An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
-# traversal/scheme/space. The canonical form is not an edge case — `gpt2`, `t5-small`,
-# `distilgpt2` and `bert-base-uncased` all live at the root of the Hub with no owner, and every
-# one of them was accepted by the control plane, given a VM, and only then rejected here.
-_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
-# A safe single path segment for the on-VM results dir name (no slash / traversal / shell chars).
-_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
 _MAX_RENDERED_CHARS = 200_000
-# Scrub token-shaped substrings from any surfaced error (defense in depth on top of
-# replacing the known token value).
-_TOKEN_RE = re.compile(r"(hf_[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._\-]+)")
 _RESULTS_FILENAME = "results.parquet"
-# A phase message is a short human phrase. Capped because the sink is reachable from public
-# API: a caller's hook must not be able to grow the file the orchestrator tails without bound.
-_MAX_PHASE_CHARS = 200
+# Where results land on the VM when they are not pushed — see `_local_results_dir`.
+_RESULTS_DIR_NAME = "strata-inference-results"
 # How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
 # provider/status/class, short enough that the run's message stays a message.
 _MAX_SAMPLE_ERROR_CHARS = 500
-# How often a long uncountable phase re-stamps itself with its elapsed time. Matches the
-# serving heartbeat, so one run does not narrate two different cadences.
-_PHASE_TICK_SECONDS = 10.0
 
 
 class Hyperparams(BaseModel):
@@ -140,41 +132,12 @@ class RunSpec(BaseModel):
     run_id: str | None = None
 
 
-class RunError(Exception):
-    """A runner failure whose message is safe to surface (already token-scrubbed)."""
-
-
-def _validate_repo_id(repo_id: str, what: str) -> str:
-    """Defensively re-validate an id even though the server allow-listed it — the VM is the
-    trust boundary that actually fetches/pushes."""
-    # fullmatch (not match): match's `$` accepts a trailing newline ("org/x\n").
-    if ".." in repo_id or not _REPO_ID_RE.fullmatch(repo_id):
-        msg = f"invalid {what} id"
-        raise RunError(msg)
-    return repo_id
-
-
-def _sanitize(text: str, token: str | None) -> str:
-    """Strip the write token + any token-shaped substring from a message before it's emitted."""
-    if token:
-        text = text.replace(token, "***")
-    return _TOKEN_RE.sub("***", text)
-
-
 def load_spec() -> RunSpec:
-    raw = os.environ.get("STRATA_RUN_CONFIG")
-    if not raw:
-        msg = "STRATA_RUN_CONFIG is not set"
-        raise RunError(msg)
-    try:
-        spec = RunSpec.model_validate_json(raw)  # parse + validate as DATA; no eval/yaml
-    except ValueError as exc:
-        msg = f"invalid STRATA_RUN_CONFIG: {exc}"
-        raise RunError(msg) from exc
-    _validate_repo_id(spec.model_id, "model")
-    _validate_repo_id(spec.dataset_id, "dataset")
+    spec = load_config(RunSpec)
+    validate_repo_id(spec.model_id, "model")
+    validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
-        _validate_repo_id(spec.output_repo_id, "output repo")
+        validate_repo_id(spec.output_repo_id, "output repo")
     _validate_template_coverage(spec)
     return spec
 
@@ -274,60 +237,6 @@ def _build_requests(
     return prompts, custom_ids
 
 
-def _emit(writer: JsonlProgressWriter | None, event: ProgressEvent) -> None:
-    if writer is not None:
-        writer.emit(event)
-
-
-def _phase_sink(writer: JsonlProgressWriter | None, hf_token: str | None) -> Callable[[str], None]:
-    """Build the one function every phase message goes through.
-
-    A single choke point, so scrubbing is unconditional: the same sink is handed to
-    ``serving_endpoint``, whose ``on_phase`` is public API, and a phrase that came from
-    outside this module gets the treatment the error path already applies.
-    """
-
-    def _phase(message: str) -> None:
-        _emit(
-            writer,
-            ProgressEvent(kind="phase", message=_sanitize(message, hf_token)[:_MAX_PHASE_CHARS]),
-        )
-
-    return _phase
-
-
-@contextlib.asynccontextmanager
-async def _ticking_phase(
-    phase: Callable[[str], None], message: str, interval_s: float = _PHASE_TICK_SECONDS
-) -> AsyncGenerator[None]:
-    """Report ``message`` for as long as the block runs, re-stamping it with its elapsed time.
-
-    A one-shot phase says a step BEGAN and never that it is still going. "Installing the inference
-    engine" and "Loading the dataset" then sit unchanged for minutes, indistinguishable from a run
-    that has hung — which is the question anyone watching is actually asking.
-
-    The ticker is an asyncio task, so it only ticks while the event loop is free: every blocking
-    call it wraps is handed to a thread for exactly that reason. Cancelled in a ``finally``, so a
-    step that raises does not leave a caption ticking forever underneath the error.
-    """
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    phase(message)  # immediately, with no elapsed: zero is noise, and this marks the start
-
-    async def _tick() -> None:
-        while True:
-            await asyncio.sleep(interval_s)
-            phase(f"{message} ({format_elapsed(loop.time() - started)})")
-
-    task = asyncio.create_task(_tick())
-    try:
-        yield
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
 async def _run_batches(
     spec: RunSpec,
     client: LLMClient,
@@ -372,7 +281,7 @@ async def _run_batches(
             else:
                 out.append({"custom_id": cid, "output": None, "error": repr(result.error)})
                 failed += 1
-        _emit(
+        emit(
             writer,
             ProgressEvent(
                 kind="step",
@@ -412,17 +321,8 @@ def _check_produced_output(rows: list[dict[str, Any]], ok: int) -> None:
 
 
 def _local_results_dir(run_id: str | None) -> Path:
-    """A stable, cleanup-surviving location for a run's results: outside the per-run workdir the
-    orchestrator deletes, named by the run id so the user can retrieve it over SSH.
-
-    Used whether or not the results are then pushed. Writing them inside the workdir and pushing
-    from there would mean a failed upload destroys the whole run's output along with it.
-
-    Falls back to the cwd when no usable run id was provided (degraded — may be cleaned — but
-    never crashes; the run id is validated as a single safe path segment)."""
-    if run_id and _SAFE_NAME_RE.fullmatch(run_id):
-        return Path.home() / "strata-inference-results" / run_id
-    return Path.cwd()
+    """Where this run's parquet lands on the VM — see :func:`strata_forge.pipelines._common.results_dir`."""
+    return results_dir(run_id, name=_RESULTS_DIR_NAME)
 
 
 def _write_results(rows: list[dict[str, Any]], outdir: Path) -> Path:
@@ -438,7 +338,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push results"
         raise RunError(msg)
-    out_repo = _validate_repo_id(spec.output_repo_id, "output repo")
+    out_repo = validate_repo_id(spec.output_repo_id, "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
     await hub.upload_file(
@@ -452,18 +352,18 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWriter | None) -> str:
-    phase = _phase_sink(writer, hf_token)
+    phase = phase_sink(writer, hf_token)
 
     # The split download is unbounded by row_limit (that only slices during iteration), so it
     # runs BEFORE the first countable milestone and can take minutes on its own.
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
     # blocked event loop cannot tick the caption that says it is still going.
-    async with _ticking_phase(phase, "Loading the dataset"):
+    async with ticking_phase(phase, "Loading the dataset"):
         rows = await asyncio.to_thread(_load_rows, spec, hf_token)
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
-    _emit(writer, ProgressEvent(kind="start", total_steps=len(prompts)))
+    emit(writer, ProgressEvent(kind="start", total_steps=len(prompts)))
 
     hp = spec.hyperparams
     task = build_vllm_task(
@@ -528,7 +428,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         )
         # The first `step` only lands once a whole progress_chunk has completed, and that
         # chunk absorbs the client's cold start on top of its generations.
-        async with _ticking_phase(phase, "Generating responses"):
+        async with ticking_phase(phase, "Generating responses"):
             out = await _run_batches(spec, client, prompts, custom_ids, writer, endpoint.is_alive)
 
     # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
@@ -540,11 +440,11 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     #
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
-    async with _ticking_phase(phase, "Writing results"):
+    async with ticking_phase(phase, "Writing results"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
     if hf_token and spec.output_repo_id:
         try:
-            async with _ticking_phase(phase, "Uploading results to the Hub"):
+            async with ticking_phase(phase, "Uploading results to the Hub"):
                 destination = await _push_results(spec, results_path, hf_token)
         except Exception as exc:
             # Name WHERE the results are. The run still fails — the user asked for them on the Hub
@@ -556,7 +456,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         destination = str(results_path)
 
     ok = sum(1 for r in out if r["error"] is None)
-    _emit(
+    emit(
         writer,
         ProgressEvent(
             kind="end",
@@ -573,74 +473,9 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     return destination
 
 
-def _progress_path() -> str | None:
-    """Resolve the progress file: the spec's progress_path (read defensively, the spec may be
-    invalid) else FORGE_PROGRESS_PATH."""
-    raw = os.environ.get("STRATA_RUN_CONFIG") or "{}"
-    try:
-        from_spec = json.loads(raw).get("progress_path")
-    except ValueError, AttributeError:
-        from_spec = None
-    return from_spec or os.environ.get("FORGE_PROGRESS_PATH")
-
-
-def _install_termination_handlers() -> None:
-    """Turn SIGTERM/SIGINT into an ordinary cancellation, so teardown actually runs.
-
-    This is what stops a cancelled run from stranding its GPU. Cancelling a run signals the
-    job's process group, which includes this process — and Python's default SIGTERM handling
-    terminates immediately, without unwinding. The model server is started through a backend
-    that puts it in a session of ITS OWN (so that killing the server's tree cannot signal us),
-    which means the group signal never reaches it: the only thing that stops it is the
-    `serving_endpoint` teardown in this process's `finally`, and that never runs if the
-    interpreter dies where it stands.
-
-    Cancelling the running task raises `CancelledError` at the current await instead, so every
-    `finally` on the stack unwinds and the server is asked to stop. The caller's SIGKILL follows
-    a grace period, which is the budget this teardown has.
-    """
-    task = asyncio.current_task()
-    if task is None:  # pragma: no cover — main() always runs as a task under asyncio.run
-        return
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        with contextlib.suppress(NotImplementedError, ValueError):
-            # NotImplementedError: signal handlers are POSIX-only. ValueError: not the main
-            # thread. Neither is worth failing a run over — the run simply keeps the default
-            # behaviour it had before.
-            loop.add_signal_handler(sig, task.cancel)
-
-
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
-    hf_token = os.environ.get("HF_WRITE_TOKEN") or None
-    path = _progress_path()
-    writer = JsonlProgressWriter(path) if path else None
-    _install_termination_handlers()
-    try:
-        spec = load_spec()
-        await _execute(spec, hf_token, writer)
-    except asyncio.CancelledError:
-        # Asked to stop. The `finally` blocks unwinding beneath this are the point — they are
-        # what shut the model server down. Report it as a distinct outcome rather than as a
-        # failure of the work, and do not re-raise: the exit code is the caller's answer.
-        _emit(writer, ProgressEvent(kind="error", message="run cancelled"))
-        print("run cancelled", file=sys.stderr, flush=True)
-        return 1
-    except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
-        detail = _sanitize(str(exc), hf_token)
-        _emit(writer, ProgressEvent(kind="error", message=detail))
-        # Also to stderr, because that is where the control plane reads a failed run's reason
-        # from. Catching the exception here means no traceback is printed, so without this the
-        # run's own account of why it failed exists only in the progress file, and the record
-        # explains the failure with whatever unrelated output happened to be last in the stream.
-        print(f"run failed: {detail}", file=sys.stderr, flush=True)
-        return 1
-    else:
-        return 0
-    finally:
-        if writer is not None:
-            writer.close()
+    return await runner_main(lambda writer, token: _execute(load_spec(), token, writer))
 
 
 if __name__ == "__main__":  # pragma: no cover

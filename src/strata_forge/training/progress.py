@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,6 +34,9 @@ __all__ = [
     "ProgressEvent",
     "ProgressKind",
     "attach",
+    "coerce_float",
+    "coerce_int",
+    "numeric_metrics",
     "trainer_callback",
 ]
 
@@ -83,8 +86,12 @@ class ProgressEvent(BaseModel):
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-def _coerce_float(value: Any) -> float | None:
-    """Best-effort cast to ``float``; ``None`` for bools / non-numerics."""
+def coerce_float(value: Any) -> float | None:
+    """Best-effort cast to ``float``; ``None`` for bools / non-numerics.
+
+    Shared with the runners, which report the same trainer numbers from ``train()``'s return
+    value rather than from a callback — the same values reached two different ways.
+    """
     if value is None or isinstance(value, bool):  # bool is an int subclass — reject it
         return None
     try:
@@ -93,21 +100,39 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def _coerce_int(value: Any) -> int | None:
-    f = _coerce_float(value)
+def coerce_int(value: Any) -> int | None:
+    f = coerce_float(value)
     return int(f) if f is not None else None
 
 
-def _numeric_extras(values: dict[str, Any]) -> dict[str, float]:
-    """The numeric entries of ``values`` (as floats), minus the promoted keys."""
+def _numeric_extras(
+    values: dict[str, Any], *, exclude: frozenset[str] = _PROMOTED
+) -> dict[str, float]:
+    """The numeric entries of ``values`` (as floats), minus ``exclude``.
+
+    Per-event callbacks exclude the keys promoted to their own :class:`ProgressEvent` fields;
+    a whole-run summary excludes nothing, because there is nowhere else for those numbers to go.
+    """
     out: dict[str, float] = {}
     for key, value in values.items():
-        if key in _PROMOTED:
+        if key in exclude:
             continue
-        coerced = _coerce_float(value)
+        coerced = coerce_float(value)
         if coerced is not None:
             out[str(key)] = coerced
     return out
+
+
+def numeric_metrics(train_output: Any) -> dict[str, float]:
+    """The numeric entries of a TRL ``TrainOutput``'s metrics, as floats.
+
+    The ``train()``-return counterpart of :func:`trainer_callback`'s per-event extraction: the
+    same trainer numbers, reached once at the end instead of as they happen.
+    """
+    raw: Any = getattr(train_output, "metrics", None)
+    if not isinstance(raw, dict):
+        return {}
+    return _numeric_extras(cast("dict[str, Any]", raw), exclude=frozenset())
 
 
 class JsonlProgressWriter:
@@ -169,9 +194,9 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             writer.emit(
                 ProgressEvent(
                     kind="start",
-                    step=_coerce_int(getattr(state, "global_step", None)),
-                    total_steps=_coerce_int(getattr(state, "max_steps", None)),
-                    epoch=_coerce_float(getattr(state, "epoch", None)),
+                    step=coerce_int(getattr(state, "global_step", None)),
+                    total_steps=coerce_int(getattr(state, "max_steps", None)),
+                    epoch=coerce_float(getattr(state, "epoch", None)),
                 )
             )
 
@@ -189,11 +214,11 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             writer.emit(
                 ProgressEvent(
                     kind="eval" if is_eval else "step",
-                    step=_coerce_int(getattr(state, "global_step", None)),
-                    total_steps=_coerce_int(getattr(state, "max_steps", None)),
-                    epoch=_coerce_float(data.get("epoch", getattr(state, "epoch", None))),
-                    loss=_coerce_float(data.get("eval_loss") if is_eval else data.get("loss")),
-                    learning_rate=_coerce_float(data.get("learning_rate")),
+                    step=coerce_int(getattr(state, "global_step", None)),
+                    total_steps=coerce_int(getattr(state, "max_steps", None)),
+                    epoch=coerce_float(data.get("epoch", getattr(state, "epoch", None))),
+                    loss=coerce_float(data.get("eval_loss") if is_eval else data.get("loss")),
+                    learning_rate=coerce_float(data.get("learning_rate")),
                     metrics=_numeric_extras(data),
                 )
             )
@@ -203,8 +228,8 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             writer.emit(
                 ProgressEvent(
                     kind="checkpoint",
-                    step=_coerce_int(getattr(state, "global_step", None)),
-                    epoch=_coerce_float(getattr(state, "epoch", None)),
+                    step=coerce_int(getattr(state, "global_step", None)),
+                    epoch=coerce_float(getattr(state, "epoch", None)),
                 )
             )
 
@@ -213,9 +238,9 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             writer.emit(
                 ProgressEvent(
                     kind="end",
-                    step=_coerce_int(getattr(state, "global_step", None)),
-                    total_steps=_coerce_int(getattr(state, "max_steps", None)),
-                    epoch=_coerce_float(getattr(state, "epoch", None)),
+                    step=coerce_int(getattr(state, "global_step", None)),
+                    total_steps=coerce_int(getattr(state, "max_steps", None)),
+                    epoch=coerce_float(getattr(state, "epoch", None)),
                 )
             )
 
