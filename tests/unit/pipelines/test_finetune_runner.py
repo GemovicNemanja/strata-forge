@@ -21,21 +21,22 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import pytest
 
 from strata_forge.pipelines import finetune_runner as fr
-from strata_forge.pipelines._common import RunError
+from strata_forge.pipelines._common import RunError, ticking_phase
 from strata_forge.training.progress import JsonlProgressWriter
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable
     from pathlib import Path
 
 _TOKEN = "hf_secretwritetoken1234567890"
 
 
 @contextlib.asynccontextmanager
-async def _fast_ticking_phase(phase: Any, message: str, interval_s: float = 0.0) -> Any:
+async def _fast_ticking_phase(
+    phase: Callable[[str], None], message: str, interval_s: float = 0.0
+) -> AsyncGenerator[None]:
     """`ticking_phase` at a millisecond cadence, so a short test step still re-stamps."""
     del interval_s
-    from strata_forge.pipelines._common import ticking_phase
-
     async with ticking_phase(phase, message, interval_s=0.005):
         yield
 
@@ -534,10 +535,14 @@ class TestPhaseBoundary:
         def _dir(_run_id: str | None, *, name: str) -> Path:
             return tmp_path / name
 
-        monkeypatch.setattr(
-            fr, "_load_split", lambda *_a, **_k: [{"prompt": "q", "completion": "a"}]
-        )
-        monkeypatch.setattr(fr, "_to_dataset", lambda rows: rows)
+        def _rows(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+            return [{"prompt": "q", "completion": "a"}]
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        monkeypatch.setattr(fr, "_load_split", _rows)
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
         monkeypatch.setattr(fr, "_build_trainer", _slow_build)
         monkeypatch.setattr(fr, "_train", _slow_train)
         monkeypatch.setattr(fr, "results_dir", _dir)
