@@ -215,6 +215,46 @@ class TestTrainerConfig:
                 _spec(hyperparams={"beta": 0.1}), pick_method("sft"), tmp_path
             )
 
+    @pytest.mark.parametrize("field", ["model_id", "output_dir", "progress_jsonl"])
+    def test_a_hyperparam_cannot_retarget_a_field_the_runner_derives(
+        self, tmp_path: Path, field: str
+    ) -> None:
+        # These three are DECLARED config fields, so extra="forbid" waves them through. Splatting
+        # over them let a submitted hyperparam train a model the record does not name and write the
+        # checkpoints and the progress log to any absolute path — past the validate_repo_id
+        # re-check this module performs precisely because the spec is not trusted.
+        from strata_forge.training.methods import pick_method
+
+        with pytest.raises(RunError, match=f"may not set {field}"):
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={field: "attacker/evil"}), pick_method("sft"), tmp_path
+            )
+
+    @pytest.mark.parametrize("field", ["model_id", "output_dir", "progress_jsonl"])
+    def test_extra_trainer_args_cannot_reach_them_either(self, tmp_path: Path, field: str) -> None:
+        # to_trl_kwargs applies extra_trainer_args LAST, so it reaches TRL's own output_dir even
+        # when this layer is right. The escape hatch stays open for a caller driving the runners
+        # from Python; it is only the inert spec, whose submitter is not the operator, that is
+        # barred from aiming it.
+        from strata_forge.training.methods import pick_method
+
+        with pytest.raises(RunError, match=f"may not set extra_trainer_args.{field}"):
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": {field: "elsewhere"}}),
+                pick_method("sft"),
+                tmp_path,
+            )
+
+    def test_the_derived_fields_are_the_spec_s_own(self, tmp_path: Path) -> None:
+        # The positive half: what the run RECORDS is what the trainer is pointed at.
+        from strata_forge.training.methods import pick_method
+
+        spec = _spec(model_id="Qwen/Qwen3-0.6B")
+        cfg = fr._trainer_config(spec, pick_method("sft"), tmp_path)  # pyright: ignore[reportPrivateUsage]
+        assert cfg.model_id == spec.model_id
+        assert cfg.output_dir == str(tmp_path)
+        assert cfg.progress_jsonl == spec.progress_path
+
     def test_the_progress_path_is_threaded_to_the_trainer_callback(self, tmp_path: Path) -> None:
         # This is the whole live-loss wiring: the trainer writes to the same file the runner does.
         from strata_forge.training.methods import pick_method

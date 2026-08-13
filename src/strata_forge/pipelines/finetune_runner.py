@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import sys
+from collections.abc import Mapping  # runtime: isinstance below
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -172,6 +173,29 @@ def _peft_config(spec: FinetuneSpec, method: MethodSpec) -> LoRAConfig | QLoRACo
     return lora if spec.adapter == "lora" else QLoRAConfig(lora=lora)
 
 
+#: Config fields this module DERIVES rather than accepts. ``model_id`` is the value ``load_spec``
+#: ran ``validate_repo_id`` over and the value the run is recorded as; ``output_dir`` is the
+#: artifact directory the push, merge and cleanup paths all address; ``progress_jsonl`` is the
+#: orchestrator's channel. ``extra="forbid"`` cannot defend them because they are DECLARED fields
+#: — it rejects unknown keys, not known ones — so naming them has to be refused here.
+_RUNNER_OWNED = ("model_id", "output_dir", "progress_jsonl")
+
+
+def _reject_runner_owned(hyperparams: dict[str, Any]) -> None:
+    """Refuse a hyperparam that would retarget a field the runner derives.
+
+    Named rather than silently dropped, matching how every other inapplicable knob is handled: a
+    caller who asked for something the run will not do should be told, not quietly overruled.
+    """
+    clashing = [key for key in _RUNNER_OWNED if key in hyperparams]
+    extra = hyperparams.get("extra_trainer_args")
+    if isinstance(extra, Mapping):
+        clashing += [f"extra_trainer_args.{key}" for key in _RUNNER_OWNED if key in extra]
+    if clashing:
+        msg = f"hyperparams may not set {', '.join(clashing)}: the runner derives these"
+        raise RunError(msg)
+
+
 def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) -> Any:
     """Build the method's typed config from the inert spec.
 
@@ -179,14 +203,24 @@ def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) ->
     ``extra="forbid"`` is the authority on what each method accepts, and re-stating that list here
     would be a second definition to keep in sync. A knob that does not apply therefore surfaces as
     a validation error naming the field — before the model is downloaded.
+
+    That delegation stops at :data:`_RUNNER_OWNED`. Those three are already-declared fields, so
+    ``extra="forbid"`` waves them through; splatting over them would let a submitted hyperparam
+    train a different model than the record names and write the checkpoints and the progress log to
+    any absolute path — walking straight past the ``validate_repo_id`` re-check this module exists
+    to perform. ``extra_trainer_args`` is checked for the same reason: it is applied LAST inside
+    ``to_trl_kwargs``, so it reaches TRL's own ``output_dir`` even when this layer is correct. That
+    stays a deliberate, documented escape hatch for a caller driving the runners from Python; it is
+    only from an INERT SPEC, where the submitter is not the operator, that it must not aim.
     """
+    _reject_runner_owned(spec.hyperparams)
     kwargs: dict[str, Any] = {
+        **spec.hyperparams,
         "model_id": spec.model_id,
         "output_dir": str(output_dir),
         # The trainer's own callback writes to the same file the bootstrap and this module append
         # to, so live loss/eval/checkpoint events need no wiring beyond this.
         "progress_jsonl": spec.progress_path,
-        **spec.hyperparams,
     }
     if method.name == "sft":
         # Only the flat `text` shape names a column; for the others TRL derives the text from the
