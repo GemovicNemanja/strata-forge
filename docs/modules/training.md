@@ -108,7 +108,7 @@ Key fields:
 | ``per_device_batch_size`` | 1 | |
 | ``gradient_accumulation_steps`` | 8 | Effective batch = device × accumulation × N devices |
 | ``learning_rate`` | 2e-4 | |
-| ``warmup_ratio`` | 0.03 | Fraction of total steps |
+| ``warmup_ratio`` | 0.03 | Fraction of total steps; reaches TRL as ``warmup_steps`` |
 | ``precision`` | ``"bf16"`` | Or ``"fp16"`` / ``"fp32"`` |
 | ``gradient_checkpointing`` | ``True`` | |
 | ``save_steps`` | 0 | 0 = no intermediate saves |
@@ -326,6 +326,32 @@ This bounds only the **declaration** path. `extra_trainer_args` remains an unres
 hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the
 operator, and Forge does not block access to the underlying TRL surface. The distinction is who
 submitted the values, not what they are.
+
+## The upstream contract
+
+A config renders to a kwargs dict that is splatted into TRL's constructor, so the
+names it emits are part of this package's contract with a specific pair of upstream
+majors — pinned in `pyproject.toml` as `transformers>=5.5.3,<6` and `trl>=1.0,<2`,
+and frozen as an explicit key set in `tests/unit/training/test_trl_contract.py`.
+Two places where the emitted name deliberately differs from the field:
+
+- ``warmup_ratio`` reaches TRL as **``warmup_steps``**. transformers 5 removed
+  `warmup_ratio` and folded it into `warmup_steps`, which reads a float in
+  ``[0, 1)`` as exactly that fraction — identical semantics, so the field keeps
+  the name that describes what it is.
+- ORPO's config/trainer are resolved from **``trl.experimental.orpo``** when the
+  top-level namespace does not export them, which is where TRL 1.x moved them.
+  That namespace carries no semver promise, so ORPO is the one method the
+  ``<2`` ceiling does not fully protect.
+
+``max_prompt_length`` is **gone** from the preference configs: TRL removed it
+across 0.27–0.29 with no replacement. Bound prompt length by filtering the
+dataset before training; ``max_length`` still applies to the full sequence.
+
+These pins are not decoration. This package is `pip install`-ed fresh onto a
+user's VM at run time with no lockfile, so an unbounded specifier means every
+run resolves against whatever shipped that morning, and a breaking upstream
+release surfaces as a crash on the user's hardware rather than a red build.
 
 ## Lazy-import contract
 

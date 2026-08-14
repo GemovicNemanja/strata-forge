@@ -59,7 +59,9 @@ class SFTConfig(BaseModel):
         gradient_accumulation_steps: Effective batch size = device
             x accumulation x N devices.
         learning_rate: Optimizer learning rate.
-        warmup_ratio: Fraction of total steps used for LR warmup.
+        warmup_ratio: Fraction of total steps used for LR warmup. Reaches TRL as
+            ``warmup_steps``, which takes a float in ``[0, 1)`` as exactly this
+            fraction.
         weight_decay: AdamW weight decay.
         precision: Training precision.
         gradient_checkpointing: Trade memory for compute.
@@ -105,7 +107,11 @@ class SFTConfig(BaseModel):
             "per_device_train_batch_size": self.per_device_batch_size,
             "gradient_accumulation_steps": self.gradient_accumulation_steps,
             "learning_rate": self.learning_rate,
-            "warmup_ratio": self.warmup_ratio,
+            # Forwarded under a DIFFERENT name than the field deliberately. transformers 5 removed
+            # `warmup_ratio` and folded it into `warmup_steps`, which reads a float in [0, 1) as a
+            # fraction of total steps -- identical semantics, so the knob this package exposes keeps
+            # the name that describes what it is.
+            "warmup_steps": self.warmup_ratio,
             "weight_decay": self.weight_decay,
             "logging_steps": self.logging_steps,
             "gradient_checkpointing": self.gradient_checkpointing,
