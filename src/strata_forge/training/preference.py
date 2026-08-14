@@ -12,6 +12,7 @@ All heavy imports defer to :meth:`PreferenceRunner.train`.
 
 from __future__ import annotations
 
+import importlib
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -66,7 +67,9 @@ class _BasePreferenceConfig(BaseModel):
             "per_device_train_batch_size": self.per_device_batch_size,
             "gradient_accumulation_steps": self.gradient_accumulation_steps,
             "learning_rate": self.learning_rate,
-            "warmup_ratio": self.warmup_ratio,
+            # See SFTConfig.to_trl_kwargs: transformers 5 folded `warmup_ratio` into `warmup_steps`,
+            # which reads a float in [0, 1) as a fraction of total steps.
+            "warmup_steps": self.warmup_ratio,
             "weight_decay": self.weight_decay,
             "logging_steps": self.logging_steps,
             "gradient_checkpointing": self.gradient_checkpointing,
@@ -89,8 +92,7 @@ class DPOConfig(_BasePreferenceConfig):
 
     method: Literal["dpo"] = "dpo"
     beta: float = Field(default=0.1, gt=0)
-    loss_type: Literal["sigmoid", "hinge", "ipo", "kto_pair"] = "sigmoid"
-    max_prompt_length: int = Field(default=1024, ge=8)
+    loss_type: Literal["sigmoid", "hinge", "ipo"] = "sigmoid"
     max_length: int = Field(default=2048, ge=8)
 
     def to_trl_kwargs(self) -> dict[str, Any]:
@@ -99,7 +101,6 @@ class DPOConfig(_BasePreferenceConfig):
             {
                 "beta": self.beta,
                 "loss_type": self.loss_type,
-                "max_prompt_length": self.max_prompt_length,
                 "max_length": self.max_length,
             }
         )
@@ -112,7 +113,6 @@ class ORPOConfig(_BasePreferenceConfig):
 
     method: Literal["orpo"] = "orpo"
     beta: float = Field(default=0.1, gt=0)
-    max_prompt_length: int = Field(default=1024, ge=8)
     max_length: int = Field(default=2048, ge=8)
 
     def to_trl_kwargs(self) -> dict[str, Any]:
@@ -120,7 +120,6 @@ class ORPOConfig(_BasePreferenceConfig):
         kwargs.update(
             {
                 "beta": self.beta,
-                "max_prompt_length": self.max_prompt_length,
                 "max_length": self.max_length,
             }
         )
@@ -135,7 +134,6 @@ class KTOConfig(_BasePreferenceConfig):
     beta: float = Field(default=0.1, gt=0)
     desirable_weight: float = Field(default=1.0, gt=0)
     undesirable_weight: float = Field(default=1.0, gt=0)
-    max_prompt_length: int = Field(default=1024, ge=8)
     max_length: int = Field(default=2048, ge=8)
 
     def to_trl_kwargs(self) -> dict[str, Any]:
@@ -145,7 +143,6 @@ class KTOConfig(_BasePreferenceConfig):
                 "beta": self.beta,
                 "desirable_weight": self.desirable_weight,
                 "undesirable_weight": self.undesirable_weight,
-                "max_prompt_length": self.max_prompt_length,
                 "max_length": self.max_length,
             }
         )
@@ -159,7 +156,6 @@ class GRPOConfig(_BasePreferenceConfig):
     method: Literal["grpo"] = "grpo"
     beta: float = Field(default=0.04, gt=0)
     num_generations: int = Field(default=8, ge=2)
-    max_prompt_length: int = Field(default=512, ge=8)
     max_completion_length: int = Field(default=256, ge=8)
 
     def to_trl_kwargs(self) -> dict[str, Any]:
@@ -168,7 +164,6 @@ class GRPOConfig(_BasePreferenceConfig):
             {
                 "beta": self.beta,
                 "num_generations": self.num_generations,
-                "max_prompt_length": self.max_prompt_length,
                 "max_completion_length": self.max_completion_length,
             }
         )
@@ -207,6 +202,37 @@ _TRL_CONFIG_CLASS: dict[str, str] = {
     "kto": "KTOConfig",
     "grpo": "GRPOConfig",
 }
+
+#: Methods whose classes TRL keeps outside its top-level namespace, and the submodule they moved to.
+#: ORPO left the mainline API and now lives only under ``trl.experimental``. That namespace carries
+#: NO semantic-versioning promise, so this is the one method a major-version ceiling does not
+#: protect -- a minor TRL release may move or change it again.
+_TRL_FALLBACK_MODULE: dict[str, str] = {"orpo": "trl.experimental.orpo"}
+
+
+def _resolve_trl_class(trl_mod: Any, method: str, name: str) -> Any:
+    """Find a TRL class by name, following the method's move out of the top-level namespace.
+
+    Looks in ``trl`` first so a version that still exports the class mainline keeps working, then
+    falls back to the submodule TRL relegated it to.
+    """
+    found = getattr(trl_mod, name, None)
+    if found is not None:
+        return found
+    module_path = _TRL_FALLBACK_MODULE.get(method)
+    if module_path is None:
+        msg = f"trl has no {name}; the installed TRL version does not support {method}"
+        raise AttributeError(msg)
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:  # pragma: no cover - depends on the installed TRL layout
+        msg = f"trl has no {name} and {module_path} is unavailable: {exc}"
+        raise AttributeError(msg) from exc
+    try:
+        return getattr(module, name)
+    except AttributeError as exc:
+        msg = f"neither trl nor {module_path} provides {name}"
+        raise AttributeError(msg) from exc
 
 
 class PreferenceRunner:
@@ -271,8 +297,8 @@ class PreferenceRunner:
         if tokenizer is None:
             tokenizer = transformers_mod.AutoTokenizer.from_pretrained(self._config.model_id)
 
-        trl_config_cls: Any = getattr(trl_mod, _TRL_CONFIG_CLASS[method])
-        trainer_cls: Any = getattr(trl_mod, _TRAINER_CLASS[method])
+        trl_config_cls: Any = _resolve_trl_class(trl_mod, method, _TRL_CONFIG_CLASS[method])
+        trainer_cls: Any = _resolve_trl_class(trl_mod, method, _TRAINER_CLASS[method])
         trl_config = trl_config_cls(**self._config.to_trl_kwargs())
 
         trainer_kwargs: dict[str, Any] = {

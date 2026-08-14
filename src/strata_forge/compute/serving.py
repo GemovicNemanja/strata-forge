@@ -173,13 +173,13 @@ def build_vllm_task(
     # knows where the task will run; this does not.
     if python_executable is None:
         cli_args: list[str] = ["vllm", "serve", model]
-        install = "pip install 'vllm>=0.7'" if setup is None else setup
+        install = "pip install 'vllm>=0.24,<1'" if setup is None else setup
     else:
         quoted = _quote_args([python_executable])
         cli_args = [python_executable, "-m", "vllm.entrypoints.openai.api_server", "--model", model]
         # Same reasoning for the install: `pip` is not on a login shell's PATH either, and
         # installing with the wrong pip puts vLLM where the served interpreter cannot import it.
-        install = f"{quoted} -m pip install 'vllm>=0.7'" if setup is None else setup
+        install = f"{quoted} -m pip install 'vllm>=0.24,<1'" if setup is None else setup
 
     cli_args.extend(
         [

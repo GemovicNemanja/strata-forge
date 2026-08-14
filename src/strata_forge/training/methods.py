@@ -96,7 +96,7 @@ METHODS: dict[str, MethodSpec] = {
         config_cls=DPOConfig,
         runner_cls=PreferenceRunner,
         formats=frozenset({"preference"}),
-        tuning_knobs=("beta", "loss_type", "max_prompt_length", "max_length"),
+        tuning_knobs=("beta", "loss_type", "max_length"),
     ),
     "orpo": MethodSpec(
         name="orpo",
@@ -105,7 +105,7 @@ METHODS: dict[str, MethodSpec] = {
         config_cls=ORPOConfig,
         runner_cls=PreferenceRunner,
         formats=frozenset({"preference"}),
-        tuning_knobs=("beta", "max_prompt_length", "max_length"),
+        tuning_knobs=("beta", "max_length"),
     ),
     "kto": MethodSpec(
         name="kto",
@@ -118,7 +118,6 @@ METHODS: dict[str, MethodSpec] = {
             "beta",
             "desirable_weight",
             "undesirable_weight",
-            "max_prompt_length",
             "max_length",
         ),
     ),

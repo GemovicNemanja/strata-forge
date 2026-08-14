@@ -1,3 +1,3 @@
 """AI Forge — typed, async-first baseline for AI/LLM experiments."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
