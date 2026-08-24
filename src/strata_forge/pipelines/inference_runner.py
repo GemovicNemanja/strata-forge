@@ -47,6 +47,7 @@ import itertools
 import re
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any
@@ -95,6 +96,8 @@ _RESULTS_DIR_NAME = "strata-inference-results"
 # How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
 # provider/status/class, short enough that the run's message stays a message.
 _MAX_SAMPLE_ERROR_CHARS = 500
+# How many recent row latencies the p50 is taken over. Bounds both the memory and the sort.
+_LATENCY_WINDOW = 1000
 
 
 class Hyperparams(BaseModel):
@@ -267,7 +270,12 @@ async def _run_batches(
     # point is dataset loading and engine warmup, and folding minutes of that into the denominator
     # would report a rows/s the run never actually ran at.
     started = time.monotonic()
-    latencies_ms: list[float] = []
+    # Bounded, and a ring rather than a list for two reasons. `statistics.median` copies and
+    # sorts everything it is given, so an unbounded history makes the per-chunk cost quadratic
+    # in the row count -- and `progress_chunk` can be as low as 1 with no `row_limit`, which
+    # would put a full sort per row on the event loop. A median over the most recent rows is
+    # also the more useful number: it tracks how the run is behaving NOW.
+    latencies_ms: deque[float] = deque(maxlen=_LATENCY_WINDOW)
     output_tokens = 0
     for start in range(0, total, hp.progress_chunk):
         # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
@@ -314,13 +322,13 @@ async def _run_batches(
 
 
 def _throughput(
-    started: float, rows_done: int, output_tokens: int, latencies_ms: list[float]
+    started: float, rows_done: int, output_tokens: int, latencies_ms: deque[float]
 ) -> dict[str, float]:
     """Rate and latency counters for the rows finished so far.
 
     Rates are cumulative rather than per-chunk: a chunk is small enough that its own wall time is
     mostly noise from whichever row happened to be slowest, and a gauge that swings on that reads
-    as broken. ``latency_p50_ms`` is a real median over every row completed so far — the tail is
+    as broken. ``latency_p50_ms`` is a real median over the most recent rows — the tail is
     what makes a mean useless here, and the median is what survives it.
     """
     elapsed = time.monotonic() - started

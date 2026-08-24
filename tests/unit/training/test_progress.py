@@ -12,9 +12,13 @@ import pytest
 from pydantic import ValidationError
 
 from strata_forge.training.progress import (
+    MAX_METRIC_KEY_CHARS,
+    MAX_METRIC_KEYS,
     JsonlProgressWriter,
     ProgressEvent,
+    _numeric_extras,  # pyright: ignore[reportPrivateUsage]
     attach,
+    coerce_float,
     trainer_callback,
 )
 from strata_forge.training.sft import SFTConfig, SFTRunner
@@ -281,3 +285,53 @@ class TestSFTRunnerProgressWiring:
         cfg = SFTConfig(model_id="gpt2", output_dir="./out")
         SFTRunner(cfg).build_trainer(train_dataset=["row"])
         assert fake_trainer_stack["callbacks"] == []
+
+
+class TestNonFiniteMetrics:
+    """NaN and infinity are routine in fp16 training, not adversarial — and they used to poison
+    the very line that reports them.
+
+    Pydantic serializes them to JSON `null`, which `metrics: dict[str, float]` then refuses to
+    parse back: `ProgressEvent` could emit a document it could not itself read. An ordinary
+    gradient explosion would have cost the orchestrator the whole event.
+    """
+
+    def test_a_nan_loss_is_dropped_rather_than_emitted_as_null(self) -> None:
+        assert coerce_float(float("nan")) is None
+
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), "1e400"])
+    def test_infinities_are_dropped(self, value: Any) -> None:
+        # "1e400" is the silent-overflow route: float() returns inf without complaint.
+        assert coerce_float(value) is None
+
+    def test_an_event_carrying_a_diverged_metric_still_round_trips(self) -> None:
+        event = ProgressEvent(
+            kind="step",
+            stage="run",
+            step=5,
+            loss=coerce_float(float("nan")),
+            metrics=_numeric_extras({"grad_norm": float("inf"), "lr_scale": 2.0}),
+        )
+        raw = event.model_dump_json()
+        assert "null" not in raw.split('"metrics"')[1][:40]
+        reparsed = ProgressEvent.model_validate_json(raw)
+        assert reparsed.metrics == {"lr_scale": 2.0}
+        assert reparsed.loss is None
+
+
+class TestMetricKeyBounds:
+    """`metrics` keys are strings on a channel that is tailed, relayed and rendered.
+
+    `message` has had a cap since the sink was written. `trainer_callback` is public API, and a
+    consumer whose `compute_metrics` keys a score on a dataset-derived label puts that text
+    straight into the same file — so the same bound belongs here.
+    """
+
+    def test_a_long_key_is_truncated(self) -> None:
+        out = _numeric_extras({"k" * 500: 1.0})
+        key = next(iter(out))
+        assert len(key) == MAX_METRIC_KEY_CHARS
+
+    def test_the_key_count_is_capped(self) -> None:
+        out = _numeric_extras({f"metric_{i}": float(i) for i in range(MAX_METRIC_KEYS * 3)})
+        assert len(out) == MAX_METRIC_KEYS

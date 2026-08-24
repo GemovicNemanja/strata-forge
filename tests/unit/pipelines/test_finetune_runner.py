@@ -16,7 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import time
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
 
@@ -33,11 +33,19 @@ _TOKEN = "hf_secretwritetoken1234567890"
 
 @contextlib.asynccontextmanager
 async def _fast_ticking_phase(
-    phase: Callable[[str], None], message: str, interval_s: float = 0.0
+    phase: Callable[[str], None],
+    message: str,
+    interval_s: float = 0.0,
+    *,
+    stage: str | None = None,
 ) -> AsyncGenerator[None]:
-    """`ticking_phase` at a millisecond cadence, so a short test step still re-stamps."""
+    """`ticking_phase` at a millisecond cadence, so a short test step still re-stamps.
+
+    Mirrors the real signature including ``stage``, so the runner's staged call sites exercise
+    this stub rather than tripping over an argument it does not accept.
+    """
     del interval_s
-    async with ticking_phase(phase, message, interval_s=0.005):
+    async with ticking_phase(phase, message, interval_s=0.005, stage=cast("Any", stage)):
         yield
 
 

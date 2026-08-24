@@ -22,6 +22,7 @@ runners use to wire a writer onto a trainer when a path (or the
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import UTC, datetime
@@ -33,6 +34,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from strata_forge.training.hardware import GpuSampler
 
 __all__ = [
+    "MAX_METRIC_KEYS",
+    "MAX_METRIC_KEY_CHARS",
     "RUN_STAGES",
     "JsonlProgressWriter",
     "ProgressEvent",
@@ -74,6 +77,11 @@ RUN_STAGES: tuple[RunStage, ...] = (
     "push",
 )
 """Every stage in order. Consumers rendering a stepper should read this rather than hardcode it."""
+
+# A metric key is a string on a channel that is tailed, relayed and rendered. `message` has had
+# a cap since the sink was written; these give `metrics` the same treatment on both axes.
+MAX_METRIC_KEYS = 64
+MAX_METRIC_KEY_CHARS = 64
 
 # Keys promoted to dedicated :class:`ProgressEvent` fields, so they aren't
 # duplicated inside ``metrics``.
@@ -120,17 +128,24 @@ class ProgressEvent(BaseModel):
 
 
 def coerce_float(value: Any) -> float | None:
-    """Best-effort cast to ``float``; ``None`` for bools / non-numerics.
+    """Best-effort cast to ``float``; ``None`` for bools, non-numerics and non-finite values.
 
     Shared with the runners, which report the same trainer numbers from ``train()``'s return
     value rather than from a callback — the same values reached two different ways.
+
+    NaN and infinity are dropped rather than passed through, and that matters more than it looks:
+    ``loss=nan`` and ``grad_norm=inf`` are routine in fp16 training, not adversarial. Pydantic
+    serializes them to JSON ``null``, which ``metrics: dict[str, float]`` then REFUSES to parse
+    back — so an ordinary gradient explosion would emit a progress line the orchestrator cannot
+    read. A dropped key degrades to "not reported"; an unparseable line loses the whole event.
     """
     if value is None or isinstance(value, bool):  # bool is an int subclass — reject it
         return None
     try:
-        return float(value)
+        out = float(value)
     except TypeError, ValueError:
         return None
+    return out if math.isfinite(out) else None
 
 
 def coerce_int(value: Any) -> int | None:
@@ -145,14 +160,23 @@ def _numeric_extras(
 
     Per-event callbacks exclude the keys promoted to their own :class:`ProgressEvent` fields;
     a whole-run summary excludes nothing, because there is nowhere else for those numbers to go.
+
+    Keys are bounded in both length and count. ``values`` is the trainer's log dict, and
+    :func:`trainer_callback` is public API: a consumer whose ``compute_metrics`` keys a score on a
+    dataset-derived label (per-class accuracy, a common pattern) puts that text straight into the
+    file the orchestrator tails and relays onward. Forge itself sets no ``compute_metrics``, so
+    this is a bound on a surface rather than a fix for a live leak — but the bound belongs at the
+    choke point, not in each caller.
     """
     out: dict[str, float] = {}
     for key, value in values.items():
         if key in exclude:
             continue
+        if len(out) >= MAX_METRIC_KEYS:
+            break
         coerced = coerce_float(value)
         if coerced is not None:
-            out[str(key)] = coerced
+            out[str(key)[:MAX_METRIC_KEY_CHARS]] = coerced
     return out
 
 
@@ -255,12 +279,15 @@ class JsonlProgressWriter:
         self.close()
 
 
-def trainer_callback(writer: JsonlProgressWriter) -> Any:
+def trainer_callback(writer: JsonlProgressWriter, *, gpu: GpuSampler | None = None) -> Any:
     """Build a ``transformers.TrainerCallback`` that forwards events to ``writer``.
 
     ``transformers`` is imported lazily here, so importing
     :mod:`strata_forge.training.progress` never pulls the ``[finetuning]`` extra. The
     returned object is ready to pass to ``trainer.add_callback(...)``.
+
+    ``gpu`` is injectable so a caller can share one sampler with its phase sink — and so a test
+    can supply a stub instead of probing whatever hardware the test machine happens to have.
     """
     try:
         transformers_mod: Any = __import__("transformers")
@@ -272,7 +299,7 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
         raise ImportError(msg) from exc
 
     base: Any = transformers_mod.TrainerCallback
-    gpu = GpuSampler()
+    sampler = gpu if gpu is not None else GpuSampler()
     # Throughput is derived here rather than read off the trainer: `transformers` reports
     # `train_samples_per_second` only in the final TrainOutput, which is exactly too late to
     # watch. Tracking the wall clock between logs gives the same number while it still matters.
@@ -291,7 +318,7 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
                     step=coerce_int(getattr(state, "global_step", None)),
                     total_steps=coerce_int(getattr(state, "max_steps", None)),
                     epoch=coerce_float(getattr(state, "epoch", None)),
-                    metrics=gpu.sample(),
+                    metrics=sampler.sample(),
                 )
             )
 
@@ -319,7 +346,7 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
                     # Trainer numbers first, then derived pace, then hardware. Later keys win, but
                     # `pace` yields nothing for a key the trainer already reported, so a real
                     # `train_tokens_per_second` from the trainer is never overwritten by an estimate.
-                    metrics={**_numeric_extras(data), **pace.tick(step, data), **gpu.sample()},
+                    metrics={**_numeric_extras(data), **pace.tick(step, data), **sampler.sample()},
                 )
             )
 
@@ -345,7 +372,7 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
                     step=coerce_int(getattr(state, "global_step", None)),
                     total_steps=coerce_int(getattr(state, "max_steps", None)),
                     epoch=coerce_float(getattr(state, "epoch", None)),
-                    metrics=gpu.sample(),
+                    metrics=sampler.sample(),
                 )
             )
 

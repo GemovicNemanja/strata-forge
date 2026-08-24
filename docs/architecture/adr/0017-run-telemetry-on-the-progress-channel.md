@@ -59,9 +59,26 @@ be derivable from data the runner already had in hand and was discarding.
 - **Telemetry never fails a run.** Every sampler failure path — no binary, no driver, a timeout, a
   changed CSV shape, a CPU-only box — returns `{}`. A missing gauge is cosmetic; an exception raised
   out of a metrics call mid-run is not.
-- GPU sampling costs one subprocess per `GpuSampler.min_interval_s` (5s default). The sampler caches
-  and repeats the last reading in between, because a slightly stale gauge is honest whereas a gap
-  makes a chart look like the GPU stopped.
+- **Sampling happens off the caller's thread.** `GpuSampler.sample()` returns the last reading and
+  refreshes in a daemon thread. Two facts force this: the callers are coroutines driving
+  generations and a liveness heartbeat, and `subprocess.run(timeout=...)` does not actually bound
+  `nvidia-smi` — its POSIX timeout path kills the child then calls `wait()` with no timeout, which
+  never returns for the uninterruptible `D` state a wedged driver produces. Blocking there would
+  hang the run inside a metrics call *and* defeat cancellation, since the stall sits in a blocking
+  C call that `task.cancel()` can never interrupt. The probe abandons an unkillable child, leaking
+  a zombie — strictly better than stranding a GPU.
+- A failed refresh keeps the last good reading rather than blanking it: a slightly stale gauge is
+  honest, whereas a gap makes a chart look like the GPU stopped.
+- **Non-finite values are dropped at `coerce_float`.** `loss=nan` and `grad_norm=inf` are routine in
+  fp16 training. Pydantic serializes them to JSON `null`, which `metrics: dict[str, float]` refuses
+  to parse back — so `ProgressEvent` could emit a document it could not itself read, and an
+  ordinary gradient explosion would cost the orchestrator the whole event.
+- **Metric keys are capped** in length and count. `trainer_callback` is public API, and a
+  consumer whose `compute_metrics` keys a score on a dataset-derived label would otherwise put that
+  text straight onto a channel that is tailed, relayed and rendered.
+- **The inference p50 is over a bounded window** (`deque(maxlen=...)`). `statistics.median` copies
+  and sorts what it is given, so an unbounded history would make the per-chunk cost quadratic in the
+  row count — and `progress_chunk` can be 1 with no `row_limit`.
 - Multi-GPU boxes report **mean** utilization, **summed** memory, and **max** temperature. Max, not
   mean, because one card cooking is the fact worth surfacing and an average hides it behind its
   healthy neighbours.

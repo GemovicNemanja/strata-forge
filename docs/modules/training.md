@@ -419,7 +419,7 @@ schema change and an older consumer ignores what it does not recognise.
 |---|---|
 | `grad_norm`, `eval_*`, … | whatever the TRL/`transformers` log dict carried, minus the promoted fields |
 | `steps_per_s` | derived from the wall clock between logged steps |
-| `tokens_per_s` | derived, *only* when the trainer counts tokens (`include_num_input_tokens_seen`) |
+| `tokens_per_s` | training: derived, *only* when the trainer counts tokens (`include_num_input_tokens_seen`). Batch inference: from each row's `usage` |
 | `succeeded`, `failed` | batch inference, per chunk |
 | `rows_per_s`, `latency_p50_ms` | batch inference, from each row's own `LLMResponse` |
 | `gpu_count`, `gpu_util_pct`, `gpu_mem_used_mb`, `gpu_mem_total_mb`, `gpu_temp_c` | `strata_forge.training.hardware` |
@@ -429,14 +429,28 @@ during exactly the long uncountable stretches where nothing else does.
 
 ### GPU counters
 
-`hardware.GpuSampler` shells out to `nvidia-smi` and caches for `min_interval_s` (5s default),
-so it is safe to call on every event. Two properties are deliberate:
+`hardware.GpuSampler.sample()` **never blocks**: it returns the last reading and hands a refresh
+to a daemon thread when that reading has gone stale (`min_interval_s`, 5s default). Three
+properties are deliberate:
 
 - **No new dependency.** `pynvml` would be tidier in-process, but forge's dependencies install
   *fresh on the user's VM* at the start of every run, so each pin is another package that can
   publish a breaking release between a green CI run and someone's four-hour fine-tune.
 - **It never raises.** No binary, no driver, a timeout, a changed CSV shape, a CPU-only box — every
-  path returns `{}`. A missing gauge is cosmetic; an exception out of a metrics call is not.
+  path yields no counters. A missing gauge is cosmetic; an exception out of a metrics call is not.
+- **It never hangs the run.** Callers are coroutines, and `nvidia-smi` can block for an unbounded
+  time — `subprocess.run(timeout=...)` does *not* bound it, because its POSIX timeout path kills
+  the child and then waits on it with no timeout, which never returns for the uninterruptible
+  `D` state a wedged driver produces. Sampling therefore happens off the loop, and the probe
+  abandons an unkillable child rather than waiting for it.
 
 On a multi-GPU box: mean utilization, summed memory, **max** temperature. Max because one card
 cooking is the fact worth surfacing, and a mean would hide it behind its healthy neighbours.
+Missing values are handled per *field*, so a card that reports `[N/A]` for temperature alone still
+contributes its utilization and memory. A failed refresh keeps the last good reading rather than
+blanking the gauge.
+
+Non-finite numbers never reach the channel. `loss=nan` and `grad_norm=inf` are routine in fp16, and
+pydantic serializes them to JSON `null` — which `metrics: dict[str, float]` then refuses to parse
+back, so an ordinary gradient explosion would emit a line the orchestrator could not read.
+`coerce_float` drops them, and metric keys are capped in length and count.
