@@ -30,8 +30,22 @@ if TYPE_CHECKING:
 _TOKEN = "hf_secretwritetoken1234567890"
 
 
-def _ok(text: str) -> BatchInferenceResult:
-    return BatchInferenceResult(response=cast("LLMResponse", types.SimpleNamespace(text=text)))
+def _ok(text: str, *, latency_ms: float = 100.0, output_tokens: int = 10) -> BatchInferenceResult:
+    """A successful result shaped like a real ``LLMResponse``.
+
+    ``latency_ms`` and ``usage`` are not decoration: the runner reads both to report per-row
+    latency and tokens/s, so a double without them is a double that cannot exercise the path.
+    """
+    return BatchInferenceResult(
+        response=cast(
+            "LLMResponse",
+            types.SimpleNamespace(
+                text=text,
+                latency_ms=latency_ms,
+                usage=types.SimpleNamespace(output_tokens=output_tokens),
+            ),
+        )
+    )
 
 
 def _fail(exc: Exception) -> BatchInferenceResult:
@@ -218,7 +232,18 @@ async def test_run_batches_reconciles_and_emits(
     events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     step = [e for e in events if e["kind"] == "step"]
     assert step
-    assert step[-1]["metrics"] == {"succeeded": 1.0, "failed": 1.0}
+    metrics = step[-1]["metrics"]
+    # Subset rather than equality: the same event also carries throughput and (on a real GPU box)
+    # hardware counters, and pinning the whole dict would make every future gauge break this test
+    # for a reason that has nothing to do with reconciliation.
+    assert metrics["succeeded"] == 1.0
+    assert metrics["failed"] == 1.0
+    assert step[-1]["stage"] == "run"
+
+    # Only the successful row contributes to latency and tokens — a failure has neither.
+    assert metrics["latency_p50_ms"] == 100.0
+    assert metrics["rows_per_s"] > 0
+    assert metrics["tokens_per_s"] > 0
 
 
 # ----------------------- main: happy path + no token leak -------------------

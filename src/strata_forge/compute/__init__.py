@@ -13,6 +13,7 @@ the batch runner are dep-free.
 """
 
 from strata_forge.compute.backends import (
+    MAX_CONSOLE_CHUNK_BYTES,
     Backend,
     LocalBackend,
     SkyPilotBackend,
@@ -20,7 +21,7 @@ from strata_forge.compute.backends import (
     safe_workdir_relpath,
 )
 from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
-from strata_forge.compute.job import Job, JobState, JobStatus
+from strata_forge.compute.job import ConsoleChunk, Job, JobState, JobStatus
 from strata_forge.compute.serving import (
     ServingEndpoint,
     build_sglang_task,
@@ -32,9 +33,11 @@ from strata_forge.compute.serving import (
 from strata_forge.compute.task import ResourceSpec, Task
 
 __all__ = [
+    "MAX_CONSOLE_CHUNK_BYTES",
     "Backend",
     "BatchInferenceResult",
     "BatchInferenceRunner",
+    "ConsoleChunk",
     "Job",
     "JobState",
     "JobStatus",

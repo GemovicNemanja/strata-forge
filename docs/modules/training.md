@@ -388,3 +388,69 @@ When any of these is missing, the corresponding method raises
 - **DPO with PEFT + no `ref_model`:** TRL handles this by disabling
   the adapter on the base model to derive a reference. No special
   Forge config required; just don't pass ``ref_model``.
+
+## Run telemetry
+
+`strata_forge.training.progress` is the channel an orchestrator tails (one `ProgressEvent` per
+JSONL line, read via `Backend.read_file` — see
+[ADR 0016](../architecture/adr/0016-backend-read-file.md)). Beyond the step counters it carries two
+things a run *watcher* needs, decided in
+[ADR 0017](../architecture/adr/0017-run-telemetry-on-the-progress-channel.md).
+
+**`stage` — where the run is, as an id.** One of `RUN_STAGES`:
+
+```
+provision → install_engine → load_model → run → push
+```
+
+`stage` is independent of `kind`: `kind` says what sort of record an event is, `stage` says where in
+the run it sits. Render an ordered stepper from `RUN_STAGES` and `stage` — never by matching on
+`message`, whose wording is prose and free to change.
+
+A runner reports only the last three. `provision` and `install_engine` describe the VM *before the
+runner's process exists*, so the orchestrator that submitted the job owns them. Dataset loading
+reports as `load_model`: not literally the model, but the same "getting ready" milestone from the
+watcher's side.
+
+**`metrics` — the numbers.** A free-form `dict[str, float]`, so a new counter is a key rather than a
+schema change and an older consumer ignores what it does not recognise.
+
+| Key | Where it comes from |
+|---|---|
+| `grad_norm`, `eval_*`, … | whatever the TRL/`transformers` log dict carried, minus the promoted fields |
+| `steps_per_s` | derived from the wall clock between logged steps |
+| `tokens_per_s` | training: derived, *only* when the trainer counts tokens (`include_num_input_tokens_seen`). Batch inference: from each row's `usage` |
+| `succeeded`, `failed` | batch inference, per chunk |
+| `rows_per_s`, `latency_p50_ms` | batch inference, from each row's own `LLMResponse` |
+| `gpu_count`, `gpu_util_pct`, `gpu_mem_used_mb`, `gpu_mem_total_mb`, `gpu_temp_c` | `strata_forge.training.hardware` |
+
+A `phase` event may carry `stage` and `metrics` too — neither is a step count, and both stay true
+during exactly the long uncountable stretches where nothing else does.
+
+### GPU counters
+
+`hardware.GpuSampler.sample()` **never blocks**: it returns the last reading and hands a refresh
+to a daemon thread when that reading has gone stale (`min_interval_s`, 5s default). Three
+properties are deliberate:
+
+- **No new dependency.** `pynvml` would be tidier in-process, but forge's dependencies install
+  *fresh on the user's VM* at the start of every run, so each pin is another package that can
+  publish a breaking release between a green CI run and someone's four-hour fine-tune.
+- **It never raises.** No binary, no driver, a timeout, a changed CSV shape, a CPU-only box — every
+  path yields no counters. A missing gauge is cosmetic; an exception out of a metrics call is not.
+- **It never hangs the run.** Callers are coroutines, and `nvidia-smi` can block for an unbounded
+  time — `subprocess.run(timeout=...)` does *not* bound it, because its POSIX timeout path kills
+  the child and then waits on it with no timeout, which never returns for the uninterruptible
+  `D` state a wedged driver produces. Sampling therefore happens off the loop, and the probe
+  abandons an unkillable child rather than waiting for it.
+
+On a multi-GPU box: mean utilization, summed memory, **max** temperature. Max because one card
+cooking is the fact worth surfacing, and a mean would hide it behind its healthy neighbours.
+Missing values are handled per *field*, so a card that reports `[N/A]` for temperature alone still
+contributes its utilization and memory. A failed refresh keeps the last good reading rather than
+blanking the gauge.
+
+Non-finite numbers never reach the channel. `loss=nan` and `grad_norm=inf` are routine in fp16, and
+pydantic serializes them to JSON `null` — which `metrics: dict[str, float]` then refuses to parse
+back, so an ordinary gradient explosion would emit a line the orchestrator could not read.
+`coerce_float` drops them, and metric keys are capped in length and count.

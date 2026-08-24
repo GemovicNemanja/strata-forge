@@ -14,16 +14,27 @@ import posixpath
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from strata_forge.compute.job import Job, JobStatus
+    from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
     from strata_forge.compute.task import Task
 
-__all__ = ["MAX_READ_FILE_BYTES", "Backend", "safe_workdir_relpath"]
+__all__ = [
+    "MAX_CONSOLE_CHUNK_BYTES",
+    "MAX_READ_FILE_BYTES",
+    "Backend",
+    "safe_workdir_relpath",
+]
 
 # Hard cap on a single :meth:`Backend.read_file` result. A control plane polls
 # read_file on an interval from a SHARED process; without a cap a runaway/malicious
 # file (e.g. a huge progress.jsonl) could exhaust that process's memory and degrade
 # service for every user. Backends bound the read to this many bytes.
 MAX_READ_FILE_BYTES = 8 * 1024 * 1024
+
+# Default ceiling on one :meth:`Backend.console` slice. Much smaller than the read_file cap
+# because this one is polled continuously for the whole life of a run rather than read once:
+# the budget that matters is per-interval, and a chunk that cannot be shown to a human in the
+# time before the next one arrives is a chunk nobody reads.
+MAX_CONSOLE_CHUNK_BYTES = 64 * 1024
 
 
 def safe_workdir_relpath(path: str) -> str:
@@ -86,6 +97,38 @@ class Backend(Protocol):
 
         This complements :meth:`logs` (stdout/stderr): it reads a side-channel file
         such as a runner's ``progress.jsonl`` of structured metric events.
+        """
+        ...  # pragma: no cover — Protocol body
+
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk:
+        """Read the console INCREMENTALLY: only what was appended past the given offsets.
+
+        This is :meth:`logs` for a watcher rather than for a post-mortem. Pass the offsets
+        from the previous :class:`ConsoleChunk` (zero on the first call) and receive exactly
+        the bytes written since, so a caller polling on an interval stores a continuous
+        transcript instead of a pile of overlapping tails.
+
+        ``max_bytes`` is the TOTAL for the call and is split evenly between the two streams,
+        clamped to :data:`MAX_CONSOLE_CHUNK_BYTES`; evenly, because stderr is where a failure
+        announces itself and a chatty stdout must not be able to starve it. When more than that
+        accumulated, the NEWEST bytes are returned and the shortfall is reported as
+        ``dropped_bytes`` — a watcher wants where the run is now, and a silent gap would
+        misrepresent a jump-cut as a whole log.
+
+        A backend with no way to read a suffix of its logs raises :class:`NotImplementedError`
+        rather than re-fetching the whole log per poll: that is linear in memory as well as in
+        time, inside a process shared by every account.
+
+        Offsets are in BYTES of the underlying stream, so a slice may cut a multi-byte
+        character; the boundary decodes to a replacement character rather than raising.
+        Returns empty text (and the offsets unchanged) when nothing has been written yet.
         """
         ...  # pragma: no cover — Protocol body
 

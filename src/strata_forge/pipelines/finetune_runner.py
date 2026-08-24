@@ -64,6 +64,7 @@ from strata_forge.training.dataset_format import (
     sft_text_field,
     validate_mapping,
 )
+from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.methods import (
     UnsupportedMethodError,
     check_format,
@@ -342,13 +343,17 @@ async def _push_artifact(spec: FinetuneSpec, artifact_dir: Path, hf_token: str) 
 async def _execute(
     spec: FinetuneSpec, hf_token: str | None, writer: JsonlProgressWriter | None
 ) -> str:
-    phase = phase_sink(writer, hf_token)
+    # One sampler for the run: the phase sink folds its counters into every caption, so the
+    # `load_model` and `push` stretches -- where nothing is countable -- still show the box
+    # working. The trainer callback covers `run` with its own.
+    gpu = GpuSampler()
+    phase = phase_sink(writer, hf_token, gpu=gpu)
     method = pick_method(spec.method)
 
     # Downloading a split is unbounded by row_limit (that only slices during iteration) and runs
     # before any countable milestone. to_thread, not a direct call: load_dataset blocks, and a
     # blocked event loop stops the very ticker that says the step is still running.
-    async with ticking_phase(phase, "Loading the dataset"):
+    async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         train_rows = await asyncio.to_thread(_load_split, spec, spec.split, hf_token)
         eval_rows = (
             await asyncio.to_thread(_load_split, spec, spec.eval_split, hf_token)
@@ -369,7 +374,7 @@ async def _execute(
     # This phase covers everything BEFORE that: downloading the model, quantising it for QLoRA, and
     # wiring the adapter. On a cold box with a large model that is the longest silent stretch of
     # the run, and nothing else reports it.
-    async with ticking_phase(phase, "Loading the model onto the GPU"):
+    async with ticking_phase(phase, "Loading the model onto the GPU", stage="load_model"):
         trainer = await asyncio.to_thread(
             _build_trainer, method, config, peft_config, train_rows, eval_rows
         )
@@ -382,12 +387,12 @@ async def _execute(
     metrics, steps = await asyncio.to_thread(_train, trainer, artifact_dir)
 
     if spec.merge_adapter:
-        async with ticking_phase(phase, "Merging the adapter into the base model"):
+        async with ticking_phase(phase, "Merging the adapter into the base model", stage="push"):
             await asyncio.to_thread(_merge_adapter, spec, artifact_dir)
 
     if hf_token and spec.output_repo_id:
         try:
-            async with ticking_phase(phase, "Uploading the model to the Hub"):
+            async with ticking_phase(phase, "Uploading the model to the Hub", stage="push"):
                 destination = await _push_artifact(spec, artifact_dir, hf_token)
         except Exception as exc:
             # Name WHERE the weights are. The run still fails — the user asked for them on the Hub

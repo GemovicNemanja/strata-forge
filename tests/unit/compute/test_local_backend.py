@@ -189,6 +189,75 @@ class TestLogs:
             await backend.logs(job, tail=0)
 
 
+class TestConsole:
+    """Incremental reads: the same contract the SSH backend implements, over in-memory buffers."""
+
+    async def test_resumes_from_the_offset_it_returned(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="printf 'one\\ntwo\\n'"))
+        await _wait_until_terminal(backend, job)
+
+        first = await backend.console(job)
+        assert first.stdout == "one\ntwo\n"
+        # Nothing more was written, so a second read from that offset is empty rather than a
+        # repeat of the same lines -- which is the whole point of reading incrementally.
+        second = await backend.console(
+            job, stdout_offset=first.stdout_offset, stderr_offset=first.stderr_offset
+        )
+        assert second.stdout == ""
+        assert second.stdout_offset == first.stdout_offset
+
+    async def test_separates_the_two_streams(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="echo out; echo err 1>&2"))
+        await _wait_until_terminal(backend, job)
+        chunk = await backend.console(job)
+        assert chunk.stdout.strip() == "out"
+        assert chunk.stderr.strip() == "err"
+
+    async def test_an_overflowing_window_keeps_the_newest_and_reports_the_gap(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="printf '0123456789'"))
+        await _wait_until_terminal(backend, job)
+        # `max_bytes` is the TOTAL for the call, split evenly between the two streams.
+        chunk = await backend.console(job, max_bytes=8)
+        assert chunk.stdout == "6789"
+        assert chunk.dropped_bytes == 6
+
+    async def test_a_nonpositive_cap_is_rejected(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="echo x"))
+        await _wait_until_terminal(backend, job)
+        with pytest.raises(ValueError, match="max_bytes"):
+            await backend.console(job, max_bytes=0)
+
+    async def test_offsets_stay_absolute_once_the_window_starts_sliding(self) -> None:
+        """The buffer is a sliding 1 MiB window, so its indices are NOT stream offsets.
+
+        Reading `len(buffer)` as an offset pins the cursor at the cap forever: every later poll
+        asks for bytes past the end of a buffer that has stopped growing, gets nothing, and
+        reports `dropped_bytes=0` while the rest of the run's output disappears -- including the
+        final line, which is the one a watcher is waiting for.
+        """
+        backend = LocalBackend()
+        marker = "THE-LAST-LINE"
+        # Deliberately past _MAX_BUFFER_BYTES: below the cap nothing slides and the bug hides.
+        job = await backend.submit(
+            Task(name="t", run=f"python3 -c \"print('x'*(1<<21)); print('{marker}')\"")
+        )
+        await _wait_until_terminal(backend, job)
+
+        seen: list[str] = []
+        chunk = await backend.console(job, max_bytes=8192)
+        seen.append(chunk.stdout)
+        for _ in range(60):
+            chunk = await backend.console(
+                job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
+            )
+            seen.append(chunk.stdout)
+        assert marker in "".join(seen), "the end of the output must eventually be delivered"
+
+
 class TestCancel:
     async def test_cancel_running_job(self) -> None:
         backend = LocalBackend()
