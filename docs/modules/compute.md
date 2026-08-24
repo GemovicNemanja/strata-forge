@@ -225,9 +225,55 @@ class Backend(Protocol):
     async def submit(self, task: Task) -> Job: ...
     async def status(self, job: Job) -> JobStatus: ...
     async def logs(self, job: Job, *, tail: int | None = None) -> str: ...
+    async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str: ...
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk: ...
     async def cancel(self, job: Job) -> None: ...
     async def cleanup(self, job: Job) -> None: ...
 ```
+
+### Reading the console
+
+``logs`` answers "what has this job printed?" — the right question after a job
+ends. A watcher following a *live* job asks "what has it printed since last
+time?", and a tail cannot answer that: consecutive windows overlap by an unknown
+amount, and de-duplicating by matching the last line seen fails on precisely the
+output that makes a console worth watching, because a progress bar rewriting
+itself emits the same line over and over.
+
+``console`` answers it with byte offsets. Pass back the offsets from the previous
+:class:`ConsoleChunk` (zero the first time) and receive exactly what was appended
+since:
+
+```python
+chunk = await backend.console(job)
+while not done:
+    chunk = await backend.console(
+        job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
+    )
+    render(chunk.stdout, chunk.stderr)
+    if chunk.dropped_bytes:
+        render(f"[{chunk.dropped_bytes} bytes not shown]")
+```
+
+When more than ``max_bytes`` accumulated between calls the NEWEST bytes are kept
+and the shortfall is reported as ``dropped_bytes`` — a watcher wants where the
+run is now, and a silent jump-cut would read as a whole transcript. Offsets are
+byte offsets into the underlying stream, so a slice may cut a multi-byte
+character; the boundary decodes to a replacement character rather than raising.
+
+The SSH backend does this in ONE round trip: it measures both files and computes
+the slice lengths in the same remote shell (measuring locally and slicing
+remotely would race a job that is still writing) and base64-frames the payloads
+so byte counts survive the transport. SkyPilot has no way to ask for a suffix of
+``sky logs``, so it re-reads the whole log and slices locally — correct, but
+linear in the log's size per poll.
 
 Methods that don't apply to a particular backend raise
 :class:`NotImplementedError` rather than silently passing — that

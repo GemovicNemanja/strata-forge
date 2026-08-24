@@ -189,6 +189,48 @@ class TestLogs:
             await backend.logs(job, tail=0)
 
 
+class TestConsole:
+    """Incremental reads: the same contract the SSH backend implements, over in-memory buffers."""
+
+    async def test_resumes_from_the_offset_it_returned(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="printf 'one\\ntwo\\n'"))
+        await _wait_until_terminal(backend, job)
+
+        first = await backend.console(job)
+        assert first.stdout == "one\ntwo\n"
+        # Nothing more was written, so a second read from that offset is empty rather than a
+        # repeat of the same lines -- which is the whole point of reading incrementally.
+        second = await backend.console(
+            job, stdout_offset=first.stdout_offset, stderr_offset=first.stderr_offset
+        )
+        assert second.stdout == ""
+        assert second.stdout_offset == first.stdout_offset
+
+    async def test_separates_the_two_streams(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="echo out; echo err 1>&2"))
+        await _wait_until_terminal(backend, job)
+        chunk = await backend.console(job)
+        assert chunk.stdout.strip() == "out"
+        assert chunk.stderr.strip() == "err"
+
+    async def test_an_overflowing_window_keeps_the_newest_and_reports_the_gap(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="printf '0123456789'"))
+        await _wait_until_terminal(backend, job)
+        chunk = await backend.console(job, max_bytes=4)
+        assert chunk.stdout == "6789"
+        assert chunk.dropped_bytes == 6
+
+    async def test_a_nonpositive_cap_is_rejected(self) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="t", run="echo x"))
+        await _wait_until_terminal(backend, job)
+        with pytest.raises(ValueError, match="max_bytes"):
+            await backend.console(job, max_bytes=0)
+
+
 class TestCancel:
     async def test_cancel_running_job(self) -> None:
         backend = LocalBackend()

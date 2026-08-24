@@ -12,6 +12,8 @@ import httpx
 import pytest
 
 from strata_forge.compute import (
+    MAX_CONSOLE_CHUNK_BYTES,
+    ConsoleChunk,
     Job,
     JobStatus,
     ResourceSpec,
@@ -332,6 +334,17 @@ class _FakeBackend:
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
         del job, path, tail
         return ""
+
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk:
+        del job, max_bytes
+        return ConsoleChunk(stdout_offset=stdout_offset, stderr_offset=stderr_offset)
 
     async def cancel(self, job: Job) -> None:
         self.cancelled.append(job)

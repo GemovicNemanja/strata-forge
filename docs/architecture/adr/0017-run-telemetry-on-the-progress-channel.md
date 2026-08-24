@@ -86,6 +86,34 @@ be derivable from data the runner already had in hand and was discarding.
   (`TrainingArguments.include_num_input_tokens_seen`). Absent that, it is not knowable here and
   reporting an estimate would be worse than reporting nothing.
 
+## The console is a third channel, read by offset
+
+Structured progress says how far a run has got; it does not say what the machine is printing. A
+watcher wants both — a stalled install, a CUDA OOM, a tokenizer warning are all console text and
+none of them are events.
+
+`Backend.console` reads that stream INCREMENTALLY, by byte offset, returning a `ConsoleChunk`. It
+exists because `logs(tail=N)` cannot be de-duplicated by a caller polling on an interval:
+consecutive windows overlap by an unknown amount, and the obvious remedy — remember the last line
+and resume after it — fails on the output that most needs watching, since a progress bar rewriting
+itself emits the same line repeatedly. An orchestrator storing those overlapping windows would
+accumulate the same text once per poll for the life of the run.
+
+Consequences:
+
+- **Offsets advance to the stream's current size, not to what was read.** When more accumulated
+  than one chunk may carry, the newest bytes are returned and the rest is reported as
+  `dropped_bytes`. Re-offering the skipped middle would leave a busy job's reader permanently
+  behind, dropping the same bytes forever.
+- **A gap is stated, never smoothed over.** A jump-cut presented as a continuous transcript is a
+  worse artifact than one that says what is missing.
+- **The SSH read is one round trip, with the arithmetic done remotely.** Measuring the files here
+  and slicing them there would race a job that is still writing, and the frame lengths would stop
+  matching the payloads.
+- **Payloads are base64.** The SSH channel yields decoded text, so a raw slice that cut a
+  multi-byte character would arrive with a length no longer equal to the byte count the offsets
+  depend on. Console output is not guaranteed to be text at all — ANSI, NULs and CRs all appear.
+
 ## Alternatives considered
 
 **A second telemetry file/channel.** Rejected: it doubles what the orchestrator tails and what
@@ -94,6 +122,9 @@ the same instant.
 
 **Structured stage objects instead of a literal.** Rejected: the set is small, closed, and ordered.
 A literal keeps it comparable across a JSON boundary with no schema to negotiate.
+
+**A line-anchored cursor instead of byte offsets.** Rejected: it is ambiguous exactly when it
+matters. Repeated identical lines are the normal output of anything with a progress bar.
 
 **Widening `serving.py`'s `on_phase` hook to take a stage.** Rejected: `serving.py` reports prose
 through a public one-argument hook and knows nothing about run stages, which is correct. The runner

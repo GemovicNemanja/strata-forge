@@ -20,8 +20,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from strata_forge.compute.backends.base import safe_workdir_relpath
-from strata_forge.compute.job import Job, JobStatus
+from strata_forge.compute.backends.base import MAX_CONSOLE_CHUNK_BYTES, safe_workdir_relpath
+from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
 from strata_forge.compute.task import Task  # noqa: TC001 — runtime use in submit
 
 __all__ = ["SkyPilotBackend"]
@@ -208,6 +208,33 @@ class SkyPilotBackend:
             return text
         lines = text.splitlines()
         return "\n".join(lines[-tail:])
+
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk:
+        # `sky logs` hands back one interleaved stream with no way to ask for a suffix, so this
+        # re-reads the whole log and slices locally. Correct, but linear in the log's size on
+        # every poll -- the SSH backend's one-round-trip incremental read is the path the control
+        # plane actually uses.
+        if max_bytes <= 0:
+            err = f"max_bytes must be >= 1; got {max_bytes}"
+            raise ValueError(err)
+        data = (await self.logs(job)).encode("utf-8")
+        pending = data[max(0, int(stdout_offset)) :]
+        dropped = max(0, len(pending) - max_bytes)
+        return ConsoleChunk(
+            stdout=pending[-max_bytes:].decode("utf-8", errors="replace") if pending else "",
+            stdout_offset=len(data),
+            # SkyPilot does not separate the two streams; everything arrives as stdout and this
+            # offset stays where the caller left it rather than pretending to advance.
+            stderr_offset=max(0, int(stderr_offset)),
+            dropped_bytes=dropped,
+        )
 
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
         # Reading an arbitrary file off the cluster needs an exec+capture round-trip

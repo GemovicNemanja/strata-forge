@@ -21,13 +21,18 @@ the SkyPilot backend.
 
 from __future__ import annotations
 
+import base64
 import shlex
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from strata_forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
-from strata_forge.compute.job import Job, JobStatus
+from strata_forge.compute.backends.base import (
+    MAX_CONSOLE_CHUNK_BYTES,
+    MAX_READ_FILE_BYTES,
+    safe_workdir_relpath,
+)
+from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
 from strata_forge.compute.task import Task  # noqa: TC001 — runtime use in submit
 
 __all__ = ["SSHBackend"]
@@ -41,6 +46,9 @@ _EXIT_FILE = "forge.exit"
 # user asked for. The lie is not free downstream: an orchestrator that captures diagnostics only
 # for FAILED jobs discards the logs of exactly the deaths nobody chose.
 _CANCELLED_FILE = "forge.cancelled"
+# Prefixes the console read's size header for the same reason `_REPORT_MARKER` prefixes the
+# launch report: a login shell may print a banner or an rc file's chatter first.
+_CONSOLE_MARKER = "__forge_console__"
 _STDOUT_FILE = "stdout.log"
 _STDERR_FILE = "stderr.log"
 _FORGE_REMOTE_ROOT = ".forge-compute"
@@ -429,6 +437,41 @@ class SSHBackend:
         _exit, stdout, _stderr = await self._run_remote(cmd)
         return stdout
 
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk:
+        workdir = self._job_workdir(job)
+        if max_bytes <= 0:
+            err = f"max_bytes must be >= 1; got {max_bytes}"
+            raise ValueError(err)
+        stdout_offset, stderr_offset = max(0, int(stdout_offset)), max(0, int(stderr_offset))
+
+        _exit, raw, _stderr = await self._run_remote(
+            _console_command(workdir, stdout_offset, stderr_offset, max_bytes)
+        )
+        sizes, payloads = _console_frames(raw)
+        if sizes is None:
+            return ConsoleChunk(stdout_offset=stdout_offset, stderr_offset=stderr_offset)
+        total_out, total_err, take_out, take_err = sizes
+        dropped = max(0, total_out - stdout_offset - take_out) + max(
+            0, total_err - stderr_offset - take_err
+        )
+        return ConsoleChunk(
+            stdout=_b64_text(payloads[0]),
+            stderr=_b64_text(payloads[1]),
+            # The offsets advance to the file's CURRENT size, not to what was read: the skipped
+            # middle is reported as dropped and must not be re-offered on the next call, or a
+            # busy job would keep the reader permanently behind, forever re-dropping.
+            stdout_offset=total_out,
+            stderr_offset=total_err,
+            dropped_bytes=dropped,
+        )
+
     async def cancel(self, job: Job) -> None:
         target = self._signal_target(job)
         workdir = self._job_workdir(job)
@@ -472,3 +515,66 @@ class SSHBackend:
             self._connection.close()
             await self._connection.wait_closed()
             self._connection = None
+
+
+def _console_command(workdir: str, out_off: int, err_off: int, cap: int) -> str:
+    """Compose the one-round-trip incremental console read.
+
+    Sizes are measured and the slice lengths computed REMOTELY, in the same shell, so the two
+    always describe the same instant. Measuring here and slicing there would race a job that is
+    still writing, and the frame lengths would no longer match the payloads.
+
+    The payloads are base64 so that byte counts survive the transport: the SSH channel hands back
+    decoded text, and a raw slice that cut a multi-byte character mid-sequence would arrive with a
+    length no longer equal to the number of bytes it represents — which is the one invariant the
+    offsets depend on.
+    """
+    out = shlex.quote(f"{workdir}/{_STDOUT_FILE}")
+    err = shlex.quote(f"{workdir}/{_STDERR_FILE}")
+    return (
+        # `tr -dc 0-9` because `wc -c` pads its output with spaces on BSD userlands; the default
+        # covers a file the job has not created yet, which is not an error.
+        f"o=$(wc -c < {out} 2>/dev/null | tr -dc 0-9); o=${{o:-0}}; "
+        f"e=$(wc -c < {err} 2>/dev/null | tr -dc 0-9); e=${{e:-0}}; "
+        f'no=$((o-{out_off})); [ "$no" -lt 0 ] && no=0; [ "$no" -gt {cap} ] && no={cap}; '
+        f'ne=$((e-{err_off})); [ "$ne" -lt 0 ] && ne=0; [ "$ne" -gt {cap} ] && ne={cap}; '
+        f'printf "{_CONSOLE_MARKER} %s %s %s %s\\n" "$o" "$e" "$no" "$ne"; '
+        # `tail -c N` takes the LAST N bytes, so an over-budget read skips the middle and keeps
+        # the newest output -- where a run that is being watched actually is.
+        f'if [ "$no" -gt 0 ]; then tail -c "$no" {out} 2>/dev/null | base64 | tr -d "\\n"; fi; echo; '
+        f'if [ "$ne" -gt 0 ]; then tail -c "$ne" {err} 2>/dev/null | base64 | tr -d "\\n"; fi; echo'
+    )
+
+
+def _console_frames(raw: str) -> tuple[tuple[int, int, int, int] | None, tuple[str, str]]:
+    """Split the reply into (sizes, payloads), or (None, ...) if the marker never arrived.
+
+    Located by marker for the same reason `submit` does it: a login shell may print a banner, a
+    motd or an rc file's chatter before anything this command wrote.
+    """
+    lines = raw.splitlines()
+    index = next(
+        (i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith(_CONSOLE_MARKER)), None
+    )
+    if index is None:
+        return None, ("", "")
+    fields = lines[index].split()
+    if len(fields) != 5:
+        return None, ("", "")
+    try:
+        sizes = (int(fields[1]), int(fields[2]), int(fields[3]), int(fields[4]))
+    except ValueError:
+        return None, ("", "")
+    tail = lines[index + 1 :]
+    return sizes, (tail[0] if tail else "", tail[1] if len(tail) > 1 else "")
+
+
+def _b64_text(payload: str) -> str:
+    """Decode one base64 frame to text, tolerating a slice that cut a character in half."""
+    if not payload:
+        return ""
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except ValueError:  # binascii.Error subclasses it
+        return ""
+    return data.decode("utf-8", errors="replace")

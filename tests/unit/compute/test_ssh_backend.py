@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import shlex
@@ -969,3 +970,155 @@ class TestCancelReachesTheWholeTree:
             f"the job joined the launcher's group {launcher_pgid} — cancelling it would "
             "signal the shell that started it"
         )
+
+
+class TestConsole:
+    """The incremental console read.
+
+    Two halves, tested two ways: the WIRE protocol (framing, offsets, gap accounting) against the
+    fake connection, and the remote SHELL SCRIPT against a real `bash` over real files — because
+    the fake connection never executes the command, and the command is where this feature can
+    actually be wrong.
+    """
+
+    @staticmethod
+    async def _job(backend: SSHBackend, fake_connection: _FakeSSHConnection) -> Any:
+        fake_connection.queue(
+            _FakeProcessResult(),
+            _FakeProcessResult(),
+            _FakeProcessResult(stdout="42\n"),
+        )
+        return await backend.submit(Task(name="t", run="echo"))
+
+    @staticmethod
+    def _reply(out: bytes, err: bytes, *, total_out: int, total_err: int) -> _FakeProcessResult:
+        return _FakeProcessResult(
+            stdout=(
+                f"__forge_console__ {total_out} {total_err} {len(out)} {len(err)}\n"
+                f"{base64.b64encode(out).decode()}\n{base64.b64encode(err).decode()}\n"
+            )
+        )
+
+    async def test_reads_both_streams_and_reports_the_resume_offsets(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._job(backend, fake_connection)
+        fake_connection.queue(self._reply(b"hello\n", b"oops\n", total_out=6, total_err=5))
+        chunk = await backend.console(job)
+        assert chunk.stdout == "hello\n"
+        assert chunk.stderr == "oops\n"
+        assert (chunk.stdout_offset, chunk.stderr_offset) == (6, 5)
+        assert chunk.dropped_bytes == 0
+
+    async def test_passes_the_offsets_it_was_given_to_the_remote_side(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._job(backend, fake_connection)
+        fake_connection.queue(self._reply(b"", b"", total_out=6, total_err=0))
+        await backend.console(job, stdout_offset=6, stderr_offset=2)
+        command = fake_connection.commands[-1]
+        assert "o-6" in command
+        assert "e-2" in command
+
+    async def test_an_overflowing_window_keeps_the_newest_and_says_what_it_dropped(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """A silent jump-cut would read as a whole transcript. The hole is reported."""
+        job = await self._job(backend, fake_connection)
+        # The remote side wrote 1000 bytes; the cap allowed only the last 10.
+        fake_connection.queue(self._reply(b"0123456789", b"", total_out=1000, total_err=0))
+        chunk = await backend.console(job, max_bytes=10)
+        assert chunk.stdout == "0123456789"
+        assert chunk.dropped_bytes == 990
+        # Advanced to the file's real size: re-offering the skipped middle would leave a busy
+        # job's reader permanently behind, dropping the same bytes forever.
+        assert chunk.stdout_offset == 1000
+
+    async def test_a_banner_before_the_marker_is_ignored(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # A login shell's motd/rc chatter lands ahead of anything the command printed.
+        job = await self._job(backend, fake_connection)
+        reply = self._reply(b"hi\n", b"", total_out=3, total_err=0)
+        fake_connection.queue(_FakeProcessResult(stdout="Welcome to Ubuntu\n" + reply.stdout))
+        assert (await backend.console(job)).stdout == "hi\n"
+
+    async def test_a_reply_with_no_marker_yields_nothing_and_keeps_the_offsets(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """Never advance past bytes that were not read: that would lose them permanently."""
+        job = await self._job(backend, fake_connection)
+        fake_connection.queue(_FakeProcessResult(stdout="garbage\n"))
+        chunk = await backend.console(job, stdout_offset=17, stderr_offset=4)
+        assert chunk.stdout == ""
+        assert (chunk.stdout_offset, chunk.stderr_offset) == (17, 4)
+
+    async def test_a_slice_that_cut_a_character_in_half_does_not_raise(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # Offsets are byte offsets, so a boundary can land mid-sequence. Cosmetic, not fatal.
+        job = await self._job(backend, fake_connection)
+        half = "é".encode()[:1]
+        fake_connection.queue(self._reply(half + b"ok", b"", total_out=3, total_err=0))
+        assert (await backend.console(job)).stdout.endswith("ok")
+
+    async def test_a_nonpositive_cap_is_rejected(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        job = await self._job(backend, fake_connection)
+        with pytest.raises(ValueError, match="max_bytes"):
+            await backend.console(job, max_bytes=0)
+
+    # -- the remote shell script, executed for real ---------------------------------
+
+    @staticmethod
+    def _run_script(
+        workdir: Path, out_off: int, err_off: int, cap: int
+    ) -> tuple[Any, tuple[str, str]]:
+        from strata_forge.compute.backends.ssh import (
+            _console_command,  # pyright: ignore[reportPrivateUsage]
+            _console_frames,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        proc = subprocess.run(  # noqa: S602 — the command under test IS a shell command
+            _console_command(str(workdir), out_off, err_off, cap),
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return _console_frames(proc.stdout)
+
+    def test_the_script_reports_sizes_and_slices_for_real(self, tmp_path: Path) -> None:
+        (tmp_path / "stdout.log").write_bytes(b"abcdefghij")
+        (tmp_path / "stderr.log").write_bytes(b"XYZ")
+        sizes, payloads = self._run_script(tmp_path, 4, 0, 1024)
+        assert sizes == (10, 3, 6, 3)
+        assert base64.b64decode(payloads[0]) == b"efghij"
+        assert base64.b64decode(payloads[1]) == b"XYZ"
+
+    def test_the_script_treats_missing_files_as_empty(self, tmp_path: Path) -> None:
+        # A job that has not written anything yet is not an error.
+        sizes, payloads = self._run_script(tmp_path, 0, 0, 1024)
+        assert sizes == (0, 0, 0, 0)
+        assert payloads == ("", "")
+
+    def test_the_script_caps_to_the_newest_bytes(self, tmp_path: Path) -> None:
+        (tmp_path / "stdout.log").write_bytes(b"0123456789")
+        sizes, payloads = self._run_script(tmp_path, 0, 0, 4)
+        assert sizes == (10, 0, 4, 0)
+        assert base64.b64decode(payloads[0]) == b"6789"
+
+    def test_the_script_survives_an_offset_past_the_end(self, tmp_path: Path) -> None:
+        # A truncated or recreated file must not make the arithmetic go negative.
+        (tmp_path / "stdout.log").write_bytes(b"abc")
+        sizes, payloads = self._run_script(tmp_path, 99, 0, 1024)
+        assert sizes == (3, 0, 0, 0)
+        assert payloads[0] == ""
+
+    def test_the_script_round_trips_binary_output(self, tmp_path: Path) -> None:
+        """Console output is not guaranteed to be text — ANSI, NULs and CRs all appear."""
+        payload = bytes(range(256))
+        (tmp_path / "stdout.log").write_bytes(payload)
+        _sizes, payloads = self._run_script(tmp_path, 0, 0, 4096)
+        assert base64.b64decode(payloads[0]) == payload

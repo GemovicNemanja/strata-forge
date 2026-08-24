@@ -36,8 +36,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from strata_forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
-from strata_forge.compute.job import Job, JobStatus
+from strata_forge.compute.backends.base import (
+    MAX_CONSOLE_CHUNK_BYTES,
+    MAX_READ_FILE_BYTES,
+    safe_workdir_relpath,
+)
+from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
 
 if TYPE_CHECKING:
     from strata_forge.compute.task import Task
@@ -373,6 +377,28 @@ class LocalBackend:
         lines = combined.splitlines()
         return "\n".join(lines[-tail:])
 
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk:
+        state = self._require_job(job)
+        if max_bytes <= 0:
+            err = f"max_bytes must be >= 1; got {max_bytes}"
+            raise ValueError(err)
+        out, out_dropped = _slice_stream(state.stdout_buffer, stdout_offset, max_bytes)
+        err_text, err_dropped = _slice_stream(state.stderr_buffer, stderr_offset, max_bytes)
+        return ConsoleChunk(
+            stdout=out,
+            stderr=err_text,
+            stdout_offset=len(state.stdout_buffer),
+            stderr_offset=len(state.stderr_buffer),
+            dropped_bytes=out_dropped + err_dropped,
+        )
+
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
         state = self._require_job(job)
         rel = safe_workdir_relpath(path)
@@ -437,3 +463,13 @@ class LocalBackend:
         process = state.process
         if process is not None:
             await _reap_group(process)
+
+
+def _slice_stream(buffer: bytes | bytearray, offset: int, cap: int) -> tuple[str, int]:
+    """Return (text after ``offset``, bytes dropped), keeping the NEWEST ``cap`` bytes."""
+    pending = buffer[max(0, int(offset)) :]
+    if len(pending) <= cap:
+        return pending.decode("utf-8", errors="replace"), 0
+    # Same choice the SSH backend makes: a watcher wants where the job is now, and the shortfall
+    # is reported rather than hidden.
+    return pending[-cap:].decode("utf-8", errors="replace"), len(pending) - cap
