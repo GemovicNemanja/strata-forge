@@ -113,6 +113,30 @@ Consequences:
 - **Payloads are base64.** The SSH channel yields decoded text, so a raw slice that cut a
   multi-byte character would arrive with a length no longer equal to the byte count the offsets
   depend on. Console output is not guaranteed to be text at all — ANSI, NULs and CRs all appear.
+- **Each slice is anchored to its START, not to the end of the file.** `tail -c N` counts back
+  from the current EOF, and the job is still writing: a file that grew between the measurement and
+  the slice would hand back a window shifted off the one the header describes, losing bytes at the
+  front and re-delivering bytes at the back — the two failures byte offsets exist to eliminate.
+  Doing both in one remote shell is necessary but not sufficient; `wc` and `tail` are still two
+  processes.
+- **The reply is treated as input, not as instruction.** It is composed by a shell on a machine
+  its owner controls, so the byte cap expressed in that shell is a cap the remote is free to
+  ignore, and the size header is a claim rather than a measurement. The read is therefore bounded
+  by the CALLER (`connection.run()` buffers a whole reply before returning it, so `console` uses a
+  streaming read with an explicit limit), the header is range-checked before it can reach a
+  `ConsoleChunk` — a negative size raises a `ValidationError` out of a backend method nobody is
+  catching, and an absurd one is persisted as a cursor and then wraps silently in the remote
+  shell's 64-bit arithmetic, turning the next read into a replay — and a decoded payload must be
+  exactly the length the header promised.
+- **An offset never advances past bytes that did not arrive intact.** A box with no `base64`
+  binary, a reply cut short by the command timeout, a corrupt frame: each costs one poll and is
+  retried, rather than being read as "nothing was printed" and skipped forever.
+- **A shrinking stream is a rotation, not a negative number.** A file truncated under the reader
+  (a restart opening it with `>`, logrotate) leaves the offset past the end; the whole file is
+  then unread, and the bytes lost in between are reported rather than silently clamped to zero.
+- **A sliding in-memory buffer has to report how far it slid.** `LocalBackend` keeps a 1 MiB
+  window, so its buffer indices are not stream offsets — reading `len(buffer)` as one pins the
+  cursor at the cap and the reader goes silent for the rest of the run, including the final line.
 
 ## Alternatives considered
 

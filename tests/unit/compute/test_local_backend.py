@@ -219,7 +219,8 @@ class TestConsole:
         backend = LocalBackend()
         job = await backend.submit(Task(name="t", run="printf '0123456789'"))
         await _wait_until_terminal(backend, job)
-        chunk = await backend.console(job, max_bytes=4)
+        # `max_bytes` is the TOTAL for the call, split evenly between the two streams.
+        chunk = await backend.console(job, max_bytes=8)
         assert chunk.stdout == "6789"
         assert chunk.dropped_bytes == 6
 
@@ -229,6 +230,32 @@ class TestConsole:
         await _wait_until_terminal(backend, job)
         with pytest.raises(ValueError, match="max_bytes"):
             await backend.console(job, max_bytes=0)
+
+    async def test_offsets_stay_absolute_once_the_window_starts_sliding(self) -> None:
+        """The buffer is a sliding 1 MiB window, so its indices are NOT stream offsets.
+
+        Reading `len(buffer)` as an offset pins the cursor at the cap forever: every later poll
+        asks for bytes past the end of a buffer that has stopped growing, gets nothing, and
+        reports `dropped_bytes=0` while the rest of the run's output disappears -- including the
+        final line, which is the one a watcher is waiting for.
+        """
+        backend = LocalBackend()
+        marker = "THE-LAST-LINE"
+        # Deliberately past _MAX_BUFFER_BYTES: below the cap nothing slides and the bug hides.
+        job = await backend.submit(
+            Task(name="t", run=f"python3 -c \"print('x'*(1<<21)); print('{marker}')\"")
+        )
+        await _wait_until_terminal(backend, job)
+
+        seen: list[str] = []
+        chunk = await backend.console(job, max_bytes=8192)
+        seen.append(chunk.stdout)
+        for _ in range(60):
+            chunk = await backend.console(
+                job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
+            )
+            seen.append(chunk.stdout)
+        assert marker in "".join(seen), "the end of the output must eventually be delivered"
 
 
 class TestCancel:

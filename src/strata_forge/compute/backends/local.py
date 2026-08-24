@@ -68,23 +68,41 @@ async def _drain(
     reader: asyncio.StreamReader,
     buffer: bytearray,
     path: Path | None,
+    dropped: _Counter | None = None,
 ) -> None:
     """Copy one pipe into ``buffer`` (capped) and, when given, append it to ``path``.
 
     Writes are unbuffered so a tailing reader sees output as it happens — the file exists to
     be read while the process is still misbehaving, not after it exits.
+
+    ``dropped`` counts the bytes trimmed off the FRONT of the window. Without it the buffer's
+    indices are not stream offsets — once the cap is reached ``len(buffer)`` stops growing, and
+    an incremental reader resuming from it would sit at a position the stream has long left
+    behind, silently receiving nothing for the rest of the run.
     """
     fh = path.open("ab", buffering=0) if path is not None else None
     try:
         while chunk := await reader.read(_READ_CHUNK_BYTES):
             buffer.extend(chunk)
             if len(buffer) > _MAX_BUFFER_BYTES:
-                del buffer[: len(buffer) - _MAX_BUFFER_BYTES]
+                trimmed = len(buffer) - _MAX_BUFFER_BYTES
+                del buffer[:trimmed]
+                if dropped is not None:
+                    dropped.value += trimmed
             if fh is not None:
                 fh.write(chunk)
     finally:
         if fh is not None:
             fh.close()
+
+
+class _Counter:
+    """A mutable integer the drain task and its reader share."""
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value = 0
 
 
 # How long the group gets to honour SIGTERM before SIGKILL, and how often liveness is re-asked.
@@ -156,6 +174,10 @@ class _JobState:
         self.process: asyncio.subprocess.Process | None = None
         self.stdout_buffer = bytearray()
         self.stderr_buffer = bytearray()
+        # How much each stream's sliding window has already discarded, so an incremental reader
+        # can work in absolute stream offsets rather than in buffer indices.
+        self.stdout_dropped = _Counter()
+        self.stderr_dropped = _Counter()
         self.started_at: datetime | None = None
         self.finished_at: datetime | None = None
         self.exit_code: int | None = None
@@ -241,10 +263,10 @@ class LocalBackend:
                 state.process = process
                 stdout_log, stderr_log = state.log_paths or (None, None)
                 drains = [
-                    asyncio.create_task(_drain(reader, buffer, path))
-                    for reader, buffer, path in (
-                        (process.stdout, state.stdout_buffer, stdout_log),
-                        (process.stderr, state.stderr_buffer, stderr_log),
+                    asyncio.create_task(_drain(reader, buffer, path, dropped))
+                    for reader, buffer, path, dropped in (
+                        (process.stdout, state.stdout_buffer, stdout_log, state.stdout_dropped),
+                        (process.stderr, state.stderr_buffer, stderr_log, state.stderr_dropped),
                     )
                     if reader is not None
                 ]
@@ -386,16 +408,18 @@ class LocalBackend:
         max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
     ) -> ConsoleChunk:
         state = self._require_job(job)
-        if max_bytes <= 0:
-            err = f"max_bytes must be >= 1; got {max_bytes}"
-            raise ValueError(err)
-        out, out_dropped = _slice_stream(state.stdout_buffer, stdout_offset, max_bytes)
-        err_text, err_dropped = _slice_stream(state.stderr_buffer, stderr_offset, max_bytes)
+        budget = _console_budget(max_bytes)
+        out, out_dropped = _slice_stream(
+            state.stdout_buffer, state.stdout_dropped.value, stdout_offset, budget
+        )
+        err, err_dropped = _slice_stream(
+            state.stderr_buffer, state.stderr_dropped.value, stderr_offset, budget
+        )
         return ConsoleChunk(
             stdout=out,
-            stderr=err_text,
-            stdout_offset=len(state.stdout_buffer),
-            stderr_offset=len(state.stderr_buffer),
+            stderr=err,
+            stdout_offset=state.stdout_dropped.value + len(state.stdout_buffer),
+            stderr_offset=state.stderr_dropped.value + len(state.stderr_buffer),
             dropped_bytes=out_dropped + err_dropped,
         )
 
@@ -465,11 +489,38 @@ class LocalBackend:
             await _reap_group(process)
 
 
-def _slice_stream(buffer: bytes | bytearray, offset: int, cap: int) -> tuple[str, int]:
-    """Return (text after ``offset``, bytes dropped), keeping the NEWEST ``cap`` bytes."""
-    pending = buffer[max(0, int(offset)) :]
+def _slice_stream(
+    buffer: bytes | bytearray, discarded: int, offset: int, cap: int
+) -> tuple[str, int]:
+    """Return (text after the absolute ``offset``, bytes dropped) from a SLIDING window.
+
+    ``discarded`` is how much the window has already thrown away, which is what makes ``offset``
+    an absolute position in the stream rather than an index into whatever the buffer happens to
+    hold. Bytes the window dropped before this reader reached them are counted as dropped — the
+    reader missed them just as surely as if the chunk cap had elided them.
+    """
+    start = max(0, int(offset) - discarded)
+    missed = max(0, discarded - int(offset))
+    pending = buffer[start:]
     if len(pending) <= cap:
-        return pending.decode("utf-8", errors="replace"), 0
+        return pending.decode("utf-8", errors="replace"), missed
     # Same choice the SSH backend makes: a watcher wants where the job is now, and the shortfall
     # is reported rather than hidden.
-    return pending[-cap:].decode("utf-8", errors="replace"), len(pending) - cap
+    return pending[-cap:].decode("utf-8", errors="replace"), missed + len(pending) - cap
+
+
+def _console_budget(max_bytes: int) -> int:
+    """The per-STREAM slice budget; ``max_bytes`` is the total for the call, split evenly.
+
+    Mirrors the SSH backend deliberately: the contract belongs to ``Backend.console``, not to one
+    implementation of it, and a caller sizing a frame against ``max_bytes`` must get the same
+    ceiling whichever backend answers.
+    """
+    try:
+        cap = int(max_bytes)
+    except TypeError, ValueError:
+        cap = 0
+    if cap < 2:
+        err = f"max_bytes must be >= 2; got {max_bytes!r}"
+        raise ValueError(err)
+    return min(cap, MAX_CONSOLE_CHUNK_BYTES) // 2

@@ -115,9 +115,16 @@ class Backend(Protocol):
         the bytes written since, so a caller polling on an interval stores a continuous
         transcript instead of a pile of overlapping tails.
 
-        When more than ``max_bytes`` accumulated, the NEWEST ``max_bytes`` are returned and
-        the shortfall is reported as ``dropped_bytes`` — a watcher wants where the run is
-        now, and a silent gap would misrepresent a jump-cut as a whole log.
+        ``max_bytes`` is the TOTAL for the call and is split evenly between the two streams,
+        clamped to :data:`MAX_CONSOLE_CHUNK_BYTES`; evenly, because stderr is where a failure
+        announces itself and a chatty stdout must not be able to starve it. When more than that
+        accumulated, the NEWEST bytes are returned and the shortfall is reported as
+        ``dropped_bytes`` — a watcher wants where the run is now, and a silent gap would
+        misrepresent a jump-cut as a whole log.
+
+        A backend with no way to read a suffix of its logs raises :class:`NotImplementedError`
+        rather than re-fetching the whole log per poll: that is linear in memory as well as in
+        time, inside a process shared by every account.
 
         Offsets are in BYTES of the underlying stream, so a slice may cut a multi-byte
         character; the boundary decodes to a replacement character rather than raising.

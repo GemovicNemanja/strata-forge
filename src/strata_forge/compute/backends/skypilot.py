@@ -217,24 +217,19 @@ class SkyPilotBackend:
         stderr_offset: int = 0,
         max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
     ) -> ConsoleChunk:
-        # `sky logs` hands back one interleaved stream with no way to ask for a suffix, so this
-        # re-reads the whole log and slices locally. Correct, but linear in the log's size on
-        # every poll -- the SSH backend's one-round-trip incremental read is the path the control
-        # plane actually uses.
-        if max_bytes <= 0:
-            err = f"max_bytes must be >= 1; got {max_bytes}"
-            raise ValueError(err)
-        data = (await self.logs(job)).encode("utf-8")
-        pending = data[max(0, int(stdout_offset)) :]
-        dropped = max(0, len(pending) - max_bytes)
-        return ConsoleChunk(
-            stdout=pending[-max_bytes:].decode("utf-8", errors="replace") if pending else "",
-            stdout_offset=len(data),
-            # SkyPilot does not separate the two streams; everything arrives as stdout and this
-            # offset stays where the caller left it rather than pretending to advance.
-            stderr_offset=max(0, int(stderr_offset)),
-            dropped_bytes=dropped,
+        # Deliberately not implemented, for the same reason as `read_file` below: `sky logs` has
+        # no way to ask for a suffix, so the only implementation available here re-fetches the
+        # WHOLE log on every poll and slices it locally. That is linear in the log's size in
+        # memory as well as in time -- three full-size copies coexist per call -- inside a
+        # control-plane process shared by every account, with no bound anywhere. A backend that
+        # can be OOM-ed by one tenant's chatty job is worse than one that says it cannot do this
+        # yet. Byte offsets into a re-fetched, re-rendered string would not be stable either.
+        _ = (job, stdout_offset, stderr_offset, max_bytes)
+        err = (
+            "SkyPilotBackend.console is not implemented yet (lands with the SkyPilot compute "
+            "path, which needs an incremental log read `sky logs` does not currently offer)."
         )
+        raise NotImplementedError(err)
 
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str:
         # Reading an arbitrary file off the cluster needs an exec+capture round-trip

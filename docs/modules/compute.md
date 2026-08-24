@@ -262,18 +262,28 @@ while not done:
         render(f"[{chunk.dropped_bytes} bytes not shown]")
 ```
 
-When more than ``max_bytes`` accumulated between calls the NEWEST bytes are kept
-and the shortfall is reported as ``dropped_bytes`` — a watcher wants where the
-run is now, and a silent jump-cut would read as a whole transcript. Offsets are
-byte offsets into the underlying stream, so a slice may cut a multi-byte
-character; the boundary decodes to a replacement character rather than raising.
+``max_bytes`` is the TOTAL for the call, split evenly between the two streams and
+clamped to ``MAX_CONSOLE_CHUNK_BYTES``. When more accumulated between calls the
+NEWEST bytes are kept and the shortfall is reported as ``dropped_bytes`` — a
+watcher wants where the run is now, and a silent jump-cut would read as a whole
+transcript. Offsets are byte offsets into the underlying stream, so a slice may
+cut a multi-byte character; the boundary decodes to a replacement character
+rather than raising.
 
-The SSH backend does this in ONE round trip: it measures both files and computes
-the slice lengths in the same remote shell (measuring locally and slicing
-remotely would race a job that is still writing) and base64-frames the payloads
-so byte counts survive the transport. SkyPilot has no way to ask for a suffix of
-``sky logs``, so it re-reads the whole log and slices locally — correct, but
-linear in the log's size per poll.
+The SSH backend does this in ONE round trip. It measures both files and computes
+the slice lengths in the same remote shell, anchors each slice to its START
+(``tail -c N`` counts back from the end of a file the job is still writing, so an
+end-anchored slice would not match the header it arrived with), and base64-frames
+the payloads so byte counts survive the transport. The reply is read under a
+bound of the caller's own — the remote-side cap lives in a shell on a machine its
+owner controls — and every field of it is validated before use: a header is a
+claim, not a measurement. Anything that fails those checks costs one poll and
+leaves the offsets untouched, because advancing past bytes that never arrived
+loses them for good.
+
+SkyPilot raises ``NotImplementedError``: ``sky logs`` has no way to ask for a
+suffix, and re-fetching the whole log per poll is linear in memory as well as in
+time inside a process shared by every account.
 
 Methods that don't apply to a particular backend raise
 :class:`NotImplementedError` rather than silently passing — that
