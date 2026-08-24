@@ -146,12 +146,24 @@ class TestTrainerCallback:
         assert step["learning_rate"] == 1e-4
         assert step["epoch"] == 0.1
         # promoted keys are NOT duplicated inside metrics; extras are kept
-        assert step["metrics"] == {"grad_norm": 2.0}
+        assert step["metrics"]["grad_norm"] == 2.0
+        assert "loss" not in step["metrics"]
+        assert "learning_rate" not in step["metrics"]
+        # The first log establishes the pace baseline and reports no rate: one timestamp is not
+        # a rate, and dividing by a zero interval would emit an infinity.
+        assert "steps_per_s" not in step["metrics"]
 
         ev = events[2]
         assert ev["kind"] == "eval"
         assert ev["loss"] == 0.4  # promoted from eval_loss
-        assert ev["metrics"] == {"eval_runtime": 1.2}
+        assert ev["metrics"]["eval_runtime"] == 1.2
+        assert "eval_loss" not in ev["metrics"]
+        # By the second log there is an interval to divide by. Both logs report the same
+        # global_step, so the derived rate is a real zero rather than a missing key.
+        assert ev["metrics"]["steps_per_s"] == 0.0
+
+        # Every event a runner emits during training belongs to the same coarse milestone.
+        assert [e["stage"] for e in events] == ["run"] * len(events)
 
     def test_requires_transformers(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setitem(sys.modules, "transformers", None)

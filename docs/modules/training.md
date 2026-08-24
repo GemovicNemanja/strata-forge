@@ -388,3 +388,55 @@ When any of these is missing, the corresponding method raises
 - **DPO with PEFT + no `ref_model`:** TRL handles this by disabling
   the adapter on the base model to derive a reference. No special
   Forge config required; just don't pass ``ref_model``.
+
+## Run telemetry
+
+`strata_forge.training.progress` is the channel an orchestrator tails (one `ProgressEvent` per
+JSONL line, read via `Backend.read_file` — see
+[ADR 0016](../architecture/adr/0016-backend-read-file.md)). Beyond the step counters it carries two
+things a run *watcher* needs, decided in
+[ADR 0017](../architecture/adr/0017-run-telemetry-on-the-progress-channel.md).
+
+**`stage` — where the run is, as an id.** One of `RUN_STAGES`:
+
+```
+provision → install_engine → load_model → run → push
+```
+
+`stage` is independent of `kind`: `kind` says what sort of record an event is, `stage` says where in
+the run it sits. Render an ordered stepper from `RUN_STAGES` and `stage` — never by matching on
+`message`, whose wording is prose and free to change.
+
+A runner reports only the last three. `provision` and `install_engine` describe the VM *before the
+runner's process exists*, so the orchestrator that submitted the job owns them. Dataset loading
+reports as `load_model`: not literally the model, but the same "getting ready" milestone from the
+watcher's side.
+
+**`metrics` — the numbers.** A free-form `dict[str, float]`, so a new counter is a key rather than a
+schema change and an older consumer ignores what it does not recognise.
+
+| Key | Where it comes from |
+|---|---|
+| `grad_norm`, `eval_*`, … | whatever the TRL/`transformers` log dict carried, minus the promoted fields |
+| `steps_per_s` | derived from the wall clock between logged steps |
+| `tokens_per_s` | derived, *only* when the trainer counts tokens (`include_num_input_tokens_seen`) |
+| `succeeded`, `failed` | batch inference, per chunk |
+| `rows_per_s`, `latency_p50_ms` | batch inference, from each row's own `LLMResponse` |
+| `gpu_count`, `gpu_util_pct`, `gpu_mem_used_mb`, `gpu_mem_total_mb`, `gpu_temp_c` | `strata_forge.training.hardware` |
+
+A `phase` event may carry `stage` and `metrics` too — neither is a step count, and both stay true
+during exactly the long uncountable stretches where nothing else does.
+
+### GPU counters
+
+`hardware.GpuSampler` shells out to `nvidia-smi` and caches for `min_interval_s` (5s default),
+so it is safe to call on every event. Two properties are deliberate:
+
+- **No new dependency.** `pynvml` would be tidier in-process, but forge's dependencies install
+  *fresh on the user's VM* at the start of every run, so each pin is another package that can
+  publish a breaking release between a green CI run and someone's four-hour fine-tune.
+- **It never raises.** No binary, no driver, a timeout, a changed CSV shape, a CPU-only box — every
+  path returns `{}`. A missing gauge is cosmetic; an exception out of a metrics call is not.
+
+On a multi-GPU box: mean utilization, summed memory, **max** temperature. Max because one card
+cooking is the fact worth surfacing, and a mean would hide it behind its healthy neighbours.

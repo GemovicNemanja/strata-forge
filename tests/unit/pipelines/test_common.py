@@ -14,7 +14,7 @@ import json
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -79,6 +79,63 @@ class TestSanitize:
     def test_the_phase_sink_tolerates_no_writer(self) -> None:
         # Progress is optional: a runner launched without a progress path must still run.
         phase_sink(None, _TOKEN)("still going")
+
+    def test_the_phase_sink_records_the_stage_when_given_one(self, tmp_path: Path) -> None:
+        # `stage` is what lets a consumer render an ordered stepper without pattern-matching the
+        # English in `message`, which changes constantly and is not an API.
+        writer = JsonlProgressWriter(tmp_path / "p.jsonl")
+        phase_sink(writer, None)("Starting the model server", stage="load_model")
+        writer.close()
+        assert json.loads((tmp_path / "p.jsonl").read_text())["stage"] == "load_model"
+
+    def test_the_phase_sink_leaves_the_stage_unset_by_default(self, tmp_path: Path) -> None:
+        # Keeps the plain one-argument call valid for callers outside the runner, whose hooks
+        # know nothing about run stages.
+        writer = JsonlProgressWriter(tmp_path / "p.jsonl")
+        phase_sink(writer, None)("Uploading")
+        writer.close()
+        assert json.loads((tmp_path / "p.jsonl").read_text())["stage"] is None
+
+    def test_the_phase_sink_carries_gpu_counters(self, tmp_path: Path) -> None:
+        # This is where hardware telemetry matters most: loading a model or uploading results
+        # can take minutes during which nothing is countable and the gauges are all that moves.
+        class _Sampler:
+            def sample(self) -> dict[str, float]:
+                return {"gpu_util_pct": 94.0}
+
+        writer = JsonlProgressWriter(tmp_path / "p.jsonl")
+        phase_sink(writer, None, gpu=cast("Any", _Sampler()))(
+            "Loading the model", stage="load_model"
+        )
+        writer.close()
+        assert json.loads((tmp_path / "p.jsonl").read_text())["metrics"] == {"gpu_util_pct": 94.0}
+
+    @pytest.mark.asyncio
+    async def test_a_staged_ticking_phase_stamps_every_tick(self, tmp_path: Path) -> None:
+        # A consumer that misses one event still learns the stage from the next.
+        writer = JsonlProgressWriter(tmp_path / "p.jsonl")
+        async with ticking_phase(
+            phase_sink(writer, None), "Generating responses", 0.01, stage="run"
+        ):
+            await asyncio.sleep(0.035)
+        writer.close()
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "p.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        assert len(events) > 1, "the ticker should have re-stamped at least once"
+        assert {e["stage"] for e in events} == {"run"}
+
+    @pytest.mark.asyncio
+    async def test_an_unstaged_ticking_phase_accepts_a_one_argument_sink(self) -> None:
+        # `serving.py`'s public `on_phase` hook is a plain Callable[[str], None]; forcing a
+        # `stage=` keyword onto it would break every caller for a value they never asked for.
+        seen: list[str] = []
+        async with ticking_phase(seen.append, "Loading", 0.01):
+            await asyncio.sleep(0.02)
+        assert seen
+        assert seen[0] == "Loading"
 
 
 # ------------------------------ repo ids -------------------------------------

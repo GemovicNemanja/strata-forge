@@ -23,16 +23,21 @@ runners use to wire a writer onto a trainer when a path (or the
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from strata_forge.training.hardware import GpuSampler
+
 __all__ = [
+    "RUN_STAGES",
     "JsonlProgressWriter",
     "ProgressEvent",
     "ProgressKind",
+    "RunStage",
     "attach",
     "coerce_float",
     "coerce_int",
@@ -44,8 +49,31 @@ __all__ = [
 # ``phase`` is listed first because it is the only kind that can precede ``start``: it reports
 # what a long provisioning step is doing (downloading data, launching a model server, uploading
 # results) so the stretches between countable milestones are not a silent gap to whoever tails
-# the JSONL. A ``phase`` event carries ``message`` only — never a step count.
+# the JSONL. A ``phase`` event carries no step count — but it may carry ``stage`` and ``metrics``,
+# because neither is a count: one says WHICH milestone the prose belongs to, the other reports the
+# machine underneath it, and both stay meaningful during the long uncountable stretches.
 type ProgressKind = Literal["phase", "start", "step", "eval", "checkpoint", "end", "error"]
+
+# The coarse milestone a run is in, as an ID rather than prose. ``message`` says what is happening
+# in words that change constantly ("Loading the dataset", "Starting the model server"); ``stage``
+# says which of a fixed, ordered set of milestones that sentence belongs to, so an orchestrator can
+# render an ordered stepper without pattern-matching English.
+#
+# A runner only ever reports the last three. ``provision`` and ``install_engine`` describe the VM
+# before the runner's own process exists — the orchestrator that submitted the job owns those, and
+# infers them from the job's own lifecycle. Dataset loading is reported as ``load_model``: it is
+# not the model, but it is the same "getting ready to run" milestone from the watcher's side, and a
+# stage the user never sees a separate label for is a stage that should not exist.
+type RunStage = Literal["provision", "install_engine", "load_model", "run", "push"]
+
+RUN_STAGES: tuple[RunStage, ...] = (
+    "provision",
+    "install_engine",
+    "load_model",
+    "run",
+    "push",
+)
+"""Every stage in order. Consumers rendering a stepper should read this rather than hardcode it."""
 
 # Keys promoted to dedicated :class:`ProgressEvent` fields, so they aren't
 # duplicated inside ``metrics``.
@@ -55,12 +83,16 @@ _PROMOTED = frozenset({"loss", "eval_loss", "learning_rate", "epoch"})
 class ProgressEvent(BaseModel):
     """One structured training-progress record.
 
-    A ``phase`` event is the exception to the shape below: it carries only ``kind``,
-    ``message`` and ``ts``, because it marks work that has no step to count.
+    A ``phase`` event is the exception to the shape below: it carries no step, epoch or
+    loss, because it marks work that has no step to count. It may still carry ``stage``
+    and ``metrics`` — neither is a count, and both stay true while nothing is countable.
 
     Attributes:
         kind: The lifecycle milestone this event marks, or ``phase`` for a free-form
             report of what a long uncountable step is currently doing.
+        stage: Which coarse, ordered milestone this event belongs to, when the runner knows.
+            Independent of ``kind``: ``kind`` says what sort of record this is, ``stage`` says
+            where in the run it sits. ``None`` on events emitted before a stage is established.
         step: Global optimizer step, when known.
         total_steps: Total planned optimizer steps, when known.
         epoch: Fractional epoch, when known.
@@ -76,6 +108,7 @@ class ProgressEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: ProgressKind
+    stage: RunStage | None = None
     step: int | None = None
     total_steps: int | None = None
     epoch: float | None = None
@@ -135,6 +168,60 @@ def numeric_metrics(train_output: Any) -> dict[str, float]:
     return _numeric_extras(cast("dict[str, Any]", raw), exclude=frozenset())
 
 
+class _Pace:
+    """Derives training throughput from the wall clock between logged steps.
+
+    ``transformers`` reports ``train_samples_per_second`` once, in the ``TrainOutput`` returned
+    after training ends — useful for a report, useless for watching a run. This measures the same
+    thing continuously from what every log already carries: the step number, the time it arrived,
+    and (when the trainer was asked to count them) the tokens seen so far.
+
+    Cumulative from the first log rather than per-interval, for the same reason the inference
+    runner is: a single slow step between two logs would otherwise make the gauge lurch. The first
+    log establishes the baseline and reports nothing — one timestamp is not a rate.
+    """
+
+    def __init__(self) -> None:
+        self._t0: float | None = None
+        self._step0: int | None = None
+        self._tokens0: float | None = None
+
+    def start(self) -> None:
+        self._t0 = time.monotonic()
+        self._step0 = None
+        self._tokens0 = None
+
+    def tick(self, step: int | None, data: dict[str, Any]) -> dict[str, float]:
+        """Rates for this log line, or ``{}`` until there is enough history to divide by."""
+        now = time.monotonic()
+        if self._t0 is None:
+            self._t0 = now
+        tokens = coerce_float(data.get("num_tokens"))
+
+        if self._step0 is None:
+            self._step0, self._tokens0, self._t0 = step, tokens, now
+            return {}
+
+        elapsed = now - self._t0
+        if elapsed <= 0:
+            return {}
+
+        out: dict[str, float] = {}
+        # `self._step0` is an int by here: the baseline branch above returns whenever it is None.
+        if step is not None:
+            out["steps_per_s"] = (step - self._step0) / elapsed
+        # Only when the trainer was configured to count tokens
+        # (`TrainingArguments.include_num_input_tokens_seen`); absent, tokens/s is not knowable
+        # here and reporting a guess would be worse than reporting nothing.
+        if (
+            tokens is not None
+            and self._tokens0 is not None
+            and "train_tokens_per_second" not in data
+        ):
+            out["tokens_per_s"] = (tokens - self._tokens0) / elapsed
+        return out
+
+
 class JsonlProgressWriter:
     """Append :class:`ProgressEvent`s to a JSONL file, one per line.
 
@@ -185,18 +272,26 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
         raise ImportError(msg) from exc
 
     base: Any = transformers_mod.TrainerCallback
+    gpu = GpuSampler()
+    # Throughput is derived here rather than read off the trainer: `transformers` reports
+    # `train_samples_per_second` only in the final TrainOutput, which is exactly too late to
+    # watch. Tracking the wall clock between logs gives the same number while it still matters.
+    pace = _Pace()
 
     class _JsonlCallback(base):  # pyright: ignore[reportUntypedBaseClass]
         """Maps a subset of ``TrainerCallback`` hooks onto JSONL events."""
 
         def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
             del args, control, kwargs
+            pace.start()
             writer.emit(
                 ProgressEvent(
                     kind="start",
+                    stage="run",
                     step=coerce_int(getattr(state, "global_step", None)),
                     total_steps=coerce_int(getattr(state, "max_steps", None)),
                     epoch=coerce_float(getattr(state, "epoch", None)),
+                    metrics=gpu.sample(),
                 )
             )
 
@@ -211,15 +306,20 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             del args, control, kwargs
             data = dict(logs or {})
             is_eval = any(key.startswith("eval_") for key in data)
+            step = coerce_int(getattr(state, "global_step", None))
             writer.emit(
                 ProgressEvent(
                     kind="eval" if is_eval else "step",
-                    step=coerce_int(getattr(state, "global_step", None)),
+                    stage="run",
+                    step=step,
                     total_steps=coerce_int(getattr(state, "max_steps", None)),
                     epoch=coerce_float(data.get("epoch", getattr(state, "epoch", None))),
                     loss=coerce_float(data.get("eval_loss") if is_eval else data.get("loss")),
                     learning_rate=coerce_float(data.get("learning_rate")),
-                    metrics=_numeric_extras(data),
+                    # Trainer numbers first, then derived pace, then hardware. Later keys win, but
+                    # `pace` yields nothing for a key the trainer already reported, so a real
+                    # `train_tokens_per_second` from the trainer is never overwritten by an estimate.
+                    metrics={**_numeric_extras(data), **pace.tick(step, data), **gpu.sample()},
                 )
             )
 
@@ -228,6 +328,7 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             writer.emit(
                 ProgressEvent(
                     kind="checkpoint",
+                    stage="run",
                     step=coerce_int(getattr(state, "global_step", None)),
                     epoch=coerce_float(getattr(state, "epoch", None)),
                 )
@@ -238,9 +339,13 @@ def trainer_callback(writer: JsonlProgressWriter) -> Any:
             writer.emit(
                 ProgressEvent(
                     kind="end",
+                    # Still `run`: this marks the END of training, not the start of pushing.
+                    # The runner owns the `push` stage, because it is the one that uploads.
+                    stage="run",
                     step=coerce_int(getattr(state, "global_step", None)),
                     total_steps=coerce_int(getattr(state, "max_steps", None)),
                     epoch=coerce_float(getattr(state, "epoch", None)),
+                    metrics=gpu.sample(),
                 )
             )
 

@@ -28,8 +28,9 @@ import os
 import re
 import signal
 import sys
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
 
@@ -39,11 +40,27 @@ from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
+    from strata_forge.training.hardware import GpuSampler
+    from strata_forge.training.progress import RunStage
+
+
+class PhaseSink(Protocol):
+    """What :func:`phase_sink` returns, and what every phase-reporting hook accepts.
+
+    Spelled as a Protocol rather than a ``Callable`` alias because ``stage`` is keyword-only:
+    a bare ``phase("Loading the dataset")`` from a caller outside the runner stays valid, while
+    a runner that knows its milestone can pass ``stage=`` without a second sink type.
+    """
+
+    def __call__(self, message: str, *, stage: RunStage | None = ...) -> None: ...
+
+
 __all__ = [
     "MAX_PHASE_CHARS",
     "PHASE_TICK_SECONDS",
     "REPO_ID_RE",
     "SAFE_NAME_RE",
+    "PhaseSink",
     "RunError",
     "emit",
     "install_termination_handlers",
@@ -118,18 +135,35 @@ def emit(writer: JsonlProgressWriter | None, event: ProgressEvent) -> None:
         writer.emit(event)
 
 
-def phase_sink(writer: JsonlProgressWriter | None, hf_token: str | None) -> Callable[[str], None]:
+def phase_sink(
+    writer: JsonlProgressWriter | None,
+    hf_token: str | None,
+    *,
+    gpu: GpuSampler | None = None,
+) -> PhaseSink:
     """Build the one function every phase message goes through.
 
     A single choke point, so scrubbing is unconditional: the same sink is handed to library code
     whose phase hook is public API, and a phrase that came from outside the runner gets the
     treatment the error path already applies.
+
+    ``stage`` is keyword-only and optional so the plain ``phase("...")` call an outside caller
+    makes still type-checks; runners that know which milestone they are in pass it.
+
+    When ``gpu`` is given, its counters ride every phase event. That matters most exactly here:
+    loading a model or uploading results can take minutes during which nothing is countable, and
+    the hardware gauges are the only thing left that still moves.
     """
 
-    def _phase(message: str) -> None:
+    def _phase(message: str, *, stage: RunStage | None = None) -> None:
         emit(
             writer,
-            ProgressEvent(kind="phase", message=sanitize(message, hf_token)[:MAX_PHASE_CHARS]),
+            ProgressEvent(
+                kind="phase",
+                stage=stage,
+                message=sanitize(message, hf_token)[:MAX_PHASE_CHARS],
+                metrics=gpu.sample() if gpu is not None else {},
+            ),
         )
 
     return _phase
@@ -137,7 +171,11 @@ def phase_sink(writer: JsonlProgressWriter | None, hf_token: str | None) -> Call
 
 @contextlib.asynccontextmanager
 async def ticking_phase(
-    phase: Callable[[str], None], message: str, interval_s: float = PHASE_TICK_SECONDS
+    phase: PhaseSink | Callable[[str], None],
+    message: str,
+    interval_s: float = PHASE_TICK_SECONDS,
+    *,
+    stage: RunStage | None = None,
 ) -> AsyncGenerator[None]:
     """Report ``message`` for as long as the block runs, re-stamping it with its elapsed time.
 
@@ -151,12 +189,20 @@ async def ticking_phase(
     """
     loop = asyncio.get_running_loop()
     started = loop.time()
-    phase(message)  # immediately, with no elapsed: zero is noise, and this marks the start
+    # Bind the stage once, and only when there is one: a sink is often a plain one-argument
+    # callable (`serving.py`'s public `on_phase` hook, a bare `list.append` in a test), and
+    # unconditionally passing `stage=` would break every one of them for a value they never asked
+    # for. With no stage, this is exactly the call it always was.
+    report = phase if stage is None else partial(phase, stage=stage)
+
+    # Immediately, with no elapsed: zero is noise, and this marks the start. Every tick re-stamps
+    # the same stage, so a consumer that loses one event still learns the stage from the next.
+    report(message)
 
     async def _tick() -> None:
         while True:
             await asyncio.sleep(interval_s)
-            phase(f"{message} ({format_elapsed(loop.time() - started)})")
+            report(f"{message} ({format_elapsed(loop.time() - started)})")
 
     task = asyncio.create_task(_tick())
     try:

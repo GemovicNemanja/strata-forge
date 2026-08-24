@@ -46,7 +46,9 @@ import asyncio
 import itertools
 import re
 import sys
+import time
 from pathlib import Path
+from statistics import median
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -71,6 +73,7 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
 )
 from strata_forge.storage import HFHubClient
+from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
@@ -244,6 +247,7 @@ async def _run_batches(
     custom_ids: list[str],
     writer: JsonlProgressWriter | None,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
+    gpu: GpuSampler | None = None,
 ) -> list[dict[str, Any]]:
     """Run the prompts in progress-chunked batches; reconcile results positionally.
 
@@ -259,6 +263,12 @@ async def _run_batches(
     total = len(prompts)
     out: list[dict[str, Any]] = []
     ok = failed = 0
+    # Throughput is measured from the first chunk, not from process start: everything before this
+    # point is dataset loading and engine warmup, and folding minutes of that into the denominator
+    # would report a rows/s the run never actually ran at.
+    started = time.monotonic()
+    latencies_ms: list[float] = []
+    output_tokens = 0
     for start in range(0, total, hp.progress_chunk):
         # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
         # the granularity the run already reports at. It bounds the waste at one chunk rather than
@@ -278,6 +288,10 @@ async def _run_batches(
             if result.succeeded and result.response is not None:
                 out.append({"custom_id": cid, "output": result.response.text, "error": None})
                 ok += 1
+                # Both already measured per request by the client — a true per-row latency and a
+                # real token count, not an average reconstructed from the chunk's wall time.
+                latencies_ms.append(result.response.latency_ms)
+                output_tokens += result.response.usage.output_tokens
             else:
                 out.append({"custom_id": cid, "output": None, "error": repr(result.error)})
                 failed += 1
@@ -285,12 +299,38 @@ async def _run_batches(
             writer,
             ProgressEvent(
                 kind="step",
+                stage="run",
                 step=len(out),
                 total_steps=total,
-                metrics={"succeeded": float(ok), "failed": float(failed)},
+                metrics={
+                    "succeeded": float(ok),
+                    "failed": float(failed),
+                    **_throughput(started, len(out), output_tokens, latencies_ms),
+                    **(gpu.sample() if gpu is not None else {}),
+                },
             ),
         )
     return out
+
+
+def _throughput(
+    started: float, rows_done: int, output_tokens: int, latencies_ms: list[float]
+) -> dict[str, float]:
+    """Rate and latency counters for the rows finished so far.
+
+    Rates are cumulative rather than per-chunk: a chunk is small enough that its own wall time is
+    mostly noise from whichever row happened to be slowest, and a gauge that swings on that reads
+    as broken. ``latency_p50_ms`` is a real median over every row completed so far — the tail is
+    what makes a mean useless here, and the median is what survives it.
+    """
+    elapsed = time.monotonic() - started
+    metrics: dict[str, float] = {}
+    if elapsed > 0:
+        metrics["rows_per_s"] = rows_done / elapsed
+        metrics["tokens_per_s"] = output_tokens / elapsed
+    if latencies_ms:
+        metrics["latency_p50_ms"] = median(latencies_ms)
+    return metrics
 
 
 def _check_produced_output(rows: list[dict[str, Any]], ok: int) -> None:
@@ -352,18 +392,21 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWriter | None) -> str:
-    phase = phase_sink(writer, hf_token)
+    # One sampler for the run: the phase sink folds its counters into every caption, and the
+    # step events below reuse the same cached reading rather than shelling out twice.
+    gpu = GpuSampler()
+    phase = phase_sink(writer, hf_token, gpu=gpu)
 
     # The split download is unbounded by row_limit (that only slices during iteration), so it
     # runs BEFORE the first countable milestone and can take minutes on its own.
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
     # blocked event loop cannot tick the caption that says it is still going.
-    async with ticking_phase(phase, "Loading the dataset"):
+    async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         rows = await asyncio.to_thread(_load_rows, spec, hf_token)
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
-    emit(writer, ProgressEvent(kind="start", total_steps=len(prompts)))
+    emit(writer, ProgressEvent(kind="start", stage="run", total_steps=len(prompts)))
 
     hp = spec.hyperparams
     task = build_vllm_task(
@@ -410,7 +453,9 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         task,
         base_url=f"http://{_SERVE_HOST}:{_SERVE_PORT}/v1",
         wait_timeout_s=hp.wait_timeout_s,
-        on_phase=phase,
+        # serving.py reports prose through a plain one-arg hook and knows nothing about run
+        # stages, which is right: bind the stage here rather than widening its public API.
+        on_phase=lambda message: phase(message, stage="load_model"),
     ) as endpoint:
         # The endpoint this runner just launched is on loopback and takes no credential, and
         # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back
@@ -428,8 +473,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         )
         # The first `step` only lands once a whole progress_chunk has completed, and that
         # chunk absorbs the client's cold start on top of its generations.
-        async with ticking_phase(phase, "Generating responses"):
-            out = await _run_batches(spec, client, prompts, custom_ids, writer, endpoint.is_alive)
+        async with ticking_phase(phase, "Generating responses", stage="run"):
+            out = await _run_batches(
+                spec, client, prompts, custom_ids, writer, endpoint.is_alive, gpu
+            )
 
     # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
     # The orchestrator deletes that workdir on every terminal state, so writing there and pushing
@@ -440,11 +487,11 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     #
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
-    async with ticking_phase(phase, "Writing results"):
+    async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
     if hf_token and spec.output_repo_id:
         try:
-            async with ticking_phase(phase, "Uploading results to the Hub"):
+            async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
                 destination = await _push_results(spec, results_path, hf_token)
         except Exception as exc:
             # Name WHERE the results are. The run still fails — the user asked for them on the Hub
@@ -460,6 +507,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         writer,
         ProgressEvent(
             kind="end",
+            stage="push",
             step=len(out),
             total_steps=len(out),
             metrics={"succeeded": float(ok), "failed": float(len(out) - ok)},
