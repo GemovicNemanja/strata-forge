@@ -1273,7 +1273,9 @@ class TestConsoleDistrustsTheRemote:
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
     ) -> None:
         job = await self._job(backend, fake_connection)
-        fake_connection.queue(_FakeProcessResult(stdout="__forge_console__ 8 0 8 0\n!!not-b64!!\n\n"))
+        fake_connection.queue(
+            _FakeProcessResult(stdout="__forge_console__ 8 0 8 0\n!!not-b64!!\n\n")
+        )
         assert (await backend.console(job, stdout_offset=0)).stdout_offset == 0
 
     async def test_a_shrunken_file_reports_what_it_could_not_show(
@@ -1284,8 +1286,7 @@ class TestConsoleDistrustsTheRemote:
         fake_connection.queue(
             _FakeProcessResult(
                 stdout=(
-                    "__forge_console__ 100 0 10 0\n"
-                    f"{base64.b64encode(b'0123456789').decode()}\n\n"
+                    f"__forge_console__ 100 0 10 0\n{base64.b64encode(b'0123456789').decode()}\n\n"
                 )
             )
         )
