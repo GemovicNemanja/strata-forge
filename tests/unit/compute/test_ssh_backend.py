@@ -39,20 +39,58 @@ class _FakeProcessResult:
         self.stderr = stderr
 
 
+#: How much of a reply this double hands back per `read` call. Small enough that every console
+#: reply in these tests spans several reads, which is the case the real reader always produces and
+#: a single-shot double never does.
+_FAKE_READ_CHUNK = 48
+
+
 class _FakeReader:
+    """Mimics asyncssh's `SSHReader`, INCLUDING that `read(n)` is `read up to n`.
+
+    asyncssh returns the moment any data is buffered rather than waiting for `n` characters, so a
+    reply written by the remote in several pieces takes several reads to collect. A double that
+    hands back the whole string on the first call cannot fail for a caller that only reads once —
+    which is exactly the bug this shape exists to catch.
+    """
+
     def __init__(self, text: str) -> None:
         self._text = text
-        self.requested: int | None = None
+        self._pos = 0
+        #: The bounds this reader was asked for, in order — the caller's own cap is the only thing
+        #: standing between the control plane and a reply sized by the remote.
+        self.requested: list[int] = []
 
     async def read(self, n: int = -1) -> str:
-        # Records the bound it was asked for, which is the whole point of this path.
-        self.requested = n
-        return self._text if n < 0 else self._text[:n]
+        self.requested.append(n)
+        if n < 0:
+            piece, self._pos = self._text[self._pos :], len(self._text)
+            return piece
+        take = min(n, _FAKE_READ_CHUNK)
+        piece = self._text[self._pos : self._pos + take]
+        self._pos += len(piece)
+        return piece
+
+
+class _NeverEndingReader(_FakeReader):
+    """A remote that finishes its reply and then holds the channel open forever.
+
+    Not exotic: any login shell that backgrounds a process inheriting stdout does this, and so
+    does a deliberately hostile one. The reply arrives in full; EOF never does.
+    """
+
+    async def read(self, n: int = -1) -> str:
+        piece = await super().read(n)
+        if piece:
+            return piece
+        # Exhausted, and no EOF is coming. A reader waiting for one waits for the deadline.
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")  # pragma: no cover
 
 
 class _FakeProcess:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = _FakeReader(stdout)
+    def __init__(self, stdout: str, *, never_ends: bool = False) -> None:
+        self.stdout = _NeverEndingReader(stdout) if never_ends else _FakeReader(stdout)
         self.closed = False
 
     def close(self) -> None:
@@ -70,6 +108,10 @@ class _FakeSSHConnection:
         self.script: list[_FakeProcessResult] = []
         self.closed = False
         self.last_timeout: float | None = None
+        self.last_process: _FakeProcess | None = None
+        #: Make every process hold its channel open after the reply, like a shell that backgrounds
+        #: something inheriting stdout.
+        self.never_ends = False
 
     def queue(self, *results: _FakeProcessResult) -> None:
         self.script.extend(results)
@@ -109,7 +151,8 @@ class _FakeSSHConnection:
         not use it, so the double has to offer the streaming shape too.
         """
         result = await self.run(command)
-        return _FakeProcess(result.stdout)
+        self.last_process = _FakeProcess(result.stdout, never_ends=self.never_ends)
+        return self.last_process
 
     def close(self) -> None:
         self.closed = True
@@ -1041,6 +1084,49 @@ class TestConsole:
         assert chunk.stderr == "oops\n"
         assert (chunk.stdout_offset, chunk.stderr_offset) == (6, 5)
         assert chunk.dropped_bytes == 0
+
+    async def test_a_reply_too_large_for_one_read_is_still_assembled(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """The case a real run is made of, and the one a single-shot read gets wrong.
+
+        `SSHReader.read(n)` returns as soon as anything is buffered, and the remote composes this
+        reply in several writes -- so all but the smallest console read arrives in pieces. A reader
+        that took the first piece for the whole reply would see payloads shorter than the header
+        promised, correctly refuse to advance its offsets, and then do the same on every later
+        poll: a console that stays empty for the life of the run while progress streams normally.
+        """
+        job = await self._job(backend, fake_connection)
+        printed = b"".join(b"row %d / 10570 . ok . 402 ms\n" % i for i in range(200))
+        fake_connection.queue(self._reply(printed, b"", total_out=len(printed), total_err=0))
+        chunk = await backend.console(job, max_bytes=64 * 1024)
+        assert chunk.stdout == printed.decode()
+        assert chunk.stdout_offset == len(printed)
+        assert chunk.dropped_bytes == 0
+        # Several reads, each bounded: the loop is the fix, the cap is what makes it safe.
+        reader = fake_connection.last_process.stdout
+        assert len(reader.requested) > 1
+        assert all(n > 0 for n in reader.requested)
+
+    async def test_a_remote_that_never_hangs_up_does_not_stall_the_read(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """The reply is self-delimiting, so waiting for EOF is waiting for nothing.
+
+        EOF arrives when the remote closes the channel, and it does not do that while any process
+        still holds stdout -- a login shell that backgrounds a daemon is enough. A read that waited
+        for it would spend the whole command deadline on every poll of that target, and the
+        orchestrator polls runs sequentially in one process shared by every account: one such
+        target would stop other people's runs being reconciled at all.
+        """
+        job = await self._job(backend, fake_connection)
+        fake_connection.never_ends = True
+        fake_connection.queue(self._reply(b"hello\n", b"", total_out=6, total_err=0))
+        # No deadline of its own: if the read waits for EOF this never returns and the suite hangs,
+        # which is a louder failure than a wrong assertion.
+        chunk = await asyncio.wait_for(backend.console(job), timeout=5)
+        assert chunk.stdout == "hello\n"
+        assert chunk.stdout_offset == 6
 
     async def test_passes_the_offsets_it_was_given_to_the_remote_side(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection

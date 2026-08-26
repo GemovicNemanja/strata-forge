@@ -27,7 +27,10 @@ import contextlib
 import shlex
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
@@ -94,6 +97,9 @@ def _report_fields(stdout: str) -> dict[str, str]:
 _CONNECT_TIMEOUT_S = 30.0
 _LOGIN_TIMEOUT_S = 30.0
 _COMMAND_TIMEOUT_S = 120.0
+#: How long to wait for a closed channel to finish tearing down. Short and separate from the
+#: command deadline because it runs AFTER that deadline may already have been spent.
+_CLOSE_DRAIN_S = 5.0
 
 
 class SSHBackend:
@@ -182,7 +188,9 @@ class SSHBackend:
         self._connection = await asyncssh_mod.connect(**kwargs)
         return self._connection
 
-    async def _run_remote_bounded(self, command: str, limit: int) -> str:
+    async def _run_remote_bounded(
+        self, command: str, limit: int, complete: Callable[[str], bool]
+    ) -> str:
         """Run ``command`` and read AT MOST ``limit`` characters of its stdout.
 
         ``connection.run()`` collects the entire reply into memory before returning it, and the
@@ -190,16 +198,48 @@ class SSHBackend:
         that shell is a cap the remote side is free to ignore. This is the control plane's own
         bound, and it matters because this command is polled for the whole life of every run from
         one process shared by every account.
+
+        Read in a LOOP, because ``SSHReader.read(n)`` is a `read up to n` and not a `read n`: it
+        returns the moment any data is buffered. The reply this bound exists for is composed by
+        several separate writes on the remote side -- a header line, then two base64 frames -- so a
+        single call reliably returns the header alone. The caller then sees payloads whose decoded
+        length does not match the byte counts the header promised, treats the whole chunk as one
+        that did not arrive intact, and refuses to advance its offsets: correct behaviour on a
+        corrupt read, and permanent silence when every read is truncated the same way.
+
+        The loop stops on ``complete``, not on EOF, and that distinction is the difference between
+        a fast poll and a service-wide stall. EOF arrives when the remote closes the channel, which
+        it does not do while ANY process still holds stdout -- a login shell that backgrounds a
+        daemon, a tmux, or simply a hostile one. Waiting for it would turn every poll of that
+        target into a full ``_COMMAND_TIMEOUT_S`` stall, and the orchestrator polls runs
+        sequentially in one process shared by every account: a single such target would stop other
+        people's runs being reconciled at all. The reply is self-delimiting, so there is no need to
+        ask the remote to hang up before believing it has finished talking.
         """
         connection = await self._get_connection()
         async with asyncio.timeout(_COMMAND_TIMEOUT_S):
             process = await connection.create_process(command)
             try:
-                return str(await process.stdout.read(limit) or "")
+                pieces: list[str] = []
+                remaining = limit
+                while remaining > 0:
+                    piece = str(await process.stdout.read(remaining) or "")
+                    if not piece:  # EOF -- the remote hung up, which is also an ending
+                        break
+                    pieces.append(piece)
+                    remaining -= len(piece)
+                    if complete("".join(pieces)):
+                        break
+                return "".join(pieces)
             finally:
                 process.close()
+                # Bounded, because the deadline above has already been spent. `asyncio.timeout`
+                # cancels this task ONCE, at the deadline; by the time a cancellation has unwound
+                # into this `finally` there is no timer left to interrupt a fresh await, so an
+                # unbounded drain here would hang the poller with nothing to stop it -- on exactly
+                # the half-open connection that made the read time out in the first place.
                 with contextlib.suppress(Exception):
-                    await process.wait_closed()
+                    await asyncio.wait_for(process.wait_closed(), _CLOSE_DRAIN_S)
 
     async def _run_remote(self, command: str, *, check: bool = False) -> tuple[int, str, str]:
         """Run ``command`` on the remote host; return (exit, stdout, stderr)."""
@@ -490,7 +530,9 @@ class SSHBackend:
         unread = ConsoleChunk(stdout_offset=out_off, stderr_offset=err_off)
 
         raw = await self._run_remote_bounded(
-            _console_command(workdir, out_off, err_off, budget), _reply_limit(budget)
+            _console_command(workdir, out_off, err_off, budget),
+            _reply_limit(budget),
+            _console_complete,
         )
         sizes, payloads = _console_frames(raw)
         if sizes is None or not _plausible(sizes, budget):
@@ -639,6 +681,21 @@ def _console_command(workdir: str, out_off: int, err_off: int, cap: int) -> str:
         f'if [ "$ne" -gt 0 ]; then tail -c +"$se" {err} 2>/dev/null | head -c "$ne" '
         f'| base64 | tr -d "\\n"; fi; echo'
     )
+
+
+def _console_complete(raw: str) -> bool:
+    """Has the whole reply arrived, judged from the reply itself?
+
+    Counted in NEWLINES rather than lines, because the two differ exactly when it matters: a
+    payload still being written splits into a final element that looks like a complete line, so
+    counting lines would call a half-delivered frame finished and hand the caller a base64 string
+    shorter than its header promised -- the failure this read exists to avoid.
+
+    Three terminators after the marker: the one ending the header line, and one for each of the
+    two payload lines the command emits with `echo` whether or not the slice was empty.
+    """
+    start = raw.rfind(_CONSOLE_MARKER)
+    return start >= 0 and raw.count("\n", start) >= 3
 
 
 def _console_frames(raw: str) -> tuple[tuple[int, int, int, int] | None, tuple[str, str]]:

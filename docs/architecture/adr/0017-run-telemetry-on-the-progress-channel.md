@@ -130,7 +130,25 @@ Consequences:
   exactly the length the header promised.
 - **An offset never advances past bytes that did not arrive intact.** A box with no `base64`
   binary, a reply cut short by the command timeout, a corrupt frame: each costs one poll and is
-  retried, rather than being read as "nothing was printed" and skipped forever.
+  retried, rather than being read as "nothing was printed" and skipped forever. The corollary is
+  that the caller's bounded read must collect the WHOLE reply before judging it: `SSHReader.read(n)`
+  reads *up to* `n` and returns the moment anything is buffered, while the remote composes the reply
+  in several writes — so a single call returns the header alone, every payload then fails the
+  length check, and the refusal to advance that protects a corrupt read becomes a console that is
+  empty for the life of the run.
+- **The read ends when the REPLY is complete, never when the channel closes.** The two are not the
+  same event: EOF arrives only once the remote closes the channel, and it does not do that while
+  any process still holds stdout — a login shell that backgrounds a daemon is enough, and a
+  hostile one is trivial. Waiting for EOF would spend the whole command deadline on every poll of
+  that target, and an orchestrator polls runs sequentially in one process shared by every account,
+  so a single such target would stop other people's runs being reconciled at all. The reply is
+  self-delimiting (a marker line and two `echo`-terminated payload lines), so completeness is
+  counted in newlines after the marker — in newlines rather than lines, because a payload still
+  being written splits into a final element that looks exactly like a complete line.
+- **The channel drain after a timeout carries its own deadline.** A timeout cancels its task once,
+  at the deadline; by the time that cancellation has unwound into the cleanup there is no timer
+  left to interrupt a fresh await, so an unbounded drain there hangs with nothing to stop it — on
+  precisely the half-open connection that caused the timeout.
 - **A shrinking stream is a rotation, not a negative number.** A file truncated under the reader
   (a restart opening it with `>`, logrotate) leaves the offset past the end; the whole file is
   then unread, and the bytes lost in between are reported rather than silently clamped to zero.
