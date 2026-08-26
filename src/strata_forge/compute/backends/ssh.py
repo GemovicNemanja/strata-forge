@@ -190,12 +190,28 @@ class SSHBackend:
         that shell is a cap the remote side is free to ignore. This is the control plane's own
         bound, and it matters because this command is polled for the whole life of every run from
         one process shared by every account.
+
+        Read in a LOOP, because ``SSHReader.read(n)`` is a `read up to n` and not a `read n`: it
+        returns the moment any data is buffered. The reply this bound exists for is composed by
+        several separate writes on the remote side -- a header line, then two base64 frames -- so a
+        single call reliably returns the header alone. The caller then sees payloads whose decoded
+        length does not match the byte counts the header promised, treats the whole chunk as one
+        that did not arrive intact, and refuses to advance its offsets: correct behaviour on a
+        corrupt read, and permanent silence when every read is truncated the same way.
         """
         connection = await self._get_connection()
         async with asyncio.timeout(_COMMAND_TIMEOUT_S):
             process = await connection.create_process(command)
             try:
-                return str(await process.stdout.read(limit) or "")
+                pieces: list[str] = []
+                remaining = limit
+                while remaining > 0:
+                    piece = str(await process.stdout.read(remaining) or "")
+                    if not piece:  # EOF -- the command finished writing
+                        break
+                    pieces.append(piece)
+                    remaining -= len(piece)
+                return "".join(pieces)
             finally:
                 process.close()
                 with contextlib.suppress(Exception):

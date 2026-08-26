@@ -130,7 +130,12 @@ Consequences:
   exactly the length the header promised.
 - **An offset never advances past bytes that did not arrive intact.** A box with no `base64`
   binary, a reply cut short by the command timeout, a corrupt frame: each costs one poll and is
-  retried, rather than being read as "nothing was printed" and skipped forever.
+  retried, rather than being read as "nothing was printed" and skipped forever. The corollary is
+  that the caller's bounded read must collect the WHOLE reply before judging it: `SSHReader.read(n)`
+  reads *up to* `n` and returns the moment anything is buffered, while the remote composes the reply
+  in several writes — so a single call returns the header alone, every payload then fails the
+  length check, and the refusal to advance that protects a corrupt read becomes a console that is
+  empty for the life of the run.
 - **A shrinking stream is a rotation, not a negative number.** A file truncated under the reader
   (a restart opening it with `>`, logrotate) leaves the offset past the end; the whole file is
   then unread, and the bytes lost in between are reported rather than silently clamped to zero.
