@@ -72,9 +72,25 @@ class _FakeReader:
         return piece
 
 
+class _NeverEndingReader(_FakeReader):
+    """A remote that finishes its reply and then holds the channel open forever.
+
+    Not exotic: any login shell that backgrounds a process inheriting stdout does this, and so
+    does a deliberately hostile one. The reply arrives in full; EOF never does.
+    """
+
+    async def read(self, n: int = -1) -> str:
+        piece = await super().read(n)
+        if piece:
+            return piece
+        # Exhausted, and no EOF is coming. A reader waiting for one waits for the deadline.
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
 class _FakeProcess:
-    def __init__(self, stdout: str) -> None:
-        self.stdout = _FakeReader(stdout)
+    def __init__(self, stdout: str, *, never_ends: bool = False) -> None:
+        self.stdout = _NeverEndingReader(stdout) if never_ends else _FakeReader(stdout)
         self.closed = False
 
     def close(self) -> None:
@@ -93,6 +109,9 @@ class _FakeSSHConnection:
         self.closed = False
         self.last_timeout: float | None = None
         self.last_process: _FakeProcess | None = None
+        #: Make every process hold its channel open after the reply, like a shell that backgrounds
+        #: something inheriting stdout.
+        self.never_ends = False
 
     def queue(self, *results: _FakeProcessResult) -> None:
         self.script.extend(results)
@@ -132,7 +151,7 @@ class _FakeSSHConnection:
         not use it, so the double has to offer the streaming shape too.
         """
         result = await self.run(command)
-        self.last_process = _FakeProcess(result.stdout)
+        self.last_process = _FakeProcess(result.stdout, never_ends=self.never_ends)
         return self.last_process
 
     def close(self) -> None:
@@ -1088,6 +1107,26 @@ class TestConsole:
         reader = fake_connection.last_process.stdout
         assert len(reader.requested) > 1
         assert all(n > 0 for n in reader.requested)
+
+    async def test_a_remote_that_never_hangs_up_does_not_stall_the_read(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        """The reply is self-delimiting, so waiting for EOF is waiting for nothing.
+
+        EOF arrives when the remote closes the channel, and it does not do that while any process
+        still holds stdout -- a login shell that backgrounds a daemon is enough. A read that waited
+        for it would spend the whole command deadline on every poll of that target, and the
+        orchestrator polls runs sequentially in one process shared by every account: one such
+        target would stop other people's runs being reconciled at all.
+        """
+        job = await self._job(backend, fake_connection)
+        fake_connection.never_ends = True
+        fake_connection.queue(self._reply(b"hello\n", b"", total_out=6, total_err=0))
+        # No deadline of its own: if the read waits for EOF this never returns and the suite hangs,
+        # which is a louder failure than a wrong assertion.
+        chunk = await asyncio.wait_for(backend.console(job), timeout=5)
+        assert chunk.stdout == "hello\n"
+        assert chunk.stdout_offset == 6
 
     async def test_passes_the_offsets_it_was_given_to_the_remote_side(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
