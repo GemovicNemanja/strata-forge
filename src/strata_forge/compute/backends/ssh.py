@@ -21,13 +21,23 @@ the SkyPilot backend.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import contextlib
 import shlex
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from strata_forge.compute.backends.base import MAX_READ_FILE_BYTES, safe_workdir_relpath
-from strata_forge.compute.job import Job, JobStatus
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+from strata_forge.compute.backends.base import (
+    MAX_CONSOLE_CHUNK_BYTES,
+    MAX_READ_FILE_BYTES,
+    safe_workdir_relpath,
+)
+from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
 from strata_forge.compute.task import Task  # noqa: TC001 — runtime use in submit
 
 __all__ = ["SSHBackend"]
@@ -41,6 +51,16 @@ _EXIT_FILE = "forge.exit"
 # user asked for. The lie is not free downstream: an orchestrator that captures diagnostics only
 # for FAILED jobs discards the logs of exactly the deaths nobody chose.
 _CANCELLED_FILE = "forge.cancelled"
+# Prefixes the console read's size header for the same reason `_REPORT_MARKER` prefixes the
+# launch report: a login shell may print a banner or an rc file's chatter first.
+_CONSOLE_MARKER = "__forge_console__"
+# Room for the header line, base64 padding and the two trailing newlines when sizing how much
+# of the reply is worth reading at all.
+_CONSOLE_FRAME_SLACK = 256
+# Beyond this a reported stream size is not a measurement, it is a fabrication or a bug. Well
+# under 2**53 so the value stays exact through JSON and inside the remote shell's 64-bit
+# arithmetic, which wraps silently rather than failing.
+_MAX_PLAUSIBLE_BYTES = 1 << 48
 _STDOUT_FILE = "stdout.log"
 _STDERR_FILE = "stderr.log"
 _FORGE_REMOTE_ROOT = ".forge-compute"
@@ -77,6 +97,9 @@ def _report_fields(stdout: str) -> dict[str, str]:
 _CONNECT_TIMEOUT_S = 30.0
 _LOGIN_TIMEOUT_S = 30.0
 _COMMAND_TIMEOUT_S = 120.0
+#: How long to wait for a closed channel to finish tearing down. Short and separate from the
+#: command deadline because it runs AFTER that deadline may already have been spent.
+_CLOSE_DRAIN_S = 5.0
 
 
 class SSHBackend:
@@ -164,6 +187,59 @@ class SSHBackend:
             kwargs["passphrase"] = self._passphrase
         self._connection = await asyncssh_mod.connect(**kwargs)
         return self._connection
+
+    async def _run_remote_bounded(
+        self, command: str, limit: int, complete: Callable[[str], bool]
+    ) -> str:
+        """Run ``command`` and read AT MOST ``limit`` characters of its stdout.
+
+        ``connection.run()`` collects the entire reply into memory before returning it, and the
+        reply is composed by a shell on a machine the user controls -- so a cap expressed only in
+        that shell is a cap the remote side is free to ignore. This is the control plane's own
+        bound, and it matters because this command is polled for the whole life of every run from
+        one process shared by every account.
+
+        Read in a LOOP, because ``SSHReader.read(n)`` is a `read up to n` and not a `read n`: it
+        returns the moment any data is buffered. The reply this bound exists for is composed by
+        several separate writes on the remote side -- a header line, then two base64 frames -- so a
+        single call reliably returns the header alone. The caller then sees payloads whose decoded
+        length does not match the byte counts the header promised, treats the whole chunk as one
+        that did not arrive intact, and refuses to advance its offsets: correct behaviour on a
+        corrupt read, and permanent silence when every read is truncated the same way.
+
+        The loop stops on ``complete``, not on EOF, and that distinction is the difference between
+        a fast poll and a service-wide stall. EOF arrives when the remote closes the channel, which
+        it does not do while ANY process still holds stdout -- a login shell that backgrounds a
+        daemon, a tmux, or simply a hostile one. Waiting for it would turn every poll of that
+        target into a full ``_COMMAND_TIMEOUT_S`` stall, and the orchestrator polls runs
+        sequentially in one process shared by every account: a single such target would stop other
+        people's runs being reconciled at all. The reply is self-delimiting, so there is no need to
+        ask the remote to hang up before believing it has finished talking.
+        """
+        connection = await self._get_connection()
+        async with asyncio.timeout(_COMMAND_TIMEOUT_S):
+            process = await connection.create_process(command)
+            try:
+                pieces: list[str] = []
+                remaining = limit
+                while remaining > 0:
+                    piece = str(await process.stdout.read(remaining) or "")
+                    if not piece:  # EOF -- the remote hung up, which is also an ending
+                        break
+                    pieces.append(piece)
+                    remaining -= len(piece)
+                    if complete("".join(pieces)):
+                        break
+                return "".join(pieces)
+            finally:
+                process.close()
+                # Bounded, because the deadline above has already been spent. `asyncio.timeout`
+                # cancels this task ONCE, at the deadline; by the time a cancellation has unwound
+                # into this `finally` there is no timer left to interrupt a fresh await, so an
+                # unbounded drain here would hang the poller with nothing to stop it -- on exactly
+                # the half-open connection that made the read time out in the first place.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(process.wait_closed(), _CLOSE_DRAIN_S)
 
     async def _run_remote(self, command: str, *, check: bool = False) -> tuple[int, str, str]:
         """Run ``command`` on the remote host; return (exit, stdout, stderr)."""
@@ -294,6 +370,15 @@ class SSHBackend:
         workdir = job.metadata.get("remote_workdir")
         if not isinstance(workdir, str) or not workdir:
             err = f"SSHBackend: job {job.id!r} missing remote_workdir metadata"
+            raise ValueError(err)
+        # Confined here rather than in each caller, so every method that composes a remote path
+        # from it inherits the guard `cleanup` already asks for. A record whose metadata said
+        # "../../../../etc" would otherwise have `logs`/`console`/`read_file` reading /etc.
+        if ".." in workdir.split("/") or not workdir.startswith(self._remote_root + "/"):
+            err = (
+                f"SSHBackend: job {job.id!r} workdir {workdir!r} is not under "
+                f"remote_root {self._remote_root!r}"
+            )
             raise ValueError(err)
         return workdir
 
@@ -429,6 +514,48 @@ class SSHBackend:
         _exit, stdout, _stderr = await self._run_remote(cmd)
         return stdout
 
+    async def console(
+        self,
+        job: Job,
+        *,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
+    ) -> ConsoleChunk:
+        workdir = self._job_workdir(job)
+        budget = _console_budget(max_bytes)
+        out_off, err_off = max(0, int(stdout_offset)), max(0, int(stderr_offset))
+        # Every early return hands back the offsets UNCHANGED. Advancing past bytes that did not
+        # arrive intact would lose them permanently; repeating a poll costs one round trip.
+        unread = ConsoleChunk(stdout_offset=out_off, stderr_offset=err_off)
+
+        raw = await self._run_remote_bounded(
+            _console_command(workdir, out_off, err_off, budget),
+            _reply_limit(budget),
+            _console_complete,
+        )
+        sizes, payloads = _console_frames(raw)
+        if sizes is None or not _plausible(sizes, budget):
+            return unread
+        total_out, total_err, take_out, take_err = sizes
+        out, err = _b64_text(payloads[0], take_out), _b64_text(payloads[1], take_err)
+        if out is None or err is None:
+            return unread
+
+        dropped = (_unread_bytes(total_out, out_off) - take_out) + (
+            _unread_bytes(total_err, err_off) - take_err
+        )
+        return ConsoleChunk(
+            stdout=out,
+            stderr=err,
+            # The offsets advance to each file's CURRENT size, not to what was read: the skipped
+            # middle is reported as dropped and must not be re-offered, or a busy job would keep
+            # the reader permanently behind, forever re-dropping the same bytes.
+            stdout_offset=total_out,
+            stderr_offset=total_err,
+            dropped_bytes=max(0, dropped),
+        )
+
     async def cancel(self, job: Job) -> None:
         target = self._signal_target(job)
         workdir = self._job_workdir(job)
@@ -456,14 +583,8 @@ class SSHBackend:
         await self._run_remote(cmd)
 
     async def cleanup(self, job: Job) -> None:
+        # `_job_workdir` confines to the remote_root, which is what makes this `rm -rf` safe.
         workdir = self._job_workdir(job)
-        # Refuse to wipe anything that doesn't live under the remote_root.
-        if not workdir.startswith(self._remote_root + "/"):
-            err = (
-                f"SSHBackend.cleanup: refusing to remove {workdir!r} — "
-                f"not under remote_root {self._remote_root!r}"
-            )
-            raise ValueError(err)
         await self._run_remote(f"rm -rf {shlex.quote(workdir)}")
 
     async def close(self) -> None:
@@ -472,3 +593,148 @@ class SSHBackend:
             self._connection.close()
             await self._connection.wait_closed()
             self._connection = None
+
+
+def _console_budget(max_bytes: int) -> int:
+    """The per-STREAM slice budget. ``max_bytes`` is the total for the call, split evenly.
+
+    Split rather than applied to each stream separately, so the ceiling a caller sizes a frame or
+    a database column against is the one it actually gets. Evenly rather than first-come, because
+    stderr is where a failure announces itself and a chatty stdout must not be able to starve it.
+
+    Coerced and clamped rather than trusted: a value that arrived through JSON is a float, and
+    ``[ "$n" -gt 65536.0 ]`` is not a comparison the remote shell can make -- it errors, leaves
+    the slice length uncapped, and the cap silently ceases to exist.
+    """
+    try:
+        cap = int(max_bytes)
+    except TypeError, ValueError:
+        cap = 0
+    if cap < 2:
+        err = f"max_bytes must be >= 2; got {max_bytes!r}"
+        raise ValueError(err)
+    return min(cap, MAX_CONSOLE_CHUNK_BYTES) // 2
+
+
+def _reply_limit(budget: int) -> int:
+    """How much of the remote's reply is worth reading: two base64 frames plus the header."""
+    return 2 * (4 * ((budget + 2) // 3) + _CONSOLE_FRAME_SLACK) + _CONSOLE_FRAME_SLACK
+
+
+def _unread_bytes(total: int, offset: int) -> int:
+    """How much of a stream the caller has not seen.
+
+    ``total < offset`` means the file SHRANK -- truncated by a restart that opened it with `>`,
+    by logrotate, or by the user. Everything now in it is unread, and reporting the subtraction's
+    negative result as zero would claim a continuous transcript across a hole.
+    """
+    return total - offset if total >= offset else total
+
+
+def _plausible(sizes: tuple[int, int, int, int], budget: int) -> bool:
+    """Is this header one a working remote could have produced?
+
+    The reply is composed on the user's own machine, so it is input rather than instruction. A
+    negative size reaches ``ConsoleChunk``'s ``ge=0`` and raises a ``ValidationError`` out of a
+    backend method no caller is catching; a huge one is persisted as a resume cursor and then
+    interpolated back into remote arithmetic that WRAPS at 64 bits rather than failing, which
+    turns the next read into a replay.
+    """
+    if any(value < 0 or value > _MAX_PLAUSIBLE_BYTES for value in sizes):
+        return False
+    _total_out, _total_err, take_out, take_err = sizes
+    return take_out <= budget and take_err <= budget
+
+
+def _console_command(workdir: str, out_off: int, err_off: int, cap: int) -> str:
+    """Compose the one-round-trip incremental console read.
+
+    Sizes are measured and the slice lengths computed REMOTELY, in the same shell, so the two
+    always describe the same instant. Measuring here and slicing there would race a job that is
+    still writing, and the frame lengths would no longer match the payloads.
+
+    The payloads are base64 so that byte counts survive the transport: the SSH channel hands back
+    decoded text, and a raw slice that cut a multi-byte character mid-sequence would arrive with a
+    length no longer equal to the number of bytes it represents — which is the one invariant the
+    offsets depend on.
+    """
+    out = shlex.quote(f"{workdir}/{_STDOUT_FILE}")
+    err = shlex.quote(f"{workdir}/{_STDERR_FILE}")
+    return (
+        # `tr -dc 0-9` because `wc -c` pads its output with spaces on BSD userlands; the default
+        # covers a file the job has not created yet, which is not an error.
+        f"o=$(wc -c < {out} 2>/dev/null | tr -dc 0-9); o=${{o:-0}}; "
+        f"e=$(wc -c < {err} 2>/dev/null | tr -dc 0-9); e=${{e:-0}}; "
+        # A negative pending count means the file SHRANK below where the reader was -- a
+        # truncation or a rotation. Everything in it now is unread, so read from the start.
+        f'no=$((o-{out_off})); [ "$no" -lt 0 ] && no=$o; [ "$no" -gt {cap} ] && no={cap}; '
+        f'ne=$((e-{err_off})); [ "$ne" -lt 0 ] && ne=$e; [ "$ne" -gt {cap} ] && ne={cap}; '
+        # Anchor each slice to its START. `tail -c N` counts back from the END OF THE FILE, and
+        # the file is still being written -- so a job that appended between `wc` and `tail` would
+        # hand back a window shifted off the one the header describes, losing bytes at the front
+        # and re-delivering bytes at the back. Both are exactly what the offsets exist to prevent.
+        # When the slice was capped this start is still the newest `cap` bytes.
+        f"so=$((o-no+1)); se=$((e-ne+1)); "
+        f'printf "{_CONSOLE_MARKER} %s %s %s %s\\n" "$o" "$e" "$no" "$ne"; '
+        f'if [ "$no" -gt 0 ]; then tail -c +"$so" {out} 2>/dev/null | head -c "$no" '
+        f'| base64 | tr -d "\\n"; fi; echo; '
+        f'if [ "$ne" -gt 0 ]; then tail -c +"$se" {err} 2>/dev/null | head -c "$ne" '
+        f'| base64 | tr -d "\\n"; fi; echo'
+    )
+
+
+def _console_complete(raw: str) -> bool:
+    """Has the whole reply arrived, judged from the reply itself?
+
+    Counted in NEWLINES rather than lines, because the two differ exactly when it matters: a
+    payload still being written splits into a final element that looks like a complete line, so
+    counting lines would call a half-delivered frame finished and hand the caller a base64 string
+    shorter than its header promised -- the failure this read exists to avoid.
+
+    Three terminators after the marker: the one ending the header line, and one for each of the
+    two payload lines the command emits with `echo` whether or not the slice was empty.
+    """
+    start = raw.rfind(_CONSOLE_MARKER)
+    return start >= 0 and raw.count("\n", start) >= 3
+
+
+def _console_frames(raw: str) -> tuple[tuple[int, int, int, int] | None, tuple[str, str]]:
+    """Split the reply into (sizes, payloads), or (None, ...) if the marker never arrived.
+
+    Located by marker for the same reason `submit` does it: a login shell may print a banner, a
+    motd or an rc file's chatter before anything this command wrote.
+    """
+    lines = raw.splitlines()
+    index = next(
+        (i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith(_CONSOLE_MARKER)), None
+    )
+    if index is None:
+        return None, ("", "")
+    fields = lines[index].split()
+    if len(fields) != 5:
+        return None, ("", "")
+    try:
+        sizes = (int(fields[1]), int(fields[2]), int(fields[3]), int(fields[4]))
+    except ValueError:
+        return None, ("", "")
+    tail = lines[index + 1 :]
+    return sizes, (tail[0] if tail else "", tail[1] if len(tail) > 1 else "")
+
+
+def _b64_text(payload: str, expected: int) -> str | None:
+    """Decode one base64 frame, or None if it is not the ``expected`` number of bytes.
+
+    None is not the same as empty: it means the payload did not arrive intact -- a remote with no
+    `base64` binary, a reply cut short by the command timeout, a stray CR the alphabet forbids --
+    and the caller must NOT advance its offset past bytes it never actually read.
+    """
+    if expected == 0:
+        return ""
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except ValueError:  # binascii.Error subclasses it
+        return None
+    if len(data) != expected:
+        return None
+    # A byte slice can cut a multi-byte character in half; that boundary is cosmetic, not fatal.
+    return data.decode("utf-8", errors="replace")

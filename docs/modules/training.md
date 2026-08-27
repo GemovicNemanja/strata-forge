@@ -27,6 +27,12 @@ Integration points:
 - **Helpers:** :func:`apply_chat_template`,
   :func:`conversation_to_dicts`, :func:`conversation_to_text`,
   :func:`pack_sequences`, :class:`PackedSequence`.
+- **Declaration layer:** :data:`METHODS` / :func:`pick_method` /
+  :func:`enabled_methods` / :func:`check_format` and
+  :data:`FORMATS` / :func:`validate_mapping` /
+  :func:`build_training_rows` — for callers that hold a job spec
+  rather than Python. See
+  [Driving training from a declaration](#driving-training-from-a-declaration).
 
 Module rules: [`src/strata_forge/training/CLAUDE.md`](../../src/strata_forge/training/CLAUDE.md).
 Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
@@ -41,6 +47,7 @@ Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
 - [PEFT (LoRA / QLoRA)](#peft-lora--qlora)
 - [Chat-template formatting](#chat-template-formatting)
 - [Sequence packing](#sequence-packing)
+- [Driving training from a declaration](#driving-training-from-a-declaration)
 - [Lazy-import contract](#lazy-import-contract)
 - [Troubleshooting](#troubleshooting)
 
@@ -101,7 +108,7 @@ Key fields:
 | ``per_device_batch_size`` | 1 | |
 | ``gradient_accumulation_steps`` | 8 | Effective batch = device × accumulation × N devices |
 | ``learning_rate`` | 2e-4 | |
-| ``warmup_ratio`` | 0.03 | Fraction of total steps |
+| ``warmup_ratio`` | 0.03 | Fraction of total steps; reaches TRL as ``warmup_steps`` |
 | ``precision`` | ``"bf16"`` | Or ``"fp16"`` / ``"fp32"`` |
 | ``gradient_checkpointing`` | ``True`` | |
 | ``save_steps`` | 0 | 0 = no intermediate saves |
@@ -245,6 +252,107 @@ the EOS. The remaining slack at the end of each pack is filled
 with pad tokens, and ``attention_mask`` is 1 for real tokens, 0
 for pad.
 
+## Driving training from a declaration
+
+The API above assumes a caller writing Python: it picks a config class, constructs a runner, and
+hands it a `Dataset`. An orchestrator cannot do any of that — it holds a JSON job spec that was
+allowed to carry data and nothing else. Two small modules close that gap, and
+[`strata_forge.pipelines.finetune_runner`](../../src/strata_forge/pipelines/finetune_runner.py) is
+their first consumer.
+
+**The method registry** (`methods.py`) is the single table mapping a method NAME to what it is:
+its config class, its runner class, the head it trains (`task_type`), and the dataset formats it
+accepts. `pick_method(name)` is the only supported way in.
+
+```python
+from strata_forge.training import pick_method, check_format, enabled_methods
+
+spec = pick_method("dpo")          # UnsupportedMethodError for an unknown method
+check_format(spec, "preference")   # ...or one the method cannot train on
+[m.name for m in enabled_methods()]  # ["sft", "dpo", "orpo", "kto"]
+```
+
+`GRPO` is registered with `enabled=False`. It is fully implemented in
+:class:`PreferenceRunner`, but it needs `reward_funcs` — callables — and a spec that carries no
+code cannot supply one. `pick_method("grpo")` therefore raises with that explanation rather than
+behaving like an unknown method. Reach for :class:`PreferenceRunner` directly to use it.
+
+**The dataset formats** (`dataset_format.py`) declare which of a dataset's columns plays which
+role, because TRL decides what kind of run it is doing by looking at the column NAMES it was
+handed and real datasets never use those names.
+
+| Format | Required roles | Optional | Methods |
+|---|---|---|---|
+| `text` | `text` | — | sft |
+| `prompt_completion` | `prompt`, `completion` | — | sft |
+| `conversational` | `messages` | — | sft |
+| `preference` | `chosen`, `rejected` | `prompt` | dpo, orpo |
+| `unpaired_preference` | `prompt`, `completion`, `label` | — | kto |
+
+```python
+from strata_forge.training import validate_mapping, build_training_rows
+
+mapping = {"prompt": "question", "completion": "answer"}
+validate_mapping("prompt_completion", mapping, dataset.column_names)  # before anything expensive
+rows = build_training_rows(dataset, "prompt_completion", mapping)
+```
+
+`validate_mapping` is the point of the whole thing: it checks the declaration against the split's
+real columns and names the missing role, the bad column and what is available. Without it a wrong
+mapping is a TRL `KeyError` on a rented GPU, minutes into a job that has already downloaded a
+model. `build_training_rows` then projects each row onto the roles and **drops every other
+column** — a leftover `id` or `source` is not inert, it can change the format TRL infers.
+
+`preference` keeps `prompt` optional because TRL accepts both spellings (an explicit prompt beside
+the two completions, or the prompt embedded in both) and datasets in the wild use each about
+equally. A `label` cell is coerced to a real boolean rather than trusted: a column of non-empty
+strings would otherwise read as every-row-true, which trains a model on the premise that nothing
+is bad — silently wrong rather than failed.
+
+**A spec's `hyperparams` reach the method's config verbatim, with three exceptions.** The config's
+own `extra="forbid"` decides what each method accepts, so an inapplicable knob is a named error
+rather than a silent drop, and no second list of field names has to be kept in sync. But
+`extra="forbid"` only rejects keys the config does not declare — it waves through
+**`model_id`, `output_dir` and `progress_jsonl`**, which the runner *derives*: `model_id` is the
+value it validated and the value the run is recorded as, `output_dir` is the artifact directory the
+push/merge/cleanup paths address, and `progress_jsonl` is the orchestrator's channel. A spec naming
+one of them is refused (`hyperparams may not set …: the runner derives these`), because otherwise a
+submitted hyperparam could train a different model than the record names and write checkpoints and
+the progress log to any absolute path — walking past the very `validate_repo_id` re-check the VM
+side exists to perform. `extra_trainer_args` is checked for the same three keys, since
+`to_trl_kwargs` applies it last and it reaches TRL's own `output_dir`.
+
+This bounds only the **declaration** path. `extra_trainer_args` remains an unrestricted escape
+hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the
+operator, and Forge does not block access to the underlying TRL surface. The distinction is who
+submitted the values, not what they are.
+
+## The upstream contract
+
+A config renders to a kwargs dict that is splatted into TRL's constructor, so the
+names it emits are part of this package's contract with a specific pair of upstream
+majors — pinned in `pyproject.toml` as `transformers>=5.5.3,<6` and `trl>=1.0,<2`,
+and frozen as an explicit key set in `tests/unit/training/test_trl_contract.py`.
+Two places where the emitted name deliberately differs from the field:
+
+- ``warmup_ratio`` reaches TRL as **``warmup_steps``**. transformers 5 removed
+  `warmup_ratio` and folded it into `warmup_steps`, which reads a float in
+  ``[0, 1)`` as exactly that fraction — identical semantics, so the field keeps
+  the name that describes what it is.
+- ORPO's config/trainer are resolved from **``trl.experimental.orpo``** when the
+  top-level namespace does not export them, which is where TRL 1.x moved them.
+  That namespace carries no semver promise, so ORPO is the one method the
+  ``<2`` ceiling does not fully protect.
+
+``max_prompt_length`` is **gone** from the preference configs: TRL removed it
+across 0.27–0.29 with no replacement. Bound prompt length by filtering the
+dataset before training; ``max_length`` still applies to the full sequence.
+
+These pins are not decoration. This package is `pip install`-ed fresh onto a
+user's VM at run time with no lockfile, so an unbounded specifier means every
+run resolves against whatever shipped that morning, and a breaking upstream
+release surfaces as a crash on the user's hardware rather than a red build.
+
 ## Lazy-import contract
 
 Importing ``strata_forge.training`` works without the ``[finetuning]``
@@ -280,3 +388,69 @@ When any of these is missing, the corresponding method raises
 - **DPO with PEFT + no `ref_model`:** TRL handles this by disabling
   the adapter on the base model to derive a reference. No special
   Forge config required; just don't pass ``ref_model``.
+
+## Run telemetry
+
+`strata_forge.training.progress` is the channel an orchestrator tails (one `ProgressEvent` per
+JSONL line, read via `Backend.read_file` — see
+[ADR 0016](../architecture/adr/0016-backend-read-file.md)). Beyond the step counters it carries two
+things a run *watcher* needs, decided in
+[ADR 0017](../architecture/adr/0017-run-telemetry-on-the-progress-channel.md).
+
+**`stage` — where the run is, as an id.** One of `RUN_STAGES`:
+
+```
+provision → install_engine → load_model → run → push
+```
+
+`stage` is independent of `kind`: `kind` says what sort of record an event is, `stage` says where in
+the run it sits. Render an ordered stepper from `RUN_STAGES` and `stage` — never by matching on
+`message`, whose wording is prose and free to change.
+
+A runner reports only the last three. `provision` and `install_engine` describe the VM *before the
+runner's process exists*, so the orchestrator that submitted the job owns them. Dataset loading
+reports as `load_model`: not literally the model, but the same "getting ready" milestone from the
+watcher's side.
+
+**`metrics` — the numbers.** A free-form `dict[str, float]`, so a new counter is a key rather than a
+schema change and an older consumer ignores what it does not recognise.
+
+| Key | Where it comes from |
+|---|---|
+| `grad_norm`, `eval_*`, … | whatever the TRL/`transformers` log dict carried, minus the promoted fields |
+| `steps_per_s` | derived from the wall clock between logged steps |
+| `tokens_per_s` | training: derived, *only* when the trainer counts tokens (`include_num_input_tokens_seen`). Batch inference: from each row's `usage` |
+| `succeeded`, `failed` | batch inference, per chunk |
+| `rows_per_s`, `latency_p50_ms` | batch inference, from each row's own `LLMResponse` |
+| `gpu_count`, `gpu_util_pct`, `gpu_mem_used_mb`, `gpu_mem_total_mb`, `gpu_temp_c` | `strata_forge.training.hardware` |
+
+A `phase` event may carry `stage` and `metrics` too — neither is a step count, and both stay true
+during exactly the long uncountable stretches where nothing else does.
+
+### GPU counters
+
+`hardware.GpuSampler.sample()` **never blocks**: it returns the last reading and hands a refresh
+to a daemon thread when that reading has gone stale (`min_interval_s`, 5s default). Three
+properties are deliberate:
+
+- **No new dependency.** `pynvml` would be tidier in-process, but forge's dependencies install
+  *fresh on the user's VM* at the start of every run, so each pin is another package that can
+  publish a breaking release between a green CI run and someone's four-hour fine-tune.
+- **It never raises.** No binary, no driver, a timeout, a changed CSV shape, a CPU-only box — every
+  path yields no counters. A missing gauge is cosmetic; an exception out of a metrics call is not.
+- **It never hangs the run.** Callers are coroutines, and `nvidia-smi` can block for an unbounded
+  time — `subprocess.run(timeout=...)` does *not* bound it, because its POSIX timeout path kills
+  the child and then waits on it with no timeout, which never returns for the uninterruptible
+  `D` state a wedged driver produces. Sampling therefore happens off the loop, and the probe
+  abandons an unkillable child rather than waiting for it.
+
+On a multi-GPU box: mean utilization, summed memory, **max** temperature. Max because one card
+cooking is the fact worth surfacing, and a mean would hide it behind its healthy neighbours.
+Missing values are handled per *field*, so a card that reports `[N/A]` for temperature alone still
+contributes its utilization and memory. A failed refresh keeps the last good reading rather than
+blanking the gauge.
+
+Non-finite numbers never reach the channel. `loss=nan` and `grad_norm=inf` are routine in fp16, and
+pydantic serializes them to JSON `null` — which `metrics: dict[str, float]` then refuses to parse
+back, so an ordinary gradient explosion would emit a line the orchestrator could not read.
+`coerce_float` drops them, and metric keys are capped in length and count.

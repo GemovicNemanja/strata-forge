@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.training.progress import attach as _attach_progress
+from strata_forge.training.progress import coerce_int, numeric_metrics
 
 if TYPE_CHECKING:
     from strata_forge.training.peft import LoRAConfig, QLoRAConfig
@@ -58,7 +59,9 @@ class SFTConfig(BaseModel):
         gradient_accumulation_steps: Effective batch size = device
             x accumulation x N devices.
         learning_rate: Optimizer learning rate.
-        warmup_ratio: Fraction of total steps used for LR warmup.
+        warmup_ratio: Fraction of total steps used for LR warmup. Reaches TRL as
+            ``warmup_steps``, which takes a float in ``[0, 1)`` as exactly this
+            fraction.
         weight_decay: AdamW weight decay.
         precision: Training precision.
         gradient_checkpointing: Trade memory for compute.
@@ -104,7 +107,11 @@ class SFTConfig(BaseModel):
             "per_device_train_batch_size": self.per_device_batch_size,
             "gradient_accumulation_steps": self.gradient_accumulation_steps,
             "learning_rate": self.learning_rate,
-            "warmup_ratio": self.warmup_ratio,
+            # Forwarded under a DIFFERENT name than the field deliberately. transformers 5 removed
+            # `warmup_ratio` and folded it into `warmup_steps`, which reads a float in [0, 1) as a
+            # fraction of total steps -- identical semantics, so the knob this package exposes keeps
+            # the name that describes what it is.
+            "warmup_steps": self.warmup_ratio,
             "weight_decay": self.weight_decay,
             "logging_steps": self.logging_steps,
             "gradient_checkpointing": self.gradient_checkpointing,
@@ -138,6 +145,9 @@ class SFTRunResult(BaseModel):
     train_runtime_s: float | None = None
     train_samples_per_second: float | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
+    # Optimizer steps actually taken. TRL reports it beside the metrics rather than inside them,
+    # so an orchestrator summarising a finished run has no other way to say how far it got.
+    steps: int | None = None
 
 
 class SFTRunner:
@@ -199,9 +209,7 @@ class SFTRunner:
         transformers_mod, trl_mod, _ = self._load_modules()
         if model is None:
             model_load_kwargs: dict[str, Any] = {}
-            if isinstance(self._peft_config, type(self._peft_config)) and hasattr(
-                self._peft_config, "to_bnb_config"
-            ):
+            if self._peft_config is not None and hasattr(self._peft_config, "to_bnb_config"):
                 # QLoRA branch: pass the bnb config.
                 model_load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
             model = transformers_mod.AutoModelForCausalLM.from_pretrained(
@@ -247,18 +255,12 @@ class SFTRunner:
         )
         train_output: Any = trainer.train()
         trainer.save_model(self._config.output_dir)
-        metrics: dict[str, float] = {}
-        train_metrics: Any = getattr(train_output, "metrics", None)
-        if isinstance(train_metrics, dict):
-            for k, v in train_metrics.items():  # pyright: ignore[reportUnknownVariableType]
-                try:
-                    metrics[str(k)] = float(v)  # pyright: ignore[reportUnknownArgumentType]
-                except TypeError, ValueError:
-                    continue
+        metrics = numeric_metrics(train_output)
         return SFTRunResult(
             output_dir=self._config.output_dir,
             train_loss=metrics.get("train_loss"),
             train_runtime_s=metrics.get("train_runtime"),
             train_samples_per_second=metrics.get("train_samples_per_second"),
             metrics=metrics,
+            steps=coerce_int(getattr(train_output, "global_step", None)),
         )

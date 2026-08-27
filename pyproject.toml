@@ -1,6 +1,6 @@
 [project]
 name = "strata-forge"
-version = "0.1.1"
+version = "0.2.0"
 description = "Typed, async-first baseline for AI/LLM experiments across major foundation-model providers."
 requires-python = ">=3.14"
 readme = "README.md"
@@ -29,18 +29,23 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
+# Every specifier carries an upper bound. This package is `pip install`-ed FRESH onto a user's own
+# VM at run time with no lockfile, so an unbounded pin means each run resolves against whatever
+# shipped that morning and a breaking upstream release lands as a mid-run crash on the user's
+# hardware rather than as a red build here. Raise a ceiling deliberately, with the call sites
+# checked against the new major -- never to make a resolver stop complaining.
 dependencies = [
-    "pydantic>=2.10",
-    "pydantic-settings>=2.6",
-    "litellm>=1.55",
-    "structlog>=24.4",
-    "tenacity>=9.0",
-    "typer>=0.15",
-    "anyio>=4.6",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0",
-    "rich>=13.9",
-    "jinja2>=3.1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.6,<3",
+    "litellm>=1.55,<2",
+    "structlog>=24.4,<27",
+    "tenacity>=9.0,<10",
+    "typer>=0.15,<1",
+    "anyio>=4.6,<5",
+    "pyyaml>=6.0,<7",
+    "python-dotenv>=1.0,<2",
+    "rich>=13.9,<16",
+    "jinja2>=3.1,<4",
 ]
 
 [project.urls]
@@ -49,30 +54,47 @@ Repository = "https://github.com/GemovicNemanja/strata-forge"
 Issues = "https://github.com/GemovicNemanja/strata-forge/issues"
 
 [project.optional-dependencies]
-redis = ["redis>=5.2"]
-multimodal = ["pillow>=11.0"]
-inspect = ["inspect-ai>=0.3"]
-langfuse = ["langfuse>=2.50"]
-hf = ["datasets>=3.1"]
-evals = ["nltk>=3.9", "rouge-score>=0.1.2"]
-rag = ["qdrant-client>=1.13", "rank-bm25>=0.2.2", "cohere>=5.13"]
-compute = ["skypilot>=0.7", "asyncssh>=2.18"]
-serving = ["vllm>=0.7"]
-bedrock = ["boto3>=1.35"]
+redis = ["redis>=5.2,<9"]
+multimodal = ["pillow>=11.0,<13"]
+inspect = ["inspect-ai>=0.3,<0.4"]
+# The tracing/prompt/dataset stores use the module-level `propagate_attributes` the v4 SDK
+# introduced; v2 and v3 are a different API surface, so the floor is the real constraint here.
+langfuse = ["langfuse>=4.0,<5"]
+hf = ["datasets>=4.0,<6"]
+evals = ["nltk>=3.9,<4", "rouge-score>=0.1.2,<0.2"]
+rag = ["qdrant-client>=1.13,<2", "rank-bm25>=0.2.2,<0.3", "cohere>=5.13,<8"]
+compute = ["skypilot>=0.7,<1", "asyncssh>=2.18,<3"]
+# vLLM is driven as a CLI (`vllm serve`), so the floor is about what it DRAGS IN rather than an API
+# this package calls: 0.24 is the first release on the transformers>=5.5.3 line that `finetuning`
+# also targets, and every vLLM minor pins torch exactly. Keep in lockstep with compute/serving.py's
+# default setup string, which installs vLLM without consulting this file.
+serving = ["vllm>=0.24,<1"]
+bedrock = ["boto3>=1.35,<2"]
 storage = [
-    "fsspec>=2024.10",
-    "s3fs>=2024.10",
-    "gcsfs>=2024.10",
-    "adlfs>=2024.7",
-    "huggingface_hub>=0.27",
+    # Do NOT raise the s3fs/gcsfs floors: `datasets` caps fsspec, and the 2026.7+ line of these two
+    # requires an fsspec that cap excludes, which makes [storage,hf] unsatisfiable outright.
+    "fsspec>=2024.10,<2027",
+    "s3fs>=2024.10,<2027",
+    "gcsfs>=2024.10,<2027",
+    "adlfs>=2024.7,<2027",
+    "huggingface_hub>=1.0,<2",
 ]
 finetuning = [
-    "torch>=2.5",
-    "transformers>=4.46",
-    "trl>=0.13",
-    "peft>=0.13",
-    "datasets>=3.1",
-    "accelerate>=1.1",
+    # torch below 2.9 publishes no cp314 wheel, and this package requires 3.14.
+    "torch>=2.9,<3",
+    # transformers 5 REMOVED `TrainingArguments.warmup_ratio` (folded into `warmup_steps`, which now
+    # takes a float in [0,1) as a ratio). The training configs forward the new name, so 4.x is no
+    # longer accepted. Capping at <5 instead would be worse than it looks: vLLM >=0.24 requires
+    # transformers>=5.5.3, so `<5` silently backtracks [serving] onto a months-old vLLM/torch.
+    "transformers>=5.5.3,<6",
+    # TRL 1.0 is where the stable core (SFT/DPO/Reward/RLOO/GRPO) started following semver; the 0.x
+    # line broke this package's call sites in four separate minors.
+    "trl>=1.0,<2",
+    # peft below 0.18 is documented-incompatible with transformers 5 and declares no ceiling of its
+    # own, so this floor is the only thing that keeps a resolver off it.
+    "peft>=0.18,<1",
+    "datasets>=4.0,<6",
+    "accelerate>=1.4,<2",
 ]
 all = [
     "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag,bedrock]",

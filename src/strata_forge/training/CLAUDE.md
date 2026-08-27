@@ -23,11 +23,19 @@ until ``train()`` is called.
   conversations into the formats HF tokenizers and TRL want.
 - :func:`pack_sequences` + :class:`PackedSequence` — greedy
   first-fit sequence packing for SFT throughput.
+- :data:`METHODS` / :class:`MethodSpec` / :func:`pick_method` /
+  :func:`enabled_methods` / :func:`check_format` — the method
+  REGISTRY, and :data:`FORMATS` / :func:`validate_mapping` /
+  :func:`build_training_rows` / :func:`sft_text_field` — the
+  dataset-shape declaration. Together they let a caller holding a
+  JSON job spec (an orchestrator, a CLI, a launch form) drive
+  training without writing Python.
 
 ## Boundaries
 
 - **Owns:** ``sft.py``, ``preference.py``, ``peft.py``,
-  ``chat_template.py``, ``packing.py``.
+  ``chat_template.py``, ``packing.py``, ``methods.py``,
+  ``dataset_format.py``.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
   for the conversation shapes consumed by
   :mod:`strata_forge.training.chat_template`. Nothing else.
@@ -82,6 +90,19 @@ input validation or :class:`ImportError` when the
   the right TRL ``XxxTrainer`` / ``XxxConfig`` pair. ``ref_model``
   is forwarded only when the method needs it; ``reward_funcs``
   is required for GRPO and rejected otherwise.
+- **One table, not a branch per caller.** ``methods.py`` is the
+  single source for what a method NAME resolves to. A method that
+  is not in it does not exist, and a method in it that cannot be
+  driven from a spec carries a ``disabled_reason`` rather than
+  going missing — GRPO is the one such entry, because its reward
+  is a callable and a spec carries no code.
+- **Dataset shapes are declared, then validated, then
+  projected.** ``dataset_format.py`` never guesses. A caller says
+  which format it has and maps columns onto that format's roles;
+  :func:`validate_mapping` refuses a bad declaration against the
+  split's real columns BEFORE any model is downloaded, and
+  :func:`build_training_rows` drops every column outside the
+  roles (a stray column changes what TRL infers).
 
 ## Test expectations
 
@@ -113,7 +134,12 @@ input validation or :class:`ImportError` when the
 
 ## When to update this file
 
-- Adding a new preference method.
+- Adding a new preference method. This means a ``methods.py``
+  entry too — a method the registry does not list cannot be
+  named by an orchestrator, a CLI or a form, so it is only
+  half-added.
+- Adding a dataset shape to ``dataset_format.py``, or changing
+  which formats a method accepts.
 - Adding a new top-level public class/function to
   ``__init__.py``.
 - Changing the lazy-import boundary.

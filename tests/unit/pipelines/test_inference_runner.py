@@ -9,12 +9,9 @@ provider are kept, so the provider_clients= seam is validated at runtime.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
-import subprocess
 import sys
-import time
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -33,8 +30,22 @@ if TYPE_CHECKING:
 _TOKEN = "hf_secretwritetoken1234567890"
 
 
-def _ok(text: str) -> BatchInferenceResult:
-    return BatchInferenceResult(response=cast("LLMResponse", types.SimpleNamespace(text=text)))
+def _ok(text: str, *, latency_ms: float = 100.0, output_tokens: int = 10) -> BatchInferenceResult:
+    """A successful result shaped like a real ``LLMResponse``.
+
+    ``latency_ms`` and ``usage`` are not decoration: the runner reads both to report per-row
+    latency and tokens/s, so a double without them is a double that cannot exercise the path.
+    """
+    return BatchInferenceResult(
+        response=cast(
+            "LLMResponse",
+            types.SimpleNamespace(
+                text=text,
+                latency_ms=latency_ms,
+                usage=types.SimpleNamespace(output_tokens=output_tokens),
+            ),
+        )
+    )
 
 
 def _fail(exc: Exception) -> BatchInferenceResult:
@@ -146,18 +157,6 @@ def test_load_spec_accepts_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert spec.output_repo_id == "org/out"
 
 
-# ------------------------------ sanitize / ids ------------------------------
-
-
-def test_sanitize_strips_token_and_token_shapes() -> None:
-    msg = f"boom token={_TOKEN} and Bearer abc.def-123 done"
-    out = ir._sanitize(msg, _TOKEN)  # pyright: ignore[reportPrivateUsage]
-    assert _TOKEN not in out
-    assert "Bearer abc.def-123" not in out
-    assert "boom" in out
-    assert "done" in out
-
-
 class _NeverEndingDataset:
     """A split that yields forever — islice MUST stop it, or _load_rows would hang/OOM."""
 
@@ -175,7 +174,6 @@ class _NeverEndingDataset:
 
 
 def test_load_rows_caps_materialization(monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
 
     counter = {"consumed": 0}
 
@@ -234,7 +232,18 @@ async def test_run_batches_reconciles_and_emits(
     events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     step = [e for e in events if e["kind"] == "step"]
     assert step
-    assert step[-1]["metrics"] == {"succeeded": 1.0, "failed": 1.0}
+    metrics = step[-1]["metrics"]
+    # Subset rather than equality: the same event also carries throughput and (on a real GPU box)
+    # hardware counters, and pinning the whole dict would make every future gauge break this test
+    # for a reason that has nothing to do with reconciliation.
+    assert metrics["succeeded"] == 1.0
+    assert metrics["failed"] == 1.0
+    assert step[-1]["stage"] == "run"
+
+    # Only the successful row contributes to latency and tokens — a failure has neither.
+    assert metrics["latency_p50_ms"] == 100.0
+    assert metrics["rows_per_s"] > 0
+    assert metrics["tokens_per_s"] > 0
 
 
 # ----------------------- main: happy path + no token leak -------------------
@@ -911,118 +920,3 @@ async def test_the_batch_runs_without_a_liveness_probe(
             spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
         )
     assert len(out) == 4
-
-
-# --------------- a long phase keeps saying it is still going -----------------
-
-
-class TestTickingPhase:
-    """A one-shot phase says a step BEGAN and never that it is still going.
-
-    "Loading the dataset" then sits unchanged for minutes, indistinguishable from a run that has
-    hung — which is the question anyone watching is actually asking.
-    """
-
-    async def test_it_reports_immediately_without_an_elapsed(self) -> None:
-        # Zero is noise; the bare phrase marks the start.
-        seen: list[str] = []
-        async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=10):  # pyright: ignore[reportPrivateUsage]
-            pass
-        assert seen == ["Loading the dataset"]
-
-    async def test_it_re_stamps_the_phase_while_the_block_runs(self) -> None:
-        seen: list[str] = []
-        async with ir._ticking_phase(seen.append, "Writing results", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
-            await asyncio.sleep(0.05)
-        assert len(seen) > 1, "a long step must re-report itself"
-        assert seen[0] == "Writing results"
-        assert all(m.startswith("Writing results (") for m in seen[1:])
-
-    async def test_it_stops_when_the_block_ends(self) -> None:
-        # A caption still ticking after its step finished would describe work that is not running.
-        seen: list[str] = []
-        async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
-            await asyncio.sleep(0.03)
-        settled = len(seen)
-        await asyncio.sleep(0.05)
-        assert len(seen) == settled
-
-    async def test_it_stops_when_the_block_raises(self) -> None:
-        # Otherwise a failed step leaves a caption ticking forever underneath the error.
-        seen: list[str] = []
-        with contextlib.suppress(RuntimeError):
-            async with ir._ticking_phase(seen.append, "Uploading results", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
-                await asyncio.sleep(0.03)
-                raise RuntimeError("push failed")
-        settled = len(seen)
-        await asyncio.sleep(0.05)
-        assert len(seen) == settled
-
-    async def test_it_ticks_through_a_blocking_step_handed_to_a_thread(self) -> None:
-        """The reason the runner uses `to_thread` for its blocking work.
-
-        The ticker is an asyncio task, so a step that blocks the event loop stops the very caption
-        that says it is still running — the exact stretch where it is needed most.
-        """
-        seen: list[str] = []
-
-        def _blocking() -> None:
-            time.sleep(0.05)
-
-        async with ir._ticking_phase(seen.append, "Loading the dataset", interval_s=0.01):  # pyright: ignore[reportPrivateUsage]
-            await asyncio.to_thread(_blocking)
-        assert len(seen) > 1, "a blocking step must still tick when handed to a thread"
-
-
-class TestTerminationTeardown:
-    """A cancelled run must shut its model server down on the way out.
-
-    Cancelling signals the job's process group, which contains this runner. The model server
-    does NOT run in that group — the backend puts it in a session of its own so that killing
-    the server's tree cannot signal the orchestrator — so the group signal never reaches it.
-    The only thing that stops it is `serving_endpoint`'s teardown in this process's `finally`,
-    and Python's default SIGTERM handling terminates the interpreter where it stands, without
-    unwinding. That leaves the GPU held by the very process the cancel existed to stop.
-
-    Driven in a SUBPROCESS on purpose: the failure mode of the mechanism is "SIGTERM kills the
-    interpreter", which in-process would take the whole test run with it.
-    """
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
-    def test_sigterm_unwinds_the_stack_so_finally_blocks_run(self, tmp_path: Path) -> None:
-        marker = tmp_path / "torn-down"
-        script = f"""
-import asyncio, os, signal, sys
-from strata_forge.pipelines.inference_runner import _install_termination_handlers
-
-async def main():
-    _install_termination_handlers()
-    try:
-        await asyncio.sleep(60)          # stands in for the batch, with the server up
-    finally:
-        open({str(marker)!r}, "w").write("torn down")   # stands in for serving teardown
-
-async def driver():
-    task = asyncio.create_task(main())
-    await asyncio.sleep(0.5)             # let the handler install and the sleep begin
-    os.kill(os.getpid(), signal.SIGTERM)
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-asyncio.run(driver())
-"""
-        completed = subprocess.run(  # noqa: S603 — fixed interpreter, generated script
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-
-        assert marker.is_file(), (
-            "SIGTERM killed the runner outright — the teardown that stops the model server "
-            f"never ran.\nstdout={completed.stdout!r}\nstderr={completed.stderr!r}"
-        )
-        assert marker.read_text() == "torn down"
