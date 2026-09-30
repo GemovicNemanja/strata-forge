@@ -22,7 +22,10 @@ from pydantic import BaseModel, ConfigDict
 import strata_forge
 from strata_forge.pipelines import SPEC_VERSION, _common
 from strata_forge.pipelines._common import (
+    REQUIRE_ENGINE_VERSION_ENV,
+    UNCHECKED_ENGINE_MESSAGE,
     RunError,
+    check_engine_version,
     installed_engine_commit,
     load_config,
     phase_sink,
@@ -54,6 +57,12 @@ class _BareSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+
+
+@pytest.fixture(autouse=True)
+def _no_required_engine_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A developer's shell may carry the switch; the tests that exercise it set it themselves.
+    monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
 
 
 # ------------------------------ scrubbing ------------------------------------
@@ -233,10 +242,66 @@ class TestEngineVersionHandshake:
         # spec models live in: the field set ships with the version, so the version names it.
         assert strata_forge.__version__ == SPEC_VERSION
 
-    def test_no_claim_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A spec from before the handshake carries no version, and must still run.
+    def test_no_claim_is_accepted_and_recorded_as_unchecked(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A spec from before the handshake carries no version, and must still run -- but the run
+        # record must say the engine was never checked, so a launch a rolled-back control plane
+        # sent as null is not mistaken for a checked one.
+        monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
+        _run_config(monkeypatch, None)
+        assert check_engine_version(None) == UNCHECKED_ENGINE_MESSAGE
+        path = tmp_path / "progress.jsonl"
+        writer = JsonlProgressWriter(str(path))
+        try:
+            assert load_config(_Spec, writer=writer).engine_version is None
+        finally:
+            writer.close()
+        events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        assert [(e["kind"], e["message"]) for e in events] == [("phase", UNCHECKED_ENGINE_MESSAGE)]
+        assert f"warning: {UNCHECKED_ENGINE_MESSAGE}" in capsys.readouterr().err
+
+    def test_a_missing_claim_is_accepted_without_a_writer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
         _run_config(monkeypatch, None)
         assert load_config(_Spec).engine_version is None
+
+    def test_a_matching_claim_is_not_a_warning(self) -> None:
+        assert check_engine_version(SPEC_VERSION) is None
+
+    @pytest.mark.parametrize("flag", ["1", "true", "yes", " 1 "])
+    def test_a_missing_claim_is_refused_when_the_machine_requires_one(
+        self, monkeypatch: pytest.MonkeyPatch, flag: str
+    ) -> None:
+        # The switch an orchestrator that stamps every spec sets on its machines: from then on
+        # a null is the skew the handshake exists to close, not a transition to tolerate.
+        monkeypatch.setenv(REQUIRE_ENGINE_VERSION_ENV, flag)
+        _run_config(monkeypatch, None)
+        with pytest.raises(RunError) as excinfo:
+            load_config(_Spec)
+        assert "engine version mismatch" in str(excinfo.value)
+        assert REQUIRE_ENGINE_VERSION_ENV in str(excinfo.value)
+
+    @pytest.mark.parametrize("flag", ["", "0", "false", "FALSE"])
+    def test_the_switch_is_off_for_its_off_values(
+        self, monkeypatch: pytest.MonkeyPatch, flag: str
+    ) -> None:
+        monkeypatch.setenv(REQUIRE_ENGINE_VERSION_ENV, flag)
+        _run_config(monkeypatch, None)
+        assert load_config(_Spec).engine_version is None
+
+    def test_the_switch_does_not_soften_a_present_claim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Requiring a claim is about null only; a stale claim is refused with or without it.
+        monkeypatch.setenv(REQUIRE_ENGINE_VERSION_ENV, "1")
+        _run_config(monkeypatch, SPEC_VERSION)
+        assert load_config(_Spec).engine_version == SPEC_VERSION
+        _run_config(monkeypatch, "0.0.1")
+        with pytest.raises(RunError, match="engine version mismatch"):
+            load_config(_Spec)
 
     def test_a_spec_class_without_the_field_is_a_bug(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A runner spec cannot opt out of the handshake by forgetting to declare the field: that
@@ -251,8 +316,8 @@ class TestEngineVersionHandshake:
         # must declare engine_version. load_config would refuse the omission anyway, but it
         # belongs in this suite, not on a VM.
         import importlib
+        import inspect
         import pkgutil
-        import typing
 
         import strata_forge.pipelines as pipelines
 
@@ -262,7 +327,11 @@ class TestEngineVersionHandshake:
             load_spec = getattr(module, "load_spec", None)
             if load_spec is None:
                 continue
-            runners[module_info.name] = typing.get_type_hints(load_spec)["return"]
+            # The return annotation is a string (postponed evaluation) naming a class of the
+            # runner's own module; resolved by name rather than get_type_hints, whose evaluation
+            # of the parameters would trip on a TYPE_CHECKING-only import.
+            returns = inspect.signature(load_spec).return_annotation
+            runners[module_info.name] = getattr(module, returns)
         assert set(runners) >= {"inference_runner", "finetune_runner"}
         for name, spec_cls in runners.items():
             assert "engine_version" in spec_cls.model_fields, name
@@ -299,6 +368,50 @@ class TestEngineVersionHandshake:
         _run_config(monkeypatch, stale)
         with pytest.raises(RunError, match="engine version mismatch"):
             load_config(_Spec)
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "v{v}",
+            "{v}.post0",
+            "{v}.0",
+            "{v}rc0",
+            " {v}",
+            "{v} ",
+            "{v}\n",
+        ],
+    )
+    def test_a_pep_440_equivalent_spelling_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, spelling: str
+    ) -> None:
+        # The compare is string equality on purpose. A normalising compare ("0.3" == "0.3.0",
+        # "v0.3.0", a post-release) would let a version the control plane never validated
+        # against pass, and would do so silently the day someone reached for packaging.version.
+        _run_config(monkeypatch, spelling.format(v=SPEC_VERSION))
+        with pytest.raises(RunError, match="engine version mismatch"):
+            load_config(_Spec)
+
+    def test_a_short_form_of_the_version_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # "0.3" for "0.3.0": the same PEP 440 version, not the same string.
+        short = SPEC_VERSION.rsplit(".", 1)[0]
+        assert short != SPEC_VERSION
+        _run_config(monkeypatch, short)
+        with pytest.raises(RunError, match="engine version mismatch"):
+            load_config(_Spec)
+
+    def test_a_long_claim_is_truncated_in_the_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The claim is echoed for diagnosis; a control plane's is short, and the record should
+        # not carry an arbitrarily long one twice (event + stderr).
+        claim = "9" * 500
+        _run_config(monkeypatch, claim)
+        with pytest.raises(RunError) as excinfo:
+            load_config(_Spec)
+        message = str(excinfo.value)
+        assert claim not in message
+        assert "9" * 100 + "..." in message
+        assert len(message) < 300
 
     def test_a_commit_claim_is_accepted_when_the_installed_commit_matches(
         self, monkeypatch: pytest.MonkeyPatch

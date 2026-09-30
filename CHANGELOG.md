@@ -21,9 +21,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `+` followed by anything else is refused as malformed). A spec class that does not declare the
   field is a `TypeError`, so a runner cannot opt out. `strata_forge.pipelines.SPEC_VERSION`
   exports the value an orchestrator writes.
-- `None` (no claim) is accepted as the transition for an orchestrator from before the handshake.
-  It is removed, and a missing claim refused like any other mismatch, in the first minor release
-  after every orchestrator that launches this engine stamps `engine_version`.
+- `None` (no claim) is accepted as the transition for an orchestrator from before the handshake,
+  and recorded: the run's first `phase` event and a stderr `warning:` line say the installed
+  engine was not checked. Setting `FORGE_REQUIRE_ENGINE_VERSION=1` in the runner's environment
+  refuses a missing claim like any other mismatch, so an orchestrator that stamps every spec can
+  close the transition on its machines at once. The default flips to refusal in the first minor
+  release after every orchestrator that launches this engine stamps `engine_version`.
+- The version compare is string equality, never a PEP 440 normalisation (`0.3`, `v0.3.0` and
+  `0.3.0.post0` are refused for `0.3.0`), and the mismatch message caps the echoed claim.
 
 ## [0.2.0] - 2026-08-27
 

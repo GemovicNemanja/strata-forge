@@ -51,7 +51,10 @@ async def _fast_ticking_phase(
 
 
 def _spec_json(**overrides: Any) -> str:
+    # Stamped the way a real launch is: a spec with no claim is accepted but recorded as an
+    # unchecked launch, and that record is its own test, not noise in every other one.
     base: dict[str, Any] = {
+        "engine_version": SPEC_VERSION,
         "method": "sft",
         "model_id": "org/model",
         "dataset_id": "org/ds",

@@ -143,8 +143,8 @@ class RunSpec(BaseModel):
     run_id: str | None = None
 
 
-def load_spec() -> RunSpec:
-    spec = load_config(RunSpec)
+def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
+    spec = load_config(RunSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
@@ -536,7 +536,9 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
 
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
-    return await runner_main(lambda writer, token: _execute(load_spec(), token, writer))
+    return await runner_main(
+        lambda writer, token: _execute(load_spec(writer=writer), token, writer)
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -142,14 +142,14 @@ class FinetuneSpec(BaseModel):
     run_id: str | None = None
 
 
-def load_spec() -> FinetuneSpec:
+def load_spec(*, writer: JsonlProgressWriter | None = None) -> FinetuneSpec:
     """Parse + validate the spec, including the pairings only this module can check.
 
     Every check here is one that would otherwise fail on the GPU: an unknown method, a dataset
     shape the method cannot train on, a merge asked for with no adapter to merge. They cost
     milliseconds at launch and minutes-to-hours anywhere later.
     """
-    spec = load_config(FinetuneSpec)
+    spec = load_config(FinetuneSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
@@ -426,7 +426,9 @@ async def _execute(
 
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
-    return await runner_main(lambda writer, token: _execute(load_spec(), token, writer))
+    return await runner_main(
+        lambda writer, token: _execute(load_spec(writer=writer), token, writer)
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
