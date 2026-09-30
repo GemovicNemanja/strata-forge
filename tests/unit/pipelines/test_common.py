@@ -60,7 +60,7 @@ class _BareSpec(BaseModel):
 
 
 @pytest.fixture(autouse=True)
-def _no_required_engine_version(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_required_engine_version(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
     # A developer's shell may carry the switch; the tests that exercise it set it themselves.
     monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
 
