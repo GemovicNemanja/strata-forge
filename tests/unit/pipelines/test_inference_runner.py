@@ -19,6 +19,7 @@ import pytest
 
 from strata_forge.compute.batch import BatchInferenceResult
 from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
+from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
 
 if TYPE_CHECKING:
@@ -110,6 +111,22 @@ def test_load_spec_rejects_extra_fields(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(surprise="x"))
     with pytest.raises(ir.RunError, match="invalid STRATA_RUN_CONFIG"):
         ir.load_spec()
+
+
+def test_load_spec_refuses_a_spec_validated_by_another_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The handshake is applied to the real spec, not only to the shared loader.
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version="0.0.1"))
+    with pytest.raises(ir.RunError, match="engine version mismatch"):
+        ir.load_spec()
+
+
+def test_load_spec_accepts_a_spec_validated_by_this_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version=SPEC_VERSION))
+    assert ir.load_spec().engine_version == SPEC_VERSION
 
 
 @pytest.mark.parametrize(

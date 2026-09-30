@@ -122,6 +122,11 @@ class RunSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
+    # The engine the control plane validated this spec against: ``"<version>"`` or
+    # ``"<version>+<commit>"``. ``load_config`` refuses any other installed engine (``None`` makes
+    # no claim). The control plane sets it, never a user: the same string decides what the setup
+    # step installs, so a spec cannot pick an engine the control plane did not validate against.
+    engine_version: str | None = None
     model_id: str
     dataset_id: str
     dataset_commit_sha: str | None = None

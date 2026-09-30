@@ -10,6 +10,12 @@ reliability property rather than a convenience:
   copy of this is how one copy stops being maintained.
 - **Re-validating ids** (:func:`validate_repo_id`). The control plane allow-lists them, but the VM
   is the boundary that actually fetches and pushes, so it checks again.
+- **The version handshake** (:func:`check_engine_version`, applied by :func:`load_config`). The
+  spec names the engine version the control plane validated it against, and the runner refuses
+  to execute under any other. The spec models set ``extra="forbid"``, so a field the installed
+  engine does not know is already a loud failure; the handshake closes the other direction, an
+  engine NEWER than the one that validated the spec, whose changed defaults or secret channel
+  an old spec would silently miss.
 - **Termination** (:func:`install_termination_handlers`). Turning SIGTERM into a cancellation is
   what stops a cancelled run from stranding a GPU; it belongs to every runner, not to whichever
   one needed it first.
@@ -29,11 +35,13 @@ import re
 import signal
 import sys
 from functools import partial
+from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from pydantic import BaseModel
 
+from strata_forge import __version__
 from strata_forge.compute.serving import format_elapsed
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
@@ -56,14 +64,17 @@ class PhaseSink(Protocol):
 
 
 __all__ = [
+    "ENGINE_DISTRIBUTION",
     "MAX_PHASE_CHARS",
     "PHASE_TICK_SECONDS",
     "REPO_ID_RE",
     "SAFE_NAME_RE",
     "PhaseSink",
     "RunError",
+    "check_engine_version",
     "emit",
     "install_termination_handlers",
+    "installed_engine_commit",
     "load_config",
     "phase_sink",
     "progress_path",
@@ -89,6 +100,12 @@ MAX_PHASE_CHARS = 200
 # How often a long uncountable phase re-stamps itself with its elapsed time. Matches the serving
 # heartbeat, so one run does not narrate two different cadences.
 PHASE_TICK_SECONDS = 10.0
+# The distribution whose installed metadata answers "which engine commit is this VM running".
+# The import package is ``strata_forge``; the distribution name is what ``pip`` and PEP 610 know.
+ENGINE_DISTRIBUTION = "strata-forge"
+# A full git commit id. The handshake compares whole ids, never a prefix: a short id the
+# control plane happened to send would match more than one commit.
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class RunError(Exception):
@@ -112,22 +129,100 @@ def sanitize(text: str, token: str | None) -> str:
     return _TOKEN_RE.sub("***", text)
 
 
+def installed_engine_commit(distribution: str = ENGINE_DISTRIBUTION) -> str | None:
+    """The git commit the installed engine was built from, or ``None`` when there is none.
+
+    Read from the distribution's PEP 610 ``direct_url.json``, which ``pip`` writes for a VCS
+    install (``pip install git+https://...@<ref>``) and omits for an index install. A release
+    from PyPI therefore has no commit, and so does an editable checkout (a ``dir_info`` URL): the
+    handshake treats both as "not a pinned commit", never as a match.
+    """
+    try:
+        raw = metadata.distribution(distribution).read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        return None
+    if not raw:
+        return None
+    try:
+        info: object = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    vcs = cast("dict[str, object]", info).get("vcs_info")
+    if not isinstance(vcs, dict):
+        return None
+    commit = cast("dict[str, object]", vcs).get("commit_id")
+    return commit if isinstance(commit, str) and commit else None
+
+
+def check_engine_version(expected: str | None) -> None:
+    """Refuse to run under an engine other than the one the spec was validated against.
+
+    ``expected`` is what the control plane wrote into the spec: ``None`` (no claim, accepted so
+    a spec from before the handshake still runs), a plain ``"<version>"`` (the released engine
+    it pinned on the VM) or ``"<version>+<commit>"`` (the exact commit its own bundled engine was
+    built from, on a deployment that installs from a git ref rather than a release). The version
+    half must equal the installed ``__version__``; the commit half must equal the installed
+    distribution's PEP 610 commit id. An engine with no recorded commit (a release from PyPI, an
+    editable checkout) cannot satisfy a commit claim at all, because the two would only ever
+    agree by accident.
+
+    The point of the check is a warm machine. Every commit of a development branch shares one
+    ``__version__`` until a release bump, so a version-only comparison cannot see that the VM
+    runs a commit older than the one that validated the spec; the commit half can.
+    """
+    if expected is None:
+        return
+    version, _, commit = expected.partition("+")
+    installed = __version__
+    if not version or version != installed:
+        msg = (
+            f"engine version mismatch: the spec was validated against strata-forge "
+            f"{expected!r} but this machine runs {installed!r}"
+        )
+        raise RunError(msg)
+    if not commit:
+        return
+    installed_commit = installed_engine_commit()
+    if not _COMMIT_RE.fullmatch(commit) or installed_commit != commit:
+        running = (
+            f"{installed}+{installed_commit}" if installed_commit else f"{installed} (release)"
+        )
+        msg = (
+            f"engine version mismatch: the spec was validated against strata-forge "
+            f"{expected!r} but this machine runs {running!r}"
+        )
+        raise RunError(msg)
+
+
 def load_config[SpecT: BaseModel](spec_cls: type[SpecT]) -> SpecT:
-    """Parse ``STRATA_RUN_CONFIG`` into ``spec_cls``.
+    """Parse ``STRATA_RUN_CONFIG`` into ``spec_cls`` and apply the engine version handshake.
 
     Parsed as DATA only: ``json`` plus Pydantic validation, never ``eval`` / ``pickle`` /
     ``yaml.unsafe_load``. The spec models set ``extra="forbid"``, so an unrecognised key is a
     loud failure rather than a silently ignored instruction.
+
+    A spec that carries ``engine_version`` is then checked against the installed engine
+    (:func:`check_engine_version`) before anything else reads it: a mismatch is the first and
+    only thing the run reports, so a stale machine is diagnosed as such rather than through
+    whatever the stale code did with the spec.
     """
     raw = os.environ.get("STRATA_RUN_CONFIG")
     if not raw:
         msg = "STRATA_RUN_CONFIG is not set"
         raise RunError(msg)
     try:
-        return spec_cls.model_validate_json(raw)
+        spec = spec_cls.model_validate_json(raw)
     except ValueError as exc:
         msg = f"invalid STRATA_RUN_CONFIG: {exc}"
         raise RunError(msg) from exc
+    expected = getattr(spec, "engine_version", None)
+    if expected is not None and not isinstance(expected, str):
+        msg = "invalid STRATA_RUN_CONFIG: engine_version must be a string"
+        raise RunError(msg)
+    check_engine_version(expected)
+    return spec
 
 
 def emit(writer: JsonlProgressWriter | None, event: ProgressEvent) -> None:
