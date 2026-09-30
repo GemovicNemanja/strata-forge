@@ -41,10 +41,19 @@ _TOKEN = "hf_secretwritetoken1234567890"
 
 
 class _Spec(BaseModel):
+    # Shaped like a real runner spec: every one of them declares engine_version.
     model_config = ConfigDict(extra="forbid")
 
     name: str
     count: int = 1
+    engine_version: str | None = None
+
+
+class _BareSpec(BaseModel):
+    # What a runner spec that forgot the handshake looks like.
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
 
 
 # ------------------------------ scrubbing ------------------------------------
@@ -192,19 +201,20 @@ class TestLoadConfig:
         with pytest.raises(RunError, match="invalid STRATA_RUN_CONFIG"):
             load_config(_Spec)
 
+    @pytest.mark.parametrize("raw", ["[]", '"x"', "1", "null"])
+    def test_a_non_object_is_a_runner_error(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", raw)
+        with pytest.raises(RunError, match="must be a JSON object"):
+            load_config(_Spec)
+
 
 # ------------------------------ the engine version handshake ------------------------------
 
 
 _COMMIT = "0123456789abcdef0123456789abcdef01234567"
 _OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
-
-
-class _VersionedSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    engine_version: str | None = None
 
 
 def _run_config(monkeypatch: pytest.MonkeyPatch, engine_version: str | None) -> None:
@@ -226,15 +236,61 @@ class TestEngineVersionHandshake:
     def test_no_claim_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A spec from before the handshake carries no version, and must still run.
         _run_config(monkeypatch, None)
-        assert load_config(_VersionedSpec).engine_version is None
+        assert load_config(_Spec).engine_version is None
 
-    def test_a_spec_without_the_field_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_spec_class_without_the_field_is_a_bug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A runner spec cannot opt out of the handshake by forgetting to declare the field: that
+        # would run unchecked, and a control plane that did stamp the version would be refused
+        # for an unknown key, so the omission would surface on a VM instead of here.
         monkeypatch.setenv("STRATA_RUN_CONFIG", '{"name": "x"}')
-        assert load_config(_Spec) == _Spec(name="x")
+        with pytest.raises(TypeError, match="_BareSpec does not declare engine_version"):
+            load_config(_BareSpec)
+
+    def test_every_runner_spec_declares_the_field(self) -> None:
+        # The registry-style guard for the next runner: the spec each runner's load_spec returns
+        # must declare engine_version. load_config would refuse the omission anyway, but it
+        # belongs in this suite, not on a VM.
+        import importlib
+        import pkgutil
+        import typing
+
+        import strata_forge.pipelines as pipelines
+
+        runners: dict[str, type[BaseModel]] = {}
+        for module_info in pkgutil.iter_modules(pipelines.__path__):
+            module = importlib.import_module(f"{pipelines.__name__}.{module_info.name}")
+            load_spec = getattr(module, "load_spec", None)
+            if load_spec is None:
+                continue
+            runners[module_info.name] = typing.get_type_hints(load_spec)["return"]
+        assert set(runners) >= {"inference_runner", "finetune_runner"}
+        for name, spec_cls in runners.items():
+            assert "engine_version" in spec_cls.model_fields, name
+            field = spec_cls.model_fields["engine_version"]
+            assert field.annotation == (str | None), name
+            assert field.default is None, name
+
+    def test_an_engine_version_that_is_not_a_string_is_refused_before_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", '{"name": "x", "engine_version": 1}')
+        with pytest.raises(RunError, match="engine_version must be a string"):
+            load_config(_Spec)
+
+    def test_a_stale_version_is_reported_before_an_unknown_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The realistic skew: a newer control plane sends a field this engine does not know AND
+        # a version it does not match. The run must blame the stale machine, not the spec.
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG", '{"name": "x", "engine_version": "0.0.1", "new_field": 1}'
+        )
+        with pytest.raises(RunError, match="engine version mismatch"):
+            load_config(_Spec)
 
     def test_the_installed_version_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _run_config(monkeypatch, SPEC_VERSION)
-        assert load_config(_VersionedSpec).engine_version == SPEC_VERSION
+        assert load_config(_Spec).engine_version == SPEC_VERSION
 
     @pytest.mark.parametrize("stale", ["0.0.1", "99.0.0", "", "+" + _COMMIT])
     def test_another_version_is_refused(self, monkeypatch: pytest.MonkeyPatch, stale: str) -> None:
@@ -242,14 +298,14 @@ class TestEngineVersionHandshake:
         # installed for an earlier run, handed a spec a newer engine validated (or the reverse).
         _run_config(monkeypatch, stale)
         with pytest.raises(RunError, match="engine version mismatch"):
-            load_config(_VersionedSpec)
+            load_config(_Spec)
 
     def test_a_commit_claim_is_accepted_when_the_installed_commit_matches(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _installed_commit(monkeypatch, _COMMIT)
         _run_config(monkeypatch, f"{SPEC_VERSION}+{_COMMIT}")
-        assert load_config(_VersionedSpec).engine_version == f"{SPEC_VERSION}+{_COMMIT}"
+        assert load_config(_Spec).engine_version == f"{SPEC_VERSION}+{_COMMIT}"
 
     def test_a_commit_claim_is_refused_on_a_different_commit(
         self, monkeypatch: pytest.MonkeyPatch
@@ -259,7 +315,7 @@ class TestEngineVersionHandshake:
         _installed_commit(monkeypatch, _OTHER_COMMIT)
         _run_config(monkeypatch, f"{SPEC_VERSION}+{_COMMIT}")
         with pytest.raises(RunError, match="engine version mismatch"):
-            load_config(_VersionedSpec)
+            load_config(_Spec)
 
     def test_a_commit_claim_is_refused_on_a_release_install(
         self, monkeypatch: pytest.MonkeyPatch
@@ -269,17 +325,60 @@ class TestEngineVersionHandshake:
         _installed_commit(monkeypatch, None)
         _run_config(monkeypatch, f"{SPEC_VERSION}+{_COMMIT}")
         with pytest.raises(RunError, match="engine version mismatch"):
-            load_config(_VersionedSpec)
+            load_config(_Spec)
 
-    @pytest.mark.parametrize("short", [_COMMIT[:7], _COMMIT[:12], _COMMIT.upper()])
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            _COMMIT[:7],
+            _COMMIT[:12],
+            _COMMIT.upper(),
+            "",
+            "+" + _COMMIT,
+            " " + _COMMIT,
+            _COMMIT + " ",
+        ],
+    )
     def test_a_commit_claim_must_be_a_full_lowercase_id(
-        self, monkeypatch: pytest.MonkeyPatch, short: str
+        self, monkeypatch: pytest.MonkeyPatch, malformed: str
     ) -> None:
-        # A prefix would match more than one commit; the handshake compares whole ids only.
+        # A prefix would match more than one commit; the handshake compares whole ids only. And
+        # an empty claim after the "+" (a SHA build-arg that came through blank) is a malformed
+        # claim, never a version-only one: reading it as "no commit" would run whatever the warm
+        # machine has, which is the exact failure the commit half exists to catch.
         _installed_commit(monkeypatch, _COMMIT)
-        _run_config(monkeypatch, f"{SPEC_VERSION}+{short}")
+        _run_config(monkeypatch, f"{SPEC_VERSION}+{malformed}")
         with pytest.raises(RunError, match="engine version mismatch"):
-            load_config(_VersionedSpec)
+            load_config(_Spec)
+
+    def test_an_empty_commit_claim_is_refused_even_on_a_release_install(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _installed_commit(monkeypatch, None)
+        _run_config(monkeypatch, f"{SPEC_VERSION}+")
+        with pytest.raises(RunError, match="engine version mismatch"):
+            load_config(_Spec)
+
+    def test_a_drift_between_the_installed_and_executing_versions_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The pin resolves against the distribution's metadata; the code that runs reports
+        # __version__. A shadowed import or a pyproject bump that missed __init__ makes them
+        # disagree, and then the spec matching one of them proves nothing.
+        monkeypatch.setattr(_common, "installed_engine_version", lambda: "0.0.1")
+        _run_config(monkeypatch, SPEC_VERSION)
+        with pytest.raises(RunError) as excinfo:
+            load_config(_Spec)
+        assert "engine version mismatch" in str(excinfo.value)
+        assert f"{SPEC_VERSION} (installed as 0.0.1)" in str(excinfo.value)
+
+    def test_no_installed_distribution_falls_back_to_the_executing_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A source tree on PYTHONPATH with nothing installed has no metadata to disagree with.
+        monkeypatch.setattr(_common, "installed_engine_version", lambda: None)
+        _run_config(monkeypatch, SPEC_VERSION)
+        assert load_config(_Spec).engine_version == SPEC_VERSION
 
     def test_a_commit_claim_with_a_stale_version_is_refused_before_the_commit_is_read(
         self, monkeypatch: pytest.MonkeyPatch
@@ -290,14 +389,14 @@ class TestEngineVersionHandshake:
         monkeypatch.setattr(_common, "installed_engine_commit", _boom)
         _run_config(monkeypatch, f"0.0.1+{_COMMIT}")
         with pytest.raises(RunError, match="engine version mismatch"):
-            load_config(_VersionedSpec)
+            load_config(_Spec)
 
     def test_the_mismatch_message_names_both_sides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The reason has to be diagnosable from the failed run's record alone.
         _installed_commit(monkeypatch, _OTHER_COMMIT)
         _run_config(monkeypatch, f"{SPEC_VERSION}+{_COMMIT}")
         with pytest.raises(RunError) as excinfo:
-            load_config(_VersionedSpec)
+            load_config(_Spec)
         message = str(excinfo.value)
         assert f"{SPEC_VERSION}+{_COMMIT}" in message
         assert f"{SPEC_VERSION}+{_OTHER_COMMIT}" in message
@@ -350,6 +449,28 @@ class TestInstalledEngineCommit:
         self, monkeypatch: pytest.MonkeyPatch, raw: str
     ) -> None:
         self._install(monkeypatch, raw)
+        assert installed_engine_commit() is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+            OSError("input/output error"),
+        ],
+    )
+    def test_an_unreadable_file_is_no_commit(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        # read_text swallows only a missing file. A corrupt or unreadable one must still be
+        # "no commit", so the run reports the named mismatch rather than a raw exception.
+        class _Broken:
+            def read_text(self, _filename: str) -> str | None:
+                raise error
+
+        def _distribution(_name: str) -> _Broken:
+            return _Broken()
+
+        monkeypatch.setattr(_common.metadata, "distribution", _distribution)
         assert installed_engine_commit() is None
 
     def test_a_missing_distribution_is_no_commit(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -534,7 +655,7 @@ class TestRunnerMain:
 
         async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
             del writer, token
-            load_config(_VersionedSpec)
+            load_config(_Spec)
             entered.append(True)
 
         assert await runner_main(_execute) == 1

@@ -241,26 +241,41 @@ machine it does not own holds up its side of the contract in four places:
   bundled engine was built from. ``load_config`` compares the version half
   with the installed ``strata_forge.__version__`` and the commit half with
   the installed distribution's PEP 610 ``direct_url.json`` commit, and
-  refuses either disagreement with ``engine version mismatch`` before any
-  other field is read; the run then exits 1 with that as its reason. An
-  engine with no recorded commit (a release from PyPI, an editable
-  checkout) cannot satisfy a commit claim. ``None`` makes no claim and is
-  accepted.
+  refuses either disagreement with ``engine version mismatch``. The check
+  runs on the parsed JSON before the model validates anything else, so a
+  spec that carries both a field this engine does not know and a version
+  it does not match reports the mismatch, not the unknown field: the run
+  record blames the stale machine, and the run exits 1 with that as its
+  reason. The version half is also compared with the version the
+  installed distribution's metadata records (what the pin resolved
+  against), so a shadowed import or a version-string drift between
+  ``pyproject.toml`` and ``__init__.py`` is a mismatch too. A ``+`` with
+  anything but a full lowercase commit id after it is a malformed claim
+  and is refused, never read as version-only. An engine with no recorded
+  commit (a release from PyPI, an editable checkout) cannot satisfy a
+  commit claim. ``None`` makes no claim and is accepted, as the transition
+  for an orchestrator from before the handshake; once every orchestrator
+  stamps a version, a missing claim becomes a refusal. Every runner spec
+  declares the field: ``load_config`` raises ``TypeError`` for a spec class
+  that does not, so a runner cannot opt out by omission.
 
-The handshake exists for a warm machine. ``extra="forbid"`` already catches
-an engine older than the spec's fields, but not the other direction: an
-engine newer than the one that validated the spec, whose changed defaults
-or secret channel an old spec silently misses. And every commit of a
-development branch shares one ``__version__`` until a release bump, so the
-commit half is what lets a deployment that installs from a branch see that
-the machine runs an older commit than the one that validated the spec. The
-string is the orchestrator's, never a user's: the same value decides what
-the setup step installs, so a spec cannot pick an engine the orchestrator
-did not validate against. What the orchestrator must do with it: pin the
-install to exactly that version (an exact ``==`` also upgrades a warm
-machine, because the older copy no longer satisfies the requirement) or,
-for a git ref, to exactly that commit, and force a reinstall only when the
-machine's recorded commit differs.
+The handshake exists for a warm machine that still runs an OLDER engine
+than the one that validated the spec. ``extra="forbid"`` catches that only
+when the newer spec carries a field the old engine does not know; a
+behaviour change on the same spec shape (where the write token travels,
+what the scrubber removes, a default) reaches the old engine with no spec
+error at all, and the run fails, or silently does the old thing, long after
+launch. And every commit of a development branch shares one
+``__version__`` until a release bump, so the commit half is what lets a
+deployment that installs from a branch see that the machine runs an older
+commit than the one that validated the spec. The string is the
+orchestrator's, never a user's: the same value decides what the setup step
+installs, so a spec cannot pick an engine the orchestrator did not validate
+against. What the orchestrator must do with it: pin the install to exactly
+that version (an exact ``==`` also upgrades a warm machine, because the
+older copy no longer satisfies the requirement) or, for a git ref, to
+exactly that commit, and force a reinstall only when the machine's recorded
+commit differs.
 
 ## Backend protocol
 

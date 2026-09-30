@@ -9,7 +9,8 @@ An orchestrator stamps every spec with the engine version it validated the spec 
 (``SPEC_VERSION``, optionally suffixed ``+<commit>`` when it installs the engine from a git
 ref), and the runner refuses to execute under any other installed engine. That is the
 handshake that keeps a machine which already has an older engine installed from running a
-spec whose fields it does not know.
+spec a newer one validated: the spec's fields may be identical, and only the behaviour behind
+them changed.
 """
 
 from strata_forge import __version__
