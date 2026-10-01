@@ -10,6 +10,12 @@ reliability property rather than a convenience:
   copy of this is how one copy stops being maintained.
 - **Re-validating ids** (:func:`validate_repo_id`). The control plane allow-lists them, but the VM
   is the boundary that actually fetches and pushes, so it checks again.
+- **The version handshake** (:func:`check_engine_version`, applied by :func:`load_config`). The
+  spec names the engine version the control plane validated it against, and the runner refuses
+  to execute under any other. ``extra="forbid"`` on the spec models only catches an OLDER engine
+  when the newer spec carries a field it does not know; a behaviour change on the same spec
+  shape (where the write token travels, what the scrubber removes, a default) reaches a warm
+  machine's older engine with no spec error at all, and that is what the handshake catches.
 - **Termination** (:func:`install_termination_handlers`). Turning SIGTERM into a cancellation is
   what stops a cancelled run from stranding a GPU; it belongs to every runner, not to whichever
   one needed it first.
@@ -29,11 +35,13 @@ import re
 import signal
 import sys
 from functools import partial
+from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from pydantic import BaseModel
 
+from strata_forge import __version__
 from strata_forge.compute.serving import format_elapsed
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
@@ -56,14 +64,21 @@ class PhaseSink(Protocol):
 
 
 __all__ = [
+    "ENGINE_DISTRIBUTION",
     "MAX_PHASE_CHARS",
     "PHASE_TICK_SECONDS",
     "REPO_ID_RE",
+    "REQUIRE_ENGINE_VERSION_ENV",
     "SAFE_NAME_RE",
+    "UNCHECKED_ENGINE_MESSAGE",
     "PhaseSink",
     "RunError",
+    "check_engine_version",
     "emit",
+    "engine_version_required",
     "install_termination_handlers",
+    "installed_engine_commit",
+    "installed_engine_version",
     "load_config",
     "phase_sink",
     "progress_path",
@@ -89,6 +104,27 @@ MAX_PHASE_CHARS = 200
 # How often a long uncountable phase re-stamps itself with its elapsed time. Matches the serving
 # heartbeat, so one run does not narrate two different cadences.
 PHASE_TICK_SECONDS = 10.0
+# The distribution whose installed metadata answers "which engine commit is this VM running".
+# The import package is ``strata_forge``; the distribution name is what ``pip`` and PEP 610 know.
+ENGINE_DISTRIBUTION = "strata-forge"
+# A full git commit id. The handshake compares whole ids, never a prefix: a short id the
+# control plane happened to send would match more than one commit.
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# Set (to anything but empty / "0" / "false") by an orchestrator that stamps every spec, which
+# turns a spec with no ``engine_version`` from an accepted-with-warning launch into a refusal.
+# The transition for a control plane from before the handshake is bounded by this switch, not
+# by hoping: a rolled-back or buggy control plane that sends ``null`` would otherwise run a
+# newer engine unchecked, which is the skew the handshake exists to close.
+REQUIRE_ENGINE_VERSION_ENV = "FORGE_REQUIRE_ENGINE_VERSION"
+# What the run record says when a spec with no claim is accepted: the launch ran unchecked,
+# and anyone reading the record after a behaviour skew needs that fact next to the outcome.
+UNCHECKED_ENGINE_MESSAGE = (
+    "spec carries no engine_version: the installed engine was not checked against "
+    "the one that validated the spec"
+)
+# The spec's claim is echoed back in the mismatch message; a control plane's value is short,
+# and a longer one would only bloat the error event and stderr line the record keeps.
+_MAX_ECHOED_CLAIM_CHARS = 100
 
 
 class RunError(Exception):
@@ -112,19 +148,173 @@ def sanitize(text: str, token: str | None) -> str:
     return _TOKEN_RE.sub("***", text)
 
 
-def load_config[SpecT: BaseModel](spec_cls: type[SpecT]) -> SpecT:
-    """Parse ``STRATA_RUN_CONFIG`` into ``spec_cls``.
+def installed_engine_commit(distribution: str = ENGINE_DISTRIBUTION) -> str | None:
+    """The git commit the installed engine was built from, or ``None`` when there is none.
+
+    Read from the distribution's PEP 610 ``direct_url.json``, which ``pip`` writes for a VCS
+    install (``pip install git+https://...@<ref>``) and omits for an index install. A release
+    from PyPI therefore has no commit, and so does an editable checkout (a ``dir_info`` URL): the
+    handshake treats both as "not a pinned commit", never as a match.
+    """
+    try:
+        raw = metadata.distribution(distribution).read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        return None
+    # ``read_text`` swallows only a missing file; a corrupt one (undecodable bytes) or an
+    # unreadable one (any other OSError) would otherwise escape as a raw exception and the run
+    # would fail with a generic reason instead of the named mismatch.
+    except OSError, ValueError:
+        return None
+    if not raw:
+        return None
+    try:
+        info: object = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    vcs = cast("dict[str, object]", info).get("vcs_info")
+    if not isinstance(vcs, dict):
+        return None
+    commit = cast("dict[str, object]", vcs).get("commit_id")
+    return commit if isinstance(commit, str) and commit else None
+
+
+def installed_engine_version(distribution: str = ENGINE_DISTRIBUTION) -> str | None:
+    """The version the installed distribution's metadata records, or ``None`` when none is installed.
+
+    This is the version an orchestrator's ``==`` pin resolved against, which is not necessarily
+    the version of the code that is executing: a shadowed import (``PYTHONPATH``, a stale
+    ``.pth`` entry, user-site over the venv) runs one copy while ``pip`` describes another, and
+    a ``pyproject.toml`` bump that missed ``__init__.py`` makes even a clean install describe
+    itself two ways. The handshake compares the spec against both, so neither drift can pass.
+    """
+    try:
+        return metadata.version(distribution)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def _mismatch(expected: str, running: str) -> RunError:
+    # The claim is control-plane-authored and scrubbed like every message, so echoing it is
+    # safe; it is capped because the record should not carry an arbitrarily long string twice.
+    if len(expected) > _MAX_ECHOED_CLAIM_CHARS:
+        expected = expected[:_MAX_ECHOED_CLAIM_CHARS] + "..."
+    return RunError(
+        f"engine version mismatch: the spec was validated against strata-forge "
+        f"{expected!r} but this machine runs {running!r}"
+    )
+
+
+def engine_version_required() -> bool:
+    """Whether a spec with no ``engine_version`` is refused rather than accepted with a warning."""
+    return os.environ.get(REQUIRE_ENGINE_VERSION_ENV, "").strip().lower() not in {"", "0", "false"}
+
+
+def check_engine_version(expected: str | None) -> str | None:
+    """Refuse to run under an engine other than the one the spec was validated against.
+
+    ``expected`` is what the control plane wrote into the spec: a plain ``"<version>"`` (the
+    released engine it pinned on the VM) or ``"<version>+<commit>"`` (the exact commit its own
+    bundled engine was built from, on a deployment that installs from a git ref rather than a
+    release). The version half must equal both the executing ``__version__`` and the version
+    the installed distribution's metadata records (the one a pin resolves against), compared as
+    strings: ``0.3`` and ``0.3.0.post0`` are not ``0.3.0``, because a normalising compare would
+    let a version the control plane never validated against pass. The commit half, when there
+    is a ``+`` at all, must be a full lowercase git id equal to the installed distribution's
+    PEP 610 commit id; a ``+`` followed by anything else is a malformed claim and is refused,
+    never read as "no commit". An engine with no recorded commit (a release from PyPI, an
+    editable checkout) cannot satisfy a commit claim at all, because the two would only ever
+    agree by accident.
+
+    ``None`` makes no claim. It is accepted, and the warning the caller must put in the run
+    record is returned, unless :data:`REQUIRE_ENGINE_VERSION_ENV` is set, when it is refused
+    like any other mismatch. Accepting it is the transition for a control plane from before the
+    handshake, whose specs carry no version; the switch is how a control plane that stamps every
+    spec closes the transition on its own machines without waiting for a release. The warning
+    is returned rather than emitted because this function has no writer: it is public API, and
+    what a caller does with the fact that a launch ran unchecked is the caller's.
+
+    The point of the check is a warm machine. Every commit of a development branch shares one
+    ``__version__`` until a release bump, so a version-only comparison cannot see that the VM
+    runs a commit older than the one that validated the spec; the commit half can.
+    """
+    if expected is None:
+        if engine_version_required():
+            msg = (
+                f"engine version mismatch: the spec carries no engine_version and "
+                f"{REQUIRE_ENGINE_VERSION_ENV} is set on this machine"
+            )
+            raise RunError(msg)
+        return UNCHECKED_ENGINE_MESSAGE
+    version, plus, commit = expected.partition("+")
+    executing = __version__
+    recorded = installed_engine_version()
+    if recorded is not None and recorded != executing:
+        raise _mismatch(expected, f"{executing} (installed as {recorded})")
+    if not version or version != executing:
+        raise _mismatch(expected, executing)
+    if not plus:
+        return None
+    installed_commit = installed_engine_commit()
+    if not _COMMIT_RE.fullmatch(commit) or installed_commit != commit:
+        running = (
+            f"{executing}+{installed_commit}" if installed_commit else f"{executing} (release)"
+        )
+        raise _mismatch(expected, running)
+    return None
+
+
+def load_config[SpecT: BaseModel](
+    spec_cls: type[SpecT], *, writer: JsonlProgressWriter | None = None
+) -> SpecT:
+    """Parse ``STRATA_RUN_CONFIG`` into ``spec_cls`` and apply the engine version handshake.
 
     Parsed as DATA only: ``json`` plus Pydantic validation, never ``eval`` / ``pickle`` /
     ``yaml.unsafe_load``. The spec models set ``extra="forbid"``, so an unrecognised key is a
     loud failure rather than a silently ignored instruction.
+
+    The spec's ``engine_version`` is checked against the installed engine
+    (:func:`check_engine_version`) BEFORE the model validates the rest, straight off the parsed
+    JSON: the realistic skew is a newer control plane sending both a field this engine does not
+    know and a version it does not match, and validating first would report the unknown field
+    and blame the spec. A mismatch is the first and only thing the run reports, so a stale
+    machine is diagnosed as such rather than through whatever the stale code did with the spec.
+
+    A spec with no claim that the handshake accepts is recorded: a ``phase`` event saying the
+    launch ran unchecked goes to ``writer`` (and the line to stderr, where the control plane
+    reads a run's account of itself), so the record of a run that later misbehaved shows the
+    engine was never checked. Runners pass the writer :func:`runner_main` hands them; a caller
+    with none still gets the stderr line.
+
+    Every runner spec must declare the field: a spec class without it is a bug in the runner
+    (``TypeError``), not a spec that opted out of the handshake.
     """
+    if "engine_version" not in spec_cls.model_fields:
+        msg = f"{spec_cls.__name__} does not declare engine_version"
+        raise TypeError(msg)
     raw = os.environ.get("STRATA_RUN_CONFIG")
     if not raw:
         msg = "STRATA_RUN_CONFIG is not set"
         raise RunError(msg)
     try:
-        return spec_cls.model_validate_json(raw)
+        data: object = json.loads(raw)
+    except ValueError as exc:
+        msg = f"invalid STRATA_RUN_CONFIG: {exc}"
+        raise RunError(msg) from exc
+    if not isinstance(data, dict):
+        msg = "invalid STRATA_RUN_CONFIG: the spec must be a JSON object"
+        raise RunError(msg)
+    expected = cast("dict[str, object]", data).get("engine_version")
+    if expected is not None and not isinstance(expected, str):
+        msg = "invalid STRATA_RUN_CONFIG: engine_version must be a string"
+        raise RunError(msg)
+    warning = check_engine_version(expected)
+    if warning is not None:
+        emit(writer, ProgressEvent(kind="phase", message=warning[:MAX_PHASE_CHARS]))
+        print(f"warning: {warning}", file=sys.stderr, flush=True)
+    try:
+        return spec_cls.model_validate(data)
     except ValueError as exc:
         msg = f"invalid STRATA_RUN_CONFIG: {exc}"
         raise RunError(msg) from exc

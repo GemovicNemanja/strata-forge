@@ -243,11 +243,33 @@ Anything under `src/` ships to a public index, so it must not name private sibli
 internal infrastructure — write module docstrings for an outside reader.
 
 **Cutting a release:** bump `version` in `pyproject.toml` **and** `__version__` in
-`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), promote
-`dev` → `main` per §8, then tag `main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies
-the tag matches the packaged version, builds, checks the archives, and uploads via PyPI **Trusted
-Publishing** (OIDC — there is no API token in this repo). `workflow_dispatch` publishes to TestPyPI
-for a rehearsal.
+`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), record
+the release under its own heading in `CHANGELOG.md` (entries accumulate under **Unreleased** as
+they merge to `dev`; the bump renames that heading), promote `dev` → `main` per §8, then tag
+`main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies the tag matches the packaged
+version, builds, checks the archives, and uploads via PyPI **Trusted Publishing** (OIDC — there is
+no API token in this repo). `workflow_dispatch` publishes to TestPyPI for a rehearsal.
+
+**When a release is required — the release rule.** The engine runs on machines the control plane
+installs it onto at launch, pinned to the exact version the control plane validated the run's spec
+against (`strata_forge.pipelines.SPEC_VERSION`, sent as the spec's `engine_version`; the runner
+refuses any other installed engine with `engine version mismatch`). A change the control plane must
+see therefore has to be a version the control plane can pin:
+
+- Every promotion of `dev` → `main` that changes a **runner spec** (`RunSpec`, `FinetuneSpec`, a
+  `Hyperparams` field), the **method or dataset-format registry**, the **`Task` shape** or a
+  **dependency pin** is a **minor** bump, tagged the same day through `release.yml`. A fix that
+  changes none of those is a **patch** release. Never promote such a change to `main` untagged:
+  production installs a released version, so an untagged `main` is a change nothing can run.
+- The server's **production** promotion always follows the forge tag — the pin makes that
+  enforceable, because the production install string names the release the server bundled, and
+  a release that is not on PyPI cannot be installed.
+- **Staging** needs no release: it installs from `forge_ref=dev`, pinned to the exact commit the
+  staging server image bundled (`engine_version` is then `"<version>+<commit>"`). But the image
+  bundles forge only when the server is deployed, so **every forge merge to `dev` (and always a
+  version bump) is followed by a `strata-server-dev` redeploy** (`workflow_dispatch` of the
+  server's staging deploy workflow); until then staging keeps running the commit the image
+  bundled, and a capability that landed on forge `dev` is not on staging yet.
 
 ---
 

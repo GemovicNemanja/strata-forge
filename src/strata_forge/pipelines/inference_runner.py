@@ -122,6 +122,11 @@ class RunSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
+    # The engine the control plane validated this spec against: ``"<version>"`` or
+    # ``"<version>+<commit>"``. ``load_config`` refuses any other installed engine (``None`` makes
+    # no claim). The control plane sets it, never a user: the same string decides what the setup
+    # step installs, so a spec cannot pick an engine the control plane did not validate against.
+    engine_version: str | None = None
     model_id: str
     dataset_id: str
     dataset_commit_sha: str | None = None
@@ -138,8 +143,8 @@ class RunSpec(BaseModel):
     run_id: str | None = None
 
 
-def load_spec() -> RunSpec:
-    spec = load_config(RunSpec)
+def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
+    spec = load_config(RunSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
@@ -531,7 +536,9 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
 
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
-    return await runner_main(lambda writer, token: _execute(load_spec(), token, writer))
+    return await runner_main(
+        lambda writer, token: _execute(load_spec(writer=writer), token, writer)
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

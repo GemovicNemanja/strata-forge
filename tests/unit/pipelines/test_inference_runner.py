@@ -19,7 +19,9 @@ import pytest
 
 from strata_forge.compute.batch import BatchInferenceResult
 from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
+from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
+from strata_forge.pipelines._common import REQUIRE_ENGINE_VERSION_ENV, UNCHECKED_ENGINE_MESSAGE
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -53,7 +55,10 @@ def _fail(exc: Exception) -> BatchInferenceResult:
 
 
 def _spec_json(**overrides: Any) -> str:
+    # Stamped the way a real launch is: a spec with no claim is accepted but recorded as an
+    # unchecked launch, and that record is its own test, not noise in every other one.
     base: dict[str, Any] = {
+        "engine_version": SPEC_VERSION,
         "model_id": "org/model",
         "dataset_id": "org/ds",
         "split": "train",
@@ -110,6 +115,22 @@ def test_load_spec_rejects_extra_fields(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(surprise="x"))
     with pytest.raises(ir.RunError, match="invalid STRATA_RUN_CONFIG"):
         ir.load_spec()
+
+
+def test_load_spec_refuses_a_spec_validated_by_another_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The handshake is applied to the real spec, not only to the shared loader.
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version="0.0.1"))
+    with pytest.raises(ir.RunError, match="engine version mismatch"):
+        ir.load_spec()
+
+
+def test_load_spec_accepts_a_spec_validated_by_this_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version=SPEC_VERSION))
+    assert ir.load_spec().engine_version == SPEC_VERSION
 
 
 @pytest.mark.parametrize(
@@ -388,6 +409,48 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     assert kinds.index("phase") < kinds.index("start")
     phase_events = [e for e in events if e["kind"] == "phase"]
     assert all(e["step"] is None and e["total_steps"] is None for e in phase_events)
+
+
+async def test_main_records_an_unchecked_engine_when_the_spec_makes_no_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A spec from before the handshake still runs, but the run's own record says the engine was
+    # never checked: the first event, before any work, and the stderr line the control plane
+    # reads. Without it a run that misbehaved on a stale machine is indistinguishable from one
+    # that was checked.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), engine_version=None)
+    )
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+
+    assert await ir.main() == 0
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert events[0]["kind"] == "phase"
+    assert events[0]["message"] == UNCHECKED_ENGINE_MESSAGE
+    assert f"warning: {UNCHECKED_ENGINE_MESSAGE}" in capsys.readouterr().err
+
+
+async def test_main_refuses_a_spec_with_no_claim_when_the_machine_requires_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The orchestrator that stamps every spec sets the switch on its machines, and the
+    # transition ends there: a null from a rolled-back control plane is a mismatch, not a launch.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), engine_version=None)
+    )
+    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    monkeypatch.setenv(REQUIRE_ENGINE_VERSION_ENV, "1")
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+
+    assert await ir.main() == 1
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert [e["kind"] for e in events] == ["error"]
+    assert "engine version mismatch" in events[0]["message"]
+    assert REQUIRE_ENGINE_VERSION_ENV in events[0]["message"]
 
 
 async def test_serving_hook_phrases_are_scrubbed_and_capped(

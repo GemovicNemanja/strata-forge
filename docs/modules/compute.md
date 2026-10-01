@@ -42,6 +42,7 @@ Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 - [Quickstart](#quickstart)
 - [Task and ResourceSpec](#task-and-resourcespec)
 - [Job lifecycle](#job-lifecycle)
+  - [The runner contract](#the-runner-contract)
 - [Backend protocol](#backend-protocol)
 - [LocalBackend](#localbackend)
 - [SSHBackend](#sshbackend)
@@ -216,6 +217,78 @@ adapter or merged model to the Hub). Both read an inert JSON spec from
 ``HF_WRITE_TOKEN`` env var, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
+
+### The runner contract
+
+An orchestrator that launches a ``strata_forge.pipelines`` runner on a
+machine it does not own holds up its side of the contract in four places:
+
+- **The spec is inert data** in ``STRATA_RUN_CONFIG``: JSON validated into
+  a Pydantic model with ``extra="forbid"``, so a key the installed engine
+  does not know is a named failure, never an ignored instruction. Nothing
+  in a spec names code to run.
+- **The write token travels apart from the spec**, in ``HF_WRITE_TOKEN``,
+  and the runner scrubs it (and anything token-shaped) from every message
+  it emits.
+- **Progress is one protocol.** Both runners append the same
+  ``ProgressEvent`` stream to ``FORGE_PROGRESS_PATH``, and the exit code is
+  the run's verdict.
+- **The spec names the engine that validated it.** Every runner spec
+  carries ``engine_version: str | None``, which the orchestrator sets to
+  ``strata_forge.pipelines.SPEC_VERSION`` (the package version) — or to
+  ``f"{SPEC_VERSION}+{commit}"`` when it installs the engine from a git ref
+  rather than a release, ``commit`` being the full id of the commit its own
+  bundled engine was built from. ``load_config`` compares the version half
+  with the installed ``strata_forge.__version__`` and the commit half with
+  the installed distribution's PEP 610 ``direct_url.json`` commit, and
+  refuses either disagreement with ``engine version mismatch``. The check
+  runs on the parsed JSON before the model validates anything else, so a
+  spec that carries both a field this engine does not know and a version
+  it does not match reports the mismatch, not the unknown field: the run
+  record blames the stale machine, and the run exits 1 with that as its
+  reason. The version half is also compared with the version the
+  installed distribution's metadata records (what the pin resolved
+  against), so a shadowed import or a version-string drift between
+  ``pyproject.toml`` and ``__init__.py`` is a mismatch too. A ``+`` with
+  anything but a full lowercase commit id after it is a malformed claim
+  and is refused, never read as version-only. An engine with no recorded
+  commit (a release from PyPI, an editable checkout) cannot satisfy a
+  commit claim. The compare is string equality, never a PEP 440
+  normalisation: ``0.3``, ``v0.3.0`` and ``0.3.0.post0`` are not ``0.3.0``.
+  ``None`` makes no claim and is accepted, as the transition for an
+  orchestrator from before the handshake, but never silently: the run's
+  first ``phase`` event (and a stderr ``warning:`` line) says the spec
+  carried no ``engine_version`` and the installed engine was not checked,
+  so the record of an unchecked launch says so. An orchestrator that stamps
+  every spec ends the transition on its own machines by setting
+  ``FORGE_REQUIRE_ENGINE_VERSION=1`` in the runner's environment
+  (``strata_forge.pipelines._common.REQUIRE_ENGINE_VERSION_ENV``): a
+  missing claim is then refused like any other mismatch, which is what
+  stops a rolled-back control plane that sends ``null`` from running a
+  newer engine unchecked. Every runner spec declares the field:
+  ``load_config`` raises ``TypeError`` for a spec class that does not, so a
+  runner cannot opt out by omission.
+
+The handshake exists for a warm machine that still runs an OLDER engine
+than the one that validated the spec. ``extra="forbid"`` catches that only
+when the newer spec carries a field the old engine does not know; a
+behaviour change on the same spec shape (where the write token travels,
+what the scrubber removes, a default) reaches the old engine with no spec
+error at all, and the run fails, or silently does the old thing, long after
+launch. The mirror case, a machine whose engine is NEWER than the one that
+validated the spec (a rolled-back control plane, a spec replayed after an
+upgrade), is the same refusal: the spec names one engine and runs under no
+other. And every commit of a development branch shares one
+``__version__`` until a release bump, so the commit half is what lets a
+deployment that installs from a branch see that the machine runs an older
+commit than the one that validated the spec. The string is the
+orchestrator's, never a user's: the same value decides what the setup step
+installs, so a spec cannot pick an engine the orchestrator did not validate
+against. What the orchestrator must do with it: pin the install to exactly
+that version (an exact ``==`` also upgrades a warm machine, because the
+older copy no longer satisfies the requirement) or, for a git ref, to
+exactly that commit, and force a reinstall only when the machine's recorded
+commit differs.
 
 ## Backend protocol
 

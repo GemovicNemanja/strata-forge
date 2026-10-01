@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
 
+from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import finetune_runner as fr
 from strata_forge.pipelines._common import RunError, ticking_phase
 from strata_forge.training.progress import JsonlProgressWriter
@@ -50,7 +51,10 @@ async def _fast_ticking_phase(
 
 
 def _spec_json(**overrides: Any) -> str:
+    # Stamped the way a real launch is: a spec with no claim is accepted but recorded as an
+    # unchecked launch, and that record is its own test, not noise in every other one.
     base: dict[str, Any] = {
+        "engine_version": SPEC_VERSION,
         "method": "sft",
         "model_id": "org/model",
         "dataset_id": "org/ds",
@@ -81,6 +85,18 @@ class TestLoadSpec:
         spec = fr.load_spec()
         assert spec.method == "sft"
         assert spec.adapter == "lora"  # the default: a full fine-tune must be asked for
+
+    def test_refuses_a_spec_validated_by_another_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The handshake is applied to the real spec, not only to the shared loader.
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version="0.0.1"))
+        with pytest.raises(RunError, match="engine version mismatch"):
+            fr.load_spec()
+
+    def test_accepts_a_spec_validated_by_this_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version=SPEC_VERSION))
+        assert fr.load_spec().engine_version == SPEC_VERSION
 
     def test_rejects_an_unknown_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # extra="forbid" is why a spec cannot smuggle an instruction past the runner.
