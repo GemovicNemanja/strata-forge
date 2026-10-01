@@ -20,6 +20,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 import strata_forge
+from strata_forge.core.errors import ValidationError
 from strata_forge.pipelines import SPEC_VERSION, _common
 from strata_forge.pipelines._common import (
     REQUIRE_ENGINE_VERSION_ENV,
@@ -30,6 +31,7 @@ from strata_forge.pipelines._common import (
     load_config,
     phase_sink,
     results_dir,
+    run_redactor,
     runner_main,
     sanitize,
     ticking_phase,
@@ -41,6 +43,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _TOKEN = "hf_secretwritetoken1234567890"
+# Leaks that only the run's VALUE redactor can catch: the token percent-encoded (`hf%5F...` is not
+# `hf_`-shaped), and a token of no known shape at all. A runner that scrubbed with the credential
+# shapes alone, e.g. after a merge dropped `run_redactor(token)`, lets both through.
+_UNSHAPED = "write-secret-0123456789abcdef"
+_VALUE_ONLY_LEAKS = [
+    pytest.param(_TOKEN, _TOKEN.replace("_", "%5F"), id="percent-encoded"),
+    pytest.param(_UNSHAPED, _UNSHAPED, id="unshaped"),
+]
 
 
 class _Spec(BaseModel):
@@ -84,6 +94,19 @@ class TestSanitize:
     def test_leaves_ordinary_text_alone(self) -> None:
         assert sanitize("dataset org/name split train", _TOKEN) == "dataset org/name split train"
 
+    def test_strips_every_encoding_of_the_known_token(self) -> None:
+        # The one redactor, not a second copy: the token in a URL or a JSON string is still it.
+        quoted = _TOKEN.replace("_", "%5F")
+        out = sanitize(f"GET /x?t={quoted} body={json.dumps({'t': _TOKEN})}", _TOKEN)
+        assert quoted not in out
+        assert _TOKEN not in out
+
+    def test_a_token_too_short_to_redact_is_refused(self) -> None:
+        # Matching a short value would redact ordinary words; the run must fail instead.
+        with pytest.raises(ValidationError):
+            run_redactor("hf_x1")
+        assert run_redactor(None).redact("plain") == "plain"
+
     def test_the_phase_sink_scrubs_and_caps(self, tmp_path: Path) -> None:
         # The sink is handed to library code whose phase hook is public API, so a phrase from
         # outside the runner gets the same treatment as an error — and cannot grow the file the
@@ -95,6 +118,17 @@ class TestSanitize:
         assert _TOKEN not in raw
         message = json.loads(raw)["message"]
         assert len(message) == _common.MAX_PHASE_CHARS
+
+    @pytest.mark.parametrize(("token", "leak"), _VALUE_ONLY_LEAKS)
+    def test_the_phase_sink_scrubs_what_only_the_token_identifies(
+        self, tmp_path: Path, token: str, leak: str
+    ) -> None:
+        writer = JsonlProgressWriter(tmp_path / "p.jsonl")
+        phase_sink(writer, token)(f"pushing to https://host/x?t={leak} now")
+        writer.close()
+        raw = (tmp_path / "p.jsonl").read_text()
+        assert leak not in raw
+        assert json.loads(raw)["message"] == "pushing to https://host/x?t=*** now"
 
     def test_the_phase_sink_tolerates_no_writer(self) -> None:
         # Progress is optional: a runner launched without a progress path must still run.
@@ -775,6 +809,56 @@ class TestRunnerMain:
         assert entered == []
         assert "engine version mismatch" in progress.read_text()
         assert "run failed: engine version mismatch" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(("token", "leak"), _VALUE_ONLY_LEAKS)
+    async def test_the_reason_loses_what_only_the_token_identifies(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        token: str,
+        leak: str,
+    ) -> None:
+        # The error event and the stderr reason go through the run's redactor, not a shapes-only
+        # one: an HTTP error quotes the request URL with the token percent-encoded in it.
+        progress = tmp_path / "p.jsonl"
+        monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
+        monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
+        monkeypatch.setenv("HF_WRITE_TOKEN", token)
+
+        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
+            del writer, token
+            msg = f"401 for https://host/x?t={leak}"
+            raise RunError(msg)
+
+        assert await runner_main(_execute) == 1
+        events = [json.loads(line) for line in progress.read_text().splitlines()]
+        assert [e["message"] for e in events if e["kind"] == "error"] == [
+            "401 for https://host/x?t=***"
+        ]
+        err = capsys.readouterr().err
+        assert leak not in err
+        assert "401 for https://host/x?t=***" in err
+
+    async def test_a_token_too_short_to_redact_fails_the_run_before_any_work(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        progress = tmp_path / "p.jsonl"
+        monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
+        monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
+        monkeypatch.setenv("HF_WRITE_TOKEN", "hf_x1")
+        ran: list[bool] = []
+
+        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
+            del writer, token
+            ran.append(True)
+
+        assert await runner_main(_execute) == 1
+        assert ran == []
+        err = capsys.readouterr().err
+        assert "redaction value" in err
+        assert "hf_x1" not in err
+        assert "hf_x1" not in progress.read_text()
 
     async def test_a_synchronous_raise_inside_execute_is_caught(
         self, monkeypatch: pytest.MonkeyPatch

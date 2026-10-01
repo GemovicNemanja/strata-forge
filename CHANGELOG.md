@@ -8,6 +8,38 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.core.redact`: `Redactor`, the one redaction implementation for every string a
+  credential-holding process surfaces and every console a relay forwards. It removes each given
+  value as written, line by line, in all four Unicode normal forms, base64-encoded at any
+  alignment (standard and URL-safe), percent-encoded and JSON- or `repr`-escaped, plus
+  `DEFAULT_PATTERNS` (Hugging Face, OpenAI/Anthropic `sk-`, GitHub, AWS access key ids, JWTs,
+  URL userinfo, bearer credentials), plus PEM private-key blocks with or without their footer,
+  which stay on with `patterns=()`. Each maximal redacted run becomes one fixed `***`, and runs
+  separated only by short whitespace count as one, so the output encodes neither a secret's
+  length nor its line count. A value shorter than 8 characters without its surrounding
+  whitespace, or made only of `*`, is refused with `ValidationError`; a pydantic `SecretStr` is
+  unwrapped. A redactor and its streams refuse to be pickled or copied.
+- `Redactor.stream()` returns a `RedactingStream` for text read incrementally: `feed` holds back
+  the last `max_len - 1` characters, `flush` releases them, and the concatenated output equals
+  `redact` of the concatenated input whatever the piece boundaries, so a secret split across two
+  console reads is still caught. `gap()` handles a read that dropped bytes, and a fresh stream
+  resumed mid-transcript: the held tail and the first `max_len - 1` characters after the hole
+  are masked. `docs/modules/compute.md` states the contract a console relay follows.
+- `strata_forge.pipelines._common.run_redactor` builds a run's redactor from its write token.
+
+### Changed
+
+- `sanitize` and every runner message (phase captions, error events, the stderr failure reason)
+  go through `Redactor`, so they also catch the token's encoded forms and the wider set of
+  credential shapes. A write token shorter than 8 characters fails the run before any work.
+
+### Security
+
+- The batch-inference runner's per-row `error` column, written into the results and pushed to
+  the Hub, is redacted. It used to carry each failed row's exception text unscrubbed.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

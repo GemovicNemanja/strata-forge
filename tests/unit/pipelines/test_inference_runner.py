@@ -19,6 +19,7 @@ import pytest
 
 from strata_forge.compute.batch import BatchInferenceResult
 from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
+from strata_forge.core.redact import Redactor
 from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
 from strata_forge.pipelines._common import REQUIRE_ENGINE_VERSION_ENV, UNCHECKED_ENGINE_MESSAGE
@@ -243,7 +244,12 @@ async def test_run_batches_reconciles_and_emits(
     progress = tmp_path / "progress.jsonl"
     with ir.JsonlProgressWriter(str(progress)) as writer:
         out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            redactor=Redactor(),
         )
 
     assert out == [
@@ -712,6 +718,55 @@ async def test_the_stderr_failure_reason_is_scrubbed(
     assert "***" in err
 
 
+async def test_the_error_column_pushed_with_the_results_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The per-row `error` column is written into the results file and pushed to the Hub with
+    # it, so an exception quoting the write token must not carry it there. Encoded forms too:
+    # an HTTP error usually quotes the request URL.
+    quoted = _TOKEN.replace("_", "%5F")
+    written: list[list[dict[str, Any]]] = []
+    code, _ = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}, {"question": "b"}, {"question": "c"}],
+        scripted=[
+            _ok("A"),
+            _fail(RuntimeError(f"upstream rejected {_TOKEN} for org")),
+            _fail(RuntimeError(f"401 for https://host/x?token={quoted}")),
+        ],
+        written=written,
+    )
+
+    assert code == 0
+    rows = written[-1]
+    assert rows[1]["error"] == "RuntimeError('upstream rejected *** for org')"
+    assert rows[2]["error"] == "RuntimeError('401 for https://host/x?token=***')"
+    assert not any(_TOKEN in str(row) or quoted in str(row) for row in rows)
+
+
+async def test_an_error_row_loses_credential_shapes_no_token_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A redactor holding no value still removes the credential shapes: a key this process was
+    # never given is caught in the column too.
+    foreign = "sk-ant-api03-AbCdEfGhIjKlMnOpQrSt"
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    prompts, ids = ir._build_requests(spec, [{"question": "a"}])  # pyright: ignore[reportPrivateUsage]
+    _FakeRunner.scripted = [_fail(RuntimeError(f"bad key {foreign}"))]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+
+    out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+        spec,
+        client=cast("LLMClient", object()),
+        prompts=prompts,
+        custom_ids=ids,
+        writer=None,
+        redactor=Redactor(),
+    )
+    assert out[0]["error"] == "RuntimeError('bad key ***')"
+
+
 async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -935,6 +990,7 @@ async def test_a_dead_server_stops_the_batch_instead_of_timing_out_every_row(
             custom_ids=ids,
             writer=writer,
             is_alive=_dies_after_the_first_chunk,
+            redactor=Redactor(),
         )
 
     # Stopped at the SECOND chunk: the first one ran before anything could be known about it.
@@ -962,6 +1018,7 @@ async def test_a_live_server_runs_every_chunk(
             custom_ids=ids,
             writer=writer,
             is_alive=_always_alive,
+            redactor=Redactor(),
         )
     assert len(out) == 4
 
@@ -980,6 +1037,11 @@ async def test_the_batch_runs_without_a_liveness_probe(
     progress = tmp_path / "progress.jsonl"
     with ir.JsonlProgressWriter(str(progress)) as writer:
         out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            redactor=Redactor(),
         )
     assert len(out) == 4
