@@ -38,7 +38,9 @@ until ``train()`` is called.
   ``dataset_format.py``.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
   for the conversation shapes consumed by
-  :mod:`strata_forge.training.chat_template`. Nothing else.
+  :mod:`strata_forge.training.chat_template`, and
+  :mod:`strata_forge.core.errors` for the ``ForgeError`` base of
+  :class:`MissingBitsAndBytesError`. Nothing else.
 - **Does NOT import** :mod:`strata_forge.tracing`, :mod:`strata_forge.agents`,
   :mod:`strata_forge.evals`, :mod:`strata_forge.rag`, :mod:`strata_forge.datasets`,
   :mod:`strata_forge.compute`. Trainer scripts that ride on
@@ -46,8 +48,11 @@ until ``train()`` is called.
   user-controlled scripts; the dependency arrow stays unbroken.
 - **External deps:** Pydantic in the core install. ``torch``,
   ``transformers``, ``trl``, ``peft``, ``datasets``,
-  ``accelerate`` live behind the ``[finetuning]`` extra and are
-  lazy-imported inside the runner methods that touch them.
+  ``accelerate``, ``bitsandbytes`` live behind the ``[finetuning]``
+  extra and are lazy-imported inside the runner methods that touch
+  them. ``bitsandbytes`` is never imported here at all: transformers
+  imports it when it quantises, and :func:`require_bitsandbytes`
+  only looks it up.
 
 ## Public API
 
@@ -56,6 +61,8 @@ The module's ``__init__.py`` re-exports:
 - Configs: :class:`SFTConfig`, :class:`DPOConfig`,
   :class:`ORPOConfig`, :class:`KTOConfig`, :class:`GRPOConfig`,
   :class:`LoRAConfig`, :class:`QLoRAConfig`.
+- QLoRA precondition: :func:`require_bitsandbytes`,
+  :class:`MissingBitsAndBytesError`.
 - Runners: :class:`SFTRunner`, :class:`PreferenceRunner`.
 - Result types: :class:`SFTRunResult`,
   :class:`PreferenceRunResult`.
@@ -66,7 +73,11 @@ The module's ``__init__.py`` re-exports:
 
 Errors raised from this module are :class:`ValueError` for
 input validation or :class:`ImportError` when the
-``[finetuning]`` extra is missing.
+``[finetuning]`` extra is missing. A missing ``bitsandbytes`` for
+QLoRA is :class:`MissingBitsAndBytesError` (a ``ForgeError`` and an
+``ImportError``), raised before anything is downloaded: every QLoRA
+entry point (``to_bnb_config``, the fine-tune runner's spec check,
+the ``train`` CLI) calls :func:`require_bitsandbytes` first.
 
 ## Internal patterns
 

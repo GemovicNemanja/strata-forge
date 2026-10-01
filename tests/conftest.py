@@ -7,6 +7,9 @@ the cassette-recording configuration).
 
 from __future__ import annotations
 
+import importlib.machinery
+import sys
+import types
 from typing import TYPE_CHECKING
 
 import pytest
@@ -110,3 +113,21 @@ def clean_forge_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for var in _FORGE_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture
+def bitsandbytes_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make bitsandbytes look installed, whatever this environment has.
+
+    QLoRA paths look the package up before building anything, and the dev environment does not
+    install the ``[finetuning]`` extra. Only the lookup is satisfied: nothing here imports it.
+    """
+    module = types.ModuleType("bitsandbytes")
+    module.__spec__ = importlib.machinery.ModuleSpec("bitsandbytes", None)
+    monkeypatch.setitem(sys.modules, "bitsandbytes", module)
+
+
+@pytest.fixture
+def bitsandbytes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make bitsandbytes look absent, even on a machine that has it installed."""
+    monkeypatch.setitem(sys.modules, "bitsandbytes", None)

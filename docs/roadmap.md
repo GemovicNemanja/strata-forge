@@ -542,12 +542,13 @@ builders have no extra requirements. Reference doc:
 `SFTRunner` over TRL `SFTTrainer`; `DPOConfig` / `ORPOConfig` /
 `KTOConfig` / `GRPOConfig` dispatched through `PreferenceRunner`;
 `LoRAConfig` / `QLoRAConfig` PEFT wrappers with QLoRA's
-bitsandbytes config builder; chat-template formatting
+bitsandbytes config builder and an up-front
+`require_bitsandbytes` check; chat-template formatting
 (`apply_chat_template`, `conversation_to_dicts`) and greedy
 first-fit sequence packing (`pack_sequences`). All heavy deps
 (`torch`, `transformers`, `trl`, `peft`, `datasets`,
-`accelerate`) sit behind the `[finetuning]` extra and are
-lazy-imported inside the runners' `train` methods. Reference
+`accelerate`, `bitsandbytes`) sit behind the `[finetuning]`
+extra and are lazy-imported inside the runners' `train` methods. Reference
 doc: [`docs/modules/training.md`](modules/training.md).
 
 ## Phase 6 — Storage (`strata_forge.storage`) ✅
