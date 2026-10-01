@@ -34,10 +34,10 @@ models:
   # Claude 5.x model below rejects forced tool use (`tool_choice` any/tool)
   # with a 400. Structured output here is emulated through a forced tool
   # call, so `structured_output` is false for all three; plain tool calling
-  # (`tool_choice` auto) is supported. "Non-default `temperature`, `top_p`, or
+  # (`tool_choice` auto) is supported. "non-default `temperature`, `top_p`, or
   # `top_k` values return a 400 error on every request, regardless of whether
-  # thinking is used" (platform.claude.com/docs/en/build-with-claude/
-  # extended-thinking, verified 2026-10-01), so `sampling_params` is false and
+  # thinking is used" (platform.claude.com/docs/en/build-with-claude/thinking,
+  # verified 2026-10-01), so `sampling_params` is false and
   # the client refuses those parameters pre-flight.
   - name: claude-fable-5-1
     vendor: anthropic
