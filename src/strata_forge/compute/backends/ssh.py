@@ -421,15 +421,16 @@ class SSHBackend:
         own_group = fields.get("m") == "1" and measured_pgid in ("", pid)
         return pid, own_group
 
-    async def _discard_workdir(self, remote_workdir: str) -> bool:
-        """Remove a workdir a failed submit created; return whether it is known to be gone.
+    async def _discard_workdir(self, job_id: str) -> bool:
+        """Remove the workdir a failed submit created; return whether it is known to be gone.
 
         Bounded by ``_DISCARD_TIMEOUT_S`` rather than the command timeout, and it never raises:
         the submit's own failure is the one the caller must see.
         """
         try:
             exit_status, _stdout, _stderr = await asyncio.wait_for(
-                self._run_remote(_remove_dir_command(remote_workdir)), _DISCARD_TIMEOUT_S
+                self._run_remote(_remove_dir_command(self._remote_root, job_id)),
+                _DISCARD_TIMEOUT_S,
             )
         except Exception:  # any failure here means "not known to be gone"
             return False
@@ -452,7 +453,7 @@ class SSHBackend:
         except Exception as exc:
             # A submit that raises hands back no job, so nothing would ever clean this workdir —
             # and it may hold the secrets file, which only a wrapper that ran would have removed.
-            if not await self._discard_workdir(remote_workdir):
+            if not await self._discard_workdir(job_id):
                 handle = Job(
                     id=job_id,
                     backend=self._name,
@@ -472,7 +473,7 @@ class SSHBackend:
         except BaseException:
             # A cancellation is re-raised as itself, whatever the discard managed: swallowing it
             # would break the caller's own timeout. The next submit's sweep is the backstop.
-            await self._discard_workdir(remote_workdir)
+            await self._discard_workdir(job_id)
             raise
 
         return Job(
@@ -504,16 +505,14 @@ class SSHBackend:
         # from it inherits the guard `cleanup` already asks for. A record whose metadata said
         # "../../../../etc" would otherwise have `logs`/`console`/`read_file` reading /etc.
         #
-        # The part below the root must name a directory IN it, not the root itself: "root/",
-        # "root/." and "root//" all pass a prefix check, and `cleanup`'s `rm -rf` of any of them
-        # removes every job's workdir, a running job's secrets file included.
+        # The part below the root must name ONE directory directly in it, which is all `submit`
+        # ever creates. Not the root itself: "root/", "root/." and "root//" all pass a prefix
+        # check, and `cleanup`'s `rm -rf` of any of them removes every job's workdir, a running
+        # job's secrets file included. And not deeper: `cleanup` verifies the removal from inside
+        # the root, which proves nothing about a directory between the root and the job's.
         prefix = self._remote_root + "/"
         below = workdir[len(prefix) :] if workdir.startswith(prefix) else ""
-        if (
-            ".." in workdir.split("/")
-            or not below
-            or any(part in ("", ".") for part in below.split("/"))
-        ):
+        if ".." in workdir.split("/") or below in ("", ".", "..") or "/" in below:
             err = (
                 f"SSHBackend: job {job.id!r} workdir {workdir!r} is not under "
                 f"remote_root {self._remote_root!r}"
@@ -731,16 +730,21 @@ class SSHBackend:
         The workdir may still hold the job's secrets file (a SIGKILL skips the wrapper's trap),
         so a removal that failed has to be visible to a caller that retries until one succeeds.
         """
-        # `_job_workdir` confines to the remote_root, which is what makes this `rm -rf` safe.
+        # `_job_workdir` confines to ONE directory directly in the remote_root, which is what makes
+        # this `rm -rf` safe and lets the removal be checked from inside the root.
         workdir = self._job_workdir(job)
-        exit_status, _stdout, _stderr = await self._run_remote(_remove_dir_command(workdir))
+        name = workdir[len(self._remote_root) + 1 :]
+        exit_status, _stdout, _stderr = await self._run_remote(
+            _remove_dir_command(self._remote_root, name)
+        )
         # The status is checked here rather than with `check=True`. asyncssh raises only on a
         # NONZERO status, so a channel that closed with none (a dropped connection, a killed
         # shell) would pass; and its error carries the remote's stderr, which names the files
-        # `rm` could not remove. Neither the stderr nor the path's contents are echoed.
+        # `rm` could not remove. Neither the stderr nor the path's contents are echoed. A status
+        # of -1 (no status at all) says nothing about the workdir, hence "not confirmed".
         if exit_status != 0:
             err = (
-                f"SSHBackend: job {job.id!r}'s workdir is still on the host after cleanup "
+                f"SSHBackend: job {job.id!r}'s workdir was not confirmed removed "
                 f"(exit {exit_status})"
             )
             raise CleanupError(err)
@@ -761,16 +765,44 @@ def _not_an_option(path: str) -> str:
     return f"./{path}" if path.startswith("-") else path
 
 
-def _remove_dir_command(path: str) -> str:
-    """A command that removes ``path`` and exits 0 only if nothing is left at it.
+# Removes "$1/$2" and exits 0 only if nothing is left there. `test` cannot tell "absent" from
+# "cannot look": a stat that fails with EACCES reads as absent. So every check runs from INSIDE a
+# directory the shell has just entered, which proves it can search it, and therefore that a
+# negative `test` there means absent. Without that, a root at mode 000 made BSD `rm -rf root/job`
+# exit 0 and both tests pass while the workdir and its secrets file stayed.
+#
+# A root that cannot be entered proves the job's directory absent only when the root itself is
+# absent, and that is proved the same way, one directory up; the walk goes up until a directory
+# can be entered, and exits 1 at the top. `-L` as well as `-e` because `test -e` follows a
+# symlink and a dangling one would read as gone. CDPATH is unset because it would send a
+# relative `cd` to a directory of the same name elsewhere. POSIX `sh` only.
+_REMOVE_DIR_SCRIPT = (
+    "unset CDPATH; "
+    'if cd -P "$1" >/dev/null 2>&1; then '
+    'rm -rf "./$2" && test ! -e "./$2" && test ! -L "./$2"; exit; fi; '
+    "p=$1; while :; do "
+    "case $p in */*) d=${p%/*} b=${p##*/} ;; *) d=. b=$p ;; esac; "
+    '[ -n "$d" ] || d=/; '
+    'if cd -P "$d" >/dev/null 2>&1; then test ! -e "./$b" && test ! -L "./$b"; exit; fi; '
+    '[ "$d" != "$p" ] || exit 1; p=$d; done'
+)
 
-    ``rm -rf`` already exits 0 for a path that is absent, which is what makes a repeated
-    removal a success. The trailing tests turn the status from "rm did not complain" into
-    "nothing is there now"; ``-L`` as well as ``-e`` because ``test -e`` follows a symlink, and
-    a dangling one would read as gone. POSIX ``test`` only: this runs in the login shell.
+
+def _remove_dir_command(root: str, name: str) -> str:
+    """A command that removes ``root/name`` and exits 0 only if nothing is left at it.
+
+    ``name`` is ONE path component: the checks run in ``root`` (see ``_REMOVE_DIR_SCRIPT``), and
+    a deeper path would put an unsearchable directory back between them and what they test.
+    ``rm -rf`` exits 0 for a path that is absent, which is what makes a repeated removal a
+    success. Both go in as arguments, never as script text.
     """
-    target = shlex.quote(_not_an_option(path))
-    return f"rm -rf {target} && test ! -e {target} && test ! -L {target}"
+    if not name or "/" in name or name in (".", ".."):
+        err = f"SSHBackend: {name!r} is not a single directory name"
+        raise ValueError(err)
+    return (
+        f"sh -c {shlex.quote(_REMOVE_DIR_SCRIPT)} sh "
+        f"{shlex.quote(_not_an_option(root))} {shlex.quote(name)}"
+    )
 
 
 def _wrapper_script(task: Task) -> str:
