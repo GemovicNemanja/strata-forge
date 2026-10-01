@@ -13,7 +13,11 @@ from __future__ import annotations
 import posixpath
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from strata_forge.compute.task import SECRETS_FILE_ENV
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
     from strata_forge.compute.task import Task
 
@@ -21,8 +25,14 @@ __all__ = [
     "MAX_CONSOLE_CHUNK_BYTES",
     "MAX_READ_FILE_BYTES",
     "Backend",
+    "SubmitCleanupError",
     "safe_workdir_relpath",
+    "secrets_guarded_script",
 ]
+
+# The unexported shell variable that holds the secrets file's path for the trap. Unexported so
+# no child of the job (the setup step's package installs above all) inherits a pointer to it.
+_SECRETS_PATH_VAR = "_forge_secrets_file"
 
 # Hard cap on a single :meth:`Backend.read_file` result. A control plane polls
 # read_file on an interval from a SHARED process; without a cap a runaway/malicious
@@ -35,6 +45,55 @@ MAX_READ_FILE_BYTES = 8 * 1024 * 1024
 # the budget that matters is per-interval, and a chunk that cannot be shown to a human in the
 # time before the next one arrives is a chunk nobody reads.
 MAX_CONSOLE_CHUNK_BYTES = 64 * 1024
+
+
+class SubmitCleanupError(RuntimeError):
+    """A submit failed after creating remote state that it then could not remove.
+
+    Raised from the submit's own failure (its ``__cause__``) when that failure is an ordinary
+    exception; a cancellation is re-raised as itself. That state may hold the job's secrets file,
+    and a submit that raises hands back no job, so :attr:`job` is the handle to remove it with:
+    pass it to :meth:`Backend.cleanup` once the host is reachable again. It names no running
+    process, so ``status``, ``cancel`` and the log readers do not apply to it.
+    """
+
+    def __init__(self, message: str, job: Job) -> None:
+        super().__init__(message)
+        self.job = job
+
+
+def secrets_guarded_script(
+    path_expr: str, setup: str, run: str, *, prelude: Sequence[str] = ()
+) -> str:
+    """The shell text that runs ``setup`` then ``run`` for a job whose secrets are in a file.
+
+    ``path_expr`` is a shell word that evaluates to the file's absolute path. The script:
+
+    - removes the file on exit through a trap in the OUTER shell, and runs ``prelude``, ``setup``
+      and ``run`` in a subshell below it. A task's own commands may install an ``EXIT`` trap of
+      their own (an orchestrator's bootstrap does, to stop a progress ticker), and a second
+      ``trap ... EXIT`` in one shell REPLACES the first: in the same shell, that would silently
+      drop the removal, and the file would outlive a failed setup or a cancellation. A trap set
+      in the subshell cannot reach the outer one.
+    - exports :data:`~strata_forge.compute.task.SECRETS_FILE_ENV` only between ``setup`` and
+      ``run``, so the setup step's package installs never hold even the path to the file.
+
+    The outer shell exits with the subshell's status, which the trap leaves untouched. bash runs
+    an ``EXIT`` trap on a normal exit and on a fatal signal such as the SIGTERM a cancel sends;
+    only SIGKILL skips it.
+    """
+    run_step = f'export {SECRETS_FILE_ENV}="${_SECRETS_PATH_VAR}" && {run}'
+    body = f"{setup} && {run_step}" if setup else run_step
+    return "\n".join(
+        [
+            f"{_SECRETS_PATH_VAR}={path_expr}",
+            f"trap 'rm -f \"${_SECRETS_PATH_VAR}\"' EXIT",
+            "(",
+            *prelude,
+            body,
+            ")",
+        ]
+    )
 
 
 def safe_workdir_relpath(path: str) -> str:
@@ -72,7 +131,15 @@ class Backend(Protocol):
         ...  # pragma: no cover — Protocol body
 
     async def submit(self, task: Task) -> Job:
-        """Submit ``task`` for execution; return its :class:`Job` handle."""
+        """Submit ``task`` for execution; return its :class:`Job` handle.
+
+        ``task.secrets`` are written to a private (0600) file whose absolute path the job's
+        ``run`` step finds in ``FORGE_SECRETS_FILE``, never into the job's environment, a command
+        line, a script or the returned job's metadata. A backend with no such channel raises
+        rather than falling back to the environment. A submit that fails after creating remote
+        state it then cannot remove raises :class:`SubmitCleanupError`, whose ``job`` names that
+        state for :meth:`cleanup`.
+        """
         ...  # pragma: no cover — Protocol body
 
     async def status(self, job: Job) -> JobStatus:

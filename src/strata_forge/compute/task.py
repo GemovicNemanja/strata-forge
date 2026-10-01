@@ -11,19 +11,81 @@ fields (``name``, ``run``, ``setup``, ``workdir``, ``envs``,
 ``file_mounts``, ``num_nodes``) plus a ``resources:`` block.
 Anything else raises — Forge doesn't pretend to mirror every
 SkyPilot field.
+
+:attr:`Task.secrets` is the one field that is NOT part of the wire
+shape: it travels beside the task rather than in it, so it is never
+serialised, never rendered, never in a repr, and never accepted
+from YAML. A backend delivers it to the job as a private file whose
+path is in :data:`SECRETS_FILE_ENV`, never as an environment
+variable.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 __all__ = [
+    "MAX_SECRETS",
+    "SECRETS_FILE_ENV",
+    "SECRETS_FILE_NAME",
     "ResourceSpec",
     "Task",
+    "render_secrets_payload",
 ]
+
+#: The environment variable a backend sets to the ABSOLUTE path of the job's secrets file. It is
+#: the only secret-related thing a job's environment ever carries: a path, never a value.
+SECRETS_FILE_ENV = "FORGE_SECRETS_FILE"
+#: The secrets file's basename. Fixed, so a reader can refuse to open (and then unlink) a path
+#: that is not one a backend wrote.
+SECRETS_FILE_NAME = ".secrets.json"
+#: Upper bound on :attr:`Task.secrets` entries. A task needs a handful of credentials at most.
+MAX_SECRETS = 8
+# Shaped like an environment variable name, because that is how a job refers to the value.
+_SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+class _Withheld:
+    """Stands in for a ``secrets`` value that is not a string, so no error can print it."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<withheld>"
+
+
+def _mask_secret_values(value: object) -> object:
+    """``value`` with every entry a :class:`~pydantic.SecretStr`, before anything can echo it.
+
+    A string becomes a ``SecretStr`` and anything else that is not one becomes
+    :class:`_Withheld`, which then fails the field's type check with a masked input. A value
+    that is not a mapping at all is withheld whole.
+    """
+    if not isinstance(value, dict):
+        return _Withheld()
+    entries = cast("dict[object, object]", value)
+    masked: dict[object, object] = {}
+    for key, item in entries.items():
+        if isinstance(item, SecretStr):
+            masked[key] = item
+        elif isinstance(item, str):
+            masked[key] = SecretStr(item)
+        else:
+            masked[key] = _Withheld()
+    return masked
 
 
 class ResourceSpec(BaseModel):
@@ -78,9 +140,21 @@ class Task(BaseModel):
             Multi-node tasks require a backend that supports them
             (SkyPilot does; local / SSH typically don't).
         metadata: Arbitrary JSON-serializable annotations.
+        secrets: Credentials the job needs, keyed like environment
+            variables (``^[A-Z][A-Z0-9_]{0,63}$``, at most
+            :data:`MAX_SECRETS`). Excluded from ``model_dump``,
+            ``to_yaml`` and ``repr``. A backend writes them to a
+            private file whose absolute path the job finds in
+            :data:`SECRETS_FILE_ENV`, or refuses the task when it has
+            no such channel. A key may not also appear in ``env``.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # `hide_input_in_errors`: a validation error's str() otherwise echoes the offending input,
+    # and for `secrets` that input is the plaintext value. It does not cover `errors()` or
+    # `json()`, which still carry each error's input — so the values are also masked before any
+    # validator runs (`_mask_secrets`), and every check on them is a FIELD validator, whose
+    # error input is the masked field rather than the caller's raw arguments.
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     name: str = Field(min_length=1)
     run: str = Field(min_length=1)
@@ -91,6 +165,67 @@ class Task(BaseModel):
     resources: ResourceSpec | None = None
     num_nodes: int = Field(default=1, ge=1)
     metadata: dict[str, Any] = Field(default={})
+    secrets: dict[str, SecretStr] = Field(default={}, exclude=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mask_secrets(cls, data: Any) -> Any:
+        # Before anything else sees the input: a model-level error reports the caller's raw
+        # arguments as its input, so the values are wrapped while they are still arguments.
+        if not isinstance(data, dict):
+            return data
+        raw = cast("dict[str, Any]", data)
+        if "secrets" not in raw:
+            return raw
+        return {**raw, "secrets": _mask_secret_values(raw["secrets"])}
+
+    @field_validator("env")
+    @classmethod
+    def _env_does_not_name_the_secrets_file(cls, env: dict[str, str]) -> dict[str, str]:
+        # The variable names a file the job reads and then DELETES, so only a backend may set it:
+        # a caller-supplied value would aim that unlink at whatever path it liked.
+        if SECRETS_FILE_ENV in env:
+            msg = f"env may not set {SECRETS_FILE_ENV}; it is reserved for the backend"
+            raise ValueError(msg)
+        return env
+
+    @field_validator("secrets")
+    @classmethod
+    def _check_secrets(
+        cls, secrets: dict[str, SecretStr], info: ValidationInfo
+    ) -> dict[str, SecretStr]:
+        # Messages name keys only: a key is a variable name, never a value.
+        if len(secrets) > MAX_SECRETS:
+            msg = f"at most {MAX_SECRETS} secrets per task; got {len(secrets)}"
+            raise ValueError(msg)
+        bad = sorted(key for key in secrets if not _SECRET_KEY_RE.fullmatch(key))
+        if bad:
+            msg = f"secret keys must match {_SECRET_KEY_RE.pattern}; got {bad!r}"
+            raise ValueError(msg)
+        empty = sorted(key for key, value in secrets.items() if not value.get_secret_value())
+        if empty:
+            msg = f"secret values must be non-empty; empty for {empty!r}"
+            raise ValueError(msg)
+        # The same name in both would put the value in the job's environment after all, which is
+        # the one place a secret must never be. Checked here rather than in a model validator,
+        # whose error would carry the caller's unmasked arguments; `env` is declared first, so
+        # it has been validated by now (it is absent only when it failed on its own).
+        env = cast("dict[str, str]", info.data.get("env", {}))
+        clash = sorted(set(secrets) & set(env))
+        if clash:
+            msg = f"keys {clash!r} appear in both env and secrets; a secret travels only in secrets"
+            raise ValueError(msg)
+        return secrets
+
+    def revalidated(self) -> Task:
+        """This task, built again through every validator.
+
+        ``model_copy(update=...)`` and ``model_construct`` skip validation, so a task built that
+        way can carry a plain-string secret, a malformed key, or a key also set in ``env``. A
+        backend calls this before it delivers anything, so those reach the job as a refusal
+        rather than as a secret in the wrong place.
+        """
+        return type(self).model_validate({**self.model_dump(), "secrets": dict(self.secrets)})
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Task:
@@ -132,7 +267,9 @@ class Task(BaseModel):
             resources_kwargs = dict(cast("dict[str, Any]", resources_value))
             raw["resources"] = ResourceSpec(**resources_kwargs)
 
-        allowed_fields = set(cls.model_fields)
+        # `secrets` is never read from YAML: a task file is plaintext config that gets committed,
+        # copied and logged, which is exactly where a credential must not live.
+        allowed_fields = set(cls.model_fields) - {"secrets"}
         unknown = set(raw) - allowed_fields
         if unknown:
             err = (
@@ -165,3 +302,13 @@ class Task(BaseModel):
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return yaml.safe_dump(payload, sort_keys=False)
+
+
+def render_secrets_payload(secrets: dict[str, SecretStr]) -> str:
+    """Serialise ``secrets`` as the JSON object a backend writes to the job's secrets file.
+
+    The one place a value is revealed. The result goes only into a private file's contents (a
+    channel's stdin, an ``O_EXCL`` 0600 write), never into a command string, an environment
+    variable or a log line.
+    """
+    return json.dumps({key: value.get_secret_value() for key, value in secrets.items()})

@@ -125,6 +125,16 @@ class SkyPilotBackend:
         return kwargs
 
     async def submit(self, task: Task) -> Job:
+        if task.secrets:
+            # Fail closed. SkyPilot's only channel for a task's values is `envs`, which lands in
+            # the job's environment and in the cluster's task records — exactly what
+            # `Task.secrets` exists to keep a credential out of. Refused before any client work,
+            # so nothing about the task has left this process.
+            err = (
+                "SkyPilotBackend cannot deliver Task.secrets: it has no private file channel, "
+                "and passing them as envs would put them in the job's environment"
+            )
+            raise ValueError(err)
         client = self._get_client()
         cluster_name = f"{self._cluster_prefix}{task.name}-{uuid.uuid4().hex[:8]}"
         sky_kwargs = self._build_sky_task(task)

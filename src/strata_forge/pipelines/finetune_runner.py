@@ -20,9 +20,11 @@ Security boundary (the VM is where allow-listed config meets real credentials + 
     ``eval``/``pickle``/``yaml.unsafe_load``. ``column_mapping``/``hyperparams``/``lora`` are
     inert values handed to typed configs, never executed. Nothing in the spec can name Python
     to run, which is why GRPO — whose reward is a callable — is not reachable from here.
-  - The HF write token arrives in its OWN env var (``HF_WRITE_TOKEN``), never in
-    ``STRATA_RUN_CONFIG``, is passed EXPLICITLY to the Hub/dataset clients (never the VM's
-    ambient ``HF_TOKEN``), and is scrubbed from every surfaced message.
+  - The HF write token arrives in a private secrets file the backend wrote beside the job
+    (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
+    :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
+    the environment. It is passed EXPLICITLY to the Hub/dataset clients (never the VM's ambient
+    ``HF_TOKEN``), and is scrubbed from every surfaced message.
   - Progress events carry step counts, float metrics and a repo id — never a training example.
     A fine-tuning corpus is often the most sensitive thing in a run, and none of it is in the
     channel the control plane relays to a browser.
@@ -49,6 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.pipelines._common import (
     RunError,
+    RunSecrets,
     emit,
     load_config,
     phase_sink,
@@ -358,8 +361,9 @@ async def _push_artifact(spec: FinetuneSpec, artifact_dir: Path, hf_token: str) 
 
 
 async def _execute(
-    spec: FinetuneSpec, hf_token: str | None, writer: JsonlProgressWriter | None
+    spec: FinetuneSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
+    hf_token = secrets.hf_token_value()
     # One sampler for the run: the phase sink folds its counters into every caption, so the
     # `load_model` and `push` stretches -- where nothing is countable -- still show the box
     # working. The trainer callback covers `run` with its own.
@@ -439,7 +443,7 @@ async def _execute(
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
     return await runner_main(
-        lambda writer, token: _execute(load_spec(writer=writer), token, writer)
+        lambda writer, secrets: _execute(load_spec(writer=writer), secrets, writer)
     )
 
 

@@ -5,10 +5,17 @@ Hugging Face write token, driven by a spec that arrived over the wire. Several o
 has to get right are identical whatever it is running, and each of them is a security or
 reliability property rather than a convenience:
 
+- **Secrets** (:func:`load_secrets`). Credentials arrive in a private file the backend wrote
+  beside the job, never in the environment; the runner reads it and deletes it before it does
+  anything else, so the file exists only until the run starts. The values travel as
+  :class:`~pydantic.SecretStr` in a :class:`RunSecrets` and are revealed only at the call that
+  needs them.
 - **Scrubbing** (:func:`run_redactor`, :func:`sanitize`). Every message a runner emits — an
   error, a phase caption, a per-row error it writes into its results — passes through the one
   :class:`~strata_forge.core.redact.Redactor`, which removes the write token in every encoding
   and anything credential-shaped. A second copy of this is how one copy stops being maintained.
+- **The model-server environment** (:func:`model_server_environ`). A server the runner starts
+  gets an allow-listed environment, not the runner's own.
 - **Re-validating ids** (:func:`validate_repo_id`). The control plane allow-lists them, but the VM
   is the boundary that actually fetches and pushes, so it checks again.
 - **The version handshake** (:func:`check_engine_version`, applied by :func:`load_config`). The
@@ -34,21 +41,24 @@ import json
 import os
 import re
 import signal
+import stat
 import sys
 from functools import partial
 from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 from strata_forge import __version__
 from strata_forge.compute.serving import format_elapsed
+from strata_forge.compute.task import SECRETS_FILE_ENV, SECRETS_FILE_NAME
 from strata_forge.core.redact import Redactor
+from strata_forge.pipelines import HF_TOKEN_SECRET
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
     from strata_forge.training.hardware import GpuSampler
     from strata_forge.training.progress import RunStage
@@ -67,7 +77,11 @@ class PhaseSink(Protocol):
 
 __all__ = [
     "ENGINE_DISTRIBUTION",
+    "HF_TOKEN_SECRET",
+    "LEGACY_TOKEN_ENV",
+    "LEGACY_TOKEN_MESSAGE",
     "MAX_PHASE_CHARS",
+    "MAX_SECRETS_FILE_BYTES",
     "PHASE_TICK_SECONDS",
     "REPO_ID_RE",
     "REQUIRE_ENGINE_VERSION_ENV",
@@ -75,6 +89,7 @@ __all__ = [
     "UNCHECKED_ENGINE_MESSAGE",
     "PhaseSink",
     "RunError",
+    "RunSecrets",
     "check_engine_version",
     "emit",
     "engine_version_required",
@@ -82,6 +97,8 @@ __all__ = [
     "installed_engine_commit",
     "installed_engine_version",
     "load_config",
+    "load_secrets",
+    "model_server_environ",
     "phase_sink",
     "progress_path",
     "results_dir",
@@ -125,10 +142,182 @@ UNCHECKED_ENGINE_MESSAGE = (
 # The spec's claim is echoed back in the mismatch message; a control plane's value is short,
 # and a longer one would only bloat the error event and stderr line the record keeps.
 _MAX_ECHOED_CLAIM_CHARS = 100
+# The keys a runner reads from its secrets file. Anything else is refused by name: a key this
+# engine does not know means the orchestrator was built against a different contract.
+_KNOWN_SECRETS = frozenset({HF_TOKEN_SECRET})
+# A handful of tokens is a few hundred bytes. The bound keeps a malformed or hostile file from
+# being read into memory whole.
+MAX_SECRETS_FILE_BYTES = 64 * 1024
+# The environment variable older orchestrators put the write token in. Read only when no secrets
+# file is configured, and removed from this process's environment once read.
+LEGACY_TOKEN_ENV = "HF_WRITE_TOKEN"  # noqa: S105 — a variable name, not a credential
+LEGACY_TOKEN_MESSAGE = (
+    f"the write token arrived in the {LEGACY_TOKEN_ENV} environment variable; that delivery is "
+    f"deprecated, and strata-forge 0.5.0 reads the token only from {SECRETS_FILE_ENV}"
+)
+# What a model server the runner starts may inherit from the runner's environment: what it needs
+# to find its interpreter, libraries, GPUs, caches and locale, and nothing else. Exact names, then
+# prefixes for the families whose members are all configuration (CUDA_VISIBLE_DEVICES, NCCL_*
+# transport knobs a multi-GPU box may need, the VLLM_* settings).
+_SERVER_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "LD_LIBRARY_PATH",
+        "XDG_CACHE_HOME",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "PYTHONUNBUFFERED",
+    }
+)
+_SERVER_ENV_PREFIXES = ("CUDA_", "NVIDIA_", "NCCL_", "VLLM_")
+# Dropped even when a prefix admits it: a name that says it holds a credential is not
+# configuration (VLLM_API_KEY would also make the local endpoint demand a key the runner's
+# client never sends).
+_CREDENTIAL_NAME_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
 
 
 class RunError(Exception):
     """A runner failure whose message is safe to surface (already token-scrubbed)."""
+
+
+class RunSecrets(BaseModel):
+    """The credentials a runner received, as :class:`~pydantic.SecretStr`.
+
+    ``from_environment`` records that the token came through the deprecated
+    :data:`LEGACY_TOKEN_ENV` rather than a secrets file, so the run can say so.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    hf_token: SecretStr | None = None
+    from_environment: bool = False
+
+    def hf_token_value(self) -> str | None:
+        """The token in plaintext, for the one call that needs it (and the scrubber)."""
+        return self.hf_token.get_secret_value() if self.hf_token is not None else None
+
+
+def load_secrets() -> RunSecrets:
+    """Read the run's secrets file, delete it, and return its contents as :class:`RunSecrets`.
+
+    The file is named by :data:`~strata_forge.compute.task.SECRETS_FILE_ENV`, which the backend
+    sets to an absolute path ending in ``.secrets.json``; a value of any other shape is refused
+    before anything touches it, because this function deletes what it is pointed at. It is
+    opened without following a symlink, must be a regular file owned by this user with no group
+    or other permission bits, and is unlinked whatever the outcome of the read, before this
+    returns — so before the runner makes any network call or starts any subprocess. A missing,
+    unreadable, oversized or malformed file is a named :class:`RunError` whose message never
+    carries the file's contents.
+
+    With no secrets file configured, the token is read from :data:`LEGACY_TOKEN_ENV` for
+    orchestrators that still deliver it that way (``from_environment`` is then set), and that
+    variable is removed from this process's environment so no child inherits it. When a file IS
+    configured the environment variable is never read: an orchestrator that delivers by file
+    cannot be steered back to the environment by a stray variable.
+    """
+    configured = os.environ.get(SECRETS_FILE_ENV, "")
+    if not configured:
+        legacy = os.environ.pop(LEGACY_TOKEN_ENV, "")
+        if not legacy:
+            return RunSecrets()
+        return RunSecrets(hf_token=SecretStr(legacy), from_environment=True)
+    os.environ.pop(LEGACY_TOKEN_ENV, None)
+    return _parse_secrets(_read_and_unlink(Path(configured)))
+
+
+def _read_and_unlink(path: Path) -> bytes:
+    if not path.is_absolute() or path.name != SECRETS_FILE_NAME:
+        msg = f"{SECRETS_FILE_ENV} must be an absolute path to a {SECRETS_FILE_NAME} file"
+        raise RunError(msg)
+    try:
+        try:
+            # O_NONBLOCK: opening a FIFO for reading otherwise blocks until a writer appears,
+            # which would hang the run before the regular-file check below could refuse it.
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            msg = f"the secrets file {path} does not exist (already read, or never written)"
+            raise RunError(msg) from None
+        except OSError as exc:
+            msg = f"the secrets file {path} could not be opened ({exc.strerror})"
+            raise RunError(msg) from None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                msg = f"the secrets file {path} is not a regular file"
+                raise RunError(msg)
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                msg = (
+                    f"the secrets file {path} must be owned by this user and readable by no one "
+                    f"else (mode {stat.S_IMODE(info.st_mode):o})"
+                )
+                raise RunError(msg)
+            raw = os.read(fd, MAX_SECRETS_FILE_BYTES + 1)
+        finally:
+            os.close(fd)
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            msg = f"the secrets file {path} could not be removed ({exc.strerror})"
+            raise RunError(msg) from None
+    if len(raw) > MAX_SECRETS_FILE_BYTES:
+        msg = f"the secrets file is larger than {MAX_SECRETS_FILE_BYTES} bytes"
+        raise RunError(msg)
+    return raw
+
+
+def _parse_secrets(raw: bytes) -> RunSecrets:
+    # `from None` throughout: a decode error keeps the whole document on the exception, and a
+    # chained cause is one traceback print away from a log.
+    try:
+        data: object = json.loads(raw.decode("utf-8"))
+    except ValueError:  # UnicodeDecodeError and JSONDecodeError both subclass it
+        msg = "the secrets file is not valid JSON"
+        raise RunError(msg) from None
+    if not isinstance(data, dict):
+        msg = "the secrets file must hold a JSON object"
+        raise RunError(msg)
+    entries = cast("dict[object, object]", data)
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in entries.items()):
+        msg = "the secrets file must map names to string values"
+        raise RunError(msg)
+    values = cast("dict[str, str]", entries)
+    unknown = set(values) - _KNOWN_SECRETS
+    if unknown:
+        # Counted, not named: the names come from a file, unvalidated and of any length.
+        msg = (
+            f"the secrets file carries {len(unknown)} key(s) this engine does not read; it "
+            f"reads only {sorted(_KNOWN_SECRETS)!r} (an orchestrator built for a different "
+            f"strata-forge?)"
+        )
+        raise RunError(msg)
+    token = values.get(HF_TOKEN_SECRET) or None
+    return RunSecrets(hf_token=SecretStr(token) if token else None)
+
+
+def model_server_environ(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The allow-listed slice of ``environ`` (default: this process's) a model server may see.
+
+    A server the runner starts is third-party code serving a model a user chose; it gets what it
+    needs to run and nothing it could leak. The runner's own environment may hold the
+    orchestrator's spec, the secrets file's path, and on an older orchestrator the write token
+    itself, and none of that is the server's business.
+    """
+    source = os.environ if environ is None else environ
+    return {
+        name: value
+        for name, value in source.items()
+        if (name in _SERVER_ENV_NAMES or name.startswith(_SERVER_ENV_PREFIXES))
+        and not _CREDENTIAL_NAME_RE.search(name)
+    }
 
 
 def validate_repo_id(repo_id: str, what: str) -> str:
@@ -471,26 +660,30 @@ def install_termination_handlers() -> None:
 
 
 async def runner_main(
-    execute: Callable[[JsonlProgressWriter | None, str | None], Awaitable[Any]],
+    execute: Callable[[JsonlProgressWriter | None, RunSecrets], Awaitable[Any]],
 ) -> int:
     """Run one pipeline to completion and return a process exit code (0 ok, 1 failure).
 
-    Owns the three things a runner's outcome depends on and none of its work: the write token is
-    read here and never leaks (every message goes through :func:`run_redactor`), a cancellation
-    is reported as a cancellation rather than as a failure of the work, and the progress writer
-    is closed whatever happens.
+    Owns the things a runner's outcome depends on and none of its work: the secrets are loaded
+    (and their file deleted) here, first, and never leak (every message goes through
+    :func:`run_redactor`); a cancellation is reported as a cancellation rather than as a failure
+    of the work; and the progress writer is closed whatever happens. A token that arrived through
+    the deprecated environment variable is reported as such, once, before the work starts.
 
     A token too short to redact fails the run before any work starts: everything the run would
     print could carry it. The refusal itself is scrubbed by the credential shapes alone.
     """
-    hf_token = os.environ.get("HF_WRITE_TOKEN") or None
     path = progress_path()
     writer = JsonlProgressWriter(path) if path else None
     install_termination_handlers()
     redactor = Redactor()
     try:
-        redactor = run_redactor(hf_token)
-        await execute(writer, hf_token)
+        secrets = load_secrets()
+        redactor = run_redactor(secrets.hf_token_value())
+        if secrets.from_environment:
+            emit(writer, ProgressEvent(kind="phase", message=LEGACY_TOKEN_MESSAGE))
+            print(f"warning: {LEGACY_TOKEN_MESSAGE}", file=sys.stderr, flush=True)
+        await execute(writer, secrets)
     except asyncio.CancelledError:
         # Asked to stop. The `finally` blocks unwinding beneath this are the point — they are
         # what shut down whatever the runner started. Report it as a distinct outcome rather than

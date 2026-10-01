@@ -15,10 +15,15 @@ them changed.
 
 from strata_forge import __version__
 
-__all__ = ["SPEC_VERSION"]
+__all__ = ["HF_TOKEN_SECRET", "SPEC_VERSION"]
 
 # The engine version a spec is validated against, and the version an orchestrator writes into
 # ``engine_version`` (alone, or as ``f"{SPEC_VERSION}+{commit}"``). It is the package version
 # because the spec models live in this package: a change to their fields ships with a version
 # bump, so the version names the contract.
 SPEC_VERSION = __version__
+
+# The key an orchestrator gives the Hugging Face token under in ``Task.secrets``, and so in the
+# job's secrets file: the one key a runner reads. Any other key is refused by name, so this is
+# part of the orchestrator contract, like the version above.
+HF_TOKEN_SECRET = "HF_TOKEN"  # noqa: S105 — a key name, not a credential

@@ -78,6 +78,7 @@ These apply everywhere in `src/strata_forge/`. Code that violates them is wrong 
 - Every LLM call is traced (when Langfuse is configured) and dumpable to NDJSON (env-gated via `FORGE_DIAGNOSTIC=1`).
 - Use the structlog logger from `strata_forge.core.logging`; `trace_id` propagates via contextvars across `await` boundaries — never pass it manually.
 - Do not log full prompts at `INFO`; use `DEBUG`. Never log raw API keys, AWS signatures, or session tokens.
+- A credential a compute job needs travels in `Task.secrets`, delivered as a private file the job reads and deletes, never in `Task.env`, a command line, a generated script or a child process's environment ([ADR 0019](docs/architecture/adr/0019-secrets-travel-beside-the-task.md)).
 
 ### 3.7 Cost awareness
 - LLM-touching code paths must respect any active `BudgetContext`. Pre-call estimation + post-call true-up.

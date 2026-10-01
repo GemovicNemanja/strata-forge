@@ -51,6 +51,9 @@ The module's ``__init__.py`` re-exports:
 
 - Data shapes: :class:`Task`, :class:`ResourceSpec`,
   :class:`Job`, :class:`JobStatus`, :data:`JobState`.
+- Secret delivery names: :data:`SECRETS_FILE_ENV` (the variable
+  holding the secrets file's absolute path) and
+  :data:`SECRETS_FILE_NAME` (its basename).
 - Protocol: :class:`Backend`.
 - Backend implementations: :class:`LocalBackend`,
   :class:`SSHBackend`, :class:`SkyPilotBackend`.
@@ -85,6 +88,23 @@ or :class:`ValueError` for input validation.
   nuance (SkyPilot's ``SETTING_UP``, SSH's
   process-exists-vs-writers-closed) lands in
   :attr:`JobStatus.message` rather than expanding the state set.
+- **Secrets travel beside the task, never in it**
+  ([ADR 0019](../../../docs/architecture/adr/0019-secrets-travel-beside-the-task.md)).
+  A credential a job needs goes in :attr:`Task.secrets`
+  (``SecretStr`` values, excluded from ``model_dump``, ``to_yaml``,
+  ``repr`` and YAML loading), never in :attr:`Task.env`, a command
+  string, a generated script or :attr:`Job.metadata`. Every backend
+  delivers it as a 0600 file in a 0700 directory whose path the job
+  finds in ``FORGE_SECRETS_FILE``, writing the bytes through a
+  channel no other user can read (SSH stdin; an ``O_EXCL`` local
+  write), and removes the file on exit through a trap in an OUTER
+  shell, with the task's ``setup`` and ``run`` in a subshell below it
+  (``backends.base.secrets_guarded_script``): a ``trap ... EXIT`` the
+  task sets would otherwise replace the removal. Only ``run`` is given
+  the path. Every backend re-validates the task first
+  (``Task.revalidated()``), since ``model_copy`` skips validators. A
+  backend with no such channel raises on non-empty ``secrets``
+  (SkyPilot does) rather than falling back to the environment.
 - **Frozen tuple-typed collections** as elsewhere in
   :mod:`strata_forge.*` (datasets, evals, agents, rag). Pydantic
   ``frozen=True`` plus ``extra="forbid"``.
@@ -117,6 +137,10 @@ or :class:`ValueError` for input validation.
   for tests and for users who want to share connections, but the
   return type is always Forge-owned shapes (:class:`Job`,
   :class:`JobStatus`) — never an SDK object.
+- **Never put a secret in a command string.** A remote command is
+  readable by every user on the host in ``/proc/<pid>/cmdline``
+  while it runs; file contents go over the channel's stdin
+  (``_run_remote(..., stdin=...)``), never a heredoc.
 - **Never block the event loop in async methods.** Subprocess
   spawning goes through ``asyncio.create_subprocess_exec``;
   ``asyncssh`` is async-native; SkyPilot's sync calls (when

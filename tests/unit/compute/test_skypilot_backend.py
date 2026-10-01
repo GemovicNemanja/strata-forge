@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import SecretStr
 
 from strata_forge.compute import Backend, SkyPilotBackend, Task
 
@@ -151,6 +152,18 @@ class TestSubmit:
         job = await backend.submit(Task(name="t", run="hi"))
         assert job.id == "777"
         assert job.metadata["cluster_name"] == "old-cluster-abc"
+
+    async def test_secrets_fail_closed_before_anything_launches(
+        self, backend: SkyPilotBackend, fake_sky: _FakeSky
+    ) -> None:
+        # SkyPilot's only channel for a value is `envs`, which is the job's environment. Refusing
+        # beats a silent fallback to exactly the delivery `Task.secrets` exists to avoid.
+        sentinel = "hf_SENTINELskypilot0123456789"
+        task = Task(name="t", run="hi", secrets={"HF_TOKEN": SecretStr(sentinel)})
+        with pytest.raises(ValueError, match=r"cannot deliver Task\.secrets") as excinfo:
+            await backend.submit(task)
+        assert sentinel not in str(excinfo.value)
+        assert fake_sky.launches == []
 
 
 # ---------------------------------------------------------------------------

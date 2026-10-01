@@ -19,9 +19,14 @@ credentials + the network):
   - Template rendering is a bounded, NON-executing ``{name}`` substitution (a regex, NOT
     ``str.format`` and NOT a template engine) — only placeholders that map to a real
     column are replaced; anything else stays literal.
-  - The HF write token arrives in its OWN env var (``HF_WRITE_TOKEN``), never in
-    ``STRATA_RUN_CONFIG``, is passed EXPLICITLY to the Hub/dataset clients (never the
-    VM's ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
+  - The HF write token arrives in a private secrets file the backend wrote beside the job
+    (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
+    :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
+    the environment. It is passed EXPLICITLY to the Hub/dataset clients (never the VM's
+    ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
+  - The model server gets an allow-listed environment
+    (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
+    third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
     repo id; result rows are ``{custom_id, output, error}`` (model text only). The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
@@ -66,8 +71,10 @@ from strata_forge.llm.providers.openai_compat import (
 )
 from strata_forge.pipelines._common import (
     RunError,
+    RunSecrets,
     emit,
     load_config,
+    model_server_environ,
     phase_sink,
     results_dir,
     run_redactor,
@@ -416,7 +423,8 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     return out_repo
 
 
-async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWriter | None) -> str:
+async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
+    hf_token = secrets.hf_token_value()
     # One sampler for the run: the phase sink folds its counters into every caption, and the
     # step events below reuse the same cached reading rather than shelling out twice.
     gpu = GpuSampler()
@@ -460,6 +468,10 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     task = task.model_copy(
         update={
             "env": {
+                # The server's whole environment: an allow-listed slice of this one, then the
+                # task's own settings. The backend below does not inherit, so nothing else
+                # reaches it.
+                **model_server_environ(),
                 **task.env,
                 # Unbuffered: the served process writes through a pipe, so CPython would otherwise
                 # hold its output in an 8 KiB block buffer — and a server that hangs before filling
@@ -474,7 +486,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     async with serving_endpoint(
         # Tee the served process's streams into the run workdir. When the runner dies, the
         # buffers die with it; the files are what is left to explain why the server never came up.
-        LocalBackend(log_dir=Path.cwd()),
+        LocalBackend(log_dir=Path.cwd(), env_inherit=False),
         task,
         base_url=f"http://{_SERVE_HOST}:{_SERVE_PORT}/v1",
         wait_timeout_s=hp.wait_timeout_s,
@@ -556,7 +568,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
     return await runner_main(
-        lambda writer, token: _execute(load_spec(writer=writer), token, writer)
+        lambda writer, secrets: _execute(load_spec(writer=writer), secrets, writer)
     )
 
 

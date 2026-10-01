@@ -48,6 +48,29 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   and an `ImportError`): the up-front check that a QLoRA run can quantise its model. It looks
   `bitsandbytes` up without importing it, and refuses one whose metadata records a version below
   the `[finetuning]` floor, naming that version. `QLoRAConfig.to_bnb_config()` calls it first.
+- `Task.secrets: dict[str, SecretStr]` carries the credentials a job needs beside the task
+  rather than in it: excluded from `model_dump`, `to_yaml`, `repr` and YAML loading, keys shaped
+  like environment variable names, at most 8, never also in `env`. The values are masked before
+  any validator runs, so no rendering of a validation error (`str`, `errors()`, `json()`) carries
+  one; a pickled `Task` still does, so a task with secrets is never pickled. Every backend
+  re-validates the task before delivering anything (`Task.revalidated()`), since
+  `model_copy(update=...)` skips validation. Every backend delivers the secrets as a 0600
+  `.secrets.json` in a 0700 directory, exports its absolute path in `FORGE_SECRETS_FILE`
+  (`strata_forge.compute.SECRETS_FILE_ENV`) to the task's `run` step only (never to `setup`),
+  and removes the file on exit through a trap in an outer shell that the task's own `EXIT` traps
+  cannot displace (ADR 0019). `SkyPilotBackend.submit` refuses a task with secrets.
+- `SubmitCleanupError` (a `RuntimeError`): `SSHBackend.submit` raises it, from the original
+  failure, when a submit fails after creating its workdir and the workdir then cannot be removed.
+  Its `job` is a handle `cleanup()` accepts, so an orchestrator can remove that workdir (and any
+  secrets file in it) once the host is reachable. A cancelled submit is still re-raised as the
+  cancellation.
+- `strata_forge.pipelines.HF_TOKEN_SECRET` (`"HF_TOKEN"`): the `Task.secrets` key the runners
+  read the Hugging Face token from, and the only key they accept.
+- `strata_forge.pipelines._common.load_secrets()` and `RunSecrets`: a runner reads its secrets
+  file first, deletes it before any network call or subprocess, and gets the values as
+  `SecretStr`. A path that is not an absolute `.secrets.json`, a symlink, a file another user
+  could read, a FIFO (refused without waiting for a writer), an unknown key (counted, never
+  named) or malformed JSON is a named error that never carries the file's contents.
 
 ### Changed
 
@@ -63,6 +86,35 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (`CLAUDE.md` §9b).
 - `strata-forge train sft|dpo` builds the adapter config before it resolves the dataset, so the
   QLoRA check runs before the dataset store is read.
+- `SSHBackend.submit` creates the job's workdir mode 0700 with no `-p` (an existing directory or
+  symlink fails the submit), requires the remote root to be owned by the login user and narrows
+  it to 0700, and writes the wrapper and then the secrets file through the SSH channel's stdin
+  with `umask 077`, from inside the workdir after checking it is the login user's own, refusing
+  anything (a FIFO included) already at the name, so no file content is ever on a remote command
+  line. The secrets file is written last, immediately before the launch. A submit that fails
+  after creating the workdir removes it within a 10 s bound. Every submit also removes secrets
+  files older than 10 minutes from job directories that were never launched (no pid file), so
+  `remote_root` must be a directory dedicated to Forge.
+- `SSHBackend.cancel` removes the job's secrets file after its final SIGKILL, for the jobs whose
+  trap never ran (SIGKILL, or a job without a process group of its own).
+- `SSHBackend` treats a remote command that ended without an exit status (asyncssh's `None`) as a
+  failure rather than a success.
+- The inference runner starts its model server with `LocalBackend(env_inherit=False)` and an
+  allow-listed environment (`model_server_environ()`), so the server never sees the spec, the
+  secrets file's path or a token. That allow-list also stops variables the server used to inherit:
+  an ambient `HF_TOKEN`, `HF_ENDPOINT` (a Hub mirror), `HF_HUB_*` settings such as
+  `HF_HUB_ENABLE_HF_TRANSFER`, and any `CUDA_*`/`NVIDIA_*`/`NCCL_*`/`VLLM_*` variable whose name
+  contains TOKEN, KEY, SECRET, PASSWORD or CREDENTIAL. A machine that relied on one of those
+  reaching vLLM (a token for a gated model, a mirror) loses it. `LocalBackend` no longer passes an
+  inherited `FORGE_SECRETS_FILE` to a child.
+- `runner_main`'s callable takes `(writer, RunSecrets)` instead of `(writer, str | None)`.
+
+### Deprecated
+
+- The `HF_WRITE_TOKEN` environment variable as the runners' token channel. With no
+  `FORGE_SECRETS_FILE` set, a runner still reads it, removes it from its own environment and
+  records a `phase` event (and a stderr `warning:`) saying the delivery is deprecated; with a
+  secrets file set it is never read. It is removed in 0.5.0.
 
 ### Fixed
 
@@ -96,6 +148,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (`docs/modules/llm.md`, "OpenAI-compatible endpoints"). Unit tests run the real LiteLLM, OpenAI
   client and `httpx` stack, streaming and not, against loopback servers and pin both halves, so a
   dependency upgrade that changes either fails there.
+- A Hugging Face token handed to a run is no longer written into `wrapper.sh`, placed on a remote
+  command line, exported into the job's environment (where the setup step's package installs
+  inherited it) or inherited by the model server.
 
 ## [0.3.0] - 2026-10-01
 
