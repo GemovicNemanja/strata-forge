@@ -215,7 +215,7 @@ forge is a library, not a service, so it has no deploy of its own — but its br
 
 1. **Register the models in forge.** Copy ids, context window, max output, pricing and capability flags from the vendor's own documentation, never from memory, the app's catalog, LiteLLM's model map or OpenRouter, and name the pages in the entry's source comment. For OpenAI that is the model page AND the GPT family / migration guide (`developers.openai.com/api/docs/guides/latest-model`) and the reasoning guide (`.../guides/reasoning`), which carry the endpoint and parameter caveats the model page omits; for Anthropic it is the models overview, the pricing page and the thinking page (`platform.claude.com/docs/en/build-with-claude/thinking`, its tool-use and sampling-parameter limits). A capability flag states what the model does on its route's wire API: every OpenAI `openai` route speaks the Responses API (`wire_api: responses`, [ADR 0018](docs/architecture/adr/0018-openai-routes-speak-the-responses-api.md)), where current OpenAI models call tools at any reasoning effort, and `sampling_params: false` marks a model that rejects `temperature` / `top_p` at its default effort. Update `CURRENT_LINEUP` in `tests/unit/llm/test_routing.py` in the same change.
 2. **Smoke every new native route live** with a real key and the parameters the server actually sends (tools, its `max_tokens` budget): `scripts/smoke_responses.py` for OpenAI routes (two legs: a tool call that suspends, then the resumed turn with its replayed reasoning), and strata-server's staging smoke once staging bundles the change. A registry entry that has never answered a tool call is not done.
-3. **Release in one sequence across the three repos.** forge PR into `dev` (bumping the version per §9b when the change will be released) → strata-server re-locks against forge `dev` and redeploys staging (its CLAUDE.md §3.8), and the staging smoke passes → forge `dev` → `main`, tag `vX.Y.Z` (PyPI) → strata-server `dev` → `main`, whose production deploy rebuilds against forge `main` → only then the app catalog PR (its `native-models` check green) → app `dev` → `main`.
+3. **Release in one sequence across the three repos.** forge PR into `dev`, carrying the version bump §9b assigns and renaming `CHANGELOG.md`'s **Unreleased** heading to it: a **patch** for registry entries alone (the model registry is not §9b's method or dataset-format registry), a **minor** when the change also does something §9b lists, such as raising the dependency pin a new wire API needs → strata-server re-locks against forge `dev` and redeploys staging (its CLAUDE.md §3.8; the `strata-server-dev` redeploy §9b requires after every forge merge to `dev`), and the staging smoke passes → forge `dev` → `main`, tagged `vX.Y.Z` the same day (PyPI; §9b never leaves `main` untagged) → strata-server `dev` → `main`, whose production deploy rebuilds against that forge release → only then the app catalog PR (its `native-models` check green) → app `dev` → `main`.
 4. **The app may offer a native route only for a model whose entry has `tool_calling: true`**, because the app's chat always sends tools. A model forge cannot carry natively stays on the app's OpenRouter route. `CURRENT_LINEUP` is forge-local and cannot see the app's catalog; the recurrence guard for "the app names a native id forge lacks" is the app's `native-models` CI check, which resolves every native catalog route against the forge registry.
 
 ---
@@ -252,12 +252,13 @@ Anything under `src/` ships to a public index, so it must not name private sibli
 internal infrastructure — write module docstrings for an outside reader.
 
 **Cutting a release:** bump `version` in `pyproject.toml` **and** `__version__` in
-`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), record
-the release under its own heading in `CHANGELOG.md` (entries accumulate under **Unreleased** as
-they merge to `dev`; the bump renames that heading), promote `dev` → `main` per §8, then tag
-`main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies the tag matches the packaged
-version, builds, checks the archives, and uploads via PyPI **Trusted Publishing** (OIDC — there is
-no API token in this repo). `workflow_dispatch` publishes to TestPyPI for a rehearsal.
+`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), re-run
+`uv lock` (the lockfile records the project's own version; `uv lock --check` catches a stale
+one), record the release under its own heading in `CHANGELOG.md` (entries accumulate under
+**Unreleased** as they merge to `dev`; the bump renames that heading), promote `dev` → `main` per
+§8, then tag `main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies the tag matches
+the packaged version, builds, checks the archives, and uploads via PyPI **Trusted Publishing**
+(OIDC — there is no API token in this repo). `workflow_dispatch` publishes to TestPyPI for a rehearsal.
 
 **When a release is required — the release rule.** The engine runs on machines the control plane
 installs it onto at launch, pinned to the exact version the control plane validated the run's spec
