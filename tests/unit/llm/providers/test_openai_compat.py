@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
+from pydantic import SecretStr
 
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine, Generator
 
 
 @pytest.fixture(autouse=True)
@@ -171,3 +179,162 @@ class TestAcompletionWiring:
             api_base="http://override:9000/v1",  # call-site override
         )
         assert captured["api_base"] == "http://override:9000/v1"
+
+
+# The trust note on `base_url` (module docstring, docs/modules/llm.md) rests on how the transport
+# treats a redirect. These run the real LiteLLM -> OpenAI client -> httpx stack against two
+# loopback servers, so a dependency upgrade that changes either half of the claim fails here: the
+# key must never reach another origin, and what DOES travel must match what the note says.
+
+_SENTINEL_KEY = "sk-redirect-sentinel"
+_PROMPT = "redirect-probe-prompt"
+_REPLY = "reply-from-the-redirect-target"
+
+
+class _Seen(NamedTuple):
+    method: str
+    path: str
+    authorization: str | None
+    has_prompt: bool
+
+
+def _completion_body() -> bytes:
+    return json.dumps(
+        {
+            "id": "chatcmpl-redirect",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": _REPLY},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    ).encode()
+
+
+def _handler(
+    seen: list[_Seen], *, redirect: int | None = None, to_origin: str = ""
+) -> type[BaseHTTPRequestHandler]:
+    """Answer with a completion, or, given ``redirect``, send ``/v1/...`` to ``to_origin``.
+
+    An empty ``to_origin`` is a relative ``Location``: a redirect within the same origin.
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        def _serve(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode() if length else ""
+            if redirect is not None and self.path.startswith("/v1/"):
+                self.send_response(redirect)
+                self.send_header("Location", f"{to_origin}/moved{self.path}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            seen.append(
+                _Seen(
+                    method=self.command,
+                    path=self.path,
+                    authorization=self.headers.get("Authorization"),
+                    has_prompt=_PROMPT in body,
+                )
+            )
+            payload = _completion_body()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:
+            self._serve()
+
+        def do_POST(self) -> None:
+            self._serve()
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base signature
+            del format, args
+
+    return _Handler
+
+
+@contextmanager
+def _loopback(handler: type[BaseHTTPRequestHandler]) -> Generator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+async def _complete(base_url: str) -> str:
+    provider = OpenAICompatProvider(
+        OpenAICompatConfig(base_url=f"{base_url}/v1", api_key=SecretStr(_SENTINEL_KEY))
+    )
+    response = await provider.acompletion(
+        provider_model_id="m",
+        messages=[{"role": "user", "content": _PROMPT}],
+        num_retries=0,
+        max_retries=0,
+    )
+    return response.choices[0].message.content
+
+
+class TestRedirects:
+    @pytest.fixture(autouse=True)
+    def _no_success_logging(self, monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+        # LiteLLM hands every success callback to a worker bound to the running event loop. Each
+        # test has its own loop, so the next call would drop the previous call's queued coroutine
+        # unawaited. Nothing here is about logging: close the coroutine instead of queueing it.
+        def _discard(async_coroutine: Coroutine[Any, Any, Any]) -> None:
+            async_coroutine.close()
+
+        monkeypatch.setattr(
+            "litellm.litellm_core_utils.logging_worker.GLOBAL_LOGGING_WORKER"
+            ".ensure_initialized_and_enqueue",
+            _discard,
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "method", "body_resent"),
+        [
+            (307, "POST", True),
+            (308, "POST", True),
+            (301, "GET", False),
+            (302, "GET", False),
+            (303, "GET", False),
+        ],
+    )
+    async def test_a_cross_origin_redirect_drops_the_key_but_not_the_reply(
+        self, status: int, method: str, body_resent: bool
+    ) -> None:
+        # A different port is a different origin, exactly as a different host is.
+        seen: list[_Seen] = []
+        with (
+            _loopback(_handler(seen)) as target,
+            _loopback(_handler([], redirect=status, to_origin=target)) as base_url,
+        ):
+            reply = await _complete(base_url)
+
+        assert [s.authorization for s in seen] == [None], "the key reached another origin"
+        assert seen[0].method == method
+        assert seen[0].has_prompt is body_resent
+        assert reply == _REPLY
+
+    async def test_a_same_origin_redirect_keeps_the_key(self) -> None:
+        seen: list[_Seen] = []
+        with _loopback(_handler(seen, redirect=307)) as base_url:
+            reply = await _complete(base_url)
+
+        assert seen == [
+            _Seen("POST", "/moved/v1/chat/completions", f"Bearer {_SENTINEL_KEY}", True)
+        ]
+        assert reply == _REPLY
