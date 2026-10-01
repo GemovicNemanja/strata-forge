@@ -60,13 +60,6 @@ jobs:
           - "finetuning,storage"  # fine-tuning machine
           - "all"
     steps:
-      # vLLM, torch and the CUDA wheels together approach 10 GB; the runner's preinstalled SDKs
-      # would otherwise turn a full disk into a false alarm.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-
       # The schedule runs from the default branch; the engine it exercises is dev, which is what
       # staging installs and what the next release is cut from.
       - uses: actions/checkout@v4
@@ -98,6 +91,8 @@ jobs:
           fi
           uv pip install --no-config --default-index "$INDEX_URL" \
             --python "$RUNNER_TEMP/smoke-venv/bin/python" "${override[@]}" ".[${EXTRAS}]"
+          # vLLM, torch and the CUDA wheels take about 8 GB; the headroom is logged so a runner
+          # image with less disk shows up here before it shows up as a failed install.
           df -h /
 
       - name: Build every config a run builds
