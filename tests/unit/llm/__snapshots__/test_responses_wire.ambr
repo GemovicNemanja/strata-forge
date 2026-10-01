@@ -1,0 +1,75 @@
+# serializer version: 1
+# name: TestBuildRequest.test_full_body_snapshot
+  dict({
+    'include': list([
+      'reasoning.encrypted_content',
+    ]),
+    'input': list([
+      dict({
+        'content': 'load gpt2',
+        'role': 'user',
+        'type': 'message',
+      }),
+      dict({
+        'encrypted_content': 'blob-1',
+        'id': 'rs_1',
+        'summary': list([
+          dict({
+            'text': 'thought',
+            'type': 'summary_text',
+          }),
+        ]),
+        'type': 'reasoning',
+      }),
+      dict({
+        'content': list([
+          dict({
+            'annotations': list([
+            ]),
+            'text': 'Let me check.',
+            'type': 'output_text',
+          }),
+        ]),
+        'id': 'msg_1',
+        'phase': 'commentary',
+        'role': 'assistant',
+        'type': 'message',
+      }),
+      dict({
+        'arguments': '{"value": "ping"}',
+        'call_id': 'call_1',
+        'id': 'fc_1',
+        'name': 'echo_value',
+        'type': 'function_call',
+      }),
+      dict({
+        'call_id': 'call_1',
+        'output': 'loaded',
+        'type': 'function_call_output',
+      }),
+    ]),
+    'instructions': 'You are a workspace assistant.',
+    'max_output_tokens': 25000,
+    'store': False,
+    'stream': True,
+    'tools': list([
+      dict({
+        'description': 'Echo a value back.',
+        'name': 'echo_value',
+        'parameters': dict({
+          'properties': dict({
+            'value': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'value',
+          ]),
+          'type': 'object',
+        }),
+        'strict': False,
+        'type': 'function',
+      }),
+    ]),
+  })
+# ---

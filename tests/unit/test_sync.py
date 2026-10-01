@@ -143,7 +143,7 @@ class TestCompleteStructured:
             [Message.user("hi")],
             schema=_Summary,
             model="gpt-5.5",
-            provider="openai",
+            provider="openai_compat",
         )
         assert isinstance(resp, StructuredResponse)
         assert resp.parsed.title == "Hi"
@@ -156,7 +156,7 @@ class TestCompleteStructured:
             return _fake_response(text=json.dumps(payload))
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
-        client = LLMClient("gpt-5.5", provider="openai")
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         resp = sync.complete_structured(
             [Message.user("hi")],
             schema=_Summary,

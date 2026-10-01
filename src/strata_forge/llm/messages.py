@@ -10,23 +10,35 @@ fundamentally part of the message shape: an ``AssistantMessage`` carries
 the model's tool-call requests, and a ``ToolResultMessage`` carries the
 matching result. ``validate_conversation`` enforces the invariant that
 every tool-result ID has a prior matching call.
+
+An ``AssistantMessage`` may also carry ``provider_items``: the ordered output
+items of an OpenAI Responses API turn (encrypted reasoning, text with its
+``phase``, function-call references). They are opaque provider state the next
+request on the same provider must replay, because the API stores nothing when
+called with ``store=false``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, NoReturn, final
+from typing import Annotated, Any, Literal, NoReturn, final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from strata_forge.core.errors import ValidationError
 
 __all__ = [
     "AnyMessage",
     "AssistantMessage",
+    "CallRef",
     "ContentPart",
     "Message",
+    "ProviderItem",
+    "ProviderItems",
+    "ReasoningItem",
+    "ResponsesProvider",
     "Role",
     "SystemMessage",
+    "TextItem",
     "TextPart",
     "ToolCall",
     "ToolResultMessage",
@@ -83,6 +95,62 @@ class ToolCall(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Provider items (an OpenAI Responses API turn's replayable output)
+# ---------------------------------------------------------------------------
+
+
+type ResponsesProvider = Literal["openai", "azure"]
+
+
+class ReasoningItem(BaseModel):
+    """A reasoning output item, carried as the provider's encrypted content."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["reasoning"] = "reasoning"
+    id: str
+    encrypted_content: str
+    summary: tuple[str, ...] = ()
+
+
+class TextItem(BaseModel):
+    """An assistant output message, with the ``phase`` the provider labelled it with."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["text"] = "text"
+    id: str
+    phase: Literal["commentary", "final_answer"] | None = None
+    text: str
+
+
+class CallRef(BaseModel):
+    """The position and item id of a function call; its name and arguments live in ``tool_calls``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["call"] = "call"
+    id: str
+    call_id: str
+
+
+type ProviderItem = Annotated[ReasoningItem | TextItem | CallRef, Field(discriminator="kind")]
+
+
+class ProviderItems(BaseModel):
+    """A Responses API turn's output items, in the provider's order, tagged with their origin.
+
+    Replayed verbatim only to the provider that produced them; any other route gets the
+    turn's plain ``content`` and ``tool_calls`` instead.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: ResponsesProvider
+    items: tuple[ProviderItem, ...]
+
+
+# ---------------------------------------------------------------------------
 # Concrete message types
 # ---------------------------------------------------------------------------
 
@@ -113,11 +181,28 @@ class UserMessage(_BaseMessage):
 
 
 class AssistantMessage(_BaseMessage):
-    """A model turn. May include text, tool calls, or both."""
+    """A model turn. May include text, tool calls, or both.
+
+    ``provider_items`` is the turn's Responses API output, when a Responses route
+    produced it. Every ``CallRef`` in it must name one of this turn's ``tool_calls``, so
+    the items can never show the model a call other than the one the caller executed.
+    """
 
     role: Literal["assistant"] = "assistant"
     content: str | None = None
     tool_calls: list[ToolCall] = []
+    provider_items: ProviderItems | None = None
+
+    @model_validator(mode="after")
+    def _call_refs_name_this_turns_calls(self) -> AssistantMessage:
+        if self.provider_items is None:
+            return self
+        call_ids = {call.id for call in self.tool_calls}
+        for item in self.provider_items.items:
+            if isinstance(item, CallRef) and item.call_id not in call_ids:
+                msg = f"provider item references call_id {item.call_id!r} that is not a tool call"
+                raise ValueError(msg)
+        return self
 
 
 class ToolResultMessage(_BaseMessage):

@@ -319,6 +319,15 @@ Detailed reference: [`docs/modules/llm.md`](modules/llm.md).
   + budgets + diagnostic, full error taxonomy, sync wrappers,
   troubleshooting.
 
+**OpenAI's Responses API (ADR 0018)**
+
+- A registry route's `wire_api` picks Chat Completions or the Responses
+  API; every OpenAI `openai` route speaks the Responses API through
+  `litellm.aresponses`, statelessly, with each turn's encrypted reasoning
+  carried on `AssistantMessage.provider_items` and replayed on the next
+  request (`responses_wire.py`). `openai_compat`, Anthropic, Vertex and
+  Bedrock stay on Chat Completions.
+
 ### Why these decisions
 
 - **LiteLLM at the seam** (ADR 0001) lets Forge get provider breadth

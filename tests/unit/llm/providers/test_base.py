@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -10,6 +11,8 @@ from strata_forge.llm.providers.base import ProviderClient
 from strata_forge.llm.providers.config import OpenAIConfig, ProviderConfig
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from strata_forge.llm.registry import ProviderName
 
 
@@ -147,3 +150,65 @@ class TestAstream:
         assert collected == ["chunk-1", "chunk-2"]
         assert captured["stream"] is True
         assert captured["model"] == "openai/gpt-5.5"
+
+
+class TestResponsesSeam:
+    """``aresponses`` / ``aresponses_stream`` call ``litellm.aresponses`` with the prefixed model."""
+
+    async def test_aresponses_merges_auth_and_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock = AsyncMock(return_value={"status": "completed"})
+        monkeypatch.setattr("litellm.aresponses", mock)
+        client = _FakeProvider(OpenAIConfig())
+        result = await client.aresponses(
+            provider_model_id="gpt-6.1-sol",
+            request={"input": [], "store": False, "api_key": "request-wins"},
+        )
+        assert result == {"status": "completed"}
+        assert mock.await_args is not None
+        kwargs = mock.await_args.kwargs
+        assert kwargs["model"] == "openai/gpt-6.1-sol"
+        assert kwargs["store"] is False
+        assert kwargs["extra"] == "marker"
+        assert kwargs["api_key"] == "request-wins"
+        assert "stream" not in kwargs
+
+    async def test_aresponses_stream_forces_stream_and_yields_events(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _events() -> AsyncIterator[dict[str, str]]:
+            yield {"type": "response.created"}
+            yield {"type": "response.completed"}
+
+        mock = AsyncMock(return_value=_events())
+        monkeypatch.setattr("litellm.aresponses", mock)
+        client = _FakeProvider(OpenAIConfig())
+        events = [
+            e
+            async for e in client.aresponses_stream(
+                provider_model_id="gpt-6.1-sol", request={"input": [], "stream": False}
+            )
+        ]
+        assert [e["type"] for e in events] == ["response.created", "response.completed"]
+        assert mock.await_args is not None
+        assert mock.await_args.kwargs["stream"] is True
+
+    def test_responses_auth_defaults_to_auth_kwargs(self) -> None:
+        client = _FakeProvider(OpenAIConfig())
+        assert client.responses_auth_kwargs() == client.auth_kwargs()
+
+    async def test_extra_headers_from_auth_and_request_are_combined(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _HeaderProvider(_FakeProvider):
+            def responses_auth_kwargs(self) -> dict[str, Any]:
+                return {"api_key": "k", "extra_headers": {"A": "auth", "B": "auth"}}
+
+        mock = AsyncMock(return_value={})
+        monkeypatch.setattr("litellm.aresponses", mock)
+        await _HeaderProvider(OpenAIConfig()).aresponses(
+            provider_model_id="m", request={"input": [], "extra_headers": {"B": "request"}}
+        )
+        assert mock.await_args is not None
+        assert mock.await_args.kwargs["extra_headers"] == {"A": "auth", "B": "request"}

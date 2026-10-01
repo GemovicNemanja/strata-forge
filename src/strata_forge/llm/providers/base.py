@@ -9,9 +9,11 @@ Concrete subclasses (``openai.py``, ``anthropic.py``, ``vertex.py``,
   into every LiteLLM call
 
 The base provides concrete ``acompletion`` and ``astream`` implementations
-on top of ``litellm.acompletion``. Provider subclasses rarely need to
-override those; when they do (e.g. for unusual streaming protocols), they
-should call the base via ``super()`` after fixing up their inputs.
+on top of ``litellm.acompletion``, and ``aresponses`` / ``aresponses_stream``
+on top of ``litellm.aresponses`` for the routes that speak OpenAI's Responses
+API. Provider subclasses rarely need to override those; when they do (e.g. for
+unusual streaming protocols), they should call the base via ``super()`` after
+fixing up their inputs.
 """
 
 from __future__ import annotations
@@ -53,6 +55,14 @@ class ProviderClient(ABC):
         ``api_base``, ...). Return an empty dict to let LiteLLM read its
         creds from the environment.
         """
+
+    def responses_auth_kwargs(self) -> dict[str, Any]:
+        """Return the kwargs to merge into every Responses API call.
+
+        Defaults to :meth:`auth_kwargs`; a provider whose Responses endpoint needs different
+        connection settings (Azure's API version) overrides it.
+        """
+        return self.auth_kwargs()
 
     def litellm_model(self, provider_model_id: str) -> str:
         """Format the model string LiteLLM expects for this provider.
@@ -109,3 +119,49 @@ class ProviderClient(ABC):
         response = cast("AsyncIterator[Any]", raw)
         async for chunk in response:
             yield chunk
+
+    async def aresponses(
+        self,
+        *,
+        provider_model_id: str,
+        request: dict[str, Any],
+    ) -> Any:
+        """One non-streaming Responses API call via ``litellm.aresponses``.
+
+        ``request`` is the body :func:`strata_forge.llm.responses_wire.build_request` builds;
+        LiteLLM forwards it to the provider unchanged. Returns the raw response object.
+        """
+        params = _merge_request(self.responses_auth_kwargs(), request)
+        return await litellm.aresponses(  # pyright: ignore[reportUnknownMemberType]
+            model=self.litellm_model(provider_model_id),
+            **params,
+        )
+
+    async def aresponses_stream(
+        self,
+        *,
+        provider_model_id: str,
+        request: dict[str, Any],
+    ) -> AsyncIterator[Any]:
+        """A streaming Responses API call via ``litellm.aresponses``; yields the typed events."""
+        params = _merge_request(self.responses_auth_kwargs(), {**request, "stream": True})
+        raw = await litellm.aresponses(  # pyright: ignore[reportUnknownMemberType]
+            model=self.litellm_model(provider_model_id),
+            **params,
+        )
+        events = cast("AsyncIterator[Any]", raw)
+        async for event in events:
+            yield event
+
+
+def _merge_request(auth: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    """Overlay ``request`` on ``auth``; ``extra_headers`` from both are combined, request winning."""
+    merged: dict[str, Any] = {**auth, **request}
+    auth_headers = auth.get("extra_headers")
+    request_headers = request.get("extra_headers")
+    if isinstance(auth_headers, dict) and isinstance(request_headers, dict):
+        merged["extra_headers"] = {
+            **cast("dict[str, Any]", auth_headers),
+            **cast("dict[str, Any]", request_headers),
+        }
+    return merged

@@ -31,6 +31,7 @@ __all__ = [
     "Registry",
     "Tier",
     "Vendor",
+    "WireApi",
     "registry",
 ]
 
@@ -47,20 +48,19 @@ ProviderName = Literal[
     "openai_compat",
 ]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+WireApi = Literal["chat_completions", "responses"]
 
-# The providers whose wire format carries OpenAI's ``reasoning_effort``. Elsewhere LiteLLM
-# translates the parameter into a vendor-specific thinking configuration, which a registry flag
-# must never trigger by accident.
-_EFFORT_PROVIDERS: frozenset[ProviderName] = frozenset({"openai", "azure"})
+# The providers that serve OpenAI's Responses API (`POST /v1/responses`). Every other provider
+# is reached through LiteLLM's Chat Completions translation.
+_RESPONSES_PROVIDERS: frozenset[ProviderName] = frozenset({"openai", "azure"})
 
 
 class ProviderRoute(BaseModel):
     """A concrete ``(provider, provider_model_id)`` dispatch target for a model.
 
-    ``tool_call_reasoning_effort`` is the ``reasoning_effort`` this route must
-    send on every call that carries tools, for a model whose Chat Completions
-    endpoint accepts function calling only at one effort level. ``None`` (the
-    default) sends no effort and leaves the provider's default in place.
+    ``wire_api`` is the API the route speaks. ``responses`` (OpenAI's Responses API) is
+    valid only on the ``openai`` and ``azure`` providers; every other route speaks Chat
+    Completions through LiteLLM.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -68,14 +68,14 @@ class ProviderRoute(BaseModel):
     provider: ProviderName
     provider_model_id: str
     is_default: bool = False
-    tool_call_reasoning_effort: ReasoningEffort | None = None
+    wire_api: WireApi = "chat_completions"
 
     @model_validator(mode="after")
-    def _validate_reasoning_effort(self) -> ProviderRoute:
-        if self.tool_call_reasoning_effort is not None and self.provider not in _EFFORT_PROVIDERS:
+    def _validate_wire_api(self) -> ProviderRoute:
+        if self.wire_api == "responses" and self.provider not in _RESPONSES_PROVIDERS:
             msg = (
-                f"tool_call_reasoning_effort is an OpenAI Chat Completions parameter; "
-                f"route {self.provider!r} cannot carry it"
+                f"wire_api 'responses' is OpenAI's Responses API; route {self.provider!r} "
+                f"cannot speak it"
             )
             raise ValueError(msg)
         return self
@@ -93,7 +93,12 @@ class Pricing(BaseModel):
 
 
 class Capabilities(BaseModel):
-    """Feature flags for what a model supports."""
+    """Feature flags for what a model supports.
+
+    ``sampling_params`` is whether the model accepts ``temperature`` / ``top_p`` at its
+    default reasoning configuration. A reasoning model that rejects them there sets it
+    ``false``, and the client refuses those parameters before any provider call.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -102,6 +107,7 @@ class Capabilities(BaseModel):
     streaming: bool = True
     vision: bool = False
     prompt_caching: bool = False
+    sampling_params: bool = True
 
 
 class Model(BaseModel):

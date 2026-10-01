@@ -32,24 +32,62 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - The model registry carries the current Anthropic and OpenAI lineups: `claude-fable-5-1`,
   `claude-opus-5-5`, `claude-sonnet-5-5` (anthropic, bedrock and vertex routes) and
   `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` (openai route), each copied from the vendor's own
-  model and pricing pages. A native `anthropic` / `openai` route refused every one of these ids
-  with `unknown_model`.
-  - `gpt-6.1-sol` has `tool_calling: false`: it calls tools only through the Responses API,
-    which the `openai` provider does not speak, so a call with tools fails pre-flight with
-    `capability_missing`.
+  model, pricing and guide pages. A native `anthropic` / `openai` route refused every one of these
+  ids with `unknown_model`.
   - The three Claude 5.x entries have `structured_output: false`: they reject the forced tool
-    call that structured output on an Anthropic route relies on. Tool calling works.
-- `ProviderRoute.tool_call_reasoning_effort`: the `reasoning_effort` an `openai` / `azure` route
-  sends on every call that carries tools. `gpt-6-luna` sets `none`, the only effort at which its
-  Chat Completions endpoint accepts function calling; calls without tools keep the default
-  effort, and a `provider_extras` value still overrides it. The field is refused on any other
-  provider.
+    call that structured output on an Anthropic route relies on, so `complete_structured` now
+    refuses them pre-flight with `capability_missing`. Tool calling works.
+  - All three GPT-6 entries have `tool_calling: true` on their Responses API route (below).
+- OpenAI's Responses API ([ADR 0018](docs/architecture/adr/0018-openai-routes-speak-the-responses-api.md)).
+  A registry route carries `wire_api: chat_completions | responses` (`responses` only on `openai`
+  and `azure`), copied onto `ModelRoute.wire_api`. Every OpenAI model's `openai` route, and the
+  `azure` routes of `gpt-5.5`, `gpt-5.5-thinking` and `gpt-5.5-instant`, speak it through
+  `litellm.aresponses`; `openai_compat` (OpenRouter, a self-hosted vLLM, Ollama), Anthropic,
+  Vertex and Bedrock stay on Chat Completions. The call surface is unchanged.
+  - Requests are stateless (`store: false`, `include: ["reasoning.encrypted_content"]`, never
+    `previous_response_id`). A turn's output items (encrypted reasoning, text with its `phase`,
+    function-call references) come back on `LLMResponse.provider_items` and the final
+    `ResponseChunk`, ride on `AssistantMessage.provider_items` through both tool loops and
+    `PendingToolCalls.messages`, and are replayed verbatim to the provider that produced them.
+  - `response.incomplete` reports `length` / `content_filter`, `response.failed` and `error`
+    events raise a mapped `ProviderError` (`map_responses_error`), and a stream that ends before
+    its terminal event raises `ProviderServerError` instead of reporting a clean stop.
+  - `AzureConfig.responses_api_version` (default `v1`, env `AZURE_OPENAI_RESPONSES_API_VERSION`)
+    selects Azure's `/openai/v1/responses` endpoint; Chat Completions keeps `api_version`. An
+    OpenAI organization (`OPENAI_ORG_ID`) is sent as the `OpenAI-Organization` header, which
+    LiteLLM's Responses path does not set from `organization`.
+  - `Tool` / `ToolDeclaration.to_openai_responses_schema()`, `to_openai_responses_tool_schema`
+    and `ImageContent.to_openai_responses_format()` render the Responses wire shapes.
+- `Capabilities.sampling_params`: whether a model accepts `temperature` / `top_p` at its default
+  reasoning effort. The client refuses them pre-flight with `ValidationError` where the provider
+  would reject them: on a Responses route unless the caller sets the reasoning effort to `none`
+  (or the model defaults to it), and on any route of a model with `sampling_params: false` (the
+  Claude 5.x entries).
+- `scripts/smoke_responses.py`: a live two-leg tool-call smoke test of every registered OpenAI
+  Responses route (reads `OPENAI_API_KEY` from the environment and never prints it).
 
 ### Changed
 
-- `resolve()` names the registry file (`strata_forge/llm/registry_data.yaml`) and the
-  `openai_compat` escape hatch in the `unknown_model` message. The message still starts with
-  `Unknown model: '<id>'` and the `reason` is unchanged.
+- The `gpt-5.5` family's `openai` routes speak the Responses API: `max_tokens` is sent as
+  `max_output_tokens`, which bounds reasoning as well as visible output, `response_format` as
+  `text.format`, and a `provider_extras` `reasoning_effort` as `reasoning.effort`. This makes tool
+  calls work on `gpt-5.5` at its default effort (Chat Completions rejected them) and makes
+  `gpt-5.5-pro` callable at all (it is not served on Chat Completions).
+- `Usage.input_tokens` is reported net of cached reads and cache writes on every route. Providers
+  include both in their input count while `compute_cost` prices each bucket separately, so cached
+  tokens were billed twice; Chat Completions usage now also reports `cache_write_tokens` from
+  LiteLLM's `cache_creation_input_tokens`.
+- The `unknown_model` message from `resolve()` states only the failure (`Unknown model: '<id>' is
+  not available on ...`), because it can reach an application's end users; the remediation (the
+  registry file, the `openai_compat` escape hatch) is logged as an `unknown_model` warning. The
+  `reason` is unchanged.
+- A chain entry pinned only to `openai_compat` is not checked against the registry's capability
+  flags even when its id equals a registered name: the operator's endpoint serves its own model.
+- Registry corrections from the vendor pages: `gpt-5.5` and `gpt-5.5-pro` have a 1,050,000-token
+  context window and 128,000 max output tokens; `claude-haiku-4-5` has 64,000 max output tokens.
+  The registry header states the sourcing rule and marks unchecked values with `# TBD verify`.
+- The `litellm` floor is `>=1.83,<2`, the release the Responses path is tested against (releases
+  before 1.66 have no `litellm.aresponses`).
 
 ## [0.2.0] - 2026-08-27
 

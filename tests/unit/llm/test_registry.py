@@ -143,37 +143,40 @@ class TestModelValidation:
         m = _make_model()
         assert m.route_for("azure") is None
 
-    def test_tool_call_reasoning_effort_defaults_to_none(self) -> None:
+    def test_wire_api_defaults_to_chat_completions(self) -> None:
         route = ProviderRoute(provider="openai", provider_model_id="x", is_default=True)
-        assert route.tool_call_reasoning_effort is None
+        assert route.wire_api == "chat_completions"
 
     @pytest.mark.parametrize("provider", ["openai", "azure"])
-    def test_tool_call_reasoning_effort_allowed_on_openai_wire(self, provider: str) -> None:
+    def test_responses_wire_api_allowed_on_openai_providers(self, provider: str) -> None:
         route = ProviderRoute(
             provider=provider,  # type: ignore[arg-type]
             provider_model_id="x",
-            tool_call_reasoning_effort="none",
+            wire_api="responses",
         )
-        assert route.tool_call_reasoning_effort == "none"
+        assert route.wire_api == "responses"
 
     @pytest.mark.parametrize("provider", ["anthropic", "bedrock", "vertex", "openai_compat"])
-    def test_tool_call_reasoning_effort_rejected_elsewhere(self, provider: str) -> None:
-        # LiteLLM turns reasoning_effort into a thinking config on these providers, which
-        # a model whose thinking cannot be configured that way would reject.
-        with pytest.raises(PydanticValidationError, match="cannot carry it"):
+    def test_responses_wire_api_rejected_elsewhere(self, provider: str) -> None:
+        # Only OpenAI and Azure serve the Responses API; OpenRouter, a local vLLM and Ollama
+        # are reached as openai_compat and speak Chat Completions.
+        with pytest.raises(PydanticValidationError, match="cannot speak it"):
             ProviderRoute(
                 provider=provider,  # type: ignore[arg-type]
                 provider_model_id="x",
-                tool_call_reasoning_effort="none",
+                wire_api="responses",
             )
 
-    def test_tool_call_reasoning_effort_rejects_unknown_level(self) -> None:
+    def test_wire_api_rejects_unknown_value(self) -> None:
         with pytest.raises(PydanticValidationError):
             ProviderRoute(
                 provider="openai",
                 provider_model_id="x",
-                tool_call_reasoning_effort="extreme",  # type: ignore[arg-type]
+                wire_api="assistants",  # type: ignore[arg-type]
             )
+
+    def test_sampling_params_default_true(self) -> None:
+        assert Capabilities().sampling_params is True
 
 
 # ---------------------------------------------------------------------------
@@ -383,28 +386,59 @@ class TestGlobalRegistry:
             defaults = [r for r in model.routes if r.is_default]
             assert len(defaults) == 1, f"{model.name} has {len(defaults)} default routes"
 
-    def test_tool_calling_is_off_only_where_the_wire_cannot_carry_it(self) -> None:
-        # GPT-6.1 Sol calls tools through the Responses API only; the `openai` provider
-        # speaks Chat Completions, so a tool call there must fail pre-flight.
+    def test_every_model_takes_tools_on_its_routes_wire(self) -> None:
+        # GPT-6 Astra and GPT-6.1 Sol call tools only through the Responses API, which
+        # their `openai` routes speak, so no registered model is tool-less.
         without_tools = {
             m.name for m in global_registry.list_models() if not m.capabilities.tool_calling
         }
-        assert without_tools == {"gpt-6.1-sol"}
+        assert without_tools == set()
+
+    def test_every_openai_route_speaks_responses(self) -> None:
+        # A future OpenAI entry on Chat Completions must be an explicit, commented exception
+        # here: GPT-5.4 and later take tools on Chat Completions only at effort `none`.
+        for model in global_registry.list_models(vendor="openai"):
+            route = model.route_for("openai")
+            assert route is not None, model.name
+            assert route.wire_api == "responses", model.name
+
+    def test_only_openai_and_azure_routes_speak_responses(self) -> None:
+        responses = {
+            (m.name, r.provider)
+            for m in global_registry.list_models()
+            for r in m.routes
+            if r.wire_api == "responses"
+        }
+        assert {provider for _, provider in responses} == {"openai", "azure"}
+        # Azure documents the Responses API for these deployments; gpt-5.5-pro is absent
+        # from its list, so that route stays on Chat Completions.
+        assert {name for name, provider in responses if provider == "azure"} == {
+            "gpt-5.5",
+            "gpt-5.5-thinking",
+            "gpt-5.5-instant",
+        }
+
+    def test_sampling_params_off_where_the_default_effort_rejects_them(self) -> None:
+        without_sampling = {
+            m.name for m in global_registry.list_models() if not m.capabilities.sampling_params
+        }
+        assert without_sampling == {
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.5-thinking",
+        }
 
     def test_forced_tool_models_do_not_claim_structured_output(self) -> None:
         # Structured output on an Anthropic route is a forced tool call, which these
         # models reject with a 400.
         for name in ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"):
             assert not global_registry.get(name).capabilities.structured_output, name
-
-    def test_only_gpt_6_luna_pins_a_tool_call_reasoning_effort(self) -> None:
-        pinned = {
-            (m.name, r.provider, r.tool_call_reasoning_effort)
-            for m in global_registry.list_models()
-            for r in m.routes
-            if r.tool_call_reasoning_effort is not None
-        }
-        assert pinned == {("gpt-6-luna", "openai", "none")}
 
     def test_pricing_is_non_negative(self) -> None:
         for model in global_registry.list_models():

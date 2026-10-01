@@ -12,6 +12,11 @@ Tool calling on Azure uses OpenAI's exact format (it's a wire-compatible
 re-host), so callers reuse
 :func:`strata_forge.llm.providers.openai.to_openai_tool_schema`. This module
 therefore exposes only the provider client.
+
+Responses API calls use ``AzureConfig.responses_api_version`` (``v1`` by
+default), which selects Azure's ``/openai/v1/responses`` endpoint; a dated
+version would select the legacy ``/openai/responses`` path, which lacks the
+newest models. Chat Completions calls keep ``api_version``.
 """
 
 from __future__ import annotations
@@ -54,4 +59,10 @@ class AzureProvider(ProviderClient):
             kwargs["api_base"] = self.config.endpoint
         if self.config.api_version:
             kwargs["api_version"] = self.config.api_version
+        return kwargs
+
+    def responses_auth_kwargs(self) -> dict[str, Any]:
+        """Return the Azure kwargs for a Responses API call (``v1`` API version)."""
+        kwargs = self.auth_kwargs()
+        kwargs["api_version"] = self.config.responses_api_version
         return kwargs

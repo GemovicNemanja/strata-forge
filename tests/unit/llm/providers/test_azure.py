@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from strata_forge.llm.providers.azure import AzureProvider
 from strata_forge.llm.providers.config import AzureConfig
@@ -15,6 +16,7 @@ def _strip_env(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[repo
     monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_RESPONSES_API_VERSION", raising=False)
 
 
 class TestProviderShape:
@@ -129,3 +131,21 @@ class TestAcompletionWiring:
             api_version="2026-04-01",  # call-site override
         )
         assert captured["api_version"] == "2026-04-01"
+
+
+class TestResponsesAuthKwargs:
+    """The Responses API call selects Azure's ``v1`` endpoint; Chat Completions keeps its version."""
+
+    def test_defaults_to_v1(self) -> None:
+        provider = AzureProvider(AzureConfig(api_key=SecretStr("k"), endpoint="https://e"))
+        assert provider.responses_auth_kwargs() == {
+            "api_key": "k",
+            "api_base": "https://e",
+            "api_version": "v1",
+        }
+        assert provider.auth_kwargs()["api_version"] == "2025-10-01-preview"
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AZURE_OPENAI_RESPONSES_API_VERSION", "preview")
+        provider = AzureProvider()
+        assert provider.responses_auth_kwargs()["api_version"] == "preview"

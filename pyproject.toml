@@ -37,7 +37,9 @@ classifiers = [
 dependencies = [
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.6,<3",
-    "litellm>=1.55,<2",
+    # The floor is the release the Responses API path (`litellm.aresponses`) is tested against;
+    # releases before 1.66 have no `aresponses` at all.
+    "litellm>=1.83,<2",
     "structlog>=24.4,<27",
     "tenacity>=9.0,<10",
     "typer>=0.15,<1",

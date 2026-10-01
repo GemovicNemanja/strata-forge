@@ -123,7 +123,8 @@ class AzureConfig(ProviderConfig):
     """Azure OpenAI credentials.
 
     Reads ``AZURE_OPENAI_API_KEY``, ``AZURE_OPENAI_ENDPOINT``,
-    ``AZURE_OPENAI_API_VERSION``.
+    ``AZURE_OPENAI_API_VERSION`` (Chat Completions) and
+    ``AZURE_OPENAI_RESPONSES_API_VERSION`` (Responses API, default ``v1``).
     """
 
     model_config = SettingsConfigDict(env_prefix="AZURE_OPENAI_", extra="ignore")
@@ -131,6 +132,7 @@ class AzureConfig(ProviderConfig):
     api_key: SecretStr | None = None
     endpoint: str | None = None
     api_version: str = "2025-10-01-preview"
+    responses_api_version: str = "v1"
 
     @property
     def enabled(self) -> bool:

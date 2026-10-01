@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from strata_forge.core.errors import RegistryError
 from strata_forge.llm.cost import compute_cost
@@ -195,16 +196,22 @@ class TestResolveUnknownModel:
         assert exc.value.provider == "anthropic"
 
     @pytest.mark.parametrize("provider", [None, "anthropic", "openai"])
-    def test_unknown_native_id_names_the_registry_file(self, provider: ProviderName | None) -> None:
-        # A vendor id the registry does not know fails on every native route; the message
-        # must point at the file to change, since it is often all a caller surfaces.
-        with pytest.raises(RegistryError) as exc:
+    def test_unknown_native_id_message_states_only_the_failure(
+        self, provider: ProviderName | None
+    ) -> None:
+        # The message can reach an application's end users, so it carries no developer
+        # remediation; the log names the file to change.
+        with capture_logs() as records, pytest.raises(RegistryError) as exc:
             resolve("claude-not-yet-registered", provider=provider)
         assert exc.value.reason == "unknown_model"
         message = str(exc.value)
         assert message.startswith("Unknown model: 'claude-not-yet-registered'")
-        assert REGISTRY_DATA_FILE in message
-        assert "openai_compat" in message
+        assert REGISTRY_DATA_FILE not in message
+        assert "openai_compat" not in message
+        warnings = [r for r in records if r["event"] == "unknown_model"]
+        assert len(warnings) == 1
+        assert REGISTRY_DATA_FILE in warnings[0]["remediation"]
+        assert "openai_compat" in warnings[0]["remediation"]
         assert Path(REGISTRY_DATA_FILE).name == "registry_data.yaml"
 
 
@@ -246,7 +253,7 @@ class TestNativeRouteAllowlist:
         ("claude-sonnet-5-5", "anthropic", "claude-sonnet-5-5", True),
         ("claude-haiku-4-5", "anthropic", "claude-haiku-4-5-20251001", True),
         ("gpt-6-astra", "openai", "gpt-6-astra", True),
-        ("gpt-6.1-sol", "openai", "gpt-6.1-sol", False),
+        ("gpt-6.1-sol", "openai", "gpt-6.1-sol", True),
         ("gpt-6-luna", "openai", "gpt-6-luna", True),
     )
 
@@ -320,3 +327,39 @@ class TestResolveAgainstGlobalRegistry:
         with pytest.raises(RegistryError) as exc:
             resolve("gemini-3.1-pro", provider="openai")
         assert exc.value.reason == "unsupported_route"
+
+
+class TestResolveWireApi:
+    """``ModelRoute.wire_api`` is copied from the registered route the call resolves to."""
+
+    def test_default_is_chat_completions(self) -> None:
+        route = ModelRoute(model="m", provider="anthropic", provider_model_id="m")
+        assert route.wire_api == "chat_completions"
+
+    @pytest.mark.parametrize(
+        ("name", "provider", "wire_api"),
+        [
+            ("gpt-6.1-sol", None, "responses"),
+            ("gpt-6-astra", "openai", "responses"),
+            ("gpt-6-luna", "openai", "responses"),
+            ("gpt-5.5", "azure", "responses"),
+            ("gpt-5.5-pro", "openai", "responses"),
+            ("gpt-5.5-pro", "azure", "chat_completions"),
+            ("claude-opus-4-7", None, "chat_completions"),
+            ("claude-opus-4-7", "bedrock", "chat_completions"),
+            ("gemini-3.1-pro", None, "chat_completions"),
+        ],
+    )
+    def test_copied_from_the_registered_route(
+        self,
+        name: str,
+        provider: ProviderName | None,
+        wire_api: str,
+    ) -> None:
+        assert resolve(name, provider=provider).wire_api == wire_api
+
+    def test_openai_compat_pin_speaks_chat_completions(self) -> None:
+        # The same id through an operator endpoint (OpenRouter, vLLM, Ollama) is not the
+        # registered route, and those endpoints speak Chat Completions.
+        route = resolve("gpt-6.1-sol", provider="openai_compat")
+        assert route.wire_api == "chat_completions"

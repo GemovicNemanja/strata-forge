@@ -35,7 +35,12 @@ from strata_forge.llm.loop_events import (
 )
 from strata_forge.llm.messages import (
     AssistantMessage,
+    CallRef,
     Message,
+    ProviderItems,
+    ReasoningItem,
+    TextItem,
+    ToolCall,
     ToolResultMessage,
     UserMessage,
 )
@@ -299,7 +304,8 @@ class TestToolCalling:
         assert "input_schema" in kwargs["tools"][0]  # Anthropic shape
 
     async def test_openai_tool_schema_shape(self, mock_litellm: AsyncMock) -> None:
-        client = LLMClient("gpt-5.5", provider="openai")
+        # Chat Completions shape, which openai_compat endpoints speak.
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         await client.complete([Message.user("hi")], tools=[_get_weather])
         kwargs = _kwargs(mock_litellm)
         # OpenAI shape: {"type": "function", "function": {...}}
@@ -364,82 +370,647 @@ class TestRequireToolSupport:
 # ---------------------------------------------------------------------------
 
 
-class TestToolCallReasoningEffort:
-    """A route's ``tool_call_reasoning_effort`` rides every call that carries tools.
+# ---------------------------------------------------------------------------
+# Responses API routes (wire_api: responses)
+# ---------------------------------------------------------------------------
 
-    GPT-6 Luna takes function calling on Chat Completions only at ``reasoning_effort``
-    ``none``; at its default effort the provider rejects every tool call.
-    """
+_RS_USAGE: dict[str, Any] = {
+    "input_tokens": 1_000,
+    "input_tokens_details": {"cached_tokens": 200, "cache_write_tokens": 100},
+    "output_tokens": 300,
+    "output_tokens_details": {"reasoning_tokens": 250},
+    "total_tokens": 1_300,
+}
 
-    async def test_tools_send_the_pinned_effort(self, mock_litellm: AsyncMock) -> None:
-        client = LLMClient("gpt-6-luna", provider="openai")
-        await client.complete([Message.user("hi")], tools=[_get_weather])
-        kwargs = _kwargs(mock_litellm)
-        assert kwargs["model"] == "openai/gpt-6-luna"
-        assert kwargs["reasoning_effort"] == "none"
-        # LiteLLM's own model map may not list a fresh release as a reasoning model.
-        assert kwargs["allowed_openai_params"] == ["reasoning_effort"]
 
-    async def test_no_tools_keeps_the_default_effort(self, mock_litellm: AsyncMock) -> None:
-        client = LLMClient("gpt-6-luna", provider="openai")
-        await client.complete([Message.user("hi")])
-        assert "reasoning_effort" not in _kwargs(mock_litellm)
-        await client.complete([Message.user("hi again")], tools=[])
-        assert "reasoning_effort" not in _kwargs(mock_litellm)
+def _rs_reasoning(rs_id: str = "rs_1", blob: str = "gAAAA-encrypted-1") -> dict[str, Any]:
+    return {"type": "reasoning", "id": rs_id, "summary": [], "encrypted_content": blob}
 
-    async def test_unpinned_model_sends_no_effort(self, mock_litellm: AsyncMock) -> None:
-        client = LLMClient("gpt-6-astra", provider="openai")
-        await client.complete([Message.user("hi")], tools=[_get_weather])
-        kwargs = _kwargs(mock_litellm)
-        assert "reasoning_effort" not in kwargs
-        assert "allowed_openai_params" not in kwargs
 
-    async def test_openai_compat_id_is_never_pinned(self, mock_litellm: AsyncMock) -> None:
-        # The same id through an operator endpoint is not the registered route.
-        client = LLMClient("gpt-6-luna", provider="openai_compat")
-        await client.complete([Message.user("hi")], tools=[_get_weather])
-        assert "reasoning_effort" not in _kwargs(mock_litellm)
+def _rs_message(
+    text: str, msg_id: str = "msg_1", phase: str | None = "final_answer"
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "type": "message",
+        "id": msg_id,
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+    if phase is not None:
+        item["phase"] = phase
+    return item
 
-    async def test_caller_provider_extras_still_win(self, mock_litellm: AsyncMock) -> None:
-        client = LLMClient("gpt-6-luna", provider="openai")
-        await client.complete(
-            [Message.user("hi")],
-            tools=[_get_weather],
-            provider_extras={"openai": {"reasoning_effort": "low"}},
+
+def _rs_call(call_id: str, name: str, arguments: str, fc_id: str) -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "id": fc_id,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+        "status": "completed",
+    }
+
+
+def _rs_completed(output: list[dict[str, Any]], *, status: str = "completed") -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "id": "resp_1",
+        "object": "response",
+        "status": status,
+        "output": output,
+        "usage": _RS_USAGE,
+    }
+    return response
+
+
+def _rs_text_events(text: str) -> list[dict[str, Any]]:
+    message = _rs_message(text)
+    return [
+        {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {**message, "content": []},
+        },
+        *(
+            {"type": "response.output_text.delta", "output_index": 0, "delta": piece}
+            for piece in (text[: len(text) // 2], text[len(text) // 2 :])
+        ),
+        {"type": "response.output_item.done", "output_index": 0, "item": message},
+        {"type": "response.completed", "response": _rs_completed([message])},
+    ]
+
+
+def _rs_tool_events(
+    calls: list[tuple[str, str, str]],
+    *,
+    blob: str = "gAAAA-encrypted-1",
+    preamble: str | None = None,
+) -> list[dict[str, Any]]:
+    """A tool turn: a reasoning item at output_index 0, an optional preamble, then the calls."""
+    reasoning = _rs_reasoning(blob=blob)
+    events: list[dict[str, Any]] = [
+        {"type": "response.output_item.added", "output_index": 0, "item": {**reasoning}},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+    ]
+    output: list[dict[str, Any]] = [reasoning]
+    if preamble is not None:
+        message = _rs_message(preamble, msg_id="msg_pre", phase="commentary")
+        events += [
+            {"type": "response.output_text.delta", "output_index": 1, "delta": preamble},
+            {"type": "response.output_item.done", "output_index": 1, "item": message},
+        ]
+        output.append(message)
+    for call_id, name, arguments in calls:
+        index = len(output)
+        item = _rs_call(call_id, name, arguments, fc_id=f"fc_{call_id}")
+        events += [
+            {
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {**item, "arguments": "", "status": "in_progress"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": index,
+                "item_id": item["id"],
+                "delta": arguments[:5],
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": index,
+                "item_id": item["id"],
+                "delta": arguments[5:],
+            },
+            {"type": "response.output_item.done", "output_index": index, "item": item},
+        ]
+        output.append(item)
+    events.append({"type": "response.completed", "response": _rs_completed(output)})
+    return events
+
+
+def _aresponses_stream(*turns: list[dict[str, Any]]) -> AsyncMock:
+    """An ``litellm.aresponses`` stand-in: each call streams the next turn's events."""
+    remaining = list(turns)
+
+    async def _side_effect(**_kwargs: Any) -> Any:
+        events = remaining.pop(0)
+
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            for event in events:
+                yield event
+
+        return _gen()
+
+    return AsyncMock(side_effect=_side_effect)
+
+
+class TestResponsesRoute:
+    """Routes with ``wire_api: responses`` call ``litellm.aresponses``, never ``acompletion``."""
+
+    async def test_complete_calls_aresponses_with_a_stateless_body(
+        self,
+        mock_litellm: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("hi there")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        client = LLMClient("gpt-6.1-sol")
+        resp = await client.complete(
+            [Message.system("be brief"), Message.user("hi")],
+            max_tokens=25_000,
         )
-        assert _kwargs(mock_litellm)["reasoning_effort"] == "low"
+        assert mock_litellm.await_count == 0
+        kwargs = _kwargs(aresponses)
+        assert kwargs["model"] == "openai/gpt-6.1-sol"
+        assert kwargs["store"] is False
+        assert kwargs["include"] == ["reasoning.encrypted_content"]
+        assert kwargs["instructions"] == "be brief"
+        assert kwargs["input"] == [{"type": "message", "role": "user", "content": "hi"}]
+        assert kwargs["max_output_tokens"] == 25_000
+        for absent in ("messages", "max_tokens", "temperature", "previous_response_id", "stream"):
+            assert absent not in kwargs
+        assert resp.text == "hi there"
+        assert resp.finish_reason == "stop"
+        assert resp.route.wire_api == "responses"
+        assert resp.provider_items is not None
+        assert resp.provider_items.items[0] == TextItem(
+            id="msg_1", phase="final_answer", text="hi there"
+        )
 
-    async def test_every_stream_tool_loop_leg_sends_it(
+    async def test_usage_is_net_of_cache_and_priced_per_bucket(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        mock = _streaming_acompletion(
-            [
-                _stream_tool(0, id="c1", name="_get_weather", args='{"location": "Oslo"}'),
-                _stream_tool(0, finish_reason="tool_calls"),
-            ],
-            [_stream_text("done", finish_reason="stop")],
-        )
-        monkeypatch.setattr("litellm.acompletion", mock)
-        client = LLMClient("gpt-6-luna", provider="openai")
-        events = await _collect(
-            client.stream_tool_loop([Message.user("weather?")], tools=[_get_weather])
-        )
-        assert isinstance(events[-1], Done)
-        assert mock.await_count == 2
-        for call in mock.await_args_list:
-            assert call.kwargs["stream"] is True
-            assert call.kwargs["reasoning_effort"] == "none"
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        resp = await LLMClient("gpt-6.1-sol").complete([Message.user("hi")])
+        assert resp.usage.input_tokens == 700
+        assert resp.usage.cache_read_tokens == 200
+        assert resp.usage.cache_write_tokens == 100
+        assert resp.usage.output_tokens == 300
+        # gpt-6.1-sol: $2 input, $0.10 cached, $2.50 cache write, $10 output per M.
+        expected = (700 * 2.00 + 200 * 0.10 + 100 * 2.50 + 300 * 10.00) / 1_000_000
+        assert abs(resp.cost_usd - expected) < 1e-12
 
-    async def test_tools_on_a_model_without_tool_calling_fail_preflight(
+    async def test_tools_are_internally_tagged_and_not_strict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        call = _rs_call("call_1", "_get_weather", '{"location": "Oslo"}', fc_id="fc_1")
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_reasoning(), call]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        resp = await LLMClient("gpt-6.1-sol").complete([Message.user("w?")], tools=[_get_weather])
+        tool_schema = _kwargs(aresponses)["tools"][0]
+        assert tool_schema["type"] == "function"
+        assert tool_schema["name"] == "_get_weather"
+        assert tool_schema["strict"] is False
+        assert "function" not in tool_schema
+        assert resp.finish_reason == "tool_use"
+        assert resp.tool_calls == [
+            ToolCall(id="call_1", name="_get_weather", arguments={"location": "Oslo"})
+        ]
+
+    async def test_luna_tool_calls_pin_no_reasoning_effort(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        await LLMClient("gpt-6-luna").complete([Message.user("hi")], tools=[_get_weather])
+        kwargs = _kwargs(aresponses)
+        assert "reasoning" not in kwargs
+        assert "reasoning_effort" not in kwargs
+
+    async def test_reasoning_effort_extra_becomes_reasoning_effort_object(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        await LLMClient("gpt-6.1-sol").complete(
+            [Message.user("hi")],
+            provider_extras={"openai": {"reasoning_effort": "high", "service_tier": "flex"}},
+        )
+        kwargs = _kwargs(aresponses)
+        assert kwargs["reasoning"] == {"effort": "high"}
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["service_tier"] == "flex"
+
+    async def test_structured_output_uses_text_format(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        payload = json.dumps({"title": "T", "bullets": ["a"]})
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message(payload)]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        resp = await LLMClient("gpt-6.1-sol").complete_structured(
+            [Message.user("hi")], schema=_Summary
+        )
+        assert resp.parsed.title == "T"
+        text_format = _kwargs(aresponses)["text"]["format"]
+        assert text_format["type"] == "json_schema"
+        assert text_format["name"] == "_Summary"
+        assert text_format["strict"] is True
+        assert "response_format" not in _kwargs(aresponses)
+
+    async def test_openai_compat_pin_of_the_same_id_stays_on_chat_completions(
         self,
         mock_litellm: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        client = LLMClient("gpt-6.1-sol", provider="openai")
-        with pytest.raises(RegistryError, match="does not support tool calling") as info:
-            await client.complete([Message.user("hi")], tools=[_get_weather])
+        aresponses = AsyncMock()
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        await LLMClient("gpt-6.1-sol", provider="openai_compat").complete([Message.user("hi")])
+        assert aresponses.await_count == 0
+        assert mock_litellm.await_count == 1
+
+    async def test_failed_response_raises_a_mapped_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from strata_forge.core.errors import FallbackExhaustedError
+
+        failed: dict[str, Any] = {
+            "id": "resp_1",
+            "status": "failed",
+            "output": [],
+            "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+        }
+        monkeypatch.setattr("litellm.aresponses", AsyncMock(return_value=failed))
+        client = LLMClient(
+            "gpt-6.1-sol", retry_max_attempts=1, retry_initial_wait=0.0, retry_max_wait=0.0
+        )
+        with pytest.raises(FallbackExhaustedError) as info:
+            await client.complete([Message.user("hi")])
+        assert [type(cause) for _, _, cause in info.value.causes] == [ProviderRateLimitError]
+
+    async def test_stream_yields_text_then_a_final_chunk(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("litellm.aresponses", _aresponses_stream(_rs_text_events("hello!")))
+        chunks = [c async for c in await LLMClient("gpt-6.1-sol").stream([Message.user("hi")])]
+        assert "".join(c.delta_text for c in chunks) == "hello!"
+        final = chunks[-1]
+        assert final.finish_reason == "stop"
+        assert final.usage is not None
+        assert final.usage.input_tokens == 700
+        assert final.provider_items is not None
+
+    async def test_stream_cut_before_the_terminal_event_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from strata_forge.core.errors import ProviderServerError
+
+        events = _rs_text_events("hello!")[:-1]
+        monkeypatch.setattr("litellm.aresponses", _aresponses_stream(events))
+        stream = await LLMClient("gpt-6.1-sol").stream([Message.user("hi")])
+        with pytest.raises(ProviderServerError, match="ended before the response completed"):
+            _ = [c async for c in stream]
+
+    async def test_stream_failed_event_raises_rate_limit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        failed: dict[str, Any] = {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+            },
+        }
+        monkeypatch.setattr("litellm.aresponses", _aresponses_stream([failed]))
+        stream = await LLMClient("gpt-6.1-sol").stream([Message.user("hi")])
+        with pytest.raises(ProviderRateLimitError, match="slow down"):
+            _ = [c async for c in stream]
+
+    async def test_stream_transport_error_is_mapped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from litellm.exceptions import RateLimitError as LLRateLimitError
+
+        async def _fail(**_kwargs: Any) -> Any:
+            raise LLRateLimitError(message="429", model="gpt-6.1-sol", llm_provider="openai")
+
+        monkeypatch.setattr("litellm.aresponses", AsyncMock(side_effect=_fail))
+        stream = await LLMClient("gpt-6.1-sol").stream([Message.user("hi")])
+        with pytest.raises(ProviderRateLimitError):
+            _ = [c async for c in stream]
+
+    async def test_incomplete_turn_ends_the_loop_with_length(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        incomplete = {
+            "type": "response.incomplete",
+            "response": {
+                **_rs_completed([_rs_reasoning()], status="incomplete"),
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        }
+        monkeypatch.setattr("litellm.aresponses", _aresponses_stream([incomplete]))
+        events = await _collect(
+            LLMClient("gpt-6.1-sol").stream_tool_loop([Message.user("hi")], tools=[_get_weather])
+        )
+        assert isinstance(events[-1], Done)
+        assert events[-1].finish_reason == "length"
+
+    async def test_stream_tool_loop_replays_reasoning_within_a_leg(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock = _aresponses_stream(
+            _rs_tool_events(
+                [("call_1", "_get_weather", '{"location": "Oslo"}')],
+                preamble="Checking the weather.",
+            ),
+            _rs_text_events("It is 18C in Oslo."),
+        )
+        monkeypatch.setattr("litellm.aresponses", mock)
+        events = await _collect(
+            LLMClient("gpt-6.1-sol").stream_tool_loop(
+                [Message.user("weather in Oslo?")], tools=[_get_weather]
+            )
+        )
+        assert isinstance(events[-1], Done)
+        assert events[-1].finish_reason == "stop"
+        assert mock.await_count == 2
+        second = mock.await_args_list[1].kwargs
+        assert second["stream"] is True
+        assert second["input"] == [
+            {"type": "message", "role": "user", "content": "weather in Oslo?"},
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [],
+                "encrypted_content": "gAAAA-encrypted-1",
+            },
+            {
+                "type": "message",
+                "id": "msg_pre",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Checking the weather.", "annotations": []}
+                ],
+                "phase": "commentary",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "_get_weather",
+                "arguments": json.dumps({"location": "Oslo"}),
+                "id": "fc_call_1",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": json.dumps({"temp_c": 18, "city": "Oslo"}),
+            },
+        ]
+
+    async def test_parallel_calls_open_dense_slots_in_output_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock = _aresponses_stream(
+            _rs_tool_events(
+                [
+                    ("call_a", "_get_weather", '{"location": "Oslo"}'),
+                    ("call_b", "_get_weather", '{"location": "Rome"}'),
+                ]
+            ),
+            _rs_text_events("done"),
+        )
+        monkeypatch.setattr("litellm.aresponses", mock)
+        events = await _collect(
+            LLMClient("gpt-6.1-sol").stream_tool_loop([Message.user("w?")], tools=[_get_weather])
+        )
+        started = [e for e in events if isinstance(e, ToolCallStarted)]
+        assert [(e.id, e.arguments["location"]) for e in started] == [
+            ("call_a", "Oslo"),
+            ("call_b", "Rome"),
+        ]
+        results = [e for e in events if isinstance(e, ToolResult)]
+        assert [r.id for r in results] == ["call_a", "call_b"]
+        second_input = mock.await_args_list[1].kwargs["input"]
+        outputs = [i["call_id"] for i in second_input if i["type"] == "function_call_output"]
+        assert outputs == ["call_a", "call_b"]
+
+    async def test_suspension_carries_provider_items_and_resume_replays_them(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock = _aresponses_stream(
+            _rs_tool_events([("call_1", "load_model", '{"repo_id": "gpt2"}')]),
+            _rs_text_events("Loaded."),
+        )
+        monkeypatch.setattr("litellm.aresponses", mock)
+        client = LLMClient("gpt-6.1-sol")
+        prompt = [Message.user("load gpt2")]
+        events = await _collect(client.stream_tool_loop(prompt, tools=[_LOAD_MODEL]))
+        pending = events[-1]
+        assert isinstance(pending, PendingToolCalls)
+        turn = pending.messages[0]
+        assert isinstance(turn, AssistantMessage)
+        assert turn.provider_items is not None
+        assert turn.provider_items.provider == "openai"
+        assert turn.provider_items.items == (
+            ReasoningItem(id="rs_1", encrypted_content="gAAAA-encrypted-1"),
+            CallRef(id="fc_call_1", call_id="call_1"),
+        )
+
+        # The caller serializes the delta (e.g. into a continuation token) and resumes.
+        restored = [
+            AssistantMessage.model_validate_json(m.model_dump_json()) for m in pending.messages
+        ]
+        resumed = [*prompt, *restored, ToolResultMessage(tool_call_id="call_1", content="ok")]
+        events = await _collect(client.stream_tool_loop(resumed, tools=[_LOAD_MODEL]))
+        assert isinstance(events[-1], Done)
+        replay = mock.await_args_list[1].kwargs["input"]
+        assert replay[1]["encrypted_content"] == "gAAAA-encrypted-1"
+        assert replay[2]["id"] == "fc_call_1"
+        assert replay[3] == {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+
+    async def test_turn_from_another_provider_is_replayed_without_items(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        azure_turn = AssistantMessage(
+            content=None,
+            tool_calls=[ToolCall(id="call_1", name="_get_weather", arguments={"location": "X"})],
+            provider_items=ProviderItems(
+                provider="azure",
+                items=(
+                    ReasoningItem(id="rs_9", encrypted_content="azure-blob"),
+                    CallRef(id="fc_9", call_id="call_1"),
+                ),
+            ),
+        )
+        await LLMClient("gpt-6.1-sol").complete(
+            [
+                Message.user("w?"),
+                azure_turn,
+                ToolResultMessage(tool_call_id="call_1", content="sunny"),
+            ],
+            tools=[_get_weather],
+        )
+        sent = _kwargs(aresponses)["input"]
+        assert all(item["type"] != "reasoning" for item in sent)
+        assert sent[1] == {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "_get_weather",
+            "arguments": json.dumps({"location": "X"}),
+        }
+
+    async def test_run_tool_loop_keeps_provider_items(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        call = _rs_call("call_1", "_get_weather", '{"location": "Oslo"}', fc_id="fc_1")
+        aresponses = AsyncMock(
+            side_effect=[
+                _rs_completed([_rs_reasoning(blob="blob-x"), call]),
+                _rs_completed([_rs_message("18C")]),
+            ]
+        )
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        resp = await LLMClient("gpt-6.1-sol").run_tool_loop(
+            [Message.user("w?")], tools=[_get_weather]
+        )
+        assert resp.text == "18C"
+        second_input = aresponses.await_args_list[1].kwargs["input"]
+        assert second_input[1]["encrypted_content"] == "blob-x"
+        assert second_input[2]["id"] == "fc_1"
+
+
+class TestSamplingParamsGuard:
+    """``temperature`` / ``top_p`` are refused pre-flight where the model rejects them."""
+
+    @pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.5", "claude-opus-5-5"])
+    async def test_refused_at_the_default_effort(
+        self,
+        model: str,
+        mock_litellm: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock()
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        client = LLMClient(model)
+        with pytest.raises(ValidationError, match="does not accept temperature or top_p"):
+            await client.complete([Message.user("hi")], temperature=0.2)
+        with pytest.raises(ValidationError):
+            await client.stream([Message.user("hi")], top_p=0.9)
+        with pytest.raises(ValidationError):
+            await _collect(client.stream_tool_loop([Message.user("hi")], tools=[], temperature=0))
+        assert aresponses.await_count == 0
+        assert mock_litellm.await_count == 0
+
+    async def test_allowed_when_the_caller_sets_effort_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        await LLMClient("gpt-6-luna").complete(
+            [Message.user("hi")],
+            temperature=0.2,
+            provider_extras={"openai": {"reasoning": {"effort": "none"}}},
+        )
+        kwargs = _kwargs(aresponses)
+        assert kwargs["temperature"] == 0.2
+        assert kwargs["reasoning"] == {"effort": "none"}
+
+    async def test_allowed_on_a_model_whose_default_effort_is_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        await LLMClient("gpt-5.5-instant").complete([Message.user("hi")], temperature=0.3)
+        assert _kwargs(aresponses)["temperature"] == 0.3
+
+    async def test_refused_with_an_explicit_effort_other_than_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("litellm.aresponses", AsyncMock())
+        with pytest.raises(ValidationError, match="reasoning effort to 'none'"):
+            await LLMClient("gpt-5.5-instant").complete(
+                [Message.user("hi")],
+                top_p=0.5,
+                provider_extras={"openai": {"reasoning_effort": "low"}},
+            )
+
+    async def test_openai_compat_pin_is_not_guarded(self, mock_litellm: AsyncMock) -> None:
+        await LLMClient("gpt-6.1-sol", provider="openai_compat").complete(
+            [Message.user("hi")], temperature=0.2
+        )
+        assert _kwargs(mock_litellm)["temperature"] == 0.2
+
+
+class TestRegistryCapabilityGates:
+    async def test_structured_output_refused_preflight(self, mock_litellm: AsyncMock) -> None:
+        client = LLMClient("claude-opus-5-5")
+        with pytest.raises(RegistryError, match="does not support structured output") as info:
+            await client.complete_structured([Message.user("hi")], schema=_Summary)
         assert info.value.reason == "capability_missing"
         assert mock_litellm.await_count == 0
+
+    async def test_openai_compat_pin_skips_the_registry_tool_gate(
+        self,
+        mock_litellm: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # An operator id that happens to equal a registered tool-less name is the
+        # operator's model, not the registered route.
+        from strata_forge.llm.registry import Capabilities, Model, Pricing, ProviderRoute, Registry
+
+        toolless = Model(
+            name="toolless",
+            vendor="openai",
+            tier="fast",
+            context_window=1024,
+            max_output_tokens=256,
+            modalities=["text"],
+            capabilities=Capabilities(tool_calling=False),
+            pricing_per_million_tokens=Pricing(input=1.0, output=1.0),
+            routes=[ProviderRoute(provider="openai", provider_model_id="t", is_default=True)],
+        )
+        monkeypatch.setattr("strata_forge.llm.client.registry", Registry([toolless]))
+        await LLMClient("toolless", provider="openai_compat").complete(
+            [Message.user("hi")], tools=[_get_weather]
+        )
+        assert mock_litellm.await_count == 1
+        strict = LLMClient("toolless", provider="openai_compat", require_tool_support=True)
+        with pytest.raises(RegistryError) as info:
+            await strict.complete([Message.user("hi")], tools=[_get_weather])
+        assert info.value.reason == "capability_unknown"
+        with pytest.raises(RegistryError) as native:
+            await LLMClient("toolless", provider="openai").complete(
+                [Message.user("hi")], tools=[_get_weather]
+            )
+        assert native.value.reason == "capability_missing"
+
+
+class TestChatCompletionsUsage:
+    async def test_input_is_net_of_cache_reads_and_writes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake = _fake_response(prompt_tokens=1_000, completion_tokens=10, cache_read=600)
+        fake.usage.cache_creation_input_tokens = 300
+        monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=fake))
+        resp = await LLMClient("claude-opus-4-7").complete([Message.user("hi")])
+        assert resp.usage.input_tokens == 100
+        assert resp.usage.cache_read_tokens == 600
+        assert resp.usage.cache_write_tokens == 300
 
 
 class TestCacheIntegration:
@@ -512,7 +1083,7 @@ class TestFallbackIntegration:
 
         responses: list[Any] = [
             LLRateLimitError(message="429", model="claude", llm_provider="anthropic"),
-            _fake_response(text="from gpt"),
+            _fake_response(text="from gemini"),
         ]
 
         async def _side_effect(**_kwargs: Any) -> Any:
@@ -523,14 +1094,14 @@ class TestFallbackIntegration:
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_side_effect))
         client = LLMClient.with_fallbacks(
-            ["claude-opus-4-7", "gpt-5.5"],
+            ["claude-opus-4-7", "gemini-3.1-pro"],
             retry_max_attempts=1,
             retry_initial_wait=0.0,
             retry_max_wait=0.0,
         )
         resp = await client.complete([Message.user("hi")])
-        assert resp.text == "from gpt"
-        assert resp.route.model == "gpt-5.5"
+        assert resp.text == "from gemini"
+        assert resp.route.model == "gemini-3.1-pro"
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +1142,7 @@ class TestStructuredOutput:
             return _fake_response(text=json.dumps(payload))
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
-        client = LLMClient("gpt-5.5", provider="openai")
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         resp = await client.complete_structured([Message.user("hi")], schema=_Summary)
         assert isinstance(resp, StructuredResponse)
         assert resp.parsed.title == "Hello"
@@ -618,7 +1189,7 @@ class TestStructuredOutput:
             return responses.pop(0)
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
-        client = LLMClient("gpt-5.5", provider="openai")
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         resp = await client.complete_structured(
             [Message.user("hi")], schema=_Summary, max_reprompt_attempts=3
         )
@@ -635,7 +1206,7 @@ class TestStructuredOutput:
             return _fake_response(text="still not json")
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
-        client = LLMClient("gpt-5.5", provider="openai")
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         with pytest.raises(StructuredOutputError):
             await client.complete_structured(
                 [Message.user("hi")], schema=_Summary, max_reprompt_attempts=1
@@ -694,7 +1265,7 @@ class TestStructuredOutput:
             return _fake_response(text="", finish_reason="stop")
 
         monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=_fake))
-        client = LLMClient("gpt-5.5", provider="openai")
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         with pytest.raises(StructuredOutputError):
             await client.complete_structured(
                 [Message.user("hi")], schema=_Summary, max_reprompt_attempts=0
@@ -1763,7 +2334,7 @@ class TestMultimodal:
         from strata_forge.llm.messages import TextPart
         from strata_forge.llm.multimodal import ImageContent
 
-        client = LLMClient("gpt-5.5", provider="openai")
+        client = LLMClient("gpt-5.5", provider="openai_compat")
         await client.complete(
             [
                 UserMessage(
@@ -1889,3 +2460,147 @@ class TestUnpricedOpenAICompatResponse:
         with pytest.raises(RegistryError) as info:
             _cost_for_route(Usage(input_tokens=1, output_tokens=1), route)
         assert info.value.reason == "unknown_model"
+
+
+# ---------------------------------------------------------------------------
+# Exact request bodies through the real LiteLLM Responses path (no network)
+# ---------------------------------------------------------------------------
+
+
+class TestResponsesHttpBody:
+    """Drive the real ``litellm.aresponses`` against a fake HTTP server.
+
+    A monkeypatched ``aresponses`` cannot see what LiteLLM does to the body on the way
+    out (it rebuilds reasoning input items, for one); this captures the JSON that would
+    reach the provider. The fake answers a streamed request with server-sent events and
+    any other with JSON, so it also covers LiteLLM faking a stream for a model its own
+    map does not list.
+    """
+
+    _BLOB = "gAAAAABo-opaque+encrypted/reasoning=="
+
+    @pytest.fixture
+    def http(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        import litellm
+        import respx
+
+        monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+        litellm.in_memory_llm_clients_cache.flush_cache()
+        with respx.mock(assert_all_called=False) as router:
+            yield router
+        litellm.in_memory_llm_clients_cache.flush_cache()
+
+    def _turns(self) -> list[list[dict[str, Any]]]:
+        call = _rs_call("call_1", "_get_weather", '{"location": "Oslo"}', fc_id="fc_1")
+        return [
+            [_rs_reasoning(blob=self._BLOB), call],
+            [_rs_message("18C in Oslo")],
+        ]
+
+    def _handler(self, bodies: list[dict[str, Any]]) -> Any:
+        import httpx
+
+        turns = self._turns()
+
+        def _respond(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append(body)
+            output = turns[len(bodies) - 1]
+            response = {
+                **_rs_completed(output),
+                "object": "response",
+                "created_at": 1,
+                "model": body["model"],
+            }
+            if not body.get("stream"):
+                return httpx.Response(200, json=response)
+            events: list[dict[str, Any]] = [
+                {"type": "response.output_item.done", "output_index": i, "item": item}
+                for i, item in enumerate(output)
+            ]
+            events.append({"type": "response.completed", "response": response})
+            sse = "".join(
+                f"event: {e['type']}\ndata: {json.dumps({**e, 'sequence_number': n})}\n\n"
+                for n, e in enumerate(events)
+            )
+            return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+        return _respond
+
+    def _client(self) -> LLMClient:
+        from pydantic import SecretStr
+
+        from strata_forge.llm.providers import OpenAIProvider
+        from strata_forge.llm.providers.config import OpenAIConfig
+
+        provider = OpenAIProvider(OpenAIConfig(api_key=SecretStr("sk-test")))
+        return LLMClient("gpt-6.1-sol", provider_clients={"openai": provider})
+
+    def _assert_bodies(self, bodies: list[dict[str, Any]]) -> None:
+        assert len(bodies) == 2
+        first, second = bodies
+        assert first["model"] == "gpt-6.1-sol"
+        assert first["store"] is False
+        assert first["include"] == ["reasoning.encrypted_content"]
+        assert first["max_output_tokens"] == 25_000
+        assert first["tools"][0]["name"] == "_get_weather"
+        assert first["tools"][0]["strict"] is False
+        assert first["input"] == [{"type": "message", "role": "user", "content": "weather?"}]
+        for body in bodies:
+            for absent in (
+                "messages",
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "previous_response_id",
+            ):
+                assert absent not in body
+        replay = second["input"]
+        reasoning = next(item for item in replay if item["type"] == "reasoning")
+        assert reasoning["id"] == "rs_1"
+        assert reasoning["encrypted_content"] == self._BLOB
+        assert "status" not in reasoning
+        call = next(item for item in replay if item["type"] == "function_call")
+        assert (call["id"], call["call_id"], call["name"]) == ("fc_1", "call_1", "_get_weather")
+        output = next(item for item in replay if item["type"] == "function_call_output")
+        assert output["call_id"] == "call_1"
+
+    async def test_run_tool_loop_bodies(self, http: Any) -> None:
+        bodies: list[dict[str, Any]] = []
+        http.post("https://api.openai.com/v1/responses").mock(side_effect=self._handler(bodies))
+        resp = await self._client().run_tool_loop(
+            [Message.user("weather?")], tools=[_get_weather], max_tokens=25_000
+        )
+        assert resp.text == "18C in Oslo"
+        self._assert_bodies(bodies)
+
+    async def test_stream_tool_loop_bodies(self, http: Any) -> None:
+        bodies: list[dict[str, Any]] = []
+        http.post("https://api.openai.com/v1/responses").mock(side_effect=self._handler(bodies))
+        events = await _collect(
+            self._client().stream_tool_loop(
+                [Message.user("weather?")], tools=[_get_weather], max_tokens=25_000
+            )
+        )
+        assert isinstance(events[-1], Done)
+        assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "18C in Oslo"
+        self._assert_bodies(bodies)
+
+    async def test_azure_uses_the_v1_responses_endpoint(self, http: Any) -> None:
+        from pydantic import SecretStr
+
+        from strata_forge.llm.providers import AzureProvider
+        from strata_forge.llm.providers.config import AzureConfig
+
+        bodies: list[dict[str, Any]] = []
+        route = http.post("https://example.openai.azure.com/openai/v1/responses").mock(
+            side_effect=self._handler(bodies)
+        )
+        azure = AzureProvider(
+            AzureConfig(api_key=SecretStr("k"), endpoint="https://example.openai.azure.com")
+        )
+        client = LLMClient("gpt-5.5", provider="azure", provider_clients={"azure": azure})
+        await client.complete([Message.user("weather?")], tools=[_get_weather])
+        assert route.called
+        assert bodies[0]["model"] == "gpt-5.5"
+        assert bodies[0]["store"] is False
