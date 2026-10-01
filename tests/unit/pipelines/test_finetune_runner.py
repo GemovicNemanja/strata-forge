@@ -321,6 +321,73 @@ class TestTrainerConfig:
                 tmp_path,
             )
 
+    @pytest.mark.parametrize(
+        "key",
+        [
+            # A Hub read with the VM's own credential, of any repo or local path.
+            "chat_template_path",
+            # Remote code, or a load configured outside the runner's terms.
+            "trust_remote_code",
+            "model_init_kwargs",
+            "ref_model_init_kwargs",
+            # A push with the VM's own credential.
+            "push_to_hub",
+            "push_to_hub_token",
+            "hub_token",
+            "hub_model_id",
+            "hub_private_repo",
+            "hub_strategy",
+            "hub_revision",
+            "trackio_space_id",
+            # A file on the VM, unpickled in the checkpoint case.
+            "resume_from_checkpoint",
+            "deepspeed",
+            "fsdp_config",
+            "accelerator_config",
+            # Outside the artifact directory, or off the machine entirely.
+            "logging_dir",
+            "report_to",
+        ],
+    )
+    def test_extra_trainer_args_cannot_load_push_or_report_under_other_terms(
+        self, tmp_path: Path, key: str
+    ) -> None:
+        # extra_trainer_args reaches TRL verbatim, so these keys would act with the VM's ambient
+        # credential, run a repo's code, read a VM file or ship the run to a third party: past
+        # every term the runner sets on its own loads. A spec names them; it does not get them.
+        from strata_forge.training.methods import pick_method
+
+        with pytest.raises(RunError, match=rf"may not set extra_trainer_args\.{key}\b"):
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": {key: "attacker/evil"}}),
+                pick_method("sft"),
+                tmp_path,
+            )
+
+    def test_every_refused_trainer_arg_is_named_at_once(self, tmp_path: Path) -> None:
+        from strata_forge.training.methods import pick_method
+
+        extra = {"report_to": "wandb", "hub_token": "x", "learning_rate": 1e-4}
+        with pytest.raises(RunError) as excinfo:
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": extra}), pick_method("dpo"), tmp_path
+            )
+        message = str(excinfo.value)
+        assert "extra_trainer_args.hub_token" in message
+        assert "extra_trainer_args.report_to" in message
+        assert "learning_rate" not in message
+
+    def test_an_ordinary_trainer_arg_still_passes_through(self, tmp_path: Path) -> None:
+        # The refusal is a deny-list of what reaches past the run, not a closing of the hatch.
+        from strata_forge.training.methods import pick_method
+
+        cfg = fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+            _spec(hyperparams={"extra_trainer_args": {"lr_scheduler_type": "cosine"}}),
+            pick_method("sft"),
+            tmp_path,
+        )
+        assert cfg.to_trl_kwargs()["lr_scheduler_type"] == "cosine"
+
     def test_the_derived_fields_are_the_spec_s_own(self, tmp_path: Path) -> None:
         # The positive half: what the run RECORDS is what the trainer is pointed at.
         from strata_forge.training.methods import pick_method

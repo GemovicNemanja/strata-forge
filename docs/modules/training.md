@@ -94,8 +94,9 @@ result = runner.train(train_dataset=preference_dataset)
 
 :class:`SFTConfig` mirrors the TRL ``SFTConfig`` knobs Forge
 exposes by default. The ``extra_trainer_args`` field is a
-verbatim passthrough to TRL — Forge never blocks access to the
-underlying surface.
+verbatim passthrough to TRL — Forge never blocks a Python caller's
+access to the underlying surface (a run spec is narrower; see
+[Driving training from a declaration](#driving-training-from-a-declaration)).
 
 Key fields:
 
@@ -208,7 +209,11 @@ Forwarding rules:
   there. With an adapter (TRL disables it to recover the reference)
   or ``precompute_ref_log_probs`` no reference is loaded. A caller
   that passes ``model=`` owns that load and should pass
-  ``ref_model=`` with it.
+  ``ref_model=`` with it. Both models load with no device placement
+  of their own, as the policy always has, so a full-weight DPO / KTO
+  run holds two copies of the base in host memory until the trainer
+  moves them to the accelerator (TRL placed its own reference load
+  with ``device_map="auto"``): size host RAM for twice the model.
 - ``reward_funcs`` is required for ``grpo`` and rejected
   elsewhere.
 - ``peft_config`` flows into every trainer when set; QLoRA's
@@ -393,6 +398,19 @@ submitted hyperparam could train a different model than the record names and wri
 the progress log to any absolute path — walking past the very `validate_repo_id` re-check the VM
 side exists to perform. `extra_trainer_args` is checked for the same three keys, since
 `to_trl_kwargs` applies it last and it reaches TRL's own `output_dir`.
+
+**A spec's `extra_trainer_args` may not set the TRL knobs that act under other terms than the
+run's.** It is TRL's and `transformers`' whole argument surface, and some of it loads, pushes or
+reports outside everything the runner sets on its own loads (see
+[Loading from the Hub](#loading-from-the-hub)): `chat_template_path` (a tokenizer load of any repo
+or local path, with the machine's own credential), `trust_remote_code` and `model_init_kwargs` /
+`ref_model_init_kwargs` (remote code, or a load configured elsewhere), `push_to_hub` and every
+`hub_*` / `trackio_*` setting (a push with the machine's own credential), `resume_from_checkpoint`,
+`deepspeed`, `fsdp_config` and `accelerator_config` (files on the machine, unpickled in the
+checkpoint case), `logging_dir` (outside the artifact directory) and `report_to` (a third-party
+service). From a spec each is refused by name
+(`hyperparams may not set extra_trainer_args.…`), all of them in one message; every other key
+passes through.
 
 This bounds only the **declaration** path. `extra_trainer_args` remains an unrestricted escape
 hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the

@@ -24,12 +24,14 @@ Security boundary (the VM is where allow-listed config meets real credentials + 
     (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
     :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
     the environment. It is passed EXPLICITLY to every Hub read and write — the split, the base
-    model and its tokenizer, the merge, the push — and a run that received none reads
-    anonymously rather than with the VM's ambient ``HF_TOKEN`` or cached login. It is scrubbed
-    from every surfaced message.
+    model and its tokenizer, the merge, the push — and a run that received none sends no
+    credential rather than the VM's ambient ``HF_TOKEN`` or cached login (a repo the VM's Hub
+    cache already holds still loads from that cache). It is scrubbed from every surfaced message.
   - Every model load refuses remote code and pickle checkpoints (``trust_remote_code=False``,
     ``use_safetensors=True`` — see :mod:`strata_forge.training.loading`): the base model is
-    named by the spec, and its repo is not the operator's.
+    named by the spec, and its repo is not the operator's. The spec's ``extra_trainer_args``
+    cannot reopen any of this: the TRL knobs that load, push or report under other terms are
+    refused by name (:data:`_SPEC_REFUSED_TRAINER_ARGS`).
   - Progress events carry step counts, float metrics and a repo id — never a training example.
     A fine-tuning corpus is often the most sensitive thing in a run, and none of it is in the
     channel the control plane relays to a browser.
@@ -50,7 +52,7 @@ import asyncio
 import itertools
 import sys
 from collections.abc import Mapping  # runtime: isinstance below
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -223,6 +225,57 @@ def _reject_runner_owned(hyperparams: dict[str, Any]) -> None:
         raise RunError(msg)
 
 
+#: TRL / ``transformers`` arguments an INERT spec may not set through ``extra_trainer_args``. That
+#: passthrough is the libraries' whole argument surface, and these knobs act outside the terms this
+#: runner sets on every load and push: they read from or write to the Hub with whatever credential
+#: the VM holds rather than the one the run was delivered (``chat_template_path``, ``push_to_hub``,
+#: the ``hub_*`` and ``trackio_*`` settings), run or configure a load of a repo's own code
+#: (``trust_remote_code``, ``model_init_kwargs``), read a file on the VM, which for a checkpoint
+#: means unpickling it (``resume_from_checkpoint``, ``deepspeed``, ``fsdp_config``,
+#: ``accelerator_config``), write outside the artifact directory (``logging_dir``), or send the
+#: run to a third-party service (``report_to``). Exact names first, then name prefixes.
+_SPEC_REFUSED_TRAINER_ARGS = frozenset(
+    {
+        "accelerator_config",
+        "chat_template_path",
+        "deepspeed",
+        "fsdp_config",
+        "logging_dir",
+        "model_init_kwargs",
+        "ref_model_init_kwargs",
+        "report_to",
+        "resume_from_checkpoint",
+        "trust_remote_code",
+    }
+)
+_SPEC_REFUSED_TRAINER_ARG_PREFIXES = ("hub_", "push_to_hub", "trackio_")
+
+
+def _reject_unsafe_trainer_args(hyperparams: dict[str, Any]) -> None:
+    """Refuse an ``extra_trainer_args`` key that reaches past the run's own credential and files.
+
+    The escape hatch stays whole for a caller driving :mod:`strata_forge.training` from Python,
+    who is the operator of the machine. A spec is submitted by someone who is not, so from a spec
+    these keys are named and refused, like every other inapplicable knob, rather than dropped.
+    """
+    extra = hyperparams.get("extra_trainer_args")
+    if not isinstance(extra, Mapping):
+        return
+    keys = [key for key in cast("Mapping[object, object]", extra) if isinstance(key, str)]
+    refused = sorted(
+        f"extra_trainer_args.{key}"
+        for key in keys
+        if key in _SPEC_REFUSED_TRAINER_ARGS or key.startswith(_SPEC_REFUSED_TRAINER_ARG_PREFIXES)
+    )
+    if refused:
+        msg = (
+            f"hyperparams may not set {', '.join(refused)}: from a run spec these reach a "
+            "credential, remote code, a file on the machine or a third-party service that the "
+            "run does not govern"
+        )
+        raise RunError(msg)
+
+
 def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) -> Any:
     """Build the method's typed config from the inert spec.
 
@@ -238,9 +291,12 @@ def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) ->
     to perform. ``extra_trainer_args`` is checked for the same reason: it is applied LAST inside
     ``to_trl_kwargs``, so it reaches TRL's own ``output_dir`` even when this layer is correct. That
     stays a deliberate, documented escape hatch for a caller driving the runners from Python; it is
-    only from an INERT SPEC, where the submitter is not the operator, that it must not aim.
+    only from an INERT SPEC, where the submitter is not the operator, that it must not aim — and
+    for the same reason :func:`_reject_unsafe_trainer_args` keeps a spec's ``extra_trainer_args``
+    off the knobs that read, push or run anything under terms other than the run's own.
     """
     _reject_runner_owned(spec.hyperparams)
+    _reject_unsafe_trainer_args(spec.hyperparams)
     kwargs: dict[str, Any] = {
         **spec.hyperparams,
         "model_id": spec.model_id,

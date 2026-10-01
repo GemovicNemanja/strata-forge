@@ -43,8 +43,11 @@ class SFTConfig(BaseModel):
 
     Mirrors the TRL ``SFTConfig`` knobs Forge exposes by default.
     Anything you need that isn't here goes through
-    :attr:`extra_trainer_args` verbatim — Forge never blocks
-    access to the underlying TRL surface.
+    :attr:`extra_trainer_args` verbatim — Forge never blocks a
+    Python caller's access to the underlying TRL surface. (A run
+    spec handed to :mod:`strata_forge.pipelines.finetune_runner`
+    cannot set the keys that load, push or report under other
+    terms than the run's.)
 
     Attributes:
         model_id: HuggingFace model id or local path.

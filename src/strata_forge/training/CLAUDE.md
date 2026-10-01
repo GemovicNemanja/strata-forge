@@ -87,7 +87,11 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   Each config has a ``to_trl_kwargs()`` (or ``to_peft_config()``)
   method that renders the typed shape into the kwargs TRL / peft
   expects. ``extra_trainer_args`` is the verbatim passthrough
-  escape hatch.
+  escape hatch for a Python caller. The fine-tuning VM runner
+  refuses, from a run spec, the keys that load, push or report
+  under other terms than the run's
+  (``pipelines.finetune_runner._SPEC_REFUSED_TRAINER_ARGS``); add a
+  TRL knob of that kind there when an upgrade introduces one.
 - **Runners are thin orchestration.** No work in the constructor.
   ``_load_modules()`` lazy-imports the heavy stack; ``train()``
   builds the trainer, runs it, saves, and returns a Pydantic
