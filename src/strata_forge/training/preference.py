@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from strata_forge.training.loading import model_load_kwargs, tokenizer_load_kwargs
 from strata_forge.training.progress import attach as _attach_progress
 from strata_forge.training.progress import coerce_int, numeric_metrics
 
 if TYPE_CHECKING:
+    from strata_forge.training.loading import HubToken
     from strata_forge.training.peft import LoRAConfig, QLoRAConfig
 
 __all__ = [
@@ -209,6 +211,9 @@ _TRL_CONFIG_CLASS: dict[str, str] = {
 #: protect -- a minor TRL release may move or change it again.
 _TRL_FALLBACK_MODULE: dict[str, str] = {"orpo": "trl.experimental.orpo"}
 
+#: Methods that score the policy against a frozen reference model.
+_REFERENCE_METHODS = frozenset({"dpo", "kto"})
+
 
 def _resolve_trl_class(trl_mod: Any, method: str, name: str) -> Any:
     """Find a TRL class by name, following the method's move out of the top-level namespace.
@@ -283,23 +288,46 @@ class PreferenceRunner:
         model: Any = None,
         ref_model: Any = None,
         reward_funcs: Any = None,
+        token: HubToken = None,
     ) -> Any:
-        """Construct the TRL preference trainer for this config."""
+        """Construct the TRL preference trainer for this config.
+
+        ``token`` is the Hub credential for every model and tokenizer this method downloads (see
+        :mod:`strata_forge.training.loading`); it is never stored on the config. When this method
+        loads the policy for DPO or KTO without an adapter, it loads the reference model too, with
+        the same arguments: left to TRL, the reference is re-downloaded by name with none of them,
+        so a gated base would fail there and a pickle checkpoint would be accepted. A caller that
+        passes ``model=`` owns that load and should pass ``ref_model=`` with it.
+        """
         transformers_mod, trl_mod = self._load_modules()
         method = self._config.method
+        trl_kwargs = self._config.to_trl_kwargs()
         if model is None:
-            model_load_kwargs: dict[str, Any] = {}
+            load_kwargs = model_load_kwargs(token)
             if self._peft_config is not None and hasattr(self._peft_config, "to_bnb_config"):
-                model_load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
+                load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
             model = transformers_mod.AutoModelForCausalLM.from_pretrained(
-                self._config.model_id, **model_load_kwargs
+                self._config.model_id, **load_kwargs
             )
+            if (
+                ref_model is None
+                and method in _REFERENCE_METHODS
+                and self._peft_config is None
+                # TRL scores the reference up front from the policy itself in this mode, and keeps
+                # no reference model in memory.
+                and not trl_kwargs.get("precompute_ref_log_probs")
+            ):
+                ref_model = transformers_mod.AutoModelForCausalLM.from_pretrained(
+                    self._config.model_id, **load_kwargs
+                )
         if tokenizer is None:
-            tokenizer = transformers_mod.AutoTokenizer.from_pretrained(self._config.model_id)
+            tokenizer = transformers_mod.AutoTokenizer.from_pretrained(
+                self._config.model_id, **tokenizer_load_kwargs(token)
+            )
 
         trl_config_cls: Any = _resolve_trl_class(trl_mod, method, _TRL_CONFIG_CLASS[method])
         trainer_cls: Any = _resolve_trl_class(trl_mod, method, _TRAINER_CLASS[method])
-        trl_config = trl_config_cls(**self._config.to_trl_kwargs())
+        trl_config = trl_config_cls(**trl_kwargs)
 
         trainer_kwargs: dict[str, Any] = {
             "model": model,
@@ -336,6 +364,7 @@ class PreferenceRunner:
         model: Any = None,
         ref_model: Any = None,
         reward_funcs: Any = None,
+        token: HubToken = None,
     ) -> PreferenceRunResult:
         """Run the preference loop end to end."""
         trainer = self.build_trainer(
@@ -345,6 +374,7 @@ class PreferenceRunner:
             model=model,
             ref_model=ref_model,
             reward_funcs=reward_funcs,
+            token=token,
         )
         train_output: Any = trainer.train()
         trainer.save_model(self._config.output_dir)

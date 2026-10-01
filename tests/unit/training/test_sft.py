@@ -102,13 +102,14 @@ def fake_ml_stack(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         @classmethod
         def from_pretrained(cls, model_id: str, **kwargs: Any) -> Any:
             state["model_loaded"] = {"model_id": model_id, "kwargs": kwargs}
+            state.setdefault("model_loads", []).append({"model_id": model_id, "kwargs": kwargs})
             return MagicMock(name=f"model({model_id})")
 
     class _FakeAutoTokenizer:
         @classmethod
         def from_pretrained(cls, model_id: str, **kwargs: Any) -> Any:
-            del kwargs
             state["tokenizer_loaded"] = model_id
+            state["tokenizer_kwargs"] = kwargs
             return MagicMock(name=f"tokenizer({model_id})")
 
     fake_transformers = types.ModuleType("transformers")
@@ -273,3 +274,53 @@ class TestSFTRunner:
         result = runner.train(train_dataset=["row"])
         assert result.train_loss == 0.5
         assert "note" not in result.metrics
+
+
+_TOKEN = "hf_secretreadtoken1234567890"
+
+
+class TestHubLoads:
+    """Every load states its terms: the caller's token, no remote code, safetensors only."""
+
+    def test_the_token_reaches_the_model_and_tokenizer_loads(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        SFTRunner(SFTConfig(model_id="org/gated", output_dir="./out")).train(
+            train_dataset=["row"], token=_TOKEN
+        )
+        assert fake_ml_stack["model_loaded"] == {
+            "model_id": "org/gated",
+            "kwargs": {"token": _TOKEN, "trust_remote_code": False, "use_safetensors": True},
+        }
+        assert fake_ml_stack["tokenizer_kwargs"] == {"token": _TOKEN, "trust_remote_code": False}
+
+    def test_the_token_never_reaches_the_trl_config_or_the_trainer(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        # TRL pickles its arguments into training_args.bin beside every checkpoint, and a pushed
+        # output directory carries that file to the Hub.
+        SFTRunner(SFTConfig(model_id="org/gated", output_dir="./out")).train(
+            train_dataset=["row"], token=_TOKEN
+        )
+        assert _TOKEN not in repr(fake_ml_stack["trl_config_kwargs"])
+        trainer_kwargs = dict(fake_ml_stack["trainer_kwargs"])
+        assert "token" not in trainer_kwargs
+        assert _TOKEN not in repr({k: v for k, v in trainer_kwargs.items() if k != "model"})
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    def test_qlora_keeps_the_load_terms_beside_the_quantization_config(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        SFTRunner(SFTConfig(model_id="gpt2", output_dir="./out"), peft_config=QLoRAConfig()).train(
+            train_dataset=["row"], token=_TOKEN
+        )
+        kwargs = fake_ml_stack["model_loaded"]["kwargs"]
+        assert kwargs["token"] == _TOKEN
+        assert kwargs["trust_remote_code"] is False
+        assert kwargs["use_safetensors"] is True
+        assert "quantization_config" in kwargs
+
+    def test_remote_code_stays_off_without_a_token(self, fake_ml_stack: dict[str, Any]) -> None:
+        SFTRunner(SFTConfig(model_id="gpt2", output_dir="./out")).train(train_dataset=["row"])
+        assert fake_ml_stack["model_loaded"]["kwargs"]["trust_remote_code"] is False
+        assert fake_ml_stack["tokenizer_kwargs"]["trust_remote_code"] is False

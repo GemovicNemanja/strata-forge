@@ -20,10 +20,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from strata_forge.training.loading import model_load_kwargs, tokenizer_load_kwargs
 from strata_forge.training.progress import attach as _attach_progress
 from strata_forge.training.progress import coerce_int, numeric_metrics
 
 if TYPE_CHECKING:
+    from strata_forge.training.loading import HubToken
     from strata_forge.training.peft import LoRAConfig, QLoRAConfig
 
 __all__ = [
@@ -200,23 +202,32 @@ class SFTRunner:
         eval_dataset: Any = None,
         tokenizer: Any = None,
         model: Any = None,
+        token: HubToken = None,
     ) -> Any:
         """Construct the TRL ``SFTTrainer`` without starting it.
 
         Useful when callers want to inspect or mutate the trainer
         before calling ``.train()``. :meth:`train` does this for you.
+
+        ``token`` is the Hub credential for the model and tokenizer
+        this method downloads (see
+        :mod:`strata_forge.training.loading`). It is an argument of the
+        load only and is never stored on the config, so it cannot
+        reach TRL's arguments or the files TRL saves.
         """
         transformers_mod, trl_mod, _ = self._load_modules()
         if model is None:
-            model_load_kwargs: dict[str, Any] = {}
+            load_kwargs = model_load_kwargs(token)
             if self._peft_config is not None and hasattr(self._peft_config, "to_bnb_config"):
                 # QLoRA branch: pass the bnb config.
-                model_load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
+                load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
             model = transformers_mod.AutoModelForCausalLM.from_pretrained(
-                self._config.model_id, **model_load_kwargs
+                self._config.model_id, **load_kwargs
             )
         if tokenizer is None:
-            tokenizer = transformers_mod.AutoTokenizer.from_pretrained(self._config.model_id)
+            tokenizer = transformers_mod.AutoTokenizer.from_pretrained(
+                self._config.model_id, **tokenizer_load_kwargs(token)
+            )
         trl_config = trl_mod.SFTConfig(**self._config.to_trl_kwargs())
         trainer_kwargs: dict[str, Any] = {
             "model": model,
@@ -239,6 +250,7 @@ class SFTRunner:
         eval_dataset: Any = None,
         tokenizer: Any = None,
         model: Any = None,
+        token: HubToken = None,
     ) -> SFTRunResult:
         """Run the SFT loop end to end.
 
@@ -252,6 +264,7 @@ class SFTRunner:
             eval_dataset=eval_dataset,
             tokenizer=tokenizer,
             model=model,
+            token=token,
         )
         train_output: Any = trainer.train()
         trainer.save_model(self._config.output_dir)

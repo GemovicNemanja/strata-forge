@@ -145,3 +145,30 @@ class TestResolveTrlClass:
         trl_mod = types.ModuleType("trl")
         with pytest.raises(AttributeError, match="dpo"):
             _resolve_trl_class(trl_mod, "dpo", "DPOConfig")
+
+
+class TestNoCredentialInTheTrlConfig:
+    """The Hub token is an argument of the model load, never a field TRL receives.
+
+    TRL pickles its arguments into ``training_args.bin`` beside every checkpoint, and a pushed
+    output directory carries that file to the Hub. A config that could hold a token would put it
+    there.
+    """
+
+    _ALL: tuple[Any, ...] = (SFTConfig, DPOConfig, ORPOConfig, KTOConfig, GRPOConfig)
+
+    @pytest.mark.parametrize("config_cls", _ALL)
+    def test_no_config_declares_a_credential_field(self, config_cls: Any) -> None:
+        for name in config_cls.model_fields:
+            assert "token" not in name.lower(), name
+
+    @pytest.mark.parametrize("config_cls", _ALL)
+    @pytest.mark.parametrize("field", ["token", "hub_token", "use_auth_token"])
+    def test_a_credential_is_refused_as_a_config_field(self, config_cls: Any, field: str) -> None:
+        with pytest.raises(ValidationError):
+            config_cls(model_id="gpt2", output_dir="./out", **{field: "hf_x" * 4})
+
+    @pytest.mark.parametrize("config_cls", _ALL)
+    def test_the_forwarded_kwargs_carry_no_credential(self, config_cls: Any) -> None:
+        forwarded = config_cls(model_id="gpt2", output_dir="./out").to_trl_kwargs()
+        assert not [key for key in forwarded if "token" in key.lower()]

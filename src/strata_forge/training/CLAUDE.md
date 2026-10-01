@@ -93,6 +93,16 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   builds the trainer, runs it, saves, and returns a Pydantic
   result. Callers can supply ``model=`` / ``tokenizer=`` /
   ``ref_model=`` to skip the default ``from_pretrained`` calls.
+- **Every Hub load states its terms.** A ``from_pretrained`` call
+  goes through ``loading.model_load_kwargs(token)`` /
+  ``loading.tokenizer_load_kwargs(token)``: ``trust_remote_code=False``
+  always, ``use_safetensors=True`` on models, and the caller's
+  ``token``. The token is a keyword argument of ``build_trainer`` /
+  ``train`` and is never a config field: a config's fields reach
+  ``to_trl_kwargs`` and TRL pickles those into ``training_args.bin``.
+  When a runner loads the DPO / KTO policy without an adapter it also
+  loads the reference model itself, on the same terms; never leave
+  that load to TRL, which re-downloads by name with none of them.
 - **PEFT is opt-in.** Runners accept ``peft_config=None``;
   when set, the adapter config flows into TRL's
   ``peft_config=`` and (for QLoRA) the BitsAndBytes config flows

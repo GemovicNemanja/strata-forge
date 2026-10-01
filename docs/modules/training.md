@@ -122,12 +122,40 @@ Key fields:
 1. Lazy-imports ``transformers`` / ``trl`` / ``datasets``.
 2. Loads model + tokenizer via ``AutoModelForCausalLM`` /
    ``AutoTokenizer`` (or uses the ``model=`` / ``tokenizer=``
-   the caller provided).
+   the caller provided), on the terms in
+   [Loading from the Hub](#loading-from-the-hub).
 3. Builds ``trl.SFTTrainer`` with the rendered kwargs + optional
    PEFT config.
 4. Runs ``trainer.train()``, calls ``trainer.save_model``.
 5. Returns an :class:`SFTRunResult` with ``train_loss``,
    ``train_runtime_s``, etc.
+
+## Loading from the Hub
+
+Every model and tokenizer load the runners make states its terms
+explicitly, from :mod:`strata_forge.training.loading`
+(``model_load_kwargs`` / ``tokenizer_load_kwargs``):
+
+| Argument | Value | Why |
+|---|---|---|
+| ``trust_remote_code`` | ``False`` | A repo's own Python never runs. |
+| ``use_safetensors`` | ``True`` (models) | A pickle checkpoint (``*.bin`` / ``*.pt``) can execute code when unpickled; a repo that ships only those fails to load instead. |
+| ``token`` | the caller's | ``build_trainer(..., token=...)`` / ``train(..., token=...)``. |
+
+``token`` is a :data:`HubToken`: a token string, ``False`` to send
+no credential at all, or ``None`` (the default) for the library's
+own lookup (an ``HF_TOKEN`` variable or a cached login). It is a
+keyword argument of the load and is **never stored on a config**:
+every ``XxxConfig`` rejects a ``token`` field, and nothing in
+``to_trl_kwargs`` carries one, so it cannot reach TRL's arguments or
+the ``training_args.bin`` TRL pickles beside each checkpoint (a
+pushed output directory would carry that file to the Hub).
+
+The VM runner in :mod:`strata_forge.pipelines.finetune_runner`
+passes the run's delivered token, or ``False`` when none was
+delivered, to every load, including the merge step's base model,
+adapter and tokenizer, so a run never falls back to a credential
+the machine happens to hold.
 
 ## Preference tuning
 
@@ -172,6 +200,15 @@ Forwarding rules:
 - ``ref_model`` flows into the trainer only for ``dpo`` and
   ``kto`` (ORPO doesn't use a reference model; GRPO doesn't
   either).
+- When the runner loads the policy itself for ``dpo`` / ``kto``
+  **without** an adapter, it loads the reference model too, with
+  the same load arguments (token, no remote code, safetensors
+  only, same precision). Left to TRL, the reference is re-downloaded
+  by the policy's name with none of them, so a gated base would fail
+  there. With an adapter (TRL disables it to recover the reference)
+  or ``precompute_ref_log_probs`` no reference is loaded. A caller
+  that passes ``model=`` owns that load and should pass
+  ``ref_model=`` with it.
 - ``reward_funcs`` is required for ``grpo`` and rejected
   elsewhere.
 - ``peft_config`` flows into every trainer when set; QLoRA's
