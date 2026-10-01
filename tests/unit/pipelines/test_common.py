@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -23,12 +24,18 @@ import strata_forge
 from strata_forge.core.errors import ValidationError
 from strata_forge.pipelines import SPEC_VERSION, _common
 from strata_forge.pipelines._common import (
+    LEGACY_TOKEN_ENV,
+    LEGACY_TOKEN_MESSAGE,
+    MAX_SECRETS_FILE_BYTES,
     REQUIRE_ENGINE_VERSION_ENV,
     UNCHECKED_ENGINE_MESSAGE,
     RunError,
+    RunSecrets,
     check_engine_version,
     installed_engine_commit,
     load_config,
+    load_secrets,
+    model_server_environ,
     phase_sink,
     results_dir,
     run_redactor,
@@ -73,6 +80,29 @@ class _BareSpec(BaseModel):
 def _no_required_engine_version(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
     # A developer's shell may carry the switch; the tests that exercise it set it themselves.
     monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_secrets(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    # Neither delivery channel may leak in from the shell running the tests.
+    monkeypatch.delenv("FORGE_SECRETS_FILE", raising=False)
+    monkeypatch.delenv(LEGACY_TOKEN_ENV, raising=False)
+
+
+def _deliver(
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path,
+    payload: object,
+    *,
+    mode: int = 0o600,
+    name: str = ".secrets.json",
+) -> Path:
+    """Write a secrets file the way a backend does and point the runner at it."""
+    path = directory / name
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+    path.chmod(mode)
+    monkeypatch.setenv("FORGE_SECRETS_FILE", str(path))
+    return path
 
 
 # ------------------------------ scrubbing ------------------------------------
@@ -745,8 +775,8 @@ class TestRunnerMain:
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
         seen: list[Any] = []
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> str:
-            seen.append((writer, token))
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> str:
+            seen.append((writer, secrets))
             return "done"
 
         assert await runner_main(_execute) == 0
@@ -754,20 +784,68 @@ class TestRunnerMain:
         assert writer is not None
         assert writer._fh.closed  # pyright: ignore[reportPrivateUsage] - lifecycle is the assertion
 
-    async def test_the_write_token_reaches_execute_from_its_own_env_var(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_the_token_reaches_execute_from_the_file_which_is_gone_first(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.delenv("FORGE_PROGRESS_PATH", raising=False)
+        progress = tmp_path / "p.jsonl"
+        monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
-        monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
-        seen: list[str | None] = []
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN})
+        seen: list[tuple[str | None, bool]] = []
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
             del writer
-            seen.append(token)
+            # Before the runner does anything at all, the file is already gone.
+            seen.append((secrets.hf_token_value(), path.exists()))
 
-        await runner_main(_execute)
-        assert seen == [_TOKEN]
+        assert await runner_main(_execute) == 0
+        assert seen == [(_TOKEN, False)]
+        # The delivery the runner asks for is not reported as a deprecated one.
+        assert LEGACY_TOKEN_MESSAGE not in progress.read_text()
+        assert LEGACY_TOKEN_MESSAGE not in capsys.readouterr().err
+
+    async def test_the_environment_fallback_works_and_says_it_is_deprecated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        progress = tmp_path / "p.jsonl"
+        monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
+        monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
+        monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+        seen: list[tuple[str | None, bool, str | None]] = []
+
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer
+            seen.append(
+                (
+                    secrets.hf_token_value(),
+                    secrets.from_environment,
+                    os.environ.get(LEGACY_TOKEN_ENV),
+                )
+            )
+
+        assert await runner_main(_execute) == 0
+        # The token arrives; and it is gone from the environment every child would inherit.
+        assert seen == [(_TOKEN, True, None)]
+        events = [json.loads(line) for line in progress.read_text().splitlines()]
+        assert events[0] == {**events[0], "kind": "phase", "message": LEGACY_TOKEN_MESSAGE}
+        assert f"warning: {LEGACY_TOKEN_MESSAGE}" in capsys.readouterr().err
+
+    async def test_a_missing_secrets_file_fails_the_run_before_execute(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        progress = tmp_path / "p.jsonl"
+        monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
+        monkeypatch.setenv("FORGE_SECRETS_FILE", str(tmp_path / ".secrets.json"))
+        entered: list[bool] = []
+
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer, secrets
+            entered.append(True)
+
+        assert await runner_main(_execute) == 1
+        assert entered == []
+        assert "secrets file" in progress.read_text()
+        assert "run failed: the secrets file" in capsys.readouterr().err
 
     async def test_a_failure_is_exit_one_and_the_reason_is_scrubbed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -775,10 +853,10 @@ class TestRunnerMain:
         progress = tmp_path / "p.jsonl"
         monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
-        monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+        _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN})
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
-            del writer, token
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer, secrets
             msg = f"upload rejected using {_TOKEN}"
             raise RunError(msg)
 
@@ -800,8 +878,8 @@ class TestRunnerMain:
         _run_config(monkeypatch, "0.0.1")
         entered: list[bool] = []
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
-            del writer, token
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer, secrets
             load_config(_Spec)
             entered.append(True)
 
@@ -867,8 +945,8 @@ class TestRunnerMain:
         monkeypatch.delenv("FORGE_PROGRESS_PATH", raising=False)
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
 
-        def _execute(writer: JsonlProgressWriter | None, token: str | None) -> Any:
-            del writer, token
+        def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> Any:
+            del writer, secrets
             msg = "bad spec"
             raise RunError(msg)
 
@@ -881,8 +959,8 @@ class TestRunnerMain:
         monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
-            del writer, token
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer, secrets
             raise asyncio.CancelledError
 
         assert await runner_main(_execute) == 1
@@ -941,3 +1019,191 @@ asyncio.run(driver())
             f"never ran.\nstdout={completed.stdout!r}\nstderr={completed.stderr!r}"
         )
         assert marker.read_text() == "torn down"
+
+
+# ------------------------------ secrets ---------------------------------------
+
+
+class TestLoadSecrets:
+    """The secrets file is read once, deleted before anything else happens, and never echoed."""
+
+    def test_reads_the_token_and_deletes_the_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN})
+        secrets = load_secrets()
+        assert secrets.hf_token_value() == _TOKEN
+        assert not secrets.from_environment
+        assert not path.exists()
+        assert _TOKEN not in repr(secrets)
+        assert _TOKEN not in str(secrets.model_dump())
+
+    def test_an_empty_object_is_no_secrets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _deliver(monkeypatch, tmp_path, {})
+        assert load_secrets().hf_token is None
+
+    def test_nothing_configured_is_no_secrets(self) -> None:
+        assert load_secrets() == RunSecrets()
+
+    def test_a_configured_file_wins_and_the_env_copy_is_never_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Once an orchestrator delivers by file, a stray env var cannot steer the token back.
+        _deliver(monkeypatch, tmp_path, {})
+        monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+        secrets = load_secrets()
+        assert secrets.hf_token is None
+        assert not secrets.from_environment
+        assert LEGACY_TOKEN_ENV not in os.environ
+
+    def test_the_legacy_variable_is_read_and_removed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+        secrets = load_secrets()
+        assert secrets.hf_token_value() == _TOKEN
+        assert secrets.from_environment
+        assert LEGACY_TOKEN_ENV not in os.environ
+
+    def test_a_missing_file_is_a_named_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("FORGE_SECRETS_FILE", str(tmp_path / ".secrets.json"))
+        with pytest.raises(RunError, match="does not exist"):
+            load_secrets()
+
+    @pytest.mark.parametrize("name", ["id_ed25519", "secrets.json", ".secrets.json.bak"])
+    def test_a_path_that_is_not_a_secrets_file_is_not_touched(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+    ) -> None:
+        # This function deletes what it is pointed at, so it refuses anything else unopened.
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN}, name=name)
+        with pytest.raises(RunError, match="must be an absolute path"):
+            load_secrets()
+        assert path.exists()
+
+    def test_a_relative_path_is_not_touched(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN})
+        monkeypatch.setenv("FORGE_SECRETS_FILE", ".secrets.json")
+        with pytest.raises(RunError, match="must be an absolute path"):
+            load_secrets()
+        assert path.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+    @pytest.mark.parametrize("mode", [0o644, 0o640, 0o604])
+    def test_a_file_others_could_read_is_refused_and_still_deleted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: int
+    ) -> None:
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN}, mode=mode)
+        with pytest.raises(RunError, match="readable by no one else") as excinfo:
+            load_secrets()
+        assert _TOKEN not in str(excinfo.value)
+        assert not path.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+    def test_a_symlink_is_not_followed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "elsewhere"
+        target.write_text(json.dumps({"HF_TOKEN": _TOKEN}))
+        target.chmod(0o600)
+        link = tmp_path / ".secrets.json"
+        link.symlink_to(target)
+        monkeypatch.setenv("FORGE_SECRETS_FILE", str(link))
+        with pytest.raises(RunError, match="could not be opened"):
+            load_secrets()
+        # The link is removed; what it pointed at is not this function's to delete.
+        assert not link.is_symlink()
+        assert target.exists()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="POSIX modes; root reads anything"
+    )
+    def test_an_unreadable_file_is_a_named_error_and_still_deleted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN}, mode=0o000)
+        with pytest.raises(RunError, match="could not be opened"):
+            load_secrets()
+        assert not path.exists()
+
+    @pytest.mark.parametrize(
+        ("payload", "reason"),
+        [
+            (f'{{"HF_TOKEN": "{_TOKEN}"', "not valid JSON"),
+            (f'["{_TOKEN}"]', "JSON object"),
+            ({"HF_TOKEN": 12345}, "string values"),
+            ({"HF_TOKEN": _TOKEN, "OTHER_KEY": _TOKEN}, "OTHER_KEY"),
+        ],
+    )
+    def test_a_malformed_file_never_echoes_its_contents(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: object, reason: str
+    ) -> None:
+        path = _deliver(monkeypatch, tmp_path, payload)
+        with pytest.raises(RunError, match=reason) as excinfo:
+            load_secrets()
+        assert _TOKEN not in str(excinfo.value)
+        assert excinfo.value.__cause__ is None
+        assert not path.exists()
+
+    def test_an_oversized_file_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": "x" * MAX_SECRETS_FILE_BYTES})
+        with pytest.raises(RunError, match="larger than"):
+            load_secrets()
+        assert not path.exists()
+
+
+class TestModelServerEnviron:
+    def test_keeps_what_a_server_needs_and_nothing_else(self) -> None:
+        source = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/u",
+            "LANG": "C.UTF-8",
+            "LD_LIBRARY_PATH": "/usr/local/cuda/lib64",
+            "HF_HOME": "/data/hf",
+            "HF_HUB_CACHE": "/data/hf/hub",
+            "TRANSFORMERS_CACHE": "/data/tf",
+            "PYTHONUNBUFFERED": "1",
+            "CUDA_VISIBLE_DEVICES": "0,1",
+            "NVIDIA_VISIBLE_DEVICES": "all",
+            "VLLM_USE_V1": "1",
+            "NCCL_P2P_DISABLE": "1",
+            # Everything below must not reach the server.
+            "HF_WRITE_TOKEN": _TOKEN,
+            "HF_TOKEN": _TOKEN,
+            "FORGE_SECRETS_FILE": "/w/.secrets.json",
+            "STRATA_RUN_CONFIG": "{}",
+            "OPENAI_API_KEY": _TOKEN,
+            "AWS_SECRET_ACCESS_KEY": _TOKEN,
+            "VLLM_API_KEY": _TOKEN,
+            "CUDA_SOMETHING_TOKEN": _TOKEN,
+            "SSH_AUTH_SOCK": "/run/user/1000/agent.sock",
+        }
+        kept = model_server_environ(source)
+        assert set(kept) == {
+            "PATH",
+            "HOME",
+            "LANG",
+            "LD_LIBRARY_PATH",
+            "HF_HOME",
+            "HF_HUB_CACHE",
+            "TRANSFORMERS_CACHE",
+            "PYTHONUNBUFFERED",
+            "CUDA_VISIBLE_DEVICES",
+            "NVIDIA_VISIBLE_DEVICES",
+            "VLLM_USE_V1",
+            "NCCL_P2P_DISABLE",
+        }
+        assert _TOKEN not in json.dumps(kept)
+
+    def test_defaults_to_this_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+        kept = model_server_environ()
+        assert kept["CUDA_VISIBLE_DEVICES"] == "3"
+        assert "HF_WRITE_TOKEN" not in kept

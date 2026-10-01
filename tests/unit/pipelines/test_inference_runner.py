@@ -22,7 +22,12 @@ from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
 from strata_forge.core.redact import Redactor
 from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
-from strata_forge.pipelines._common import REQUIRE_ENGINE_VERSION_ENV, UNCHECKED_ENGINE_MESSAGE
+from strata_forge.pipelines._common import (
+    LEGACY_TOKEN_ENV,
+    LEGACY_TOKEN_MESSAGE,
+    REQUIRE_ENGINE_VERSION_ENV,
+    UNCHECKED_ENGINE_MESSAGE,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -31,6 +36,22 @@ if TYPE_CHECKING:
     from strata_forge.llm import LLMClient, LLMResponse
 
 _TOKEN = "hf_secretwritetoken1234567890"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_secrets(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    # Neither delivery channel may leak in from the shell running the tests.
+    monkeypatch.delenv("FORGE_SECRETS_FILE", raising=False)
+    monkeypatch.delenv(LEGACY_TOKEN_ENV, raising=False)
+
+
+def _deliver_token(monkeypatch: pytest.MonkeyPatch, directory: Path) -> Path:
+    """Hand the runner the write token the way a backend does: a 0600 file it is pointed at."""
+    path = directory / ".secrets.json"
+    path.write_text(json.dumps({"HF_TOKEN": _TOKEN}))
+    path.chmod(0o600)
+    monkeypatch.setenv("FORGE_SECRETS_FILE", str(path))
+    return path
 
 
 def _ok(text: str, *, latency_ms: float = 100.0, output_tokens: int = 10) -> BatchInferenceResult:
@@ -291,7 +312,7 @@ async def test_main_happy_path_pushes_and_never_leaks_token(
 ) -> None:
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
         del spec, token
@@ -399,7 +420,7 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     # entire timeout, leaving the user staring at a spinner.
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
 
     assert await ir.main() == 0
@@ -428,7 +449,7 @@ async def test_main_records_an_unchecked_engine_when_the_spec_makes_no_claim(
     monkeypatch.setenv(
         "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), engine_version=None)
     )
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
 
@@ -448,7 +469,7 @@ async def test_main_refuses_a_spec_with_no_claim_when_the_machine_requires_one(
     monkeypatch.setenv(
         "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), engine_version=None)
     )
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     monkeypatch.setenv(REQUIRE_ENGINE_VERSION_ENV, "1")
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
 
@@ -466,7 +487,7 @@ async def test_serving_hook_phrases_are_scrubbed_and_capped(
     # not necessarily one this module wrote. It gets the same treatment as an error message.
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     def _drive(rec: dict[str, Any]) -> None:
         rec["on_phase"](f"pulling weights with {_TOKEN} " + "x" * 500)
@@ -489,7 +510,7 @@ async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
 ) -> None:
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     record: dict[str, Any] = {}
     _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
     monkeypatch.chdir(tmp_path)  # on the VM this is the per-run job workdir
@@ -513,12 +534,70 @@ async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
     assert record["task"].env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
 
 
+@pytest.mark.parametrize("delivery", ["file", "environment"])
+async def test_the_model_server_environment_holds_no_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delivery: str
+) -> None:
+    # vLLM is third-party code serving a model a user chose. It gets an allow-listed environment
+    # and does not inherit the runner's, so neither the token (however it was delivered), nor
+    # the secrets file's path, nor the spec, nor whatever credentials the VM carries reach it.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    if delivery == "file":
+        _deliver_token(monkeypatch, tmp_path)
+    else:
+        monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+    monkeypatch.setenv("HF_TOKEN", "hf_ambientvmtoken0123456789")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient0123456789")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+    monkeypatch.chdir(tmp_path)
+
+    assert await ir.main() == 0
+    backend = record["backend"]
+    assert backend._env_inherit is False  # pyright: ignore[reportPrivateUsage]
+    env = record["task"].env
+    assert not record["task"].secrets
+    rendered = json.dumps(env)
+    for leaked in (_TOKEN, "hf_ambientvmtoken0123456789", "sk-ambient0123456789"):
+        assert leaked not in rendered
+    for name in ("HF_TOKEN", LEGACY_TOKEN_ENV, "FORGE_SECRETS_FILE", "STRATA_RUN_CONFIG"):
+        assert name not in env
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert "PATH" in env
+
+
+async def test_main_accepts_the_deprecated_env_token_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+    pushed: list[str] = []
+
+    async def _push(spec: Any, results_path: Any, token: str) -> str:
+        del results_path
+        pushed.append(token)
+        return cast("str", spec.output_repo_id)
+
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+    monkeypatch.setattr(ir, "_push_results", _push)
+
+    assert await ir.main() == 0
+    assert pushed == [_TOKEN]
+    text = progress.read_text()
+    events = [json.loads(line) for line in text.splitlines() if line.strip()]
+    assert events[0]["message"] == LEGACY_TOKEN_MESSAGE
+    assert _TOKEN not in text
+
+
 async def test_main_error_path_scrubs_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     def _boom(spec: Any, token: Any) -> list[dict[str, Any]]:
         del spec, token
@@ -604,7 +683,7 @@ async def _run_main(
     """Drive `main` over a scripted split; return its exit code and the progress events."""
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     _mock_main_deps(
         monkeypatch, tmp_path, _fake_serving, rows=rows, scripted=scripted, written=written
     )
@@ -788,7 +867,7 @@ async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
     monkeypatch.setattr("litellm.acompletion", _fake_acompletion)
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     # The REAL BatchInferenceRunner + LLMClient, so the provider wiring is exercised end to end.
     # Restored from its own import: by this point `ir.BatchInferenceRunner` is the stub.
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
@@ -898,7 +977,7 @@ async def test_results_are_written_outside_the_workdir_even_when_pushing(
     monkeypatch.setenv(
         "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), run_id="run123")
     )
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     outdirs: list[Path] = []
 
     def _write(rows: Any, outdir: Path) -> Path:
@@ -931,7 +1010,7 @@ async def test_a_failed_push_says_where_the_results_are(
     monkeypatch.setenv(
         "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), run_id="run123")
     )
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     async def _push_boom(spec: Any, results_path: Any, token: str) -> str:
         del spec, results_path, token

@@ -19,10 +19,11 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
+from pydantic import SecretStr
 
 from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import finetune_runner as fr
-from strata_forge.pipelines._common import RunError, ticking_phase
+from strata_forge.pipelines._common import RunError, RunSecrets, ticking_phase
 from strata_forge.training.progress import JsonlProgressWriter
 
 if TYPE_CHECKING:
@@ -468,7 +469,8 @@ def _drive(
     if push is not None:
         monkeypatch.setattr(fr, "_push_artifact", push)
 
-    destination = asyncio.run(fr._execute(spec or _spec(), token, writer))  # pyright: ignore[reportPrivateUsage]
+    secrets = RunSecrets(hf_token=SecretStr(token) if token else None)
+    destination = asyncio.run(fr._execute(spec or _spec(), secrets, writer))  # pyright: ignore[reportPrivateUsage]
     writer.close()
     events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
     return destination, events
@@ -595,7 +597,7 @@ class TestExecute:
         monkeypatch.setattr(fr, "results_dir", _dir)
         import asyncio
 
-        asyncio.run(fr._execute(_spec(eval_split="test", output_repo_id=None), None, None))  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(fr._execute(_spec(eval_split="test", output_repo_id=None), RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
         assert seen == ["train", "test"]
 
     def test_the_merge_step_runs_only_when_asked_for(
@@ -664,7 +666,7 @@ class TestPhaseBoundary:
         # A fast tick, so an equally-long build and loop are told apart by their row counts.
         monkeypatch.setattr(fr, "ticking_phase", _fast_ticking_phase)
 
-        asyncio.run(fr._execute(_spec(output_repo_id=None), None, writer))  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(fr._execute(_spec(output_repo_id=None), RunSecrets(), writer))  # pyright: ignore[reportPrivateUsage]
         writer.close()
 
         events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
