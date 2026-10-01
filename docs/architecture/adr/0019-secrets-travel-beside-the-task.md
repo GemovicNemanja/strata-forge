@@ -1,4 +1,4 @@
-# ADR 0018 — Secrets travel beside the task, never in it
+# ADR 0019 — Secrets travel beside the task, never in it
 
 **Status:** Accepted
 **Supersedes:** the environment part of [ADR 0013](0013-compute-task-and-backend-shapes.md)

@@ -22,5 +22,5 @@ channel (SkyPilot) refuses a task that carries secrets.
 
 See [ADR 0013](../../../docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
 for the task-as-data + Protocol design rationale,
-[ADR 0018](../../../docs/architecture/adr/0018-secrets-travel-beside-the-task.md)
+[ADR 0019](../../../docs/architecture/adr/0019-secrets-travel-beside-the-task.md)
 for secret delivery, and `docs/roadmap.md` for the current status.

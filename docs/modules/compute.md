@@ -10,7 +10,7 @@ ships typed task / job / status Pydantic shapes, a
 self-hosted inference servers (vLLM, TGI, SGLang). See
 [ADR 0013](../architecture/adr/0013-compute-task-and-backend-shapes.md)
 for the task-as-data + Protocol design rationale, and
-[ADR 0018](../architecture/adr/0018-secrets-travel-beside-the-task.md)
+[ADR 0019](../architecture/adr/0019-secrets-travel-beside-the-task.md)
 for how a job's credentials reach it.
 
 Integration points:

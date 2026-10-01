@@ -58,7 +58,7 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `.secrets.json` in a 0700 directory, exports its absolute path in `FORGE_SECRETS_FILE`
   (`strata_forge.compute.SECRETS_FILE_ENV`) to the task's `run` step only (never to `setup`),
   and removes the file on exit through a trap in an outer shell that the task's own `EXIT` traps
-  cannot displace (ADR 0018). `SkyPilotBackend.submit` refuses a task with secrets.
+  cannot displace (ADR 0019). `SkyPilotBackend.submit` refuses a task with secrets.
 - `SubmitCleanupError` (a `RuntimeError`): `SSHBackend.submit` raises it, from the original
   failure, when a submit fails after creating its workdir and the workdir then cannot be removed.
   Its `job` is a handle `cleanup()` accepts, so an orchestrator can remove that workdir (and any

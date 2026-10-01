@@ -89,7 +89,7 @@ or :class:`ValueError` for input validation.
   process-exists-vs-writers-closed) lands in
   :attr:`JobStatus.message` rather than expanding the state set.
 - **Secrets travel beside the task, never in it**
-  ([ADR 0018](../../../docs/architecture/adr/0018-secrets-travel-beside-the-task.md)).
+  ([ADR 0019](../../../docs/architecture/adr/0019-secrets-travel-beside-the-task.md)).
   A credential a job needs goes in :attr:`Task.secrets`
   (``SecretStr`` values, excluded from ``model_dump``, ``to_yaml``,
   ``repr`` and YAML loading), never in :attr:`Task.env`, a command
