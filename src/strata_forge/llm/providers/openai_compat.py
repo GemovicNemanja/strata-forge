@@ -16,13 +16,20 @@ OpenAI's tool schema verbatim. Callers reuse
 ``base_url`` is caller-trusted. The key and the whole conversation go to whatever URL is
 configured, unchecked: no scheme, host, path or address validation, and deliberately no
 private-address block, because loopback is the normal case (a model server on the same
-machine). A caller that takes ``base_url`` from someone it does not trust validates it first,
-against the whole URL rather than only its host.
+machine). A caller that takes ``base_url`` from someone it does not trust validates it first:
+exact equality with a URL it allows, never a prefix or host-only match (the OpenAI client
+resolves ``..`` segments and sends ``%``-encoded ones raw). A call-site ``api_base`` overrides
+``base_url`` and is the same trust surface. Such a caller also passes ``api_key`` explicitly
+(:data:`UNAUTHENTICATED_API_KEY` when it has none): left unset, the config reads
+``FORGE_OPENAI_COMPAT_API_KEY`` and the client falls back to an ambient ``OPENAI_API_KEY``,
+either of which then goes to that URL.
 
-The transport follows redirects. A hop to another origin drops the ``Authorization`` header,
-so the key stays on the configured host, but a 307/308 re-sends the request body and the reply
-(or an error quoting it) comes back to the caller. Trusting a ``base_url`` therefore
-includes trusting every redirect its server issues, on any path the caller lets through.
+The transport follows redirects. A hop to another host or port drops the ``Authorization``
+header, so the configured ``api_key`` stays on the configured host (an ``http`` to ``https``
+upgrade on the same host keeps it). Nothing else is dropped: a 307/308 re-sends the request
+body, a credential in ``extra_headers`` follows every hop, and the reply (or an error quoting
+it) comes back to the caller. Trusting a ``base_url`` therefore includes trusting every
+redirect its server issues, on any path the caller lets through.
 """
 
 from __future__ import annotations
