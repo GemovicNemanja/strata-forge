@@ -14,6 +14,7 @@ import posixpath
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from strata_forge.compute.task import SECRETS_FILE_ENV
+from strata_forge.core.errors import ForgeError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,6 +26,7 @@ __all__ = [
     "MAX_CONSOLE_CHUNK_BYTES",
     "MAX_READ_FILE_BYTES",
     "Backend",
+    "CleanupError",
     "SubmitCleanupError",
     "safe_workdir_relpath",
     "secrets_guarded_script",
@@ -60,6 +62,18 @@ class SubmitCleanupError(RuntimeError):
     def __init__(self, message: str, job: Job) -> None:
         super().__init__(message)
         self.job = job
+
+
+class CleanupError(ForgeError):
+    """:meth:`Backend.cleanup` ran, and the job's backend-side state is still there.
+
+    The state may hold the job's secrets file, so a caller that sees this has NOT cleaned up and
+    should try again later: the method is idempotent, and a retry against state that has since
+    gone is a success. The message names the job and how the removal failed (an exit status,
+    an exception type), never what the remote printed or what the state contains, so it is safe
+    to store and show. A transport failure (the host is unreachable, the command timed out) is
+    raised as itself, not as this: it says nothing about whether the state survived.
+    """
 
 
 def secrets_guarded_script(
@@ -207,11 +221,20 @@ class Backend(Protocol):
         ...  # pragma: no cover — Protocol body
 
     async def cleanup(self, job: Job) -> None:
-        """Tear down any backend-side state associated with ``job``.
+        """Tear down any backend-side state associated with ``job``, and prove it is gone.
 
         Examples: remote temporary directories (SSH), SkyPilot
         clusters launched specifically for this job, captured log
         buffers. Idempotent — callers can invoke it repeatedly or
-        on already-cleaned jobs.
+        on already-cleaned jobs; state that is already absent is a
+        success.
+
+        Returning means the state is gone, not that a removal was
+        attempted: that state may hold the job's secrets file, and
+        a caller that retries until cleanup succeeds can only do so
+        if a failed one says so. When the backend could run the
+        removal but the state survived it, this raises
+        :class:`CleanupError`; a transport failure propagates as
+        itself.
         """
         ...  # pragma: no cover — Protocol body

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
     MAX_READ_FILE_BYTES,
+    CleanupError,
     SubmitCleanupError,
     safe_workdir_relpath,
     secrets_guarded_script,
@@ -426,10 +427,9 @@ class SSHBackend:
         Bounded by ``_DISCARD_TIMEOUT_S`` rather than the command timeout, and it never raises:
         the submit's own failure is the one the caller must see.
         """
-        command = f"rm -rf {shlex.quote(_not_an_option(remote_workdir))}"
         try:
             exit_status, _stdout, _stderr = await asyncio.wait_for(
-                self._run_remote(command), _DISCARD_TIMEOUT_S
+                self._run_remote(_remove_dir_command(remote_workdir)), _DISCARD_TIMEOUT_S
             )
         except Exception:  # any failure here means "not known to be gone"
             return False
@@ -716,9 +716,24 @@ class SSHBackend:
         await self._run_remote(cmd)
 
     async def cleanup(self, job: Job) -> None:
+        """Remove the job's workdir and confirm it is gone; raise :class:`CleanupError` if not.
+
+        The workdir may still hold the job's secrets file (a SIGKILL skips the wrapper's trap),
+        so a removal that failed has to be visible to a caller that retries until one succeeds.
+        """
         # `_job_workdir` confines to the remote_root, which is what makes this `rm -rf` safe.
         workdir = self._job_workdir(job)
-        await self._run_remote(f"rm -rf {shlex.quote(workdir)}")
+        exit_status, _stdout, _stderr = await self._run_remote(_remove_dir_command(workdir))
+        # The status is checked here rather than with `check=True`. asyncssh raises only on a
+        # NONZERO status, so a channel that closed with none (a dropped connection, a killed
+        # shell) would pass; and its error carries the remote's stderr, which names the files
+        # `rm` could not remove. Neither the stderr nor the path's contents are echoed.
+        if exit_status != 0:
+            err = (
+                f"SSHBackend: job {job.id!r}'s workdir is still on the host after cleanup "
+                f"(exit {exit_status})"
+            )
+            raise CleanupError(err)
 
     async def close(self) -> None:
         """Close the underlying SSH connection if we own it."""
@@ -734,6 +749,18 @@ def _not_an_option(path: str) -> str:
     ``./`` rather than ``--``: the BSD userland's ``chmod`` has no ``--``.
     """
     return f"./{path}" if path.startswith("-") else path
+
+
+def _remove_dir_command(path: str) -> str:
+    """A command that removes ``path`` and exits 0 only if nothing is left at it.
+
+    ``rm -rf`` already exits 0 for a path that is absent, which is what makes a repeated
+    removal a success. The trailing tests turn the status from "rm did not complain" into
+    "nothing is there now"; ``-L`` as well as ``-e`` because ``test -e`` follows a symlink, and
+    a dangling one would read as gone. POSIX ``test`` only: this runs in the login shell.
+    """
+    target = shlex.quote(_not_an_option(path))
+    return f"rm -rf {target} && test ! -e {target} && test ! -L {target}"
 
 
 def _wrapper_script(task: Task) -> str:

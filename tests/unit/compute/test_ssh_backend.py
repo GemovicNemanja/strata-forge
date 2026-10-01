@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from strata_forge.compute import (
     MAX_CONSOLE_CHUNK_BYTES,
     Backend,
+    CleanupError,
     Job,
     SSHBackend,
     SubmitCleanupError,
@@ -34,6 +35,7 @@ from strata_forge.compute import (
 from strata_forge.compute.backends.ssh import (
     _REPORT_MARKER,  # pyright: ignore[reportPrivateUsage]
 )
+from strata_forge.core.errors import ForgeError
 
 # ---------------------------------------------------------------------------
 # Fake asyncssh connection
@@ -522,7 +524,10 @@ class TestSecretDelivery:
             await backend.submit(_secret_task())
         workdir = re.search(r"\.forge-compute/[0-9a-f]{32}", fake_connection.commands[0])
         assert workdir is not None
-        assert fake_connection.commands[-1] == f"rm -rf {workdir.group(0)}"
+        assert fake_connection.commands[-1] == (
+            f"rm -rf {workdir.group(0)} && test ! -e {workdir.group(0)} "
+            f"&& test ! -L {workdir.group(0)}"
+        )
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell semantics")
     @pytest.mark.parametrize("umask", ["000", "022"])
@@ -711,7 +716,10 @@ class TestSecretDelivery:
         assert error.job.metadata["remote_workdir"] == workdir.group(0)
         assert "pid" not in error.job.metadata
         await backend.cleanup(error.job)
-        assert fake_connection.commands[-1] == f"rm -rf {workdir.group(0)}"
+        assert fake_connection.commands[-1] == (
+            f"rm -rf {workdir.group(0)} && test ! -e {workdir.group(0)} "
+            f"&& test ! -L {workdir.group(0)}"
+        )
 
     async def test_a_discard_that_hangs_is_bounded(
         self,
@@ -1276,6 +1284,134 @@ class TestCancelCleanup:
         )
         with pytest.raises(ValueError, match="not under remote_root"):
             await backend.cleanup(bad_job)
+
+
+def _cleanup_job(workdir: str = f".forge-compute/{'e' * 32}") -> Job:
+    return Job(id="e" * 32, backend="ssh", task_name="t", metadata={"remote_workdir": workdir})
+
+
+class TestVerifiedCleanup:
+    """`cleanup` returns only when the workdir is gone, so a caller can retry one that is not.
+
+    The workdir may still hold the job's secrets file: a SIGKILL skips the wrapper's trap, and a
+    submit that failed may never have launched the wrapper at all.
+    """
+
+    async def test_the_removal_is_checked_not_assumed(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        await backend.cleanup(_cleanup_job())
+        workdir = f".forge-compute/{'e' * 32}"
+        assert fake_connection.commands == [
+            f"rm -rf {workdir} && test ! -e {workdir} && test ! -L {workdir}"
+        ]
+
+    async def test_a_failed_removal_raises(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        fake_connection.queue(_FakeProcessResult(exit_status=1))
+        with pytest.raises(CleanupError, match=r"still on the host.*exit 1"):
+            await backend.cleanup(_cleanup_job())
+
+    async def test_a_removal_that_reports_no_exit_status_raises(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # asyncssh's `check=True` would let this through: it raises only on a NONZERO status.
+        fake_connection.queue(_FakeProcessResult(exit_status=None))
+        with pytest.raises(CleanupError):
+            await backend.cleanup(_cleanup_job())
+
+    async def test_the_error_is_a_forge_error_that_echoes_nothing_from_the_host(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        stderr = f"rm: cannot remove '.forge-compute/{'e' * 32}/{_SENTINEL}': Permission denied\n"
+        fake_connection.queue(_FakeProcessResult(exit_status=1, stdout=_SENTINEL, stderr=stderr))
+        with pytest.raises(CleanupError) as excinfo:
+            await backend.cleanup(_cleanup_job())
+        error = excinfo.value
+        assert isinstance(error, ForgeError)
+        assert _SENTINEL not in str(error)
+        assert "Permission denied" not in str(error)
+        assert error.__cause__ is None
+        assert error.__context__ is None
+
+    async def test_a_transport_failure_is_raised_as_itself(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # Whether the workdir survived is unknown, so it is not reported as a cleanup that ran.
+        fake_connection.run = AsyncMock(side_effect=ConnectionResetError("gone"))
+        with pytest.raises(ConnectionResetError):
+            await backend.cleanup(_cleanup_job())
+
+    async def test_confinement_is_checked_before_anything_runs(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        for workdir in ("/etc", ".forge-compute/../../etc", "elsewhere/x"):
+            with pytest.raises(ValueError, match="remote_root"):
+                await backend.cleanup(_cleanup_job(workdir))
+        assert fake_connection.commands == []
+
+    async def test_an_option_shaped_root_cannot_reach_rm_as_a_flag(
+        self, fake_connection: _FakeSSHConnection
+    ) -> None:
+        backend = SSHBackend(connection=fake_connection, remote_root="-rf")
+        await backend.cleanup(_cleanup_job("-rf/job"))
+        assert fake_connection.commands[-1].startswith("rm -rf ./-rf/job && ")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell semantics")
+class TestVerifiedCleanupOnARealShell:
+    """The same contract against a real filesystem, where `rm` can actually fail."""
+
+    async def test_the_workdir_and_its_secrets_file_are_removed(self, tmp_path: Path) -> None:
+        workdir = tmp_path / ".forge-compute" / ("e" * 32)
+        workdir.mkdir(parents=True)
+        (workdir / ".secrets.json").write_text(_SENTINEL)
+        (workdir / "nested").mkdir()
+        (workdir / "nested" / "out.log").write_text("x")
+        backend = SSHBackend(connection=_ShellConnection(tmp_path))
+        await backend.cleanup(_cleanup_job())
+        assert not workdir.exists()
+        assert (tmp_path / ".forge-compute").is_dir()
+
+    async def test_an_absent_workdir_is_a_success(self, tmp_path: Path) -> None:
+        backend = SSHBackend(connection=_ShellConnection(tmp_path))
+        await backend.cleanup(_cleanup_job())
+        await backend.cleanup(_cleanup_job())
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="root ignores directory modes"
+    )
+    async def test_a_workdir_rm_cannot_remove_raises_and_a_retry_succeeds(
+        self, tmp_path: Path
+    ) -> None:
+        workdir = tmp_path / ".forge-compute" / ("e" * 32)
+        locked = workdir / "locked"
+        locked.mkdir(parents=True)
+        (locked / ".secrets.json").write_text(_SENTINEL)
+        locked.chmod(0o500)
+        backend = SSHBackend(connection=_ShellConnection(tmp_path))
+        try:
+            with pytest.raises(CleanupError) as excinfo:
+                await backend.cleanup(_cleanup_job())
+            assert ".secrets.json" not in str(excinfo.value)
+            assert (locked / ".secrets.json").exists()
+        finally:
+            locked.chmod(0o700)
+        await backend.cleanup(_cleanup_job())
+        assert not workdir.exists()
+
+    async def test_a_symlinked_workdir_is_unlinked_not_followed(self, tmp_path: Path) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "keep.txt").write_text("keep")
+        root = tmp_path / ".forge-compute"
+        root.mkdir()
+        (root / ("e" * 32)).symlink_to(elsewhere, target_is_directory=True)
+        backend = SSHBackend(connection=_ShellConnection(tmp_path))
+        await backend.cleanup(_cleanup_job())
+        assert not (root / ("e" * 32)).is_symlink()
+        assert (elsewhere / "keep.txt").read_text() == "keep"
 
 
 # ---------------------------------------------------------------------------
