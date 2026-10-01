@@ -9,7 +9,8 @@ reliability property rather than a convenience:
   beside the job, never in the environment; the runner reads it and deletes it before it does
   anything else, so the file exists only until the run starts. The values travel as
   :class:`~pydantic.SecretStr` in a :class:`RunSecrets` and are revealed only at the call that
-  needs them.
+  needs them. Every Hub read passes :meth:`RunSecrets.hub_credential` explicitly, so a run never
+  falls back to a credential the machine happens to hold.
 - **Scrubbing** (:func:`run_redactor`, :func:`sanitize`). Every message a runner emits — an
   error, a phase caption, a per-row error it writes into its results — passes through the one
   :class:`~strata_forge.core.redact.Redactor`, which removes the write token in every encoding
@@ -46,7 +47,7 @@ import sys
 from functools import partial
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -203,6 +204,16 @@ class RunSecrets(BaseModel):
     def hf_token_value(self) -> str | None:
         """The token in plaintext, for the one call that needs it (and the scrubber)."""
         return self.hf_token.get_secret_value() if self.hf_token is not None else None
+
+    def hub_credential(self) -> str | Literal[False]:
+        """The ``token=`` argument for a Hub read: the delivered token, or ``False``.
+
+        Never ``None``: every Hugging Face library reads ``None`` as "use whatever credential this
+        machine has" (an ``HF_TOKEN`` variable, a cached login, forge's own settings), and a run
+        reads the Hub with exactly the credential the control plane delivered, or with none.
+        """
+        token = self.hf_token_value()
+        return token if token else False
 
 
 def load_secrets() -> RunSecrets:

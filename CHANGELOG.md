@@ -76,6 +76,19 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   names the job and an exit status or exception type, never the remote's output or the state's
   contents. Being an `OSError`, it lands in a caller's existing `except OSError` around
   `cleanup` rather than escaping it.
+- `RunSecrets.hub_credential()`: the `token=` argument for a runner's Hub reads, the delivered
+  token or `False`, never `None`.
+- `strata_forge.training.loading` (`HubToken`, `model_load_kwargs`, `tokenizer_load_kwargs`): the
+  terms every model and tokenizer load in the training runners passes (`trust_remote_code=False`,
+  `use_safetensors=True` on models, the caller's token).
+- `SFTRunner` and `PreferenceRunner` `build_trainer` / `train` take a keyword-only `token`, the
+  Hub credential for the loads they make. It is never stored on a config, so it cannot reach TRL's
+  arguments or the `training_args.bin` TRL saves beside a checkpoint.
+- `HFHubClient(token=False)` sends no token and skips the settings and library fallbacks.
+- `build_vllm_task(served_model_name=...)` (`--served-model-name`), for serving a local snapshot
+  under its Hub id.
+- `inference_runner.SNAPSHOT_PATTERNS` / `SNAPSHOT_IGNORED`: the files the inference runner
+  downloads for the model server, and the ones it refuses.
 
 ### Changed
 
@@ -130,6 +143,22 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   remote root, which is all `submit` creates: the root itself (`<root>/`, `<root>/.`,
   `<root>//`) or a nested path (`<root>/a/b`) gets the same `ValueError` as a workdir outside the
   root.
+- Every Hub read a runner makes (the dataset split, the training base model and tokenizer, the
+  merge step, the inference model download) passes the delivered token explicitly, and a run that
+  received none reads anonymously. A machine whose own `HF_TOKEN` or `huggingface-cli login` used
+  to unlock a gated model or dataset no longer does; the token must be delivered with the run.
+- The inference runner downloads the model itself before starting the model server (safetensors
+  weights, JSON configs, tokenizer and chat-template files; never `*.bin`, `*.pt`, `*.pth`,
+  `*.pkl`, `*.ckpt`, `*.py` or `original/`), refuses a snapshot with no safetensors weights by
+  name, and serves the local snapshot with `--served-model-name <model_id>` and
+  `HF_HUB_OFFLINE=1`. A model published only as pickle weights no longer serves.
+- Every model load in the training runners sets `trust_remote_code=False` and
+  `use_safetensors=True`, and every tokenizer load `trust_remote_code=False`. A base model
+  published only as pickle weights no longer fine-tunes or merges.
+- `PreferenceRunner` loads the DPO / KTO reference model itself when it loads the policy without
+  an adapter (and `precompute_ref_log_probs` is off), with the policy's own load arguments. TRL
+  used to re-download it by name with no token, and in `float32` by default; it now matches the
+  policy's precision.
 
 ### Deprecated
 
@@ -177,6 +206,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   silent, and a job record that names the SSH remote root can no longer make `cleanup` remove
   every job's workdir, a running job's unread secrets file included. A remote root, or a local
   secrets directory's parent, that cannot be searched no longer reads as empty.
+- Gated and private models and datasets load with the run's own token, passed explicitly; the
+  model server never holds it and runs offline; no load runs a repo's code or unpickles a
+  checkpoint.
 
 ## [0.3.0] - 2026-10-01
 

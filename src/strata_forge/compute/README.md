@@ -26,6 +26,12 @@ raises `CleanupError` when that state survived, and treats state that
 is already gone as success, so an orchestrator can retry it until it
 succeeds.
 
+A model server holds no credential at all: the batch-inference runner
+downloads the model's safetensors weights, configs and tokenizer files
+itself, with the run's own token, and serves that local snapshot with
+the Hub switched off. `build_vllm_task(served_model_name=...)` keeps
+the served model addressable by its Hub id.
+
 See [ADR 0013](../../../docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
 for the task-as-data + Protocol design rationale,
 [ADR 0019](../../../docs/architecture/adr/0019-secrets-travel-beside-the-task.md)

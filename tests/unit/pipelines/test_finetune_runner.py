@@ -380,7 +380,7 @@ class TestLoadSplit:
             [{"question": "q", "answer": "a", "id": 1}], ["question", "answer", "id"]
         )
         _fake_datasets(monkeypatch, split)
-        rows = fr._load_split(_spec(), "train", None)  # pyright: ignore[reportPrivateUsage]
+        rows = fr._load_split(_spec(), "train", False)  # pyright: ignore[reportPrivateUsage]
         # Everything the trainer did not ask for is dropped: a stray column changes what TRL infers.
         assert rows == [{"prompt": "q", "completion": "a"}]
 
@@ -397,7 +397,7 @@ class TestLoadSplit:
                     yield {"question": "q", "answer": "a"}
 
         _fake_datasets(monkeypatch, _NeverEnding())  # pyright: ignore[reportArgumentType]
-        rows = fr._load_split(_spec(row_limit=3), "train", None)  # pyright: ignore[reportPrivateUsage]
+        rows = fr._load_split(_spec(row_limit=3), "train", False)  # pyright: ignore[reportPrivateUsage]
         assert len(rows) == 3
 
     def test_a_missing_column_names_the_split_and_the_columns(
@@ -405,7 +405,7 @@ class TestLoadSplit:
     ) -> None:
         _fake_datasets(monkeypatch, _FakeSplit([{"q": "x"}], ["q"]))
         with pytest.raises(RunError) as exc:
-            fr._load_split(_spec(), "train", None)  # pyright: ignore[reportPrivateUsage]
+            fr._load_split(_spec(), "train", False)  # pyright: ignore[reportPrivateUsage]
         assert "train:" in str(exc.value)
         assert "question" in str(exc.value)
 
@@ -617,6 +617,135 @@ class TestExecute:
         )
         assert merged == [True]
         assert any("Merging the adapter" in e.get("message", "") for e in events)
+
+
+# ------------------------------ the Hub credential -----------------------------
+
+
+class TestHubCredential:
+    """Every Hub read gets the delivered token explicitly, or ``False`` — never ``None``."""
+
+    @pytest.mark.parametrize(("token", "expected"), [(_TOKEN, _TOKEN), (None, False)])
+    def test_every_hub_read_gets_the_same_explicit_credential(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        token: str | None,
+        expected: str | bool,
+    ) -> None:
+        seen: dict[str, list[Any]] = {"split": [], "build": [], "merge": []}
+
+        def _rows(_spec_arg: Any, _split: str, credential: Any) -> list[dict[str, Any]]:
+            seen["split"].append(credential)
+            return [{"prompt": "q", "completion": "a"}]
+
+        def _build(*args: Any) -> object:
+            seen["build"].append(args[-1])
+            return object()
+
+        def _merge(_spec_arg: Any, _dir: Any, credential: Any) -> None:
+            seen["merge"].append(credential)
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        def _fake_train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+            return _TRAINED
+
+        def _dir(_run_id: str | None, *, name: str) -> Path:
+            return tmp_path / name
+
+        monkeypatch.setattr(fr, "_load_split", _rows)
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
+        monkeypatch.setattr(fr, "_build_trainer", _build)
+        monkeypatch.setattr(fr, "_train", _fake_train)
+        monkeypatch.setattr(fr, "_merge_adapter", _merge)
+        monkeypatch.setattr(fr, "results_dir", _dir)
+        import asyncio
+
+        secrets = RunSecrets(hf_token=SecretStr(token) if token else None)
+        asyncio.run(
+            fr._execute(_spec(output_repo_id=None, merge_adapter=True), secrets, None)  # pyright: ignore[reportPrivateUsage]
+        )
+        assert seen == {"split": [expected], "build": [expected], "merge": [expected]}
+
+    def test_the_trainer_build_hands_the_credential_to_the_method_runner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        received: dict[str, Any] = {}
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
+
+        class _Runner:
+            def build_trainer(self, **kwargs: Any) -> object:
+                received.update(kwargs)
+                return object()
+
+        class _Method:
+            def build_runner(self, config: Any, *, peft_config: Any) -> _Runner:
+                del config, peft_config
+                return _Runner()
+
+        fr._build_trainer(  # pyright: ignore[reportPrivateUsage]
+            _Method(),  # pyright: ignore[reportArgumentType]
+            object(),
+            None,
+            [],
+            None,
+            _TOKEN,
+        )
+        assert received["token"] == _TOKEN
+
+    def test_the_merge_loads_with_the_credential_and_no_remote_code(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        loads: dict[str, Any] = {}
+
+        class _AutoModel:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs: Any) -> Any:
+                loads["model"] = (model_id, kwargs)
+                return MagicMock(name="base")
+
+        class _AutoTokenizer:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs: Any) -> Any:
+                loads["tokenizer"] = (model_id, kwargs)
+                return MagicMock(name="tokenizer")
+
+        class _PeftModel:
+            @staticmethod
+            def from_pretrained(base: Any, path: str, **kwargs: Any) -> Any:
+                del base
+                loads["adapter"] = (path, kwargs)
+                return MagicMock(name="peft")
+
+        transformers_mod = types.ModuleType("transformers")
+        transformers_mod.AutoModelForCausalLM = _AutoModel  # pyright: ignore[reportAttributeAccessIssue]
+        transformers_mod.AutoTokenizer = _AutoTokenizer  # pyright: ignore[reportAttributeAccessIssue]
+        peft_mod = types.ModuleType("peft")
+        peft_mod.PeftModel = _PeftModel  # pyright: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+        monkeypatch.setitem(sys.modules, "peft", peft_mod)
+
+        fr._merge_adapter(_spec(), tmp_path, _TOKEN)  # pyright: ignore[reportPrivateUsage]
+
+        model_id, model_kwargs = loads["model"]
+        assert model_id == "org/model"
+        assert model_kwargs == {
+            "token": _TOKEN,
+            "trust_remote_code": False,
+            "use_safetensors": True,
+        }
+        assert loads["tokenizer"] == ("org/model", {"token": _TOKEN, "trust_remote_code": False})
+        assert loads["adapter"] == (str(tmp_path), {"token": _TOKEN})
 
 
 class TestPhaseBoundary:

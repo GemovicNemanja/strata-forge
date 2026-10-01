@@ -278,7 +278,7 @@ of which is running.
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a
-machine it does not own holds up its side of the contract in four places:
+machine it does not own holds up its side of the contract in five places:
 
 - **The spec is inert data** in ``STRATA_RUN_CONFIG``: JSON validated into
   a Pydantic model with ``extra="forbid"``, so a key the installed engine
@@ -318,6 +318,34 @@ machine it does not own holds up its side of the contract in four places:
   and records a ``phase`` event (and a stderr ``warning:``) saying that
   delivery is deprecated; with a file set, the variable is never read.
   The fallback is removed in 0.5.0.
+- **Hub reads use the delivered token, or none.** The same ``HF_TOKEN`` is
+  the run's credential for every Hub read as well as the push: the dataset
+  split, the training base model and tokenizer (and, for DPO / KTO without
+  an adapter, the reference model), the merge step's base, and the
+  inference runner's model download. Each read passes
+  ``RunSecrets.hub_credential()`` explicitly: the token, or ``False`` when
+  none was delivered, which reads anonymously. Never ``None``, which every
+  Hugging Face library resolves to whatever the machine holds (an
+  ``HF_TOKEN`` variable, a cached login, forge's own settings), so a run
+  reads with exactly the credential the orchestrator decided on. An
+  orchestrator therefore delivers the token to any run that reads a gated
+  or private model or dataset, not only to one that pushes; the push stays
+  gated on ``output_repo_id`` alone. Every model load sets
+  ``trust_remote_code=False`` and ``use_safetensors=True``, and every
+  tokenizer load ``trust_remote_code=False`` (see
+  [training: Loading from the Hub](training.md#loading-from-the-hub)).
+  The inference runner downloads the model **itself, before** the model
+  server starts: ``HFHubClient(token=...).download_snapshot(model_id,
+  allow_patterns=SNAPSHOT_PATTERNS, ignore_patterns=SNAPSHOT_IGNORED)``
+  fetches safetensors weights, JSON configs and the tokenizer and
+  chat-template files, and never a pickle checkpoint (``*.bin``, ``*.pt``,
+  ``*.pth``, ``*.pkl``, ``*.ckpt``), a ``*.py`` file or an ``original/``
+  directory. A snapshot with no ``*.safetensors`` file fails the run by
+  name before the server starts. The server is then started on the local
+  snapshot (``--model <snapshot> --served-model-name <model_id>``) with
+  ``HF_HUB_OFFLINE=1``, so it never holds the token and fetches nothing of
+  its own. The snapshot lands in the Hub cache (``HF_HOME``), so a warm
+  machine reuses it.
 - **Progress is one protocol.** Both runners append the same
   ``ProgressEvent`` stream to ``FORGE_PROGRESS_PATH``, and the exit code is
   the run's verdict.
@@ -761,6 +789,12 @@ vllm_task = build_vllm_task(
 tgi_task = build_tgi_task("mistralai/Mistral-7B-v0.1", port=8080)
 sglang_task = build_sglang_task("Qwen/Qwen2-7B-Instruct", port=30000, tp_size=4)
 ```
+
+``build_vllm_task`` also takes ``served_model_name``
+(``--served-model-name``). Set it when ``model`` is a local snapshot
+directory, so clients keep addressing the model by its Hub id rather
+than by a path on the server; the batch-inference runner serves its
+pre-fetched snapshot this way (see [the runner contract](#the-runner-contract)).
 
 :func:`serving_endpoint` is an async context manager that
 submits the task, waits for the HTTP endpoint to respond,

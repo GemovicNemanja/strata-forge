@@ -19,11 +19,17 @@ credentials + the network):
   - Template rendering is a bounded, NON-executing ``{name}`` substitution (a regex, NOT
     ``str.format`` and NOT a template engine) — only placeholders that map to a real
     column are replaced; anything else stays literal.
-  - The HF write token arrives in a private secrets file the backend wrote beside the job
+  - The Hugging Face token arrives in a private secrets file the backend wrote beside the job
     (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
     :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
-    the environment. It is passed EXPLICITLY to the Hub/dataset clients (never the VM's
-    ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
+    the environment. It is passed EXPLICITLY to every Hub read and write — the split, the model
+    download, the push — and a run that received none reads anonymously rather than with the
+    VM's ambient ``HF_TOKEN`` or cached login. It is scrubbed from any surfaced error.
+  - The runner downloads the model ITSELF, before the model server starts, and only its
+    servable files (:data:`SNAPSHOT_PATTERNS`: safetensors weights, configs, tokenizer and
+    chat-template files — never a pickle checkpoint or a ``*.py`` file). The server then loads
+    that local directory with ``HF_HUB_OFFLINE=1``, so it never holds the token and never
+    fetches anything of its own.
   - The model server gets an allow-listed environment
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
@@ -56,7 +62,7 @@ import time
 from collections import deque
 from pathlib import Path
 from statistics import median
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -91,7 +97,7 @@ if TYPE_CHECKING:
 
     from strata_forge.core.redact import Redactor
 
-__all__ = ["RunSpec", "main", "render_template"]
+__all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
 
 # vLLM serves on loopback only — the runner talks to it via localhost, and a multi-tenant
 # / network-reachable VM must not expose the model server.
@@ -109,6 +115,22 @@ _RESULTS_DIR_NAME = "strata-inference-results"
 _MAX_SAMPLE_ERROR_CHARS = 500
 # How many recent row latencies the p50 is taken over. Bounds both the memory and the sort.
 _LATENCY_WINDOW = 1000
+#: The files the runner downloads for the model server: safetensors weights, every JSON (configs,
+#: a sharded checkpoint's index, tokenizer and generation settings), and the tokenizer and
+#: chat-template formats that are not JSON.
+SNAPSHOT_PATTERNS = (
+    "*.safetensors",
+    "*.json",
+    "tokenizer*",
+    "*.model",
+    "*.tiktoken",
+    "*.jinja",
+    "*.txt",
+)
+#: Refused even when a pattern above admits the name (``tokenizer*`` would admit a
+#: ``tokenizer.py``): pickle checkpoints, which can run code when loaded; a repo's own Python; and
+#: the ``original/`` checkpoints some repos carry beside the converted ones.
+SNAPSHOT_IGNORED = ("*.py", "*.bin", "*.pt", "*.pth", "*.pkl", "*.pickle", "*.ckpt", "original/*")
 
 
 class Hyperparams(BaseModel):
@@ -219,7 +241,7 @@ def render_template(template: str, row: dict[str, Any], column_mapping: dict[str
     return rendered[:_MAX_RENDERED_CHARS]
 
 
-def _load_rows(spec: RunSpec, hf_token: str | None) -> list[dict[str, Any]]:
+def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any]]:
     try:
         # Lazy optional-extra import (forge convention: `Any` so pyright skips the unresolved
         # module); the [hf] extra ships `datasets`.
@@ -232,7 +254,7 @@ def _load_rows(spec: RunSpec, hf_token: str | None) -> list[dict[str, Any]]:
         name=spec.dataset_config,
         split=spec.split,
         revision=spec.dataset_commit_sha,
-        token=hf_token or None,
+        token=token,
         streaming=False,
     )
     columns = set(dataset.column_names or [])
@@ -406,6 +428,40 @@ def _write_results(rows: list[dict[str, Any]], outdir: Path) -> Path:
     return path
 
 
+def _require_safetensors(snapshot: Path, model_id: str) -> None:
+    if not any(snapshot.rglob("*.safetensors")):
+        msg = (
+            f"the model {model_id} has no safetensors weights; only safetensors checkpoints are "
+            "served, because a pickle checkpoint (*.bin, *.pt) can run code when it is loaded"
+        )
+        raise RunError(msg)
+
+
+async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
+    """Download the model's servable files with the run's credential; return the local snapshot.
+
+    The model server is pointed at this directory with the Hub switched off, so what it can load
+    is exactly what this download admitted, and the token stays in this process.
+    """
+    hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
+    try:
+        snapshot = await hub.download_snapshot(
+            spec.model_id,
+            allow_patterns=SNAPSHOT_PATTERNS,
+            ignore_patterns=SNAPSHOT_IGNORED,
+        )
+    except Exception as exc:
+        msg = f"could not download the model {spec.model_id}: {exc}"
+        if token is False:
+            msg += (
+                " (the run carries no Hugging Face token, so a gated or private model is"
+                " unreadable)"
+            )
+        raise RunError(msg) from exc
+    await asyncio.to_thread(_require_safetensors, snapshot, spec.model_id)
+    return snapshot
+
+
 async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push results"
@@ -425,6 +481,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
     hf_token = secrets.hf_token_value()
+    hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, and the
     # step events below reuse the same cached reading rather than shelling out twice.
     gpu = GpuSampler()
@@ -435,15 +492,21 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
     # blocked event loop cannot tick the caption that says it is still going.
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
-        rows = await asyncio.to_thread(_load_rows, spec, hf_token)
+        rows = await asyncio.to_thread(_load_rows, spec, hub_token)
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
     emit(writer, ProgressEvent(kind="start", stage="run", total_steps=len(prompts)))
 
+    # Before the server starts, and in this process: the download is the one step that needs the
+    # token, and the server that follows is third-party code that must not hold it.
+    async with ticking_phase(phase, "Downloading the model", stage="load_model"):
+        snapshot = await _fetch_model(spec, hub_token)
+
     hp = spec.hyperparams
     task = build_vllm_task(
-        spec.model_id,
+        str(snapshot),
+        served_model_name=spec.model_id,  # the client below keeps addressing it by its Hub id
         port=_SERVE_PORT,
         host=_SERVE_HOST,
         tensor_parallel_size=hp.tensor_parallel_size,
@@ -478,6 +541,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
                 # it leaves the log file empty, which is precisely the case the file exists for.
                 "PYTHONUNBUFFERED": "1",
                 "VLLM_USE_FLASHINFER_SAMPLER": "0",
+                # The weights are already local. Offline, the server cannot fetch a file the
+                # download above refused, and has no reason to look for a credential.
+                "HF_HUB_OFFLINE": "1",
             }
         }
     )
