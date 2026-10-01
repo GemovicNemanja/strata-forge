@@ -58,7 +58,6 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
-from strata_forge.core.redact import Redactor
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
@@ -82,6 +81,8 @@ from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from strata_forge.core.redact import Redactor
 
 __all__ = ["RunSpec", "main", "render_template"]
 
@@ -259,7 +260,8 @@ async def _run_batches(
     writer: JsonlProgressWriter | None,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
     gpu: GpuSampler | None = None,
-    redactor: Redactor | None = None,
+    *,
+    redactor: Redactor,
 ) -> list[dict[str, Any]]:
     """Run the prompts in progress-chunked batches; reconcile results positionally.
 
@@ -272,10 +274,10 @@ async def _run_batches(
 
     A failed row's ``error`` is redacted before it is stored: the column is written into the
     results and pushed to the Hub, and an exception's text can quote whatever the failing call
-    held. Without ``redactor`` the credential shapes alone are removed.
+    held. ``redactor`` is required so a caller cannot forget the run's token: a shapes-only
+    ``Redactor()`` misses its encoded forms.
     """
     hp = spec.hyperparams
-    scrub = redactor if redactor is not None else Redactor()
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
     total = len(prompts)
     out: list[dict[str, Any]] = []
@@ -315,7 +317,7 @@ async def _run_batches(
                 latencies_ms.append(result.response.latency_ms)
                 output_tokens += result.response.usage.output_tokens
             else:
-                error = scrub.redact(repr(result.error))
+                error = redactor.redact(repr(result.error))
                 out.append({"custom_id": cid, "output": None, "error": error})
                 failed += 1
         emit(

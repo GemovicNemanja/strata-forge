@@ -19,6 +19,7 @@ import pytest
 
 from strata_forge.compute.batch import BatchInferenceResult
 from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
+from strata_forge.core.redact import Redactor
 from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
 from strata_forge.pipelines._common import REQUIRE_ENGINE_VERSION_ENV, UNCHECKED_ENGINE_MESSAGE
@@ -243,7 +244,12 @@ async def test_run_batches_reconciles_and_emits(
     progress = tmp_path / "progress.jsonl"
     with ir.JsonlProgressWriter(str(progress)) as writer:
         out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            redactor=Redactor(),
         )
 
     assert out == [
@@ -739,11 +745,11 @@ async def test_the_error_column_pushed_with_the_results_is_scrubbed(
     assert not any(_TOKEN in str(row) or quoted in str(row) for row in rows)
 
 
-async def test_an_error_row_loses_credential_shapes_without_a_run_redactor(
+async def test_an_error_row_loses_credential_shapes_no_token_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A caller driving the batch directly still gets the credential shapes removed: the column
-    # is never written raw.
+    # A redactor holding no value still removes the credential shapes: a key this process was
+    # never given is caught in the column too.
     foreign = "sk-ant-api03-AbCdEfGhIjKlMnOpQrSt"
     spec = ir.RunSpec.model_validate_json(_spec_json())
     prompts, ids = ir._build_requests(spec, [{"question": "a"}])  # pyright: ignore[reportPrivateUsage]
@@ -751,7 +757,12 @@ async def test_an_error_row_loses_credential_shapes_without_a_run_redactor(
     monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
 
     out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-        spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=None
+        spec,
+        client=cast("LLMClient", object()),
+        prompts=prompts,
+        custom_ids=ids,
+        writer=None,
+        redactor=Redactor(),
     )
     assert out[0]["error"] == "RuntimeError('bad key ***')"
 
@@ -979,6 +990,7 @@ async def test_a_dead_server_stops_the_batch_instead_of_timing_out_every_row(
             custom_ids=ids,
             writer=writer,
             is_alive=_dies_after_the_first_chunk,
+            redactor=Redactor(),
         )
 
     # Stopped at the SECOND chunk: the first one ran before anything could be known about it.
@@ -1006,6 +1018,7 @@ async def test_a_live_server_runs_every_chunk(
             custom_ids=ids,
             writer=writer,
             is_alive=_always_alive,
+            redactor=Redactor(),
         )
     assert len(out) == 4
 
@@ -1024,6 +1037,11 @@ async def test_the_batch_runs_without_a_liveness_probe(
     progress = tmp_path / "progress.jsonl"
     with ir.JsonlProgressWriter(str(progress)) as writer:
         out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            redactor=Redactor(),
         )
     assert len(out) == 4
