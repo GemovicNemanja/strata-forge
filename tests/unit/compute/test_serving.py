@@ -101,6 +101,22 @@ class TestBuildVLLMTask:
         task = build_vllm_task("m", setup="")
         assert task.setup == ""
 
+    @pytest.mark.parametrize("python_executable", [None, "/opt/venv/bin/python"])
+    def test_a_local_snapshot_keeps_answering_to_its_hub_id(
+        self, python_executable: str | None
+    ) -> None:
+        # Served from a downloaded directory, the model would otherwise be addressed by that path.
+        task = build_vllm_task(
+            "/home/u/.cache/hf/snapshots/abc",
+            served_model_name="org/model",
+            python_executable=python_executable,
+        )
+        assert "/home/u/.cache/hf/snapshots/abc" in task.run
+        assert "--served-model-name org/model" in task.run
+
+    def test_no_served_name_by_default(self) -> None:
+        assert "--served-model-name" not in build_vllm_task("m").run
+
     def test_resources_override(self) -> None:
         task = build_vllm_task("m", resources=ResourceSpec(accelerators="H100:8", cpus=32))
         assert task.resources is not None
