@@ -51,6 +51,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   go through `Redactor`, so they also catch the token's encoded forms and the wider set of
   credential shapes. A write token shorter than 8 characters fails the run before any work.
 
+### Fixed
+
+- CLI error messages printed bracketed text as rich markup, so an extra's name
+  (`strata-forge[finetuning]`) vanished from the line and exception text containing `[/...]` could
+  raise inside the error path. They are printed literally.
+
 ### Security
 
 - The batch-inference runner's per-row `error` column, written into the results and pushed to
