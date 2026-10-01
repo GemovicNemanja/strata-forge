@@ -47,6 +47,7 @@ Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 - [Job lifecycle](#job-lifecycle)
   - [The runner contract](#the-runner-contract)
 - [Backend protocol](#backend-protocol)
+  - [Cleanup is verified](#cleanup-is-verified)
 - [LocalBackend](#localbackend)
 - [SSHBackend](#sshbackend)
 - [SkyPilotBackend](#skypilotbackend)
@@ -397,7 +398,37 @@ class Backend(Protocol):
         max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
     ) -> ConsoleChunk: ...
     async def cancel(self, job: Job) -> None: ...
+    # Returns once the job's state is gone; raises CleanupError if it survived.
     async def cleanup(self, job: Job) -> None: ...
+```
+
+### Cleanup is verified
+
+``cleanup`` returning means the job's backend-side state is gone, not
+that a removal was attempted. That state may still hold the job's
+secrets file (a SIGKILL skips the wrapper's trap, and a failed submit
+may never have launched the wrapper), so an orchestrator retries
+cleanup until it succeeds, and it can only do that if a failed one
+says so. The contract every backend keeps:
+
+- **State that survived raises** :class:`CleanupError` (a
+  :class:`ForgeError`). Its message names the job and how the removal
+  failed (an exit status, an exception type), never what the remote
+  printed or what the state contains, so it is safe to store and show.
+- **State that is already absent is a success**, so the method is
+  idempotent: a retry after a removal that did, in the end, happen
+  returns normally.
+- **A transport failure propagates as itself** (the host is
+  unreachable, the command timed out). It says nothing about whether
+  the state survived, so it is not reported as a cleanup that ran.
+
+```python
+from strata_forge.compute import CleanupError
+
+try:
+    await backend.cleanup(job)
+except CleanupError:
+    ...  # still there: keep the handle and try again later
 ```
 
 ### Reading the console
@@ -565,7 +596,10 @@ task's ``run`` step finds it through ``FORGE_SECRETS_FILE`` (``setup``
 does not). Modes are set explicitly, so a restrictive umask cannot
 lock the child out. The child's outer shell removes the file on exit,
 below the subshell that runs the task; the backend removes the
-directory once the child is gone, and again in ``cleanup``. With
+directory once the child is gone, and again in ``cleanup``, which
+forgets the job only once nothing is left at the directory's path: a
+directory that survives raises ``CleanupError`` and the job stays
+known, so a retry still has something that names it. With
 ``env_inherit=True`` an inherited ``FORGE_SECRETS_FILE`` is dropped:
 it names the parent's file, which the child must not read (and, by
 reading, delete).
@@ -620,6 +654,18 @@ removal, so the file goes when setup fails, when the job ends and when
 removes the file itself after its final SIGKILL, and ``cleanup``
 removes the whole workdir.
 
+``cleanup`` runs ``rm -rf <workdir> && test ! -e <workdir> && test ! -L
+<workdir>``, so its exit status means "nothing is there now" rather
+than "``rm`` did not complain"; a nonzero status, or a channel that
+closed with none, raises ``CleanupError`` without echoing the remote's
+stderr (which would name the files ``rm`` could not remove). An absent
+workdir is a success. Every method that composes a remote path from a
+job's ``remote_workdir`` first checks it is a directory *below*
+``remote_root``: an absolute path, a ``..`` component, or a path that
+names the root itself (``<root>/``, ``<root>/.``, ``<root>//``) is a
+``ValueError``, since ``rm -rf`` of the root would remove every job's
+workdir.
+
 A submit that fails after creating the workdir removes it, within a
 10 s bound. If that removal fails too (the connection is gone), an
 ordinary failure is re-raised as ``SubmitCleanupError`` (a
@@ -655,7 +701,9 @@ job states to the canonical five; unknown states fall back to
 ``running`` so callers don't crash on new SkyPilot versions.
 
 ``cleanup`` calls ``sky.down`` on the cluster — be aware that
-this tears down the entire cluster, not just the job.
+this tears down the entire cluster, not just the job. A failed
+``down`` raises ``CleanupError`` (chained to the SDK's error, naming
+only its type); SkyPilot's ``ClusterDoesNotExist`` counts as success.
 
 ``submit`` raises ``ValueError`` for a task with ``secrets``, before
 any SkyPilot call: the SDK's only channel for a value is ``envs``,

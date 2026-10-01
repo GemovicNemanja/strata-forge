@@ -71,6 +71,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `SecretStr`. A path that is not an absolute `.secrets.json`, a symlink, a file another user
   could read, a FIFO (refused without waiting for a writer), an unknown key (counted, never
   named) or malformed JSON is a named error that never carries the file's contents.
+- `CleanupError` (a `ForgeError`, exported from `strata_forge.compute`): `Backend.cleanup` raises
+  it when the job's backend-side state survived the removal. Its message names the job and an
+  exit status or exception type, never the remote's output or the state's contents.
 
 ### Changed
 
@@ -108,6 +111,17 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   reaching vLLM (a token for a gated model, a mirror) loses it. `LocalBackend` no longer passes an
   inherited `FORGE_SECRETS_FILE` to a child.
 - `runner_main`'s callable takes `(writer, RunSecrets)` instead of `(writer, str | None)`.
+- `Backend.cleanup` returning now means the job's state is gone, on every backend, so an
+  orchestrator can retry a cleanup until it succeeds; a caller that relied on `cleanup` never
+  raising now sees `CleanupError` for a removal that failed. State that is already gone is still
+  a success, and a transport failure still propagates as itself. `SSHBackend.cleanup` runs
+  `rm -rf <wd> && test ! -e <wd> && test ! -L <wd>` and checks the exit status itself (a nonzero
+  status, or none at all, raises), and a failed submit's workdir discard uses the same command.
+  `LocalBackend.cleanup` keeps the job, and raises, until its secrets directory is gone.
+  `SkyPilotBackend.cleanup` raises when `down` fails and treats `ClusterDoesNotExist` as success.
+- `SSHBackend` refuses a job whose `remote_workdir` names the remote root itself (`<root>/`,
+  `<root>/.`, `<root>//`, or any empty or `.` component below the root) with the same
+  `ValueError` as a workdir outside the root.
 
 ### Deprecated
 
@@ -151,6 +165,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - A Hugging Face token handed to a run is no longer written into `wrapper.sh`, placed on a remote
   command line, exported into the job's environment (where the setup step's package installs
   inherited it) or inherited by the model server.
+- A cleanup that leaves a job's workdir, and any secrets file in it, behind is reported instead of
+  silent, and a job record that names the SSH remote root can no longer make `cleanup` remove
+  every job's workdir, a running job's unread secrets file included.
 
 ## [0.3.0] - 2026-10-01
 
