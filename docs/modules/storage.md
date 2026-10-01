@@ -148,8 +148,10 @@ HFHubClient(
   falls back to forge settings (`HF_TOKEN` from the environment
   or `.env`), then to `huggingface_hub`'s own resolution (env var
   or cached login). `False` sends no token and skips every
-  fallback: the call is anonymous whatever credential the machine
-  holds. A caller that must read with exactly one credential (the
+  fallback: the request is anonymous whatever credential the
+  machine holds. It governs what is sent, not what is on disk: a
+  download that `huggingface_hub` can answer from its local cache
+  (it does so on a 401 or a gated refusal) still succeeds. A caller that must read with exactly one credential (the
   VM runners) passes the token or `False`, never `None`.
 - `endpoint`: custom Hub URL — useful for the Enterprise tier
   or air-gapped Hub deployments.

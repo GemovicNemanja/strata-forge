@@ -270,7 +270,7 @@ The package ships two runners over that plumbing:
 ``inference_runner`` (serve a model with vLLM, run a batch over a dataset)
 and ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
 adapter or merged model to the Hub). Both read an inert JSON spec from
-``STRATA_RUN_CONFIG``, take the HF write token only from the private
+``STRATA_RUN_CONFIG``, take the Hugging Face token only from the private
 secrets file the backend wrote beside the job, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
@@ -283,8 +283,17 @@ machine it does not own holds up its side of the contract in five places:
 - **The spec is inert data** in ``STRATA_RUN_CONFIG``: JSON validated into
   a Pydantic model with ``extra="forbid"``, so a key the installed engine
   does not know is a named failure, never an ignored instruction. Nothing
-  in a spec names code to run.
-- **The write token travels apart from the spec**, as
+  in a spec names code to run. A fine-tuning spec's
+  ``hyperparams.extra_trainer_args`` (TRL's own argument surface, passed
+  through verbatim) is refused by name when it sets a knob that would act
+  under terms other than the run's: ``chat_template_path``,
+  ``trust_remote_code``, ``model_init_kwargs``, ``push_to_hub`` and every
+  ``hub_*`` / ``trackio_*`` setting (Hub reads and pushes with the
+  machine's own credential, or a repo's code), ``resume_from_checkpoint``,
+  ``deepspeed``, ``fsdp_config``, ``accelerator_config`` (files on the
+  machine), ``logging_dir`` and ``report_to``. A caller driving
+  :mod:`strata_forge.training` from Python keeps all of them.
+- **The Hugging Face token travels apart from the spec**, as
   ``Task.secrets={"HF_TOKEN": SecretStr(token)}``, which the backend writes
   to the private file named by ``FORGE_SECRETS_FILE`` (see
   [Secrets](#secrets)). ``runner_main`` calls
@@ -324,10 +333,16 @@ machine it does not own holds up its side of the contract in five places:
   an adapter, the reference model), the merge step's base, and the
   inference runner's model download. Each read passes
   ``RunSecrets.hub_credential()`` explicitly: the token, or ``False`` when
-  none was delivered, which reads anonymously. Never ``None``, which every
+  none was delivered, which sends no credential. Never ``None``, which every
   Hugging Face library resolves to whatever the machine holds (an
   ``HF_TOKEN`` variable, a cached login, forge's own settings), so a run
-  reads with exactly the credential the orchestrator decided on. An
+  authenticates with exactly the credential the orchestrator decided on.
+  ``False`` does not reach the machine's Hub cache: ``huggingface_hub``
+  answers a refused (401 / gated) request from a snapshot it already holds,
+  and ``datasets`` from its own cache, so a gated or private repo that an
+  earlier run on the same account cached still loads without a token. That
+  is an accepted residual: the cache belongs to the account the runner
+  runs as, which can read it directly anyway. An
   orchestrator therefore delivers the token to any run that reads a gated
   or private model or dataset, not only to one that pushes; the push stays
   gated on ``output_repo_id`` alone. Every model load sets
@@ -339,13 +354,24 @@ machine it does not own holds up its side of the contract in five places:
   allow_patterns=SNAPSHOT_PATTERNS, ignore_patterns=SNAPSHOT_IGNORED)``
   fetches safetensors weights, JSON configs and the tokenizer and
   chat-template files, and never a pickle checkpoint (``*.bin``, ``*.pt``,
-  ``*.pth``, ``*.pkl``, ``*.ckpt``), a ``*.py`` file or an ``original/``
-  directory. A snapshot with no ``*.safetensors`` file fails the run by
-  name before the server starts. The server is then started on the local
-  snapshot (``--model <snapshot> --served-model-name <model_id>``) with
-  ``HF_HUB_OFFLINE=1``, so it never holds the token and fetches nothing of
-  its own. The snapshot lands in the Hub cache (``HF_HOME``), so a warm
-  machine reuses it.
+  ``*.pth``, ``*.pkl``, ``*.ckpt``, or an array format that can carry one),
+  a ``*.py`` file, compiled module or shell script, or an ``original/``
+  directory. A snapshot with no ``*.safetensors`` file at its root (where
+  the server reads weights) fails the run by name before the server
+  starts. The server is then started on the local snapshot
+  (``--model <snapshot> --served-model-name <model_id> --load-format
+  safetensors``) with ``HF_HUB_OFFLINE=1``, so it never holds the token
+  and fetches nothing of its own. The snapshot lands in the Hub cache
+  (``HF_HOME``), so a warm machine reuses it; the directory is the cache's
+  shared folder for that commit, which can also hold files an earlier,
+  unfiltered download left there, and ``--load-format safetensors`` is what
+  keeps the server off a pickle checkpoint among them (vLLM's default
+  falls back to one). ``LocalBackend`` starts the server through a login
+  shell (``bash -lc``), which re-sources the machine's profile after the
+  allow-listed environment is applied: a profile that exports
+  ``HF_TOKEN`` or ``HF_HUB_OFFLINE`` puts it back into the server's
+  environment. The delivered token is never affected; an operator
+  verifying the server's environment checks the profile as well.
 - **Progress is one protocol.** Both runners append the same
   ``ProgressEvent`` stream to ``FORGE_PROGRESS_PATH``, and the exit code is
   the run's verdict.

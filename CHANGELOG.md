@@ -145,20 +145,33 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   root.
 - Every Hub read a runner makes (the dataset split, the training base model and tokenizer, the
   merge step, the inference model download) passes the delivered token explicitly, and a run that
-  received none reads anonymously. A machine whose own `HF_TOKEN` or `huggingface-cli login` used
-  to unlock a gated model or dataset no longer does; the token must be delivered with the run.
+  received none sends no credential. A machine whose own `HF_TOKEN` or `huggingface-cli login`
+  used to unlock a gated model or dataset no longer does; the token must be delivered with the run.
+  A gated or private repo already in the machine's Hub cache still loads from that cache.
 - The inference runner downloads the model itself before starting the model server (safetensors
-  weights, JSON configs, tokenizer and chat-template files; never `*.bin`, `*.pt`, `*.pth`,
-  `*.pkl`, `*.ckpt`, `*.py` or `original/`), refuses a snapshot with no safetensors weights by
-  name, and serves the local snapshot with `--served-model-name <model_id>` and
-  `HF_HUB_OFFLINE=1`. A model published only as pickle weights no longer serves.
+  weights, JSON configs, tokenizer and chat-template files; never a pickle checkpoint or an array
+  format that can carry one, a `*.py` file, compiled module or shell script, or `original/`),
+  refuses a snapshot with no safetensors weights at its root by name, and serves the local
+  snapshot with `--served-model-name <model_id>`, `--load-format safetensors` and
+  `HF_HUB_OFFLINE=1`. A model published only as pickle weights, or with its safetensors only in a
+  subfolder, no longer serves.
+- A fine-tuning run spec's `hyperparams.extra_trainer_args` may no longer set
+  `chat_template_path`, `trust_remote_code`, `model_init_kwargs`, `ref_model_init_kwargs`,
+  `push_to_hub`, any `hub_*` or `trackio_*` key, `resume_from_checkpoint`, `deepspeed`,
+  `fsdp_config`, `accelerator_config`, `logging_dir` or `report_to`; the runner refuses the spec
+  and names every such key. A Python caller of `strata_forge.training` keeps the whole passthrough.
 - Every model load in the training runners sets `trust_remote_code=False` and
   `use_safetensors=True`, and every tokenizer load `trust_remote_code=False`. A base model
   published only as pickle weights no longer fine-tunes or merges.
 - `PreferenceRunner` loads the DPO / KTO reference model itself when it loads the policy without
   an adapter (and `precompute_ref_log_probs` is off), with the policy's own load arguments. TRL
   used to re-download it by name with no token, and in `float32` by default; it now matches the
-  policy's precision.
+  policy's precision. Like the policy, it loads with no device placement of its own, so a
+  full-weight DPO / KTO run holds both models in host memory until the trainer moves them (TRL
+  placed its own reference load with `device_map="auto"`).
+- The `jinja2` floor is `3.1.6` (from `3.1`): the fine-tuning runner renders a repo's chat
+  template in-process, and earlier 3.1.x releases have sandbox escapes. A machine with an older
+  `jinja2` upgrades it on the next install.
 
 ### Deprecated
 
@@ -208,7 +221,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   secrets directory's parent, that cannot be searched no longer reads as empty.
 - Gated and private models and datasets load with the run's own token, passed explicitly; the
   model server never holds it and runs offline; no load runs a repo's code or unpickles a
-  checkpoint.
+  checkpoint, and the model server is told to read safetensors only, so a pickle checkpoint left
+  in the shared Hub cache folder is not loaded either.
+- A fine-tuning run spec can no longer reach TRL knobs that read or push with the machine's own
+  credential, run a repo's code, read a file on the machine or report to a third party (see
+  Changed).
 
 ## [0.3.0] - 2026-10-01
 

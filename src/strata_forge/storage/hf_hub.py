@@ -44,8 +44,9 @@ class HFHubClient:
             ``HF_TOKEN`` from the environment or ``.env``), then to
             the ``huggingface_hub`` library's own resolution (env
             var or cached login). ``False`` sends no token and skips
-            every fallback: the call is anonymous whatever credential
-            the machine holds.
+            every fallback: the request is anonymous whatever
+            credential the machine holds (a download ``huggingface_hub``
+            can answer from its local cache still succeeds).
         endpoint: Custom Hub endpoint URL. When ``None``, falls back
             to :class:`strata_forge.config.HuggingFaceConfig` (``HF_ENDPOINT``).
             Default is the public ``https://huggingface.co``.
