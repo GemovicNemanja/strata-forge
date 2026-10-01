@@ -23,13 +23,15 @@ credentials + the network):
     (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
     :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
     the environment. It is passed EXPLICITLY to every Hub read and write — the split, the model
-    download, the push — and a run that received none reads anonymously rather than with the
-    VM's ambient ``HF_TOKEN`` or cached login. It is scrubbed from any surfaced error.
+    download, the push — and a run that received none sends no credential rather than the
+    VM's ambient ``HF_TOKEN`` or cached login (a repo the VM's Hub cache already holds still
+    loads from that cache). It is scrubbed from any surfaced error.
   - The runner downloads the model ITSELF, before the model server starts, and only its
     servable files (:data:`SNAPSHOT_PATTERNS`: safetensors weights, configs, tokenizer and
     chat-template files — never a pickle checkpoint or a ``*.py`` file). The server then loads
     that local directory with ``HF_HUB_OFFLINE=1``, so it never holds the token and never
-    fetches anything of its own.
+    fetches anything of its own, and with ``--load-format safetensors``, so a pickle checkpoint
+    an earlier download left in the shared cache directory is never what it loads.
   - The model server gets an allow-listed environment
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
@@ -118,19 +120,46 @@ _LATENCY_WINDOW = 1000
 #: The files the runner downloads for the model server: safetensors weights, every JSON (configs,
 #: a sharded checkpoint's index, tokenizer and generation settings), and the tokenizer and
 #: chat-template formats that are not JSON.
+#: ``tokenizer.model*`` rather than ``tokenizer*``: the versioned SentencePiece files some repos
+#: ship (``tokenizer.model.v3``) need a prefix match, and every other tokenizer format is named by
+#: its extension above, so the prefix need not admit whatever else a repo calls ``tokenizer.*``.
 SNAPSHOT_PATTERNS = (
     "*.safetensors",
     "*.json",
-    "tokenizer*",
+    "tokenizer.model*",
     "*.model",
     "*.tiktoken",
     "*.jinja",
     "*.txt",
 )
-#: Refused even when a pattern above admits the name (``tokenizer*`` would admit a
-#: ``tokenizer.py``): pickle checkpoints, which can run code when loaded; a repo's own Python; and
-#: the ``original/`` checkpoints some repos carry beside the converted ones.
-SNAPSHOT_IGNORED = ("*.py", "*.bin", "*.pt", "*.pth", "*.pkl", "*.pickle", "*.ckpt", "original/*")
+#: Refused even when a pattern above admits the name: pickle checkpoints and the array formats
+#: that can carry one, which can run code when loaded; a repo's own Python, compiled modules and
+#: shell scripts; and the ``original/`` checkpoints some repos carry beside the converted ones.
+SNAPSHOT_IGNORED = (
+    "*.py",
+    "*.pyc",
+    "*.so",
+    "*.sh",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.pkl",
+    "*.pickle",
+    "*.ckpt",
+    "*.joblib",
+    "*.npy",
+    "*.npz",
+    "*.msgpack",
+    "*.h5",
+    "*.onnx",
+    "original/*",
+)
+#: How the model server is told to read the weights. vLLM's default (``auto``) falls back to a
+#: pickle checkpoint when the directory root holds no safetensors file, and the directory a
+#: snapshot download returns is the SHARED cache folder for that commit: it also holds whatever an
+#: earlier, unfiltered download of the same commit left there. Naming the format means the
+#: download's filter is not the only thing standing between a ``*.bin`` and the server.
+_SERVE_LOAD_FORMAT = ("--load-format", "safetensors")
 
 
 class Hyperparams(BaseModel):
@@ -429,7 +458,9 @@ def _write_results(rows: list[dict[str, Any]], outdir: Path) -> Path:
 
 
 def _require_safetensors(snapshot: Path, model_id: str) -> None:
-    if not any(snapshot.rglob("*.safetensors")):
+    # The directory ROOT, as the model server reads it: weights in a subfolder are not what it
+    # would load, so a repo whose only safetensors sit in one has none that this run can serve.
+    if not any(snapshot.glob("*.safetensors")):
         msg = (
             f"the model {model_id} has no safetensors weights; only safetensors checkpoints are "
             "served, because a pickle checkpoint (*.bin, *.pt) can run code when it is loaded"
@@ -517,6 +548,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         # through a login shell, which re-sources the profile and drops this virtualenv from PATH:
         # a bare `vllm` is then "command not found" even though vLLM is installed right here.
         python_executable=sys.executable,
+        extra_args=_SERVE_LOAD_FORMAT,
     )
     # Unbuffered: the served process writes through a pipe, so CPython would otherwise hold
     # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves

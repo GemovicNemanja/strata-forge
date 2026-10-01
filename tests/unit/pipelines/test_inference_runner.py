@@ -633,14 +633,14 @@ async def test_the_model_is_fetched_with_the_delivered_token_before_serving(
 
 
 def test_the_snapshot_never_admits_pickle_checkpoints_or_code() -> None:
-    import fnmatch
+    # Through the Hub client's own filter, not a re-implementation of it: what matters is what
+    # `snapshot_download` admits, case sensitivity and path handling included.
+    # The function `snapshot_download` itself calls; re-exported by `utils` without an `__all__`.
+    from huggingface_hub.utils import (
+        filter_repo_objects,  # pyright: ignore[reportPrivateImportUsage]
+    )
 
-    def admitted(name: str) -> bool:
-        return any(fnmatch.fnmatch(name, p) for p in ir.SNAPSHOT_PATTERNS) and not any(
-            fnmatch.fnmatch(name, p) for p in ir.SNAPSHOT_IGNORED
-        )
-
-    for kept in (
+    kept = (
         "model.safetensors",
         "model-00001-of-00002.safetensors",
         "model.safetensors.index.json",
@@ -649,12 +649,14 @@ def test_the_snapshot_never_admits_pickle_checkpoints_or_code() -> None:
         "tokenizer.json",
         "tokenizer_config.json",
         "tokenizer.model",
+        "tokenizer.model.v3",
+        "spiece.model",
         "qwen.tiktoken",
         "chat_template.jinja",
         "merges.txt",
-    ):
-        assert admitted(kept), kept
-    for refused in (
+        "vocab.txt",
+    )
+    refused = (
         "pytorch_model.bin",
         "pytorch_model-00001-of-00002.bin",
         "model.pt",
@@ -664,8 +666,27 @@ def test_the_snapshot_never_admits_pickle_checkpoints_or_code() -> None:
         "tokenization_custom.py",
         "original/consolidated.00.pth",
         "original/params.json",
-    ):
-        assert not admitted(refused), refused
+        # What a bare `tokenizer*` prefix would have let in beside the weights.
+        "tokenizer.so",
+        "tokenizer.pyc",
+        "tokenizer.sh",
+        "tokenizer.joblib",
+        "tokenizer.npz",
+        "tokenizer.msgpack",
+        "tokenizer.pkl.gz",
+        "tokenizer.PY",
+        "tokenizer.BIN",
+        "tokenizer.model.pkl",
+        "tokenizer.model.so",
+    )
+    admitted = set(
+        filter_repo_objects(
+            [*kept, *refused],
+            allow_patterns=list(ir.SNAPSHOT_PATTERNS),
+            ignore_patterns=list(ir.SNAPSHOT_IGNORED),
+        )
+    )
+    assert admitted == set(kept)
 
 
 async def test_a_run_with_no_token_downloads_anonymously(
@@ -698,6 +719,9 @@ async def test_the_model_server_loads_the_local_snapshot_offline(
     snapshot = str(tmp_path / "hub-snapshot")
     assert f"--model {snapshot}" in task.run
     assert "--served-model-name org/model" in task.run
+    # Safetensors by name, not vLLM's `auto`, which falls back to a pickle checkpoint that an
+    # earlier unfiltered download may have left in the shared cache directory.
+    assert "--load-format safetensors" in task.run
     assert task.env["HF_HUB_OFFLINE"] == "1"
     assert not task.secrets
     assert _TOKEN not in json.dumps(task.env)
@@ -711,6 +735,29 @@ async def test_a_model_without_safetensors_weights_is_refused(
     # the server starts, rather than as a model-server failure minutes later.
     del hub_snapshots
     (tmp_path / "hub-snapshot" / "model.safetensors").unlink()
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert "task" not in record  # the server never started
+    assert "no safetensors weights" in progress.read_text()
+
+
+async def test_safetensors_only_in_a_subfolder_are_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # The model server reads the directory root. Safetensors in a subfolder beside a root pickle
+    # checkpoint (one an earlier unfiltered download left in the shared cache folder) would pass a
+    # recursive check while the server loaded the pickle.
+    del hub_snapshots
+    snapshot = tmp_path / "hub-snapshot"
+    (snapshot / "model.safetensors").unlink()
+    (snapshot / "pytorch_model.bin").write_bytes(b"pickle")
+    (snapshot / "sub").mkdir()
+    (snapshot / "sub" / "model.safetensors").write_bytes(b"weights")
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
     _deliver_token(monkeypatch, tmp_path)
