@@ -4494,7 +4494,7 @@ requires-dist = [
     { name = "gcsfs", marker = "extra == 'storage'", specifier = ">=2024.10,<2027" },
     { name = "huggingface-hub", marker = "extra == 'storage'", specifier = ">=1.0,<2" },
     { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3,<0.4" },
-    { name = "jinja2", specifier = ">=3.1,<4" },
+    { name = "jinja2", specifier = ">=3.1.6,<4" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=4.0,<5" },
     { name = "litellm", specifier = ">=1.83,<2" },
     { name = "nltk", marker = "extra == 'evals'", specifier = ">=3.9,<4" },
