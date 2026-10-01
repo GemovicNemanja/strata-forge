@@ -209,9 +209,15 @@ async def _cancel(job_id: str) -> None:
 
 
 async def _cleanup(job_id: str) -> None:
+    from strata_forge.compute.backends.base import CleanupError
+
     job, backend_name, backend_kwargs = _load_job(job_id)
     backend = _make_backend(backend_name, backend_kwargs)
-    await backend.cleanup(job)
+    try:
+        await backend.cleanup(job)
+    except CleanupError as exc:
+        # The saved job is the only handle on what survived, so it stays for the retry.
+        error_exit(f"cleanup failed, job kept for a retry: {exc}")
     _state_path(job_id).unlink(missing_ok=True)
     Console().print(f"[bold green]cleaned up[/] {job.id}")
 

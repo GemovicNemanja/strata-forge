@@ -121,6 +121,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   status, or none at all, raises), and a failed submit's workdir discard uses the same command.
   `LocalBackend.cleanup` keeps the job, and raises, until its secrets directory is gone.
   `SkyPilotBackend.cleanup` raises when `down` fails and treats `ClusterDoesNotExist` as success.
+- `strata-forge compute cleanup` exits 1 and keeps the saved job when the backend reports the
+  job's state survived, so running it again retries.
 - `SSHBackend` refuses a job whose `remote_workdir` names the remote root itself (`<root>/`,
   `<root>/.`, `<root>//`, or any empty or `.` component below the root) with the same
   `ValueError` as a workdir outside the root.
