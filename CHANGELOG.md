@@ -32,12 +32,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   string a run's machine installs (`[finetuning,storage]`, `[serving,storage,hf]`) plus `[all]`
   into empty Python 3.14 venvs from the public index, with no lockfile and no constraints, and
   `scripts/smoke_clean_install.py` then builds, offline and without a GPU, every enabled
-  fine-tuning method x dataset format x adapter through the runner's own spec path (down to the
-  TRL config and trainer class, the peft config and the bitsandbytes config), the batch-inference
-  spec, requests and results parquet, and the vLLM command line through the installed vLLM's own
-  entrypoint parser. A breaking upstream release fails there the day it ships instead of on a
-  user's machine. It also runs on any branch push that changes `pyproject.toml`, and a manual
-  run takes an `override` requirement as a drill that must turn it red.
+  fine-tuning method x dataset format x adapter through the runner's own spec path and
+  `build_trainer` (the TRL config, the peft config, the bitsandbytes config, and the runner's
+  trainer keywords bound against the installed trainer's signature), the batch-inference spec,
+  requests and results parquet, and the vLLM command line through the installed vLLM's own
+  entrypoint parser, with each `VLLM_` variable the runner sets checked as one vLLM still reads.
+  A breaking upstream release fails there the day it ships instead of on a user's machine. A
+  QLoRA case warns while `[finetuning]` does not install `bitsandbytes` (QLoRA cannot load a model
+  on such a machine) and fails once the extra names it but the install lacks it. It also runs on
+  any branch push other than `main` that changes `pyproject.toml`, and a manual run takes an
+  `override` of plain version pins (no URL, path or option) as a drill that must turn it red. The
+  schedule, which runs from `main`, only dispatches the job on `dev` and reports that run's
+  result, so the unlocked install never runs in the default branch's cache scope.
 
 ### Changed
 
@@ -49,6 +55,10 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 - The batch-inference runner's per-row `error` column, written into the results and pushed to
   the Hub, is redacted. It used to carry each failed row's exception text unscrubbed.
+- `release.yml`'s build job and every `nightly.yml` job no longer restore the Actions cache. Every
+  ref restores the default branch's cache scope, so an entry written there would otherwise shape
+  the distributions the publish job uploads, or run beside the nightly's provider keys and write
+  token.
 
 ## [0.3.0] - 2026-10-01
 
