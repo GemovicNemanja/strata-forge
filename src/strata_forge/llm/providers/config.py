@@ -143,9 +143,9 @@ class OpenAICompatConfig(ProviderConfig):
     """OpenAI-compatible self-hosted servers (vLLM / TGI / SGLang).
 
     Reads ``FORGE_OPENAI_COMPAT_BASE_URL`` and the optional
-    ``FORGE_OPENAI_COMPAT_API_KEY``. The wiring through LiteLLM lands when
-    ``strata_forge.compute`` adds inference serving; this config exists now so the
-    surface stays uniform.
+    ``FORGE_OPENAI_COMPAT_API_KEY``; ``OpenAICompatProvider`` passes them to
+    LiteLLM as ``api_base`` and ``api_key``. ``base_url`` is caller-trusted:
+    nothing here validates it (see the ``openai_compat`` module docstring).
     """
 
     model_config = SettingsConfigDict(

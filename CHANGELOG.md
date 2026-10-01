@@ -60,6 +60,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   the distributions the publish job uploads, or run beside the nightly's provider keys and write
   token.
 
+- The `openai_compat` provider documents that `OpenAICompatConfig.base_url` is caller-trusted:
+  the provider validates nothing about the URL and keeps no private-address block, because
+  loopback is its normal target. Its transport follows redirects. A hop to another host or port
+  drops the `Authorization` header, so the configured `api_key` stays on the configured host, but
+  nothing else is dropped: a 307/308 re-sends the request body, an `extra_headers` credential
+  follows every hop, and the final reply (or an error quoting it) reaches the caller. A caller
+  that takes `base_url` from an untrusted party therefore compares the whole URL for exact
+  equality with one it allows, never the host or a prefix, and passes `api_key` explicitly
+  (`docs/modules/llm.md`, "OpenAI-compatible endpoints"). Unit tests run the real LiteLLM, OpenAI
+  client and `httpx` stack, streaming and not, against loopback servers and pin both halves, so a
+  dependency upgrade that changes either fails there.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

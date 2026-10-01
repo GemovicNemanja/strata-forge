@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import SecretStr
 
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine, Generator
 
 
 @pytest.fixture(autouse=True)
@@ -171,3 +180,259 @@ class TestAcompletionWiring:
             api_base="http://override:9000/v1",  # call-site override
         )
         assert captured["api_base"] == "http://override:9000/v1"
+
+
+# The trust note on `base_url` (module docstring, docs/modules/llm.md) rests on how the transport
+# treats a redirect. These run the real LiteLLM -> OpenAI client -> httpx stack against two
+# loopback servers, so a dependency upgrade that changes either half of the claim fails here: the
+# configured `api_key` must never reach another origin, and what DOES travel must match what the
+# note says.
+
+_SENTINEL_KEY = "sk-redirect-sentinel"
+_PROMPT = "redirect-probe-prompt"
+_REPLY = "reply-from-the-redirect-target"
+_NON_COMPLETION = "<html>redirect-target-page</html>"
+# Bounds every request in both directions: a transport change that hangs (a body promised by
+# Content-Length but never sent, a reply never answered) fails the test instead of stalling CI.
+_IO_TIMEOUT_S = 10
+
+
+@dataclass(frozen=True)
+class _Seen:
+    """Everything one request carried to the server that answered it."""
+
+    method: str
+    path: str
+    headers: dict[str, str]  # names lowercased: HTTP header names are case-insensitive
+    body: str
+
+    @property
+    def authorization(self) -> str | None:
+        return self.headers.get("authorization")
+
+    @property
+    def has_prompt(self) -> bool:
+        return _PROMPT in self.body
+
+    def carries(self, secret: str) -> bool:
+        return (
+            secret in self.path
+            or secret in self.body
+            or any(secret in f"{name}: {value}" for name, value in self.headers.items())
+        )
+
+
+def _completion(*, stream: bool) -> tuple[bytes, str]:
+    if not stream:
+        body = {
+            "id": "chatcmpl-redirect",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": _REPLY},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        return json.dumps(body).encode(), "application/json"
+    chunks = [
+        {"role": "assistant", "content": _REPLY},
+        {},
+    ]
+    events = [
+        {
+            "id": "chatcmpl-redirect",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "m",
+            "choices": [
+                {"index": 0, "delta": delta, "finish_reason": "stop" if not delta else None}
+            ],
+        }
+        for delta in chunks
+    ]
+    sse = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+    return sse.encode(), "text/event-stream"
+
+
+def _handler(
+    seen: list[_Seen],
+    *,
+    redirect: int | None = None,
+    to_origin: str = "",
+    completion: bool = True,
+) -> type[BaseHTTPRequestHandler]:
+    """Answer with a completion, or, given ``redirect``, send ``/v1/...`` to ``to_origin``.
+
+    An empty ``to_origin`` is a relative ``Location``: a redirect within the same origin. With
+    ``completion=False`` the answer is an HTML page instead, which no client can parse as one.
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        timeout = _IO_TIMEOUT_S
+
+        def _serve(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode() if length else ""
+            if redirect is not None and self.path.startswith("/v1/"):
+                self.send_response(redirect)
+                self.send_header("Location", f"{to_origin}/moved{self.path}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            seen.append(
+                _Seen(
+                    method=self.command,
+                    path=self.path,
+                    headers={name.lower(): value for name, value in self.headers.items()},
+                    body=body,
+                )
+            )
+            if completion:
+                stream = bool(body) and json.loads(body).get("stream") is True
+                payload, content_type = _completion(stream=stream)
+            else:
+                payload, content_type = _NON_COMPLETION.encode(), "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:
+            self._serve()
+
+        def do_POST(self) -> None:
+            self._serve()
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 — base signature
+            del format, args
+
+    return _Handler
+
+
+@contextmanager
+def _loopback(handler: type[BaseHTTPRequestHandler]) -> Generator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+async def _complete(base_url: str, *, stream: bool = False, **kwargs: Any) -> str:
+    provider = OpenAICompatProvider(
+        OpenAICompatConfig(base_url=f"{base_url}/v1", api_key=SecretStr(_SENTINEL_KEY))
+    )
+    call: dict[str, Any] = {
+        "provider_model_id": "m",
+        "messages": [{"role": "user", "content": _PROMPT}],
+        "num_retries": 0,
+        "max_retries": 0,
+        "timeout": _IO_TIMEOUT_S,
+        **kwargs,
+    }
+    if stream:
+        parts = [chunk.choices[0].delta.content async for chunk in provider.astream(**call)]
+        return "".join(part for part in parts if part)
+    response = await provider.acompletion(**call)
+    return response.choices[0].message.content
+
+
+class TestRedirects:
+    @pytest.fixture(autouse=True)
+    def _no_success_logging(self, monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+        # LiteLLM hands every success callback to a worker bound to the running event loop. Each
+        # test has its own loop, so the next call would drop the previous call's queued coroutine
+        # unawaited. Nothing here is about logging: close the coroutine instead of queueing it.
+        # The worker is LiteLLM internals; if a release moves it, the patch is skipped (at worst
+        # a stray RuntimeWarning) rather than erroring tests that are about redirects.
+        def _discard(async_coroutine: Coroutine[Any, Any, Any]) -> None:
+            async_coroutine.close()
+
+        try:
+            from litellm.litellm_core_utils import logging_worker
+        except ImportError:
+            return
+        worker = getattr(logging_worker, "GLOBAL_LOGGING_WORKER", None)
+        if worker is not None and hasattr(worker, "ensure_initialized_and_enqueue"):
+            monkeypatch.setattr(worker, "ensure_initialized_and_enqueue", _discard)
+
+    @pytest.mark.parametrize(
+        ("status", "method", "body_resent", "stream"),
+        [
+            (307, "POST", True, False),
+            (307, "POST", True, True),
+            (308, "POST", True, False),
+            (301, "GET", False, False),
+            (302, "GET", False, False),
+            (303, "GET", False, False),
+        ],
+    )
+    async def test_a_cross_origin_redirect_drops_the_key_but_not_the_reply(
+        self, status: int, method: str, body_resent: bool, stream: bool
+    ) -> None:
+        # A different port is a different origin, exactly as a different host is.
+        seen: list[_Seen] = []
+        with (
+            _loopback(_handler(seen)) as target,
+            _loopback(_handler([], redirect=status, to_origin=target)) as base_url,
+        ):
+            reply = await _complete(base_url, stream=stream)
+
+        assert len(seen) == 1
+        # Not only the Authorization header: the key must not ride in any header, the path or
+        # the body either.
+        assert not seen[0].carries(_SENTINEL_KEY), "the key reached another origin"
+        assert seen[0].authorization is None
+        assert seen[0].method == method
+        assert seen[0].has_prompt is body_resent
+        assert reply == _REPLY
+
+    async def test_a_non_completion_reply_comes_back_quoted_in_the_error(self) -> None:
+        seen: list[_Seen] = []
+        with (
+            _loopback(_handler(seen, completion=False)) as target,
+            _loopback(_handler([], redirect=302, to_origin=target)) as base_url,
+            # Which exception class LiteLLM maps this to is not the claim; the quoted reply is.
+            pytest.raises(Exception, match="redirect-target-page"),
+        ):
+            await _complete(base_url)
+
+        assert len(seen) == 1
+        assert not seen[0].carries(_SENTINEL_KEY)
+
+    async def test_a_credential_in_extra_headers_follows_a_cross_origin_redirect(self) -> None:
+        # Only `Authorization` is dropped. A credential a caller puts in another header goes
+        # wherever the redirect points, which is why llm.md makes extra_headers caller-trusted.
+        seen: list[_Seen] = []
+        with (
+            _loopback(_handler(seen)) as target,
+            _loopback(_handler([], redirect=307, to_origin=target)) as base_url,
+        ):
+            reply = await _complete(base_url, extra_headers={"X-Api-Key": "sk-extra-sentinel"})
+
+        assert len(seen) == 1
+        assert seen[0].authorization is None
+        assert seen[0].headers.get("x-api-key") == "sk-extra-sentinel"
+        assert reply == _REPLY
+
+    async def test_a_same_origin_redirect_keeps_the_key(self) -> None:
+        seen: list[_Seen] = []
+        with _loopback(_handler(seen, redirect=307)) as base_url:
+            reply = await _complete(base_url)
+
+        assert len(seen) == 1
+        assert seen[0].method == "POST"
+        assert seen[0].path == "/moved/v1/chat/completions"
+        assert seen[0].authorization == f"Bearer {_SENTINEL_KEY}"
+        assert seen[0].has_prompt
+        assert reply == _REPLY

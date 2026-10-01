@@ -33,6 +33,7 @@ agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/ll
   - [Messages and content parts](#messages-and-content-parts)
   - [Responses](#responses)
 - [Routing](#routing)
+  - [OpenAI-compatible endpoints: `base_url` is caller-trusted](#openai-compatible-endpoints-base_url-is-caller-trusted)
 - [Two-axis fallback](#two-axis-fallback)
 - [Cache](#cache)
 - [Structured output](#structured-output)
@@ -362,6 +363,66 @@ route = resolve("opus", provider="bedrock")
 Aliases are resolved before lookup. Unknown models raise
 `RegistryError(reason="unknown_model")`; an unsupported `(model,
 provider)` combo raises `RegistryError(reason="unsupported_route")`.
+
+### OpenAI-compatible endpoints: `base_url` is caller-trusted
+
+The `openai_compat` provider sends its key and the whole conversation to
+`OpenAICompatConfig.base_url` and validates nothing about that URL: not the
+scheme, the host, the path, or the addresses the host resolves to. There is
+deliberately no private-address block, because loopback is the normal case:
+the batch inference runner talks to a vLLM server on `127.0.0.1` on the same
+machine.
+
+The transport (LiteLLM over the OpenAI client and `httpx`) follows every
+HTTP redirect, and the final reply comes back to the caller: as the
+response text when it parses as a completion, quoted in the raised error's
+message when it does not. What each hop carries:
+
+| Hop | `Authorization` (the `api_key`) | Caller-set headers (`extra_headers`) | Request body |
+|---|---|---|---|
+| 307 / 308 to another host or port | dropped | sent | re-sent, same method |
+| 301 / 302 / 303 to another host or port | dropped | sent | not sent (becomes a `GET`) |
+| `http` to `https`, same host, default ports | kept | sent | as the status code above says |
+| any redirect within the same origin | kept | sent | as the status code above says |
+
+Only the `Authorization` header is dropped. A credential a caller puts in
+another header (through `extra_headers`, in `provider_extras` or the call's
+keyword arguments) follows every hop. The table is verified against the
+versions in Forge's own lock: `httpx` and the OpenAI client are transitive
+dependencies (only `litellm` is declared), so a project that resolves its own
+lock and takes `base_url` from untrusted input should run its own
+cross-origin redirect test.
+
+So a caller that takes `base_url` from a party it does not trust (a web
+request, a user setting) owns that validation, and does it before building
+the provider config:
+
+- compare the **whole URL** for exact string equality with one it allows,
+  never only the host and never a prefix. The client appends
+  `/chat/completions` to whatever path it is given, so a host-only check lets
+  the requester choose any path on an allowed origin, including one that
+  redirects elsewhere. A prefix check is no better: the client resolves dot
+  segments (`https://allowed.example/api/v1/../../other` is sent to
+  `https://allowed.example/other/chat/completions`) and sends `%2e%2e`,
+  `..%2f` and empty (`//`) segments raw for the server to interpret;
+- apply the same check to an `api_base` passed at the call site (directly
+  or through `provider_extras`), which overrides `base_url`;
+- pass `api_key` explicitly, `UNAUTHENTICATED_API_KEY` when there is none.
+  Left unset, `OpenAICompatConfig` reads `FORGE_OPENAI_COMPAT_API_KEY` from
+  the environment, and failing that the client sends an ambient
+  `OPENAI_API_KEY`: either goes to the untrusted URL;
+- keep credentials out of `extra_headers`, or trust their destination as
+  fully as `base_url` itself;
+- check every address the host resolves to, if internal addresses must be
+  unreachable;
+- treat an allowed origin as trusted for its redirects too. The `api_key`
+  never leaves the configured host, but the conversation and the reply can.
+
+Forge does not refuse cross-origin redirects itself: that would mean
+replacing the HTTP client LiteLLM builds and caches for each endpoint with
+one Forge owns per provider. Once the caller pins the exact URL, a
+redirect can only come from the allowed endpoint itself, which is the same
+trust a native provider places in its vendor's API.
 
 ---
 
