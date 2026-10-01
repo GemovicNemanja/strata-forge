@@ -8,9 +8,11 @@ belongs to. :meth:`Redactor.stream` does the same for text that arrives in piece
 secret split across two of them.
 
 Each maximal run of redacted characters becomes one fixed :data:`PLACEHOLDER`, so the output
-never encodes how long a secret was. Streamed output is identical to redacting the whole text at
-once, which is the property that makes the stream trustworthy: a piece boundary can move what is
-released when, never what is released.
+never encodes how long a secret was. Two runs separated only by a little whitespace count as one,
+so a multi-line secret printed with other line endings than it was stored with does not come out
+as one placeholder per line, which would count its lines. Streamed output is identical to
+redacting the whole text at once, which is the property that makes the stream trustworthy: a
+piece boundary can move what is released when, never what is released.
 
 Two limits are deliberate. Text is matched as given, never Unicode-normalised, because the
 output is the input with spans replaced and normalising would rewrite everything else; instead a
@@ -27,6 +29,8 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+
+from pydantic import SecretStr
 
 from strata_forge.core.errors import ValidationError
 
@@ -56,6 +60,12 @@ _FRAGMENT_STEP = 32
 # How far a private-key block with no footer is redacted past its header. Larger than the PEM
 # encoding of any key in practical use, so a block whose footer was clipped stays covered.
 _PEM_BODY_CHARS = 16_384
+# Redacted runs separated by at most this much whitespace are joined into one: a line break, with
+# or without a carriage return and some indentation. Longer gaps stay readable.
+_BRIDGE_CHARS = 8
+# How many characters before the undecided text a stream keeps, so a pattern may look one
+# character back (``(?<![a-z])``, ``\b``) exactly as it would in the whole text.
+_LEFT_CONTEXT = 1
 _PEM_HEADER = re.compile(r"-----BEGIN[A-Z0-9 ]{0,64}PRIVATE KEY(?: BLOCK)?-----")
 _PEM_HEADER_MAX = 10 + 64 + 11 + 6 + 5
 _PEM_FOOTER = re.compile(r"-----END[A-Z0-9 ]{0,64}PRIVATE KEY(?: BLOCK)?-----")
@@ -74,8 +84,11 @@ class TokenPattern:
     ``max_chars`` bounds how far one match reaches from where it starts, lookahead included. It
     is what lets a stream decide that text is final, so a pattern must never match further: a
     match that does raises :class:`~strata_forge.core.errors.ValidationError` rather than being
-    trusted. A pattern may not use lookbehind. When the regex has a group named ``secret``, only
-    that group is redacted and the rest of the match stays readable.
+    trusted. A stream keeps exactly one character before the text it has not decided yet, so a
+    pattern may look back one character (``(?<![a-z])``, ``\\b``) and no further. It may not test
+    where the text ends (``$``, ``\\Z``): a stream's buffer ends where the text received so far
+    does, not where the text does. When the regex has a group named ``secret``, only that group
+    is redacted and the rest of the match stays readable.
     """
 
     name: str
@@ -88,7 +101,9 @@ class _Rules:
     """What a redactor matches, shared read-only by every stream it opens."""
 
     patterns: tuple[TokenPattern, ...]
-    needles: tuple[str, ...]
+    # Literal value forms, grouped by first character: a needle can only start where the text
+    # holds that character, so a short new stretch of text is searched for a few needles, not all.
+    needles: dict[str, tuple[str, ...]]
     # The longest stretch one match can span. Text this close to the end of what a stream has
     # received may still turn out to be part of a secret, so the stream holds it back.
     max_len: int
@@ -100,8 +115,14 @@ def _pattern(name: str, regex: str, max_chars: int) -> TokenPattern:
 
 DEFAULT_PATTERNS: tuple[TokenPattern, ...] = (
     _pattern("huggingface", r"hf_[A-Za-z0-9]{8,256}", 3 + 256),
-    # OpenAI (`sk-`, `sk-proj-`) and Anthropic (`sk-ant-`) keys share the prefix.
-    _pattern("openai-anthropic", r"sk-[A-Za-z0-9_-]{16,256}", 3 + 256),
+    # OpenAI (`sk-`, `sk-proj-`) and Anthropic (`sk-ant-`) keys share the prefix. A word ending
+    # in "sk" (`flask-`, `task-`, `mask-`) is not one, and a real key is random mixed-case text,
+    # so a name in lower case (`sk-learn-some-long-name`) is left readable too.
+    _pattern(
+        "openai-anthropic",
+        r"(?<![a-z])sk-(?=[A-Za-z0-9_-]{0,255}[A-Z])[A-Za-z0-9_-]{16,256}",
+        3 + 256,
+    ),
     # Classic, OAuth, user-to-server, server-to-server and refresh tokens.
     _pattern("github", r"gh[opusr]_[A-Za-z0-9]{20,255}", 4 + 255),
     _pattern("github-fine-grained", r"github_pat_[A-Za-z0-9_]{20,255}", 11 + 255),
@@ -109,10 +130,12 @@ DEFAULT_PATTERNS: tuple[TokenPattern, ...] = (
     # Header, dot, then payload and signature as one run: a payload longer than the bound is still
     # caught by its start, where a separately bounded segment would fail to match at all.
     _pattern("jwt", r"eyJ[A-Za-z0-9_-]{8,256}\.[A-Za-z0-9_.-]{8,256}", 3 + 256 + 1 + 256),
-    # `scheme://user:password@host`: the scheme and host stay readable.
+    # `scheme://user:password@host`: the scheme and host stay readable. The user may be empty
+    # (`redis://:password@host`), and the password runs to the LAST `@` of the authority, which
+    # is where a URL parser splits it, so a raw `@` inside the password does not cut it short.
     _pattern(
         "url-userinfo",
-        rf"://(?P<{_SPAN_GROUP}>[^\s/@:]{{1,128}}:[^\s/@]{{1,256}})@",
+        rf"://(?P<{_SPAN_GROUP}>[^\s/@:]{{0,128}}:[^\s/?#]{{1,256}})@",
         3 + 128 + 1 + 256 + 1,
     ),
     # The scheme word stays readable; only the credential after it is redacted.
@@ -186,7 +209,7 @@ def _merge(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def _needles(forms: Iterable[str]) -> tuple[str, ...]:
+def _needles(forms: Iterable[str]) -> set[str]:
     needles: set[str] = set()
     for form in forms:
         if len(form) <= _FRAGMENT_CHARS:
@@ -195,38 +218,66 @@ def _needles(forms: Iterable[str]) -> tuple[str, ...]:
         last = len(form) - _FRAGMENT_CHARS
         needles.update(form[i : i + _FRAGMENT_CHARS] for i in range(0, last, _FRAGMENT_STEP))
         needles.add(form[last:])
-    return tuple(sorted(needles))
+    return needles
+
+
+def _by_first_char(needles: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    groups: dict[str, list[str]] = {}
+    for needle in sorted(needles):
+        groups.setdefault(needle[0], []).append(needle)
+    return {first: tuple(group) for first, group in groups.items()}
+
+
+def _secret_text(value: object) -> str:
+    """The text of one redaction value, refused unless it is long enough to match safely."""
+    # A pydantic secret is unwrapped rather than stringified: `str()` of it is a mask, and
+    # redacting the mask would leave the secret itself in place.
+    text = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if not isinstance(text, str):
+        msg = "a redaction value must be a str or a SecretStr"
+        raise TypeError(msg)
+    # Measured without surrounding whitespace, which every line of a value is matched without.
+    # A value made only of `*` is a mask that was printed in place of a secret.
+    core = text.strip()
+    if len(core) < MIN_SECRET_CHARS or not core.strip("*"):
+        msg = (
+            f"refusing a redaction value shorter than {MIN_SECRET_CHARS} characters, or a "
+            "mask: it would also match ordinary text"
+        )
+        raise ValidationError(msg)
+    return text
 
 
 class Redactor:
     """Removes given secrets and credential-shaped text from strings and streams.
 
-    ``values`` are the secrets a caller holds. Each must be at least :data:`MIN_SECRET_CHARS`
-    long: a shorter one would match inside ordinary text, and the redactor refuses it rather than
-    quietly skipping it. ``patterns`` defaults to :data:`DEFAULT_PATTERNS`; pass ``()`` to redact
-    the values alone.
+    ``values`` are the secrets a caller holds, as ``str`` or pydantic ``SecretStr``. Each must
+    be at least :data:`MIN_SECRET_CHARS` long without its surrounding whitespace: a shorter one
+    would match inside ordinary text, and the redactor refuses it rather than quietly skipping
+    it. A value made only of ``*`` is refused too, since it is a mask, not a secret. A caller
+    with an optional secret drops it when it is empty and treats the refusal as a reason not to
+    relay at all, never as a reason to relay unredacted.
 
-    Never logs, and never repeats in an error message, anything it was given.
+    ``patterns`` defaults to :data:`DEFAULT_PATTERNS`; pass ``()`` to turn the credential shapes
+    off. PEM private-key blocks are not a pattern and are always redacted: a key block is a
+    secret whoever holds it, and no caller has a reason to let one through.
+
+    Never logs, and never repeats in an error message, anything it was given. It refuses to be
+    pickled or copied, so a stray serialisation cannot write the values it holds anywhere.
     """
 
     __slots__ = ("_rules", "_value_count")
 
     def __init__(
         self,
-        values: Iterable[str] = (),
+        values: Iterable[str | SecretStr] = (),
         *,
         patterns: Iterable[TokenPattern] = DEFAULT_PATTERNS,
     ) -> None:
         forms: set[str] = set()
         count = 0
         for value in values:
-            if len(value) < MIN_SECRET_CHARS:
-                msg = (
-                    f"refusing a redaction value shorter than {MIN_SECRET_CHARS} characters: "
-                    "it would also match ordinary text"
-                )
-                raise ValidationError(msg)
-            forms |= _value_forms(value)
+            forms |= _value_forms(_secret_text(value))
             count += 1
         needles = _needles(forms)
         chosen = tuple(patterns)
@@ -235,15 +286,20 @@ class Redactor:
             + [len(needle) for needle in needles]
             + [pattern.max_chars for pattern in chosen]
         )
-        self._rules = _Rules(patterns=chosen, needles=needles, max_len=max_len)
+        self._rules = _Rules(patterns=chosen, needles=_by_first_char(needles), max_len=max_len)
         self._value_count = count
 
     def __repr__(self) -> str:
         return f"Redactor(values={self._value_count}, patterns={len(self._rules.patterns)})"
 
+    def __reduce__(self) -> str | tuple[object, ...]:
+        msg = "a Redactor holds secrets and cannot be pickled or copied"
+        raise TypeError(msg)
+
     @property
     def max_len(self) -> int:
-        """The longest span one match can cover; a stream holds back ``max_len - 1`` chars."""
+        """The longest span one match can cover; a stream holds back ``max_len - 1`` characters,
+        plus up to a few characters of whitespace right after a redacted run."""
         return self._rules.max_len
 
     def redact(self, text: str) -> str:
@@ -260,9 +316,11 @@ class RedactingStream:
     """Redacts one stream of text piece by piece; obtained from :meth:`Redactor.stream`.
 
     :meth:`feed` returns what is final so far and holds back the last ``max_len - 1``
-    characters, the only ones a later piece can still turn into part of a secret.
+    characters, the only ones a later piece can still turn into part of a secret, plus any short
+    whitespace right after a redacted run, which a later run may still join.
     :meth:`flush` releases the rest when the stream ends and readies the object for a new one.
-    The concatenated output equals :meth:`Redactor.redact` of the concatenated input.
+    The concatenated output equals :meth:`Redactor.redact` of the concatenated input. Like its
+    redactor, a stream refuses to be pickled or copied: what it holds back is raw text.
 
     A reader that LOSES text between two pieces (a console read that reports dropped bytes)
     must call :meth:`gap` there. A secret the hole cut in two cannot be recognised from either
@@ -292,9 +350,15 @@ class RedactingStream:
     def __repr__(self) -> str:
         return "RedactingStream()"
 
+    def __reduce__(self) -> str | tuple[object, ...]:
+        msg = "a RedactingStream holds unredacted text and cannot be pickled or copied"
+        raise TypeError(msg)
+
     def _reset(self) -> None:
         # Positions are absolute character offsets into the whole stream.
-        self._buf = ""  # what has been received from `_buf_start` on
+        # What has been received from `_buf_start` on: `_LEFT_CONTEXT` characters before
+        # `_emitted`, so a pattern can look back across a piece boundary.
+        self._buf = ""
         self._buf_start = 0
         self._received = 0
         self._emitted = 0  # everything before this has been released
@@ -331,12 +395,41 @@ class RedactingStream:
         decided = n if final else max(self._emitted, n - self._rules.max_len + 1)
         spans = self._carried + self._pattern_spans(decided) + self._literal_spans(decided)
         spans += self._key_block_spans(decided, close_open=final and not keep_blocks)
-        spans.sort()
-        out = self._release(spans, decided)
-        self._carried = _merge((max(start, decided), end) for start, end in spans if end > decided)
-        self._buf = self._buf[decided - self._buf_start :]
-        self._buf_start = decided
+        runs = self._runs(spans)
+        until = decided if final else self._hold(runs, decided)
+        out = self._release(runs, until)
+        self._carried = _merge((max(start, until), end) for start, end in runs if end > until)
+        keep = max(until - _LEFT_CONTEXT, 0)
+        self._buf = self._buf[keep - self._buf_start :]
+        self._buf_start = keep
         return out
+
+    def _runs(self, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """The redacted runs from ``_emitted`` on, with short whitespace between two joined."""
+        base, buf, emitted = self._buf_start, self._buf, self._emitted
+        clipped = [(max(start, emitted), end) for start, end in spans if end > emitted]
+        if self._prev_covered:
+            # The run released last ends here, and the whitespace after it may join the next.
+            clipped.append((emitted, emitted))
+        runs: list[tuple[int, int]] = []
+        for start, end in _merge(clipped):
+            if runs:
+                gap_start = runs[-1][1]
+                gap = buf[gap_start - base : start - base]
+                if start - gap_start <= _BRIDGE_CHARS and gap.isspace():
+                    runs[-1] = (runs[-1][0], end)
+                    continue
+            runs.append((start, end))
+        return runs
+
+    def _hold(self, runs: list[tuple[int, int]], decided: int) -> int:
+        """Where to stop releasing: ``decided``, or the end of a run whose trailing whitespace a
+        run that starts at or after ``decided`` could still join."""
+        last_end = max((end for start, end in runs if start < decided), default=None)
+        if last_end is None or last_end >= decided or decided - last_end > _BRIDGE_CHARS:
+            return decided
+        base = self._buf_start
+        return last_end if self._buf[last_end - base : decided - base].isspace() else decided
 
     def _pattern_spans(self, decided: int) -> list[tuple[int, int]]:
         base, buf = self._buf_start, self._buf
@@ -353,19 +446,25 @@ class RedactingStream:
                 start, end = match.span(group)
                 if end > start:
                     spans.append((start + base, end + base))
-                pos = max(match.end(), match.start() + 1) + base
+                # Resume one past the START, not at the end: a second credential glued onto the
+                # first (`hf_AAAAhf_BBBB`, `Bearer AAAABearer BBBB`) starts inside this match.
+                pos = match.start() + 1 + base
             self._pattern_pos[index] = max(pos, decided)
         return spans
 
     def _literal_spans(self, decided: int) -> list[tuple[int, int]]:
         base, buf = self._buf_start, self._buf
+        lo, hi = self._literal_pos - base, decided - base
         spans: list[tuple[int, int]] = []
-        for needle in self._rules.needles:
-            hit = buf.find(needle, self._literal_pos - base)
-            while hit != -1 and hit + base < decided:
-                spans.append((hit + base, hit + base + len(needle)))
-                hit = buf.find(needle, hit + 1)
-        self._literal_pos = decided
+        # Only needles starting in [lo, hi) are new; a needle can only start on its first char.
+        for first in set(buf[lo:hi]):
+            for needle in self._rules.needles.get(first, ()):
+                stop = hi + len(needle) - 1
+                hit = buf.find(needle, lo, stop)
+                while hit != -1:
+                    spans.append((hit + base, hit + base + len(needle)))
+                    hit = buf.find(needle, hit + 1, stop)
+        self._literal_pos = max(self._literal_pos, decided)
         return spans
 
     def _key_block_spans(self, decided: int, *, close_open: bool) -> list[tuple[int, int]]:

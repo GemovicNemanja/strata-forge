@@ -15,14 +15,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   value as written, line by line, in all four Unicode normal forms, base64-encoded at any
   alignment (standard and URL-safe), percent-encoded and JSON- or `repr`-escaped, plus
   `DEFAULT_PATTERNS` (Hugging Face, OpenAI/Anthropic `sk-`, GitHub, AWS access key ids, JWTs,
-  URL userinfo, bearer credentials, and PEM private-key blocks with or without their footer).
-  Each maximal redacted run becomes one fixed `***`, so the output never encodes a secret's
-  length. A value shorter than 8 characters is refused with `ValidationError`.
+  URL userinfo, bearer credentials), plus PEM private-key blocks with or without their footer,
+  which stay on with `patterns=()`. Each maximal redacted run becomes one fixed `***`, and runs
+  separated only by short whitespace count as one, so the output encodes neither a secret's
+  length nor its line count. A value shorter than 8 characters without its surrounding
+  whitespace, or made only of `*`, is refused with `ValidationError`; a pydantic `SecretStr` is
+  unwrapped. A redactor and its streams refuse to be pickled or copied.
 - `Redactor.stream()` returns a `RedactingStream` for text read incrementally: `feed` holds back
   the last `max_len - 1` characters, `flush` releases them, and the concatenated output equals
   `redact` of the concatenated input whatever the piece boundaries, so a secret split across two
-  console reads is still caught. `gap()` handles a read that dropped bytes: the held tail and the
-  first `max_len - 1` characters after the hole are masked.
+  console reads is still caught. `gap()` handles a read that dropped bytes, and a fresh stream
+  resumed mid-transcript: the held tail and the first `max_len - 1` characters after the hole
+  are masked. `docs/modules/compute.md` states the contract a console relay follows.
 - `strata_forge.pipelines._common.run_redactor` builds a run's redactor from its write token.
 
 ### Changed

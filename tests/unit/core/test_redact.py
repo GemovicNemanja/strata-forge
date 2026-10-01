@@ -9,15 +9,19 @@ examples below the properties pin each credential shape and the text that must s
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
+import pickle
 import re
 import unicodedata
 import urllib.parse
+from typing import TYPE_CHECKING
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import SecretStr
 
 from strata_forge.core import Redactor as ExportedRedactor
 from strata_forge.core.errors import ValidationError
@@ -29,6 +33,9 @@ from strata_forge.core.redact import (
     TokenPattern,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _HF = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz01234567"
 _PEM_BODY = (
     "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUA\n"
@@ -37,10 +44,13 @@ _PEM_BODY = (
 # A secret never contains the placeholder's character: otherwise "*** + the text after it" could
 # spell the secret without the secret ever having been in the input there.
 _CHARS = st.characters(exclude_characters="*", exclude_categories=("Cs",))
-_SECRETS = st.text(alphabet=_CHARS, min_size=MIN_SECRET_CHARS, max_size=120)
+_SECRETS = st.text(alphabet=_CHARS, min_size=MIN_SECRET_CHARS, max_size=120).filter(
+    lambda s: len(s.strip()) >= MIN_SECRET_CHARS
+)
 _NOISE = st.text(alphabet=_CHARS, max_size=300)
 # Fragments that sit on the edges of every pattern, so random text exercises partial and
-# overlapping matches, private-key blocks with and without footers, and URL and bearer shapes.
+# overlapping matches, private-key blocks with and without footers, URL and bearer shapes, a
+# word ending in "sk" before `sk-`, and whitespace that may join two redacted runs.
 _SHAPES = st.lists(
     st.sampled_from(
         [
@@ -64,10 +74,13 @@ _SHAPES = st.lists(
             "-----BEGIN",
             "-----",
             "a1B2c3D4",
+            "fla",
             "Z",
             "0",
             " ",
             "\n",
+            "\r\n",
+            "    ",
             "_",
             "-",
         ]
@@ -137,6 +150,28 @@ class TestStreamingProperties:
         for cut in (1, 2, 7, redactor.max_len - 1, redactor.max_len, redactor.max_len + 1):
             assert _streamed(redactor, [text[:cut], text[cut:]]) == expected
 
+    def test_a_redacted_run_joins_the_next_across_any_cut(self) -> None:
+        # The whitespace after a run is held back until a later run either joins it or can no
+        # longer, so where the pieces break never changes how many placeholders come out.
+        key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nQyNTUxOQAAACD0aW5n\n"
+        redactor = Redactor([key])
+        text = "line one\r\nb3BlbnNzaC1rZXktdjEAAAAA\r\n  QyNTUxOQAAACD0aW5n\r\nline two"
+        expected = "line one\r\n***\r\nline two"
+        assert redactor.redact(text) == expected
+        for offset in range(len(text) + 1):
+            assert _streamed(redactor, [text[:offset], text[offset:]]) == expected
+
+    def test_a_word_ending_in_sk_is_read_across_any_cut(self) -> None:
+        # The stream keeps one character before what it has not decided, so the left boundary
+        # of `sk-` sees the same character whatever the piece boundaries.
+        redactor = Redactor()
+        # Long enough that the decided point passes every position, one character at a time.
+        tail = " " + "z" * redactor.max_len
+        text = "pip install flask-SQLAlchemy-Extension2 then sk-proj-Ab3dEf6hIj9kLmN0pQrSt done"
+        expected = "pip install flask-SQLAlchemy-Extension2 then *** done"
+        assert redactor.redact(text + tail) == expected + tail
+        assert _streamed(redactor, list(text + tail)) == expected + tail
+
     def test_one_character_at_a_time(self) -> None:
         text = f"a\n-----BEGIN PRIVATE KEY-----\n{_PEM_BODY}-----END PRIVATE KEY-----\nb {_HF} c"
         redactor = Redactor([_HF])
@@ -156,6 +191,27 @@ class TestValues:
     def test_a_short_value_is_refused_among_long_ones(self) -> None:
         with pytest.raises(ValidationError):
             Redactor([_HF, "short"])
+
+    @pytest.mark.parametrize("value", ["pw12\n\n\n\n\n", "   pw12   ", "**********", " ******** "])
+    def test_padding_and_masks_do_not_pass_for_a_secret(self, value: str) -> None:
+        # Padding does not make a short secret safe to match, and a mask (what `str()` of a
+        # pydantic secret prints) would leave the real secret in place while redacting `*`s.
+        with pytest.raises(ValidationError) as caught:
+            Redactor([value])
+        with pytest.raises(ValidationError) as reference:
+            Redactor(["x"])
+        assert str(caught.value) == str(reference.value)
+
+    def test_a_pydantic_secret_is_unwrapped_not_stringified(self) -> None:
+        quoted = _HF.replace("_", "%5F")
+        out = Redactor([SecretStr(_HF)]).redact(f"GET /x?t={quoted}")
+        assert out == "GET /x?t=***"
+        with pytest.raises(ValidationError):
+            Redactor([SecretStr(str(SecretStr(_HF)))])
+
+    def test_a_value_that_is_not_text_is_refused(self) -> None:
+        with pytest.raises(TypeError):
+            Redactor([b"hf_bytesbytesbytes"])  # type: ignore[list-item]
 
     @settings(max_examples=200, deadline=None)
     @given(
@@ -226,9 +282,27 @@ class TestValues:
         known = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
         redactor = Redactor([key, known])
         out = redactor.redact("line one\r\nb3BlbnNzaC1rZXktdjEAAAAA\r\nQyNTUxOQAAACD0aW5n\r\n")
-        assert "b3BlbnNzaC1rZXktdjEAAAAA" not in out
-        assert "QyNTUxOQAAACD0aW5n" not in out
+        # One placeholder for the lines together: one per line would count them.
+        assert out == "line one\r\n***\r\n"
         assert "AAAAC3Nz" not in redactor.redact(f"host key {known.strip()} pinned")
+
+    @settings(max_examples=100, deadline=None)
+    @given(
+        lines=st.lists(
+            st.text(alphabet=st.characters(categories=("L", "N")), min_size=8, max_size=40),
+            min_size=2,
+            max_size=8,
+        ),
+        stored=st.sampled_from(["\n", "\r\n"]),
+        printed=st.sampled_from(["\n", "\r\n", "\r", "\n    "]),
+    )
+    def test_a_multi_line_value_prints_as_one_placeholder_whatever_its_line_endings(
+        self, lines: list[str], stored: str, printed: str
+    ) -> None:
+        # How many placeholders come out must not say how many lines (about how large a key)
+        # the value had, whichever line endings it was printed with.
+        redactor = Redactor([stored.join(lines)], patterns=())
+        assert redactor.redact(f"before {printed.join(lines)} after") == "before *** after"
 
     def test_a_long_value_is_covered_whole_and_in_part(self) -> None:
         secret = "".join(chr(ord("a") + (i * 7) % 26) + str(i % 10) for i in range(200))
@@ -273,9 +347,29 @@ class TestDefaultPatterns:
             ),
             ("Authorization: Bearer abc.def-123_456~7+8/9=", "Authorization: Bearer ***"),
             ("authorization: bearer\tAbCdEfGh12345678", "authorization: bearer\t***"),
+            # A URL parser splits the authority at its LAST `@`, so a raw `@` in the password
+            # is still password; and the user may be empty.
+            ("https://alice:p@ssw0rdXYZ@host/x", "https://***@host/x"),
+            ("redis://:hunter2hunter2@cache:6379", "redis://***@cache:6379"),
+            ("q=a%3Dsk-proj-Ab3dEf6hIj9kLmN0pQrStUvWx end", "q=a%3D*** end"),
         ],
     )
     def test_each_credential_shape_is_redacted(self, text: str, expected: str) -> None:
+        assert Redactor().redact(text) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Bearer AAAAAAAAAAAABearer TOKENTOKENTOKEN", "Bearer ***"),
+            ("hf_AAAAAAAAhf_BBBBBBBBBBBB", "***"),
+            ("sk-proj-Ab3dEf6hIj9kLmN0sk-ant-Zy9xWv8uTs7rQp6", "***"),
+        ],
+    )
+    def test_a_credential_glued_onto_another_is_redacted_too(
+        self, text: str, expected: str
+    ) -> None:
+        # A search that resumed at the end of the first match would start inside the second
+        # one's prefix and miss it.
         assert Redactor().redact(text) == expected
 
     @pytest.mark.parametrize("kind", ["", "RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED ", "PGP "])
@@ -318,6 +412,11 @@ class TestDefaultPatterns:
             "http://127.0.0.1:8000/v1/models",
             "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----",
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@host",
+            "ssh://git@github.com:22/org/repo",
+            # Words ending in "sk" before a hyphen, and lower-case names: ids, not keys.
+            "pip install flask-sqlalchemy-extension2 Flask-SQLAlchemy-Extension2",
+            "facebook/mask-generation-pipeline-v2 task-specific-fine-tuning",
+            "whisk-recipes-dataset-large and sk-learn-compatible-estimators",
         ],
     )
     def test_ordinary_text_is_left_alone(self, text: str) -> None:
@@ -409,6 +508,17 @@ class TestHygiene:
         captured = capsys.readouterr()
         assert captured.out == captured.err == ""
 
+    @pytest.mark.parametrize("serialise", [pickle.dumps, copy.copy, copy.deepcopy])
+    def test_it_cannot_be_pickled_or_copied(self, serialise: Callable[[object], object]) -> None:
+        # A pickled stream would carry its raw held-back text; a pickled redactor every form of
+        # every value. Neither has a reason to leave the process.
+        redactor = Redactor([_HF])
+        stream = redactor.stream()
+        stream.feed(f"partial {_HF[:20]}")
+        for held in (redactor, stream):
+            with pytest.raises(TypeError):
+                serialise(held)
+
     def test_is_exported_from_core(self) -> None:
         assert ExportedRedactor is Redactor
 
@@ -422,6 +532,10 @@ class TestHygiene:
             "Bearer " * 20_000,
             "eyJ" + "a" * 200_000,
             "sk-" + "-" * 200_000,
+            "sk-" * 70_000,
+            "flask-" * 40_000,
+            "hf_AAAAAAAA" * 20_000,
+            ("\n" * 7 + "hf_AbCdEfGhIjKl") * 10_000,
         ],
     )
     def test_pathological_input_completes(self, hostile: str) -> None:

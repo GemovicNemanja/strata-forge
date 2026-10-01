@@ -34,14 +34,14 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - `BudgetContext` is an async context manager. Nested budgets share the parent's accumulated spend unless `isolated=True`.
 - `content_hash` hashes a JSON-canonical form (sorted keys, no whitespace) to remain stable across logically-equivalent inputs.
 - `env_snapshot` captures: installed package versions, git SHA (if in a repo), Python version, OS info. Lazy imports for `numpy` / `torch` versions when present.
-- `Redactor` computes the union of every span any value form, token pattern or private-key block covers, and replaces each maximal covered run with one `PLACEHOLDER`. `RedactingStream` runs the same computation with a "decided" bound: a match starting at least `max_len - 1` characters before the end of what has arrived is final. That is what makes streamed output equal one-shot output, and it holds only because every `TokenPattern` declares a true `max_chars` and uses no lookbehind.
+- `Redactor` computes the union of every span any value form, token pattern or private-key block covers, joins two runs separated only by up to 8 whitespace characters, and replaces each resulting run with one `PLACEHOLDER`. `RedactingStream` runs the same computation with a "decided" bound: a match starting at least `max_len - 1` characters before the end of what has arrived is final, and whitespace right after a run is held back until a later run can no longer join it. The stream keeps one character before the undecided text so a pattern may look one character back. That is what makes streamed output equal one-shot output, and it holds only because every `TokenPattern` declares a true `max_chars`, looks back at most one character and never tests where the text ends.
 
 ## Test expectations
 
 - Unit tests under `tests/unit/core/`, one file per module (`test_errors.py`, `test_retry.py`, etc.).
 - Coverage target: ≥ 85 % line.
 - Hypothesis property tests for `content_hash` (stability under reorderings, sensitivity to value changes).
-- Hypothesis property tests for `redact`: a secret split at any offset across any pieces never survives; streamed output equals one-shot output on text built from every pattern's edges; short values are refused; base64 at any alignment and the URL/JSON/`repr` encodings are caught.
+- Hypothesis property tests for `redact`: a secret split at any offset across any pieces never survives; streamed output equals one-shot output on text built from every pattern's edges and the whitespace that joins runs; short values are refused; base64 at any alignment and the URL/JSON/`repr` encodings are caught; a multi-line value prints as one placeholder whatever its line endings.
 - Tests must run without optional heavy deps installed; `set_seed` tests exercise the no-numpy and no-torch paths.
 - The structlog setup test verifies that `trace_id` propagates across `await` by spawning a task and checking the logger output.
 
@@ -51,7 +51,7 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - Do NOT change the exception hierarchy without an ADR — many `@retry` predicates and fallback rules depend on the classification.
 - The `@retry` decorator must remain compatible with both `async def` and regular `def` — when adding features, test both.
 - `BudgetContext` accounting must be thread/coroutine safe; spend updates use an `anyio.Lock`.
-- `redact.py` must never log, and no error message or `repr` from it may include a value it was given. A new `TokenPattern` needs a bounded quantifier on every repeat, a `max_chars` that covers its longest match plus any lookahead, and no lookbehind. Put the long variable part at the END: a bounded middle segment followed by a required delimiter stops matching a longer token altogether, so a middle bound must be one no real token reaches.
+- `redact.py` must never log, and no error message or `repr` from it may include a value it was given. A new `TokenPattern` needs a bounded quantifier on every repeat, a `max_chars` that covers its longest match plus any lookahead, no lookbehind longer than one character (`(?<![a-z])` and `\b` are fine), and no end-of-text test (`$`, `\Z`). Pattern searches resume one past each match's start, so overlapping and glued matches are all found and merged. Put the long variable part at the END: a bounded middle segment followed by a required delimiter stops matching a longer token altogether, so a middle bound must be one no real token reaches.
 
 ## When to update this file
 

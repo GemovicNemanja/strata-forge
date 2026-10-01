@@ -332,7 +332,7 @@ itself emits the same line over and over.
 since:
 
 ```python
-chunk = await backend.console(job)
+chunk = ConsoleChunk()  # offsets 0, so the first read is rendered like every other
 while not done:
     chunk = await backend.console(
         job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
@@ -375,9 +375,14 @@ with the stream API rather than per-chunk calls, because a secret can straddle
 two incremental reads:
 
 ```python
-redactor = Redactor([hf_token, private_key, known_hosts])
+from strata_forge.compute import ConsoleChunk
+from strata_forge.core import Redactor
+
+# Drop absent optional secrets; a ValidationError (a value too short to match
+# safely) means do not relay this console at all, never relay it raw.
+redactor = Redactor(v for v in (hf_token, private_key, known_hosts) if v)
 out, err = redactor.stream(), redactor.stream()  # one per stream, kept across polls
-chunk = await backend.console(job)
+chunk = ConsoleChunk()  # offsets 0: the first read goes through the streams too
 while not done:
     chunk = await backend.console(
         job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
@@ -385,16 +390,38 @@ while not done:
     if chunk.dropped_bytes:
         render(out.gap(), err.gap())  # a hole: neither side of a cut secret survives
     render(out.feed(chunk.stdout), err.feed(chunk.stderr))
-render(out.flush(), err.flush())  # once the job is terminal
+render(out.flush(), err.flush())  # once the job is terminal, and only then
 ```
 
 The contract a relay relies on:
 
-- **A stream holds back ``max_len - 1`` characters** (a few hundred) and releases
-  them on ``flush``. Its concatenated output equals redacting the whole transcript
-  at once, so piece boundaries never decide what is released. Keep one stream per
-  console stream for the life of the job; a fresh stream per poll is a per-chunk
-  redactor again.
+- **A stream holds back ``max_len - 1`` characters** (a few hundred), plus up
+  to 8 characters of whitespace right after a redacted run, and releases them
+  on ``flush``. Its concatenated output equals redacting the whole transcript
+  at once, so piece boundaries never decide what is released.
+- **One stream per console stream for the life of the job, in memory.** A
+  stream is process state: it cannot be persisted, pickled or copied (it refuses,
+  because what it holds back is raw text). A relay whose polls are otherwise
+  stateless (the read offsets stored on the run's row, any worker taking the
+  next poll) keeps the streams in a per-run registry in the process that polls.
+  A fresh stream per poll is a per-chunk redactor again: the tail of one poll
+  can end inside a token, and a fresh stream cannot know it.
+- **A fresh stream in the middle of a transcript calls ``gap()`` before its
+  first ``feed``.** That covers a relay restart, a lease taken over by another
+  worker, and any resume from stored offsets. The new stream cannot see what
+  the old one held back or which match was still open, so it treats the resume
+  point as a hole and masks the first ``max_len - 1`` characters after it. A
+  private-key block opened before the resume point is unknown to it; a key the
+  relay itself injected is still matched by its own lines, because every value
+  is matched line by line.
+- **``flush`` only when the job is terminal.** Never per poll and never on an
+  idle timeout: a flush releases the held tail as final, so a secret that
+  continues in the next read is released half raw.
+- **The held tail of a stream that dies is lost, not leaked.** A relay that
+  stores the read offsets has already advanced past text its stream never
+  released, so those characters (at most the hold-back) are never shown. This
+  is the safe direction; a relay that wants them has to persist and re-read
+  from an earlier offset, and still call ``gap()`` on its fresh stream.
 - **A hole needs ``gap()``.** ``dropped_bytes`` counts bytes from either stream,
   so call it on both. It masks the held tail and the first ``max_len - 1``
   characters after the hole, and keeps a private-key block that was open across
@@ -406,6 +433,11 @@ The contract a relay relies on:
   to a replacement character on each side. Every credential shape the redactor
   knows is ASCII, so this cannot split one of those; a non-ASCII secret value
   split that way is not matched.
+- **The relay is the only redaction of everything else the job prints.** A
+  runner redacts what it emits itself (phase captions, error events, its
+  failure line on stderr, the ``error`` column), but library logging, warnings
+  and tracebacks from other threads reach the console file as they were
+  written. The console relay is the layer that catches those.
 
 Methods that don't apply to a particular backend raise
 :class:`NotImplementedError` rather than silently passing — that
