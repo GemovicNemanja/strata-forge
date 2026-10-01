@@ -2473,8 +2473,7 @@ class TestResponsesHttpBody:
     A monkeypatched ``aresponses`` cannot see what LiteLLM does to the body on the way
     out (it rebuilds reasoning input items, for one); this captures the JSON that would
     reach the provider. The fake answers a streamed request with server-sent events and
-    any other with JSON, so it also covers LiteLLM faking a stream for a model its own
-    map does not list.
+    any other with JSON.
     """
 
     _BLOB = "gAAAAABo-opaque+encrypted/reasoning=="
@@ -2574,7 +2573,10 @@ class TestResponsesHttpBody:
         assert resp.text == "18C in Oslo"
         self._assert_bodies(bodies)
 
-    async def test_stream_tool_loop_bodies(self, http: Any) -> None:
+    async def test_stream_tool_loop_bodies(self, http: Any, litellm_map_without: Any) -> None:
+        # LiteLLM's bundled map lacks the model, as it lacks every model newer than its
+        # release; LiteLLM would then fake the stream from one blocking call.
+        litellm_map_without("gpt-6.1-sol")
         bodies: list[dict[str, Any]] = []
         http.post("https://api.openai.com/v1/responses").mock(side_effect=self._handler(bodies))
         events = await _collect(
@@ -2585,6 +2587,7 @@ class TestResponsesHttpBody:
         assert isinstance(events[-1], Done)
         assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "18C in Oslo"
         self._assert_bodies(bodies)
+        assert [body.get("stream") for body in bodies] == [True, True]
 
     async def test_azure_uses_the_v1_responses_endpoint(self, http: Any) -> None:
         from pydantic import SecretStr

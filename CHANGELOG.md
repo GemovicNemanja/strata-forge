@@ -49,6 +49,10 @@ to `dev`; cutting a release renames that heading to the version and its date (se
     function-call references) come back on `LLMResponse.provider_items` and the final
     `ResponseChunk`, ride on `AssistantMessage.provider_items` through both tool loops and
     `PendingToolCalls.messages`, and are replayed verbatim to the provider that produced them.
+  - A registered model that LiteLLM's model map lacks is registered with LiteLLM from the Forge
+    registry (streaming flag, limits, prices) before a Responses call. LiteLLM fakes the stream
+    of a model it cannot look up, so the GPT-6 and `gpt-5.5` streams otherwise depended on
+    LiteLLM fetching its remote map at import.
   - `response.incomplete` reports `length` / `content_filter`, `response.failed` and `error`
     events raise a mapped `ProviderError` (`map_responses_error`), and a stream that ends before
     its terminal event raises `ProviderServerError` instead of reporting a clean stop.

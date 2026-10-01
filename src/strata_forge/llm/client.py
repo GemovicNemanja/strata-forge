@@ -775,6 +775,7 @@ class LLMClient:
         request: dict[str, Any],
     ) -> AsyncIterator[ResponseChunk]:
         parser = ResponsesStreamParser(_responses_provider(route), model=route.model)
+        _describe_to_litellm(provider_client, route)
         try:
             async for event in provider_client.aresponses_stream(
                 provider_model_id=route.provider_model_id,
@@ -1268,6 +1269,7 @@ class LLMClient:
     ) -> LLMResponse:
         """One Responses API attempt; the twin of the Chat Completions path in ``_invoke``."""
         wire = _responses_diagnostic_wire(request)
+        _describe_to_litellm(provider_client, route)
         start = time.perf_counter()
         try:
             raw = await provider_client.aresponses(
@@ -1373,6 +1375,15 @@ def _responses_provider(route: ModelRoute) -> ResponsesProvider:
     if route.provider == "azure":
         return "azure"
     return "openai"
+
+
+def _describe_to_litellm(provider_client: ProviderClient, route: ModelRoute) -> None:
+    """Make sure LiteLLM maps the route's model, so it streams as the registry says."""
+    try:
+        model_entry = registry.get(route.model)
+    except RegistryError:
+        return
+    provider_client.describe_to_litellm(route.provider_model_id, model_entry)
 
 
 def _responses_diagnostic_wire(request: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -187,6 +187,15 @@ the request and parses the result. The call surface (`complete`, `stream`,
   `/openai/v1/responses` endpoint. OpenAI routes send `OPENAI_ORG_ID` as the
   `OpenAI-Organization` header, because LiteLLM's Responses path does not
   forward `organization`.
+- Before a Responses call, a registered model LiteLLM's own model map lacks
+  is registered with LiteLLM from the Forge registry (its streaming flag,
+  limits and prices, no `mode`). LiteLLM fakes a stream (one blocking call,
+  replayed as deltas, so nothing shows until the whole turn is done) for any
+  model it cannot look up, and its bundled map trails OpenAI's lineup, so
+  without this whether a new model streamed would depend on LiteLLM's
+  import-time fetch of its remote map. The parser still accepts a faked
+  stream, which a model registered with `streaming: false` gets. A model
+  LiteLLM already maps keeps LiteLLM's entry.
 
 Each turn's output items come back on `LLMResponse.provider_items` (and on
 the final `ResponseChunk` of a stream): an ordered

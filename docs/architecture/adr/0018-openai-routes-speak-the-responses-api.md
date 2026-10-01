@@ -55,6 +55,10 @@ LiteLLM 1.83 offers two ways in:
 - A failure inside the stream (`response.failed`, `error`) raises a `ProviderError` subclass, a
   `response.incomplete` turn reports `length` or `content_filter`, and a stream that ends before
   its terminal event raises. Truncation is never reported as success.
+- LiteLLM fakes a stream (one blocking call, replayed as deltas) for a model its model map lacks,
+  and its bundled map trails OpenAI's lineup, so streaming would depend on its import-time fetch
+  of the remote map. Before a Responses call Forge registers a model LiteLLM cannot look up from
+  its own registry entry (streaming flag, limits, prices); a model LiteLLM maps is left alone.
 - No tool-capable OpenAI model has a Chat Completions route: an `azure` route exists only where
   Azure documents the model for its Responses API.
 - `capabilities.sampling_params` records whether a model takes `temperature` / `top_p` at its
@@ -76,8 +80,11 @@ LiteLLM 1.83 offers two ways in:
 
 - Forge owns a second wire format: the request builder and the event parser must track the
   Responses API. The parser is written against the documented event types and also accepts a
-  stream LiteLLM fakes from a non-streamed call (for a model missing from its own model map),
+  stream LiteLLM fakes from a non-streamed call (a model registered with `streaming: false`),
   where the terminal event carries everything.
+- Forge writes into LiteLLM's process-wide model map. The entries are confined to models LiteLLM
+  does not map and carry no `mode`, so they change only streaming and LiteLLM's own cost figure
+  for those models.
 - `provider_items` are opaque and large (the encrypted reasoning). A caller that persists a
   conversation between calls (a continuation token, a database row) carries them or loses the
   reasoning context; it must never edit them, because a modified blob fails the next request.
