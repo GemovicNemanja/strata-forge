@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING
 from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
     MAX_READ_FILE_BYTES,
+    CleanupError,
     safe_workdir_relpath,
     secrets_guarded_script,
 )
@@ -506,15 +507,17 @@ class LocalBackend:
             state.cancelled = True
 
     async def cleanup(self, job: Job) -> None:
-        """Drop the job's in-memory state and make sure its process is gone.
+        """Make sure the job's process is gone, remove its secrets directory, drop its state.
 
-        Any ``log_dir`` files are left on disk on purpose: they exist to be read AFTER the
-        buffers they mirror have been discarded.
+        Raises :class:`CleanupError` when the secrets directory survives the removal, and keeps
+        the job's state so a later call can retry it: dropping the state first would leave the
+        directory with nothing that names it. Any ``log_dir`` files are left on disk on purpose:
+        they exist to be read AFTER the buffers they mirror have been discarded.
         """
-        state = self._jobs.pop(job.id, None)
+        state = self._jobs.get(job.id)
         if state is None:
             return  # already cleaned up — idempotent
-        _remove_secrets_dir(state)
+        removed = _remove_secrets_dir(state)
         # Make sure any lingering process is gone before we drop the state. Once this returns,
         # the state is dropped and nothing can name the group again, so it sweeps unconditionally
         # for the same reason cancel does — a job whose own process exited may still have left
@@ -522,6 +525,11 @@ class LocalBackend:
         process = state.process
         if process is not None:
             await _reap_group(process)
+        # Once more after the reap: the tree that was just stopped may have been writing there.
+        if not removed and not _remove_secrets_dir(state):
+            err = f"LocalBackend: job {job.id!r}'s secrets directory survived cleanup"
+            raise CleanupError(err)
+        self._jobs.pop(job.id, None)
 
 
 def _write_secrets_file(task: Task) -> Path:
@@ -549,11 +557,20 @@ def _write_secrets_file(task: Task) -> Path:
     return directory
 
 
-def _remove_secrets_dir(state: _JobState) -> None:
-    """Remove the job's secrets directory, if it still has one. Idempotent."""
-    directory, state.secrets_dir = state.secrets_dir, None
-    if directory is not None:
-        shutil.rmtree(directory, ignore_errors=True)
+def _remove_secrets_dir(state: _JobState) -> bool:
+    """Remove the job's secrets directory, if it still has one; return whether it is gone.
+
+    Idempotent. The job forgets the directory only once nothing is left at its path, so a removal
+    that failed is retried by the next call rather than recorded as done.
+    """
+    directory = state.secrets_dir
+    if directory is None:
+        return True
+    shutil.rmtree(directory, ignore_errors=True)
+    if directory.exists(follow_symlinks=False):
+        return False
+    state.secrets_dir = None
+    return True
 
 
 def _slice_stream(

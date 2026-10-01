@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import SecretStr
 
-from strata_forge.compute import Backend, LocalBackend, Task
+from strata_forge.compute import Backend, CleanupError, LocalBackend, Task
 from strata_forge.compute.backends import local as local_backend
+from strata_forge.core.errors import ForgeError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -589,6 +590,61 @@ class TestSecretDelivery:
         )
         await _wait_until_terminal(backend, job)
         assert "FOUND" in await backend.logs(job)
+
+
+class TestVerifiedCleanup:
+    """`cleanup` returns only once the secrets directory is gone, and keeps a job it could not
+    clean, so the retry has something that still names the directory."""
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+    async def test_a_directory_that_survives_raises_and_a_retry_removes_it(
+        self, tmp_path: Path
+    ) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run=(
+                    'd=$(dirname "$FORGE_SECRETS_FILE"); echo "$d" > dir.txt; '
+                    'mkdir "$d/locked" && touch "$d/locked/f" && chmod 500 "$d/locked"'
+                ),
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        secrets_dir = Path((tmp_path / "dir.txt").read_text().strip())
+        locked = secrets_dir / "locked"
+        try:
+            with pytest.raises(CleanupError, match="survived cleanup") as excinfo:
+                await backend.cleanup(job)
+            assert isinstance(excinfo.value, ForgeError)
+            assert str(secrets_dir) not in str(excinfo.value)
+            assert (await backend.status(job)).state == "succeeded"
+        finally:
+            await asyncio.to_thread(locked.chmod, 0o700)
+        await backend.cleanup(job)
+        assert not await asyncio.to_thread(secrets_dir.exists)
+        with pytest.raises(ValueError, match="unknown job"):
+            await backend.status(job)
+
+    async def test_a_job_whose_directory_is_already_gone_is_dropped(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run='dirname "$FORGE_SECRETS_FILE" > dir.txt',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        await backend.cleanup(job)
+        await backend.cleanup(job)
+        secrets_dir = Path((tmp_path / "dir.txt").read_text().strip())
+        assert not await asyncio.to_thread(secrets_dir.exists)
+        with pytest.raises(ValueError, match="unknown job"):
+            await backend.status(job)
 
 
 class TestStreamedOutput:

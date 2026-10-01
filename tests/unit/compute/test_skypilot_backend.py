@@ -11,7 +11,8 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import SecretStr
 
-from strata_forge.compute import Backend, SkyPilotBackend, Task
+from strata_forge.compute import Backend, CleanupError, SkyPilotBackend, Task
+from strata_forge.core.errors import ForgeError
 
 # ---------------------------------------------------------------------------
 # Fake sky.api.sdk
@@ -265,6 +266,34 @@ class TestCleanup:
         job = await backend.submit(Task(name="t", run="hi"))
         await backend.cleanup(job)
         assert fake_sky.downed == [job.metadata["cluster_name"]]
+
+    async def test_a_failed_teardown_raises(
+        self,
+        backend: SkyPilotBackend,
+        fake_sky: _FakeSky,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        job = await backend.submit(Task(name="t", run="hi"))
+        cause = RuntimeError("the cloud refused")
+        monkeypatch.setattr(fake_sky, "down", MagicMock(side_effect=cause))
+        with pytest.raises(CleanupError, match=r"was not torn down \(RuntimeError\)") as excinfo:
+            await backend.cleanup(job)
+        assert isinstance(excinfo.value, ForgeError)
+        assert "the cloud refused" not in str(excinfo.value)
+        assert excinfo.value.__cause__ is cause
+
+    async def test_a_cluster_that_is_already_gone_is_a_success(
+        self,
+        backend: SkyPilotBackend,
+        fake_sky: _FakeSky,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class ClusterDoesNotExist(ValueError):  # noqa: N818 — SkyPilot's own name for it
+            pass
+
+        job = await backend.submit(Task(name="t", run="hi"))
+        monkeypatch.setattr(fake_sky, "down", MagicMock(side_effect=ClusterDoesNotExist("gone")))
+        await backend.cleanup(job)
 
 
 class TestJobOwnership:
