@@ -15,6 +15,7 @@ the batch runner are dep-free.
 from strata_forge.compute.backends import (
     MAX_CONSOLE_CHUNK_BYTES,
     Backend,
+    CleanupError,
     LocalBackend,
     SkyPilotBackend,
     SSHBackend,
@@ -40,6 +41,7 @@ __all__ = [
     "Backend",
     "BatchInferenceResult",
     "BatchInferenceRunner",
+    "CleanupError",
     "ConsoleChunk",
     "Job",
     "JobState",

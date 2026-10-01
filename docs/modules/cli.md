@@ -159,6 +159,10 @@ The SSH backend needs `--ssh-host` and `--ssh-user` (port
 defaults to 22). SkyPilot reads its credentials from the
 standard environment.
 
+`cleanup` removes the saved job only once the backend confirms
+its state is gone. A cleanup that left something behind exits 1
+and keeps `~/.forge/jobs/<id>.json`, so running it again retries.
+
 ## train
 
 Run SFT or DPO over the configured dataset store. Heavy ML

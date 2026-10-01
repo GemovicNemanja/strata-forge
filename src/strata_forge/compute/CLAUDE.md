@@ -55,6 +55,9 @@ The module's ``__init__.py`` re-exports:
   holding the secrets file's absolute path) and
   :data:`SECRETS_FILE_NAME` (its basename).
 - Protocol: :class:`Backend`.
+- Errors: :class:`CleanupError` (``cleanup`` ran and the job's
+  state survived it; also an ``OSError``) and :class:`SubmitCleanupError` (a failed
+  submit left state behind; its ``job`` is the handle to clean).
 - Backend implementations: :class:`LocalBackend`,
   :class:`SSHBackend`, :class:`SkyPilotBackend`.
 - Batch inference: :class:`BatchInferenceRunner`,
@@ -105,6 +108,14 @@ or :class:`ValueError` for input validation.
   (``Task.revalidated()``), since ``model_copy`` skips validators. A
   backend with no such channel raises on non-empty ``secrets``
   (SkyPilot does) rather than falling back to the environment.
+- **Cleanup is verified.** ``cleanup`` returns only once the job's
+  backend-side state is gone (that state may hold its secrets
+  file), raises :class:`CleanupError` when the state survived, and
+  treats state that is already gone as success. The error names the
+  job and an exit status or exception type, never the remote's
+  output or the state's contents. A transport failure propagates as
+  itself. A backend never forgets a job it could not clean, since a
+  retry needs something that still names the state.
 - **Frozen tuple-typed collections** as elsewhere in
   :mod:`strata_forge.*` (datasets, evals, agents, rag). Pydantic
   ``frozen=True`` plus ``extra="forbid"``.

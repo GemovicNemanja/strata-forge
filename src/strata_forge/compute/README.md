@@ -20,6 +20,12 @@ private file the job finds through `FORGE_SECRETS_FILE`, never as an
 environment variable or on a command line. A backend with no private
 channel (SkyPilot) refuses a task that carries secrets.
 
+Cleanup is verified: `cleanup` returns only once a job's backend-side
+state (its remote workdir, and any secrets file left in it) is gone,
+raises `CleanupError` when that state survived, and treats state that
+is already gone as success, so an orchestrator can retry it until it
+succeeds.
+
 See [ADR 0013](../../../docs/architecture/adr/0013-compute-task-and-backend-shapes.md)
 for the task-as-data + Protocol design rationale,
 [ADR 0019](../../../docs/architecture/adr/0019-secrets-travel-beside-the-task.md)
