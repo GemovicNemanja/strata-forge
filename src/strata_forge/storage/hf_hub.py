@@ -43,7 +43,9 @@ class HFHubClient:
             to :class:`strata_forge.config.HuggingFaceConfig` (which reads
             ``HF_TOKEN`` from the environment or ``.env``), then to
             the ``huggingface_hub`` library's own resolution (env
-            var or cached login).
+            var or cached login). ``False`` sends no token and skips
+            every fallback: the call is anonymous whatever credential
+            the machine holds.
         endpoint: Custom Hub endpoint URL. When ``None``, falls back
             to :class:`strata_forge.config.HuggingFaceConfig` (``HF_ENDPOINT``).
             Default is the public ``https://huggingface.co``.
@@ -55,16 +57,16 @@ class HFHubClient:
     def __init__(
         self,
         *,
-        token: str | None = None,
+        token: str | Literal[False] | None = None,
         endpoint: str | None = None,
         api: Any | None = None,
     ) -> None:
-        self._token = token
+        self._token: str | Literal[False] | None = token
         self._endpoint = endpoint
         self._explicit_api = api
         self._api_cached: Any | None = None
 
-    def _resolve_token_and_endpoint(self) -> tuple[str | None, str | None]:
+    def _resolve_token_and_endpoint(self) -> tuple[str | Literal[False] | None, str | None]:
         """Apply strata_forge.config fallback for any kwarg left as ``None``.
 
         Settings are loaded lazily so importing :mod:`strata_forge.storage`

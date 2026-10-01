@@ -103,6 +103,9 @@ a shape we can't make sense of), or :class:`NotImplementedError`
   ``huggingface_hub``'s own resolver (env var or cached login).
   The fallback runs lazily inside ``_api`` so importing
   :mod:`strata_forge.storage` stays free of side effects.
+  ``token=False`` skips every layer and is passed through to
+  ``huggingface_hub`` as ``False`` (anonymous); never collapse it
+  to ``None``, which would re-enable the fallback.
 - **Use ``[storage]`` for any cloud backend.** ``fsspec`` itself
   is tiny, but the protocol-specific packages (``s3fs``,
   ``gcsfs``, ``adlfs``) are not. The extra brings them all.
