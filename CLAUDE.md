@@ -209,6 +209,14 @@ A three-tier flow — **every** change follows it; never commit directly to `dev
 
 forge is a library, not a service, so it has no deploy of its own — but its branches feed the sibling **strata-server**'s deploys: the server's **staging** (`strata-server` `dev`) bundles forge **`dev`**, and the server's **production** (`strata-server` `main`) bundles forge **`main`**. So promote a forge change to `main` only once the server staging that consumes forge `dev` looks good, and keep forge `dev` green — it gates the whole staging chain.
 
+### Native model routes — the registry ships first
+
+`src/strata_forge/llm/registry_data.yaml` is the **allowlist for every vendor-native chat route the Strata app offers**. strata-server runs chat in-process on the forge it bundles, and `routing.resolve()` refuses (`RegistryError(reason="unknown_model")`) any id on the `anthropic` / `openai` / `vertex` / `bedrock` / `azure` routes that the registry does not carry; only `openai_compat` (OpenRouter) passes ids through. An app catalog entry naming a native route for an unregistered model therefore fails with "Unknown model" for every user who holds only that vendor's key. When a vendor's lineup changes, the order is fixed:
+
+1. **Register the models in forge first.** Copy ids, context window, max output, pricing and capability flags from the vendor's own documentation (Anthropic's models overview and pricing pages; OpenAI's per-model pages) — never from memory, the app's catalog, LiteLLM's model map or OpenRouter — and name the page in the entry's source comment. Read the endpoint and parameter caveats, not just the feature list: a capability flag states what forge's transport can do (the `openai` provider speaks Chat Completions), so a model that takes tools only through the Responses API is `tool_calling: false`, and one that needs a fixed `reasoning_effort` for tools carries `tool_call_reasoning_effort`. Update `CURRENT_LINEUP` in `tests/unit/llm/test_routing.py` in the same change, merge to `dev`, and cut a release (§9b) before the server's production promotion.
+2. **Then strata-server picks the registry up** — re-lock / redeploy against forge `dev` for staging, bump to the release for production.
+3. **Only then may the app catalog add the native route**, and only for a model whose entry has `tool_calling: true`, because the app's chat always sends tools. A model forge cannot carry natively stays on the app's OpenRouter route.
+
 ---
 
 ## 9. How to add a new top-level module

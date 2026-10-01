@@ -8,6 +8,7 @@ alwaysApply: false
 - Every provider call routes through LiteLLM via the `ProviderClient` base. **Never import provider SDKs (`anthropic`, `openai`, `google-cloud-aiplatform`, `boto3`) outside `src/strata_forge/llm/providers/`** — the only escape hatch is the `provider_extras={...}` passthrough on `LLMClient.complete`.
 - New errors raised from this module must subclass `ProviderError` (in `strata_forge.core.errors`). Use `map_litellm_exception()` at the seam — never let raw LiteLLM exceptions bubble out.
 - Pricing and registry edits go in `registry_data.yaml` with the source link in a YAML comment. **Never hard-code pricing or model IDs in Python.**
+- `registry_data.yaml` is the allowlist for every vendor-native route: an unregistered id raises `unknown_model` unless pinned to `openai_compat`. Copy ids, limits, prices and capabilities from the vendor's own model pages, never from memory; capability flags describe what forge's transport can do (the `openai` provider is Chat Completions). Register and release a vendor's new models before any downstream catalog offers them natively (root `CLAUDE.md` §8, "Native model routes").
 - Cache key is provider-agnostic: a hit on `claude-opus-4-7` is valid regardless of which provider route served the original call.
 - Streaming responses are NOT cached.
 - Structured output and tool calling can be combined; when both are requested, structured output is exposed as a single forced tool internally for best fidelity across providers.
