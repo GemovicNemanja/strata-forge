@@ -70,7 +70,12 @@ from strata_forge.training.methods import (
     check_format,
     pick_method,
 )
-from strata_forge.training.peft import LoRAConfig, QLoRAConfig
+from strata_forge.training.peft import (
+    LoRAConfig,
+    MissingBitsAndBytesError,
+    QLoRAConfig,
+    require_bitsandbytes,
+)
 from strata_forge.training.progress import ProgressEvent, coerce_int, numeric_metrics
 
 if TYPE_CHECKING:
@@ -146,8 +151,9 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> FinetuneSpec:
     """Parse + validate the spec, including the pairings only this module can check.
 
     Every check here is one that would otherwise fail on the GPU: an unknown method, a dataset
-    shape the method cannot train on, a merge asked for with no adapter to merge. They cost
-    milliseconds at launch and minutes-to-hours anywhere later.
+    shape the method cannot train on, a merge asked for with no adapter to merge, a QLoRA run on
+    a machine that cannot quantise. They cost milliseconds at launch and minutes-to-hours
+    anywhere later.
     """
     spec = load_config(FinetuneSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
@@ -162,6 +168,12 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> FinetuneSpec:
     if spec.merge_adapter and spec.adapter == "none":
         msg = "merge_adapter has nothing to merge: the run trains full weights (adapter='none')"
         raise RunError(msg)
+    if spec.adapter == "qlora":
+        # Before the dataset download, not at the model load where transformers would find it.
+        try:
+            require_bitsandbytes()
+        except MissingBitsAndBytesError as exc:
+            raise RunError(str(exc)) from exc
     return spec
 
 

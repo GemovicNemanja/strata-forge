@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from strata_forge.training.peft import LoRAConfig, QLoRAConfig
+from strata_forge.training.peft import LoRAConfig, MissingBitsAndBytesError, QLoRAConfig
 from strata_forge.training.sft import SFTConfig, SFTRunner, SFTRunResult
 
 
@@ -197,6 +197,7 @@ class TestSFTRunner:
         assert fake_ml_stack["tokenizer_loaded"] == "gpt2"
         assert fake_ml_stack["trl_config_kwargs"]["num_train_epochs"] == 2.0
 
+    @pytest.mark.usefixtures("bitsandbytes_installed")
     def test_train_with_qlora_passes_bnb_config(self, fake_ml_stack: dict[str, Any]) -> None:
         cfg = SFTConfig(model_id="gpt2", output_dir="./out")
         runner = SFTRunner(cfg, peft_config=QLoRAConfig())
@@ -205,6 +206,17 @@ class TestSFTRunner:
         assert "quantization_config" in fake_ml_stack["model_loaded"]["kwargs"]
         # peft_config also flowed into the trainer.
         assert "peft_config" in fake_ml_stack["trainer_kwargs"]
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_qlora_without_bitsandbytes_stops_before_the_model_load(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        cfg = SFTConfig(model_id="gpt2", output_dir="./out")
+        runner = SFTRunner(cfg, peft_config=QLoRAConfig())
+        with pytest.raises(MissingBitsAndBytesError):
+            runner.train(train_dataset=["row1"])
+        assert fake_ml_stack["model_loaded"] is None
+        assert fake_ml_stack["bnb_kwargs"] is None
 
     def test_train_with_lora_passes_peft_config(self, fake_ml_stack: dict[str, Any]) -> None:
         cfg = SFTConfig(model_id="gpt2", output_dir="./out")

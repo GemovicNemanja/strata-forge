@@ -164,6 +164,57 @@ class TestLoadSpec:
         monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter="none"))
         assert fr.load_spec().adapter == "none"
 
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_a_qlora_run_without_bitsandbytes_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The quantising model load is the first thing that would notice, and it runs after the
+        # dataset and the weights have been downloaded onto a rented GPU.
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter="qlora"))
+        with pytest.raises(RunError, match=r"adapter 'qlora' needs bitsandbytes"):
+            fr.load_spec()
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    def test_a_qlora_run_with_bitsandbytes_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter="qlora"))
+        assert fr.load_spec().adapter == "qlora"
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    @pytest.mark.parametrize("adapter", ["none", "lora"])
+    def test_only_qlora_needs_bitsandbytes(
+        self, monkeypatch: pytest.MonkeyPatch, adapter: str
+    ) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter=adapter))
+        assert fr.load_spec().adapter == adapter
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_the_refusal_is_the_runs_reported_failure_and_nothing_is_downloaded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import asyncio
+
+        downloads: list[str] = []
+
+        def _no_download(_spec: Any, split: str, _token: str | None) -> list[dict[str, Any]]:
+            downloads.append(split)
+            return []
+
+        monkeypatch.setattr(fr, "_load_split", _no_download)
+        progress = tmp_path / "progress.jsonl"
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG", _spec_json(adapter="qlora", progress_path=str(progress))
+        )
+        monkeypatch.delenv("HF_WRITE_TOKEN", raising=False)
+        assert asyncio.run(fr.main()) == 1
+        assert downloads == []
+        assert "run failed: adapter 'qlora' needs bitsandbytes" in capsys.readouterr().err
+        # The progress file is the run's own account of the failure, so the reason is there too.
+        events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
+        assert events[-1]["kind"] == "error"
+        assert "adapter 'qlora' needs bitsandbytes" in events[-1]["message"]
+
 
 # ------------------------------ adapter + trainer config ---------------------
 

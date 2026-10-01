@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from strata_forge.training.peft import LoRAConfig
+from strata_forge.training.peft import LoRAConfig, MissingBitsAndBytesError, QLoRAConfig
 from strata_forge.training.preference import (
     DPOConfig,
     GRPOConfig,
@@ -73,6 +73,7 @@ class TestConfigs:
 def fake_ml_stack(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     state: dict[str, Any] = {
         "model_loaded": None,
+        "bnb_kwargs": None,
         "tokenizer_loaded": None,
         "trl_config_kwargs": None,
         "trainer_kwargs": None,
@@ -99,9 +100,14 @@ def fake_ml_stack(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             state["tokenizer_loaded"] = model_id
             return MagicMock(name=f"tokenizer({model_id})")
 
+    class _FakeBnbConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            state["bnb_kwargs"] = kwargs
+
     fake_transformers = types.ModuleType("transformers")
     fake_transformers.AutoModelForCausalLM = _FakeAutoModel  # type: ignore[attr-defined]
     fake_transformers.AutoTokenizer = _FakeAutoTokenizer  # type: ignore[attr-defined]
+    fake_transformers.BitsAndBytesConfig = _FakeBnbConfig  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
     class _FakeLoraConfig:
@@ -213,6 +219,24 @@ class TestPreferenceRunner:
         runner = PreferenceRunner(cfg, peft_config=LoRAConfig())
         runner.train(train_dataset=["row"])
         assert "peft_config" in fake_ml_stack["trainer_kwargs"]
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    def test_qlora_passes_bnb_config(self, fake_ml_stack: dict[str, Any]) -> None:
+        cfg = DPOConfig(model_id="gpt2", output_dir="./out")
+        PreferenceRunner(cfg, peft_config=QLoRAConfig()).train(train_dataset=["row"])
+        assert fake_ml_stack["bnb_kwargs"]["load_in_4bit"] is True
+        assert "quantization_config" in fake_ml_stack["model_loaded"]["kwargs"]
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_qlora_without_bitsandbytes_stops_before_the_model_load(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        cfg = DPOConfig(model_id="gpt2", output_dir="./out")
+        runner = PreferenceRunner(cfg, peft_config=QLoRAConfig())
+        with pytest.raises(MissingBitsAndBytesError):
+            runner.train(train_dataset=["row"])
+        assert fake_ml_stack["model_loaded"] is None
+        assert fake_ml_stack["bnb_kwargs"] is None
 
     def test_missing_extra_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "transformers", None)

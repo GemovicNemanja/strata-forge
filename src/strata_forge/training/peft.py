@@ -3,21 +3,79 @@
 Forge wraps ``peft.LoraConfig`` with Pydantic models that ship
 sensible defaults for typical Forge fine-tuning runs and add the
 quantization toggles that distinguish QLoRA from plain LoRA. The
-peft / bitsandbytes packages are imported lazily inside
-:meth:`LoRAConfig.to_peft_config` so importing this module works
-without the ``[finetuning]`` extra.
+peft / transformers packages are imported lazily inside the ``to_*``
+builders so importing this module works without the ``[finetuning]``
+extra; bitsandbytes is only ever looked up, never imported, because
+transformers imports it itself when it quantises the model.
 """
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from strata_forge.core.errors import ForgeError
+
 __all__ = [
     "LoRAConfig",
+    "MissingBitsAndBytesError",
     "QLoRAConfig",
+    "require_bitsandbytes",
 ]
+
+
+class MissingBitsAndBytesError(ForgeError, ImportError):
+    """QLoRA was asked for on a machine without a usable bitsandbytes.
+
+    Raised when the package is not installed, or when its recorded version is below the floor the
+    ``[finetuning]`` extra pins. An ``ImportError`` as well, so a caller already handling a
+    missing extra handles this too.
+    """
+
+
+# The ``[finetuning]`` extra's lower bound; a test holds the two equal.
+_BITSANDBYTES_FLOOR = (0, 49)
+
+
+def _bitsandbytes_version() -> str | None:
+    """The installed distribution's version, or ``None`` when no metadata records one."""
+    try:
+        return importlib.metadata.version("bitsandbytes")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def require_bitsandbytes() -> None:
+    """Refuse QLoRA up front when bitsandbytes is missing or older than the extra's floor.
+
+    ``transformers.BitsAndBytesConfig`` constructs without the package, so the absence otherwise
+    surfaces only inside ``from_pretrained`` -- after the dataset and the model weights have been
+    downloaded. A lookup rather than an import: importing bitsandbytes loads its CUDA library,
+    which is the model load's job, not a precondition check's. The version comes from the
+    distribution's metadata for the same reason; a version that metadata does not record, or
+    that does not start with ``major.minor``, is not refused.
+    """
+    if importlib.util.find_spec("bitsandbytes") is None:
+        msg = (
+            "adapter 'qlora' needs bitsandbytes to quantise the model, and it is not installed. "
+            "Install it with: pip install 'strata-forge[finetuning]' (which includes it), "
+            "or train with adapter 'lora'."
+        )
+        raise MissingBitsAndBytesError(msg)
+    installed = _bitsandbytes_version()
+    release = re.match(r"(\d+)\.(\d+)", installed or "")
+    if release is not None and (int(release[1]), int(release[2])) < _BITSANDBYTES_FLOOR:
+        floor = ".".join(str(part) for part in _BITSANDBYTES_FLOOR)
+        msg = (
+            f"adapter 'qlora' needs bitsandbytes>={floor} to quantise the model, and "
+            f"{installed} is installed. Upgrade it with: pip install 'bitsandbytes>={floor},<1', "
+            "or train with adapter 'lora'."
+        )
+        raise MissingBitsAndBytesError(msg)
 
 
 type _TaskType = Literal[
@@ -110,9 +168,13 @@ class QLoRAConfig(BaseModel):
         """Build a ``transformers.BitsAndBytesConfig``.
 
         Raises:
+            MissingBitsAndBytesError: When bitsandbytes is not
+                installed, which every model load with this config
+                would otherwise discover only after downloading.
             ImportError: When the ``[finetuning]`` extra is not
                 available.
         """
+        require_bitsandbytes()
         try:
             transformers_mod: Any = __import__("transformers")
         except ImportError as exc:

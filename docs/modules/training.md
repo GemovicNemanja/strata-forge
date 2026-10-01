@@ -18,6 +18,8 @@ Integration points:
 - **Configs:** :class:`SFTConfig`, :class:`DPOConfig`,
   :class:`ORPOConfig`, :class:`KTOConfig`, :class:`GRPOConfig`,
   :class:`LoRAConfig`, :class:`QLoRAConfig`.
+- **QLoRA precondition:** :func:`require_bitsandbytes`,
+  :class:`MissingBitsAndBytesError`.
 - **Runners:** :class:`SFTRunner`, :class:`PreferenceRunner`.
 - **Result shapes:** :class:`SFTRunResult`,
   :class:`PreferenceRunResult`.
@@ -200,6 +202,39 @@ QLoRA, ``to_bnb_config()`` additionally builds the
 ``transformers.BitsAndBytesConfig`` (passed via
 ``quantization_config=`` to ``from_pretrained``).
 
+QLoRA needs **bitsandbytes** on the machine that loads the model: transformers quantises the
+weights inside ``from_pretrained`` and refuses to start without it. The ``[finetuning]`` extra
+installs it (``bitsandbytes>=0.49,<1``), and it is also the one dependency whose absence would
+otherwise surface last, because ``BitsAndBytesConfig`` constructs without it. So the check is made
+up front instead:
+
+```python
+from strata_forge.training import MissingBitsAndBytesError, require_bitsandbytes
+
+require_bitsandbytes()  # MissingBitsAndBytesError when it is missing or below 0.49
+```
+
+``to_bnb_config()`` calls it before building anything, the ``finetune_runner`` calls it while
+validating the spec (before the dataset download) for ``adapter="qlora"``, and the
+``strata-forge train ... --adapter qlora`` commands call it before resolving the dataset.
+:class:`MissingBitsAndBytesError` is a ``ForgeError`` and an ``ImportError``. The check looks the
+package up without importing it, since importing it loads its native library, and reads its version
+from the distribution's metadata: a bitsandbytes below the extra's floor (one installed outside the
+extra, which pip would otherwise have upgraded) is refused the same way, naming the installed
+version. A version the metadata does not record is not refused.
+
+Why ``0.49``: the floor has to carry a CUDA 13.0 kernel (what the ``torch`` pin resolves to on
+Linux; first shipped in 0.48) and publish a wheel on each platform that ``torch>=2.9`` publishes a
+Python 3.14 wheel for (Linux x86_64 and aarch64, Windows x64, macOS arm64; the macOS wheel first
+shipped in 0.49). Because every one of those platforms has a wheel, the pin needs no platform
+marker, and QLoRA is not ruled out on any of them (bitsandbytes lists CUDA, Apple MPS and CPU among
+its devices). The cost is macOS 12 and 13: bitsandbytes' macOS wheel needs macOS 14 and it
+publishes no sdist to build from, so an Apple Silicon Mac on 12 or 13, where ``torch`` would settle
+on an older macOS 11 wheel, cannot install ``[finetuning]``. Both are past Apple's support window.
+A marker such as ``sys_platform != 'darwin' or platform_release >= '23'`` would keep them
+installable without QLoRA; it is not used, since those releases are out of support and the marker
+would be one more thing a resolver has to get right.
+
 ## Chat-template formatting
 
 ```python
@@ -362,10 +397,10 @@ adapter through the runner's own spec path and its own `build_trainer`, down to
 the TRL config, the peft config, the bitsandbytes config and the trainer call,
 whose keywords are bound against the installed trainer's signature (a model and
 a tokenizer are passed in, so nothing is downloaded). A renamed kwarg fails there
-on the day the release ships. A QLoRA case also checks the machine can quantise:
-while `[finetuning]` does not install `bitsandbytes`, the job warns that QLoRA
-cannot load a model on a fine-tuning machine, and once the extra names it, a
-missing install fails. It also runs on any branch push (main excepted) that
+on the day the release ships. A QLoRA case first checks the machine can
+quantise: it fails when `[finetuning]` stops naming `bitsandbytes` or the install
+lacks it, before it builds anything, so the gap is reported as itself rather than
+as the runner's own refusal. It also runs on any branch push (main excepted) that
 changes `pyproject.toml`, so a pin change is resolved fresh before it merges.
 
 Because it executes upstream code no lockfile vouches for, the install never
@@ -385,17 +420,27 @@ that need them:
   :meth:`PreferenceRunner._load_modules`.
 - ``peft`` inside :meth:`LoRAConfig.to_peft_config`.
 - ``transformers`` + ``torch`` inside
-  :meth:`QLoRAConfig.to_bnb_config`.
+  :meth:`QLoRAConfig.to_bnb_config`, after
+  :func:`require_bitsandbytes` has looked ``bitsandbytes`` up
+  (never imported: transformers does that when it quantises).
 
 When any of these is missing, the corresponding method raises
 :class:`ImportError` with the install hint
-``pip install 'ai-forge[finetuning]'``.
+``pip install 'strata-forge[finetuning]'`` (for ``bitsandbytes``,
+the :class:`MissingBitsAndBytesError` subclass).
 
 ## Troubleshooting
 
 - **`ImportError: The [finetuning] extra is required`:** install
   the extra; on CPU-only macOS, expect lengthy wheel builds for
   ``torch``.
+- **`adapter 'qlora' needs bitsandbytes`:** the machine has the
+  training stack but not ``bitsandbytes`` (an install that predates
+  it joining ``[finetuning]``, or one made without the extra).
+  Reinstall ``strata-forge[finetuning]``, or train with
+  ``adapter="lora"``. When the message names an installed version,
+  that ``bitsandbytes`` is older than the extra's floor; upgrade it
+  with the ``pip install`` line the message prints.
 - **OOM in SFT:** lower ``per_device_batch_size``, raise
   ``gradient_accumulation_steps``, enable
   ``gradient_checkpointing`` (default on), or switch to QLoRA.

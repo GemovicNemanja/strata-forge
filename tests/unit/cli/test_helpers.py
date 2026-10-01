@@ -40,6 +40,12 @@ class TestErrorExit:
             error_exit("bad")
         assert exc_info.value.exit_code == 1
 
+    def test_prints_brackets_literally(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # An extra's name and an exception's text both carry brackets rich would take as markup.
+        with pytest.raises(typer.Exit):
+            error_exit("pip install 'strata-forge[finetuning]' failed: [/x]")
+        assert "strata-forge[finetuning]' failed: [/x]" in capsys.readouterr().err
+
 
 class TestStoreFactories:
     def test_prompt_store_falls_back_to_memory(self, monkeypatch: pytest.MonkeyPatch) -> None:

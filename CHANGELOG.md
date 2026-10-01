@@ -38,18 +38,43 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   requests and results parquet, and the vLLM command line through the installed vLLM's own
   entrypoint parser, with each `VLLM_` variable the runner sets checked as one vLLM still reads.
   A breaking upstream release fails there the day it ships instead of on a user's machine. A
-  QLoRA case warns while `[finetuning]` does not install `bitsandbytes` (QLoRA cannot load a model
-  on such a machine) and fails once the extra names it but the install lacks it. It also runs on
+  QLoRA case first checks that `[finetuning]` names `bitsandbytes` and the install has it (QLoRA
+  cannot load a model without it), and fails before it builds anything otherwise. It also runs on
   any branch push other than `main` that changes `pyproject.toml`, and a manual run takes an
   `override` of plain version pins (no URL, path or option) as a drill that must turn it red. The
   schedule, which runs from `main`, only dispatches the job on `dev` and reports that run's
   result, so the unlocked install never runs in the default branch's cache scope.
+- `strata_forge.training.require_bitsandbytes()` and `MissingBitsAndBytesError` (a `ForgeError`
+  and an `ImportError`): the up-front check that a QLoRA run can quantise its model. It looks
+  `bitsandbytes` up without importing it, and refuses one whose metadata records a version below
+  the `[finetuning]` floor, naming that version. `QLoRAConfig.to_bnb_config()` calls it first.
 
 ### Changed
 
 - `sanitize` and every runner message (phase captions, error events, the stderr failure reason)
   go through `Redactor`, so they also catch the token's encoded forms and the wider set of
   credential shapes. A write token shorter than 8 characters fails the run before any work.
+- The `[finetuning]` extra installs `bitsandbytes>=0.49,<1` (and so does `[all]`). There is no
+  platform marker because from 0.49 bitsandbytes has a wheel for every platform `torch>=2.9` ships
+  a Python 3.14 wheel for; 0.49 is the first release with both that macOS wheel and a CUDA 13.0
+  kernel, which the `torch` pin resolves to on Linux. The macOS wheel needs macOS 14 and
+  bitsandbytes publishes no sdist, so an Apple Silicon Mac on macOS 12 or 13 can no longer install
+  `[finetuning]`. A dependency pin change, so the release that carries it is a minor one
+  (`CLAUDE.md` §9b).
+- `strata-forge train sft|dpo` builds the adapter config before it resolves the dataset, so the
+  QLoRA check runs before the dataset store is read.
+
+### Fixed
+
+- A QLoRA fine-tune on a freshly provisioned machine failed: `[finetuning]` did not install
+  `bitsandbytes`, and since `BitsAndBytesConfig` constructs without it, the run only failed inside
+  `from_pretrained`, after the dataset and the model weights had been downloaded. The extra now
+  installs it, and a QLoRA run on a machine without it is refused before anything is downloaded:
+  `finetune_runner` fails the spec check with `adapter 'qlora' needs bitsandbytes`, and so does
+  `strata-forge train ... --adapter qlora`.
+- CLI error messages printed bracketed text as rich markup, so an extra's name
+  (`strata-forge[finetuning]`) vanished from the line and exception text containing `[/...]` could
+  raise inside the error path. They are printed literally.
 
 ### Security
 

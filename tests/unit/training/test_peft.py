@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
 from typing import Any
@@ -9,7 +10,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from strata_forge.training.peft import LoRAConfig, QLoRAConfig
+from strata_forge.core.errors import ForgeError
+from strata_forge.training import peft as peft_module
+from strata_forge.training.peft import (
+    LoRAConfig,
+    MissingBitsAndBytesError,
+    QLoRAConfig,
+    require_bitsandbytes,
+)
 
 
 class TestLoRAConfig:
@@ -108,6 +116,7 @@ class TestQLoRAConfig:
         QLoRAConfig().to_peft_config()
         assert captured["r"] == 64
 
+    @pytest.mark.usefixtures("bitsandbytes_installed")
     def test_to_bnb_config_builds_with_dtype(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}
 
@@ -130,11 +139,13 @@ class TestQLoRAConfig:
         assert captured["bnb_4bit_use_double_quant"] is True
         assert captured["bnb_4bit_compute_dtype"] == "BFLOAT16_DTYPE"
 
+    @pytest.mark.usefixtures("bitsandbytes_installed")
     def test_to_bnb_config_missing_transformers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "transformers", None)
         with pytest.raises(ImportError, match=r"\[finetuning\] extra"):
             QLoRAConfig().to_bnb_config()
 
+    @pytest.mark.usefixtures("bitsandbytes_installed")
     def test_to_bnb_config_missing_torch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_transformers = types.ModuleType("transformers")
         fake_transformers.BitsAndBytesConfig = MagicMock()  # type: ignore[attr-defined]
@@ -142,3 +153,114 @@ class TestQLoRAConfig:
         monkeypatch.setitem(sys.modules, "torch", None)
         with pytest.raises(ImportError, match=r"\[finetuning\] extra"):
             QLoRAConfig().to_bnb_config()
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_to_bnb_config_refuses_without_bitsandbytes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The config itself would construct; the model load is where the absence would surface.
+        bnb_config = MagicMock()
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.BitsAndBytesConfig = bnb_config  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+        monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+        with pytest.raises(MissingBitsAndBytesError, match="bitsandbytes"):
+            QLoRAConfig().to_bnb_config()
+        bnb_config.assert_not_called()
+
+
+class TestRequireBitsandbytes:
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_names_the_package_the_extra_and_the_way_out(self) -> None:
+        with pytest.raises(MissingBitsAndBytesError) as exc_info:
+            require_bitsandbytes()
+        message = str(exc_info.value)
+        assert "bitsandbytes" in message
+        assert "strata-forge[finetuning]" in message
+        assert "adapter 'lora'" in message
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_is_a_forge_error_and_an_import_error(self) -> None:
+        # ForgeError for the hierarchy; ImportError so a missing-extra handler already catches it.
+        with pytest.raises(ForgeError):
+            require_bitsandbytes()
+        with pytest.raises(ImportError):
+            require_bitsandbytes()
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    def test_passes_when_installed(self) -> None:
+        require_bitsandbytes()
+
+    def test_looks_the_package_up_without_importing_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Importing bitsandbytes loads its CUDA library; the check must not be what does that.
+        import importlib.util
+
+        looked_up: list[str] = []
+        real_find_spec = importlib.util.find_spec
+
+        def _find_spec(name: str, package: str | None = None) -> Any:
+            looked_up.append(name)
+            return real_find_spec(name, package)
+
+        monkeypatch.delitem(sys.modules, "bitsandbytes", raising=False)
+        monkeypatch.setattr(importlib.util, "find_spec", _find_spec)
+        with contextlib.suppress(MissingBitsAndBytesError):
+            require_bitsandbytes()
+        assert looked_up == ["bitsandbytes"]
+        assert "bitsandbytes" not in sys.modules
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    @pytest.mark.parametrize("installed", ["0.45.5", "0.48.2", "0.48.2.dev0"])
+    def test_refuses_a_version_below_the_extras_floor(
+        self, monkeypatch: pytest.MonkeyPatch, installed: str
+    ) -> None:
+        # Installed outside the extra: pip would have upgraded it to satisfy the pin.
+        monkeypatch.setattr(peft_module, "_bitsandbytes_version", lambda: installed)
+        with pytest.raises(MissingBitsAndBytesError) as exc_info:
+            require_bitsandbytes()
+        message = str(exc_info.value)
+        assert "needs bitsandbytes>=0.49" in message
+        assert f"{installed} is installed" in message
+        assert "pip install 'bitsandbytes>=0.49,<1'" in message
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    @pytest.mark.parametrize("installed", ["0.49.0", "0.50.2", "1.0.0", None, "unknown"])
+    def test_accepts_the_floor_and_above_and_an_unreadable_version(
+        self, monkeypatch: pytest.MonkeyPatch, installed: str | None
+    ) -> None:
+        monkeypatch.setattr(peft_module, "_bitsandbytes_version", lambda: installed)
+        require_bitsandbytes()
+
+    def test_the_floor_is_the_extras_lower_bound(self) -> None:
+        # The check and the pin must move together, or the check refuses what the extra installs.
+        import re
+        import tomllib
+        from pathlib import Path
+
+        pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+        extras = tomllib.loads(pyproject.read_text())["project"]["optional-dependencies"]
+        pins = [req for req in extras["finetuning"] if req.startswith("bitsandbytes")]
+        assert len(pins) == 1
+        lower = re.search(r">=(\d+)\.(\d+)", pins[0])
+        assert lower is not None
+        floor = peft_module._BITSANDBYTES_FLOOR  # pyright: ignore[reportPrivateUsage]
+        assert (int(lower[1]), int(lower[2])) == floor
+
+    def test_the_version_comes_from_the_distribution_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib.metadata
+
+        def _not_installed(_name: str) -> str:
+            raise importlib.metadata.PackageNotFoundError(_name)
+
+        monkeypatch.setattr(importlib.metadata, "version", _not_installed)
+        assert peft_module._bitsandbytes_version() is None  # pyright: ignore[reportPrivateUsage]
+
+        def _installed(_name: str) -> str:
+            return "0.50.2"
+
+        monkeypatch.setattr(importlib.metadata, "version", _installed)
+        assert peft_module._bitsandbytes_version() == "0.50.2"  # pyright: ignore[reportPrivateUsage]

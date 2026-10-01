@@ -139,6 +139,7 @@ class TestSFT:
         assert isinstance(peft, LoRAConfig)
         assert peft.r == 32
 
+    @pytest.mark.usefixtures("bitsandbytes_installed")
     def test_qlora_adapter(
         self,
         store_with_dataset: InMemoryDatasetStore,
@@ -164,6 +165,34 @@ class TestSFT:
 
         peft = fake_sft_runner["init_args"]["peft_config"]
         assert isinstance(peft, QLoRAConfig)
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_qlora_without_bitsandbytes_fails_before_the_dataset(
+        self,
+        empty_store: InMemoryDatasetStore,
+        fake_sft_runner: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        # The store is empty: had the dataset been resolved first, this would fail on that.
+        result = runner.invoke(
+            app,
+            [
+                "train",
+                "sft",
+                "--model",
+                "gpt2",
+                "--dataset",
+                "missing",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--adapter",
+                "qlora",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "adapter 'qlora' needs bitsandbytes" in result.output
+        assert "strata-forge[finetuning]" in result.output
+        assert fake_sft_runner["init_args"] is None
 
     def test_missing_dataset_rejected(
         self,
@@ -241,6 +270,34 @@ class TestDPO:
         cfg = fake_pref_runner["init_args"]["config"]
         assert cfg.method == "dpo"
         assert cfg.beta == 0.2
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_qlora_without_bitsandbytes_fails_before_the_dataset(
+        self,
+        empty_store: InMemoryDatasetStore,
+        fake_pref_runner: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        # The store is empty: had the dataset been resolved first, this would fail on that.
+        result = runner.invoke(
+            app,
+            [
+                "train",
+                "dpo",
+                "--model",
+                "./sft-out",
+                "--dataset",
+                "missing",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--adapter",
+                "qlora",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "adapter 'qlora' needs bitsandbytes" in result.output
+        assert "strata-forge[finetuning]" in result.output
+        assert fake_pref_runner["init_args"] is None
 
     def test_missing_dataset_rejected(
         self,

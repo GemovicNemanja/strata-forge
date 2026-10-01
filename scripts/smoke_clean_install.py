@@ -364,35 +364,27 @@ def bitsandbytes_declared(extra: str = "finetuning") -> bool:
     return False
 
 
-#: Gaps already annotated in this process, so a gap shared by many cases is reported once.
-_REPORTED_GAPS: set[str] = set()
-
-
 def check_qlora_loadable() -> None:
     """QLoRA quantises the model at load time, which needs bitsandbytes on the run's machine.
 
     ``BitsAndBytesConfig`` constructs without it, so the config checks alone would pass on an
-    install where every QLoRA run fails at ``from_pretrained``. While ``[finetuning]`` does not
-    name it, that is reported once as a warning; once it does, a missing install fails the case.
+    install where every QLoRA run fails at ``from_pretrained``. ``[finetuning]`` installs it, so
+    an extra that stops naming it, or an install that lacks it, fails the case.
     """
-    installed = importlib.util.find_spec("bitsandbytes") is not None
-    if bitsandbytes_declared():
-        if not installed:
-            msg = "[finetuning] names bitsandbytes but it is not importable in this install"
-            raise SmokeError(msg)
-        return
-    if "qlora" not in _REPORTED_GAPS:
-        _REPORTED_GAPS.add("qlora")
-        annotate(
-            "warning",
-            "QLoRA cannot load a model on a fine-tuning machine",
-            "[finetuning] does not install bitsandbytes, so a qlora run fails at from_pretrained; "
-            "the qlora cases check the configs only",
-        )
+    if not bitsandbytes_declared():
+        msg = "[finetuning] does not name bitsandbytes, so every qlora run fails at from_pretrained"
+        raise SmokeError(msg)
+    if importlib.util.find_spec("bitsandbytes") is None:
+        msg = "[finetuning] names bitsandbytes but it is not importable in this install"
+        raise SmokeError(msg)
 
 
 def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
     """One case end to end, up to the point where a real run would download the model."""
+    if adapter == "qlora":
+        # First, so a missing bitsandbytes is reported as the install gap it is, not as the
+        # runner's spec refusal or ``to_bnb_config``'s, which both look it up as well.
+        check_qlora_loadable()
     datasets_mod: Any = importlib.import_module("datasets")
     from strata_forge.training.dataset_format import build_training_rows, validate_mapping
     from strata_forge.training.peft import QLoRAConfig
@@ -429,7 +421,6 @@ def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
         if isinstance(peft, QLoRAConfig):
             # Passing a model above skipped the quantisation config; a real run builds it.
             peft.to_bnb_config()
-            check_qlora_loadable()
 
 
 def check_inference_spec() -> None:

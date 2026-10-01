@@ -99,6 +99,15 @@ finetuning = [
     "peft>=0.18,<1",
     "datasets>=4.0,<6",
     "accelerate>=1.4,<2",
+    # QLoRA quantises the base model inside `from_pretrained`, which refuses to load without this.
+    # 0.49 is the first release with both a CUDA 13.0 kernel (the build the torch above resolves
+    # to on Linux; 0.48 added it) and an Apple Silicon wheel, so it installs everywhere torch>=2.9
+    # publishes a cp314 wheel: Linux x86_64/aarch64, Windows x64, macOS arm64. That is why there
+    # is no platform marker. Transformers 5 asks for >=0.46.1. The macOS wheel needs macOS 14 and
+    # there is no sdist, so an Apple Silicon Mac on 12 or 13 cannot install this extra (torch would
+    # settle on an older macOS 11 wheel; bitsandbytes has none). `require_bitsandbytes` in
+    # training/peft.py holds the same floor; a test keeps the two equal.
+    "bitsandbytes>=0.49,<1",
 ]
 all = [
     "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag,bedrock]",

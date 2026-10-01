@@ -6,7 +6,9 @@ The public surface is:
 - :class:`DPOConfig` / :class:`ORPOConfig` / :class:`KTOConfig` /
   :class:`GRPOConfig` / :class:`PreferenceRunner` /
   :class:`PreferenceRunResult`
-- :class:`LoRAConfig` / :class:`QLoRAConfig`
+- :class:`LoRAConfig` / :class:`QLoRAConfig`, and
+  :func:`require_bitsandbytes` / :class:`MissingBitsAndBytesError`
+  -- the up-front check that a QLoRA run can quantise its model.
 - :func:`apply_chat_template` / :func:`conversation_to_dicts` /
   :func:`conversation_to_text`
 - :func:`pack_sequences` / :class:`PackedSequence`
@@ -21,7 +23,7 @@ The public surface is:
   dataset-shape declaration those callers map columns with.
 
 Heavy ML dependencies (``torch``, ``transformers``, ``trl``,
-``peft``, ``datasets``) ride behind the ``[finetuning]`` extra
+``peft``, ``datasets``, ``bitsandbytes``) ride behind the ``[finetuning]`` extra
 and are lazy-imported inside the runners' ``train`` methods, so
 ``import strata_forge.training`` works without them.
 """
@@ -51,7 +53,12 @@ from strata_forge.training.methods import (
     pick_method,
 )
 from strata_forge.training.packing import PackedSequence, pack_sequences
-from strata_forge.training.peft import LoRAConfig, QLoRAConfig
+from strata_forge.training.peft import (
+    LoRAConfig,
+    MissingBitsAndBytesError,
+    QLoRAConfig,
+    require_bitsandbytes,
+)
 from strata_forge.training.preference import (
     AnyPreferenceConfig,
     DPOConfig,
@@ -82,6 +89,7 @@ __all__ = [
     "LoRAConfig",
     "MethodName",
     "MethodSpec",
+    "MissingBitsAndBytesError",
     "ORPOConfig",
     "PackedSequence",
     "PreferenceRunResult",
@@ -101,6 +109,7 @@ __all__ = [
     "pack_sequences",
     "pick_format",
     "pick_method",
+    "require_bitsandbytes",
     "sft_text_field",
     "trainer_callback",
     "validate_mapping",

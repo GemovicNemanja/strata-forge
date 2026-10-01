@@ -21,7 +21,7 @@ Optional extras pull in the heavy dependencies only when you need them:
 pip install "strata-forge[rag]"        # embeddings, vector store, reranking
 pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
 pip install "strata-forge[serving]"    # vLLM
-pip install "strata-forge[finetuning]" # torch, transformers, trl, peft
+pip install "strata-forge[finetuning]" # torch, transformers, trl, peft, bitsandbytes
 pip install "strata-forge[all]"        # everything
 ```
 
