@@ -389,6 +389,12 @@ def check_vllm_command_line() -> None:
     its own environment, none of which should outlive it; and because if a future vLLM starts its
     server some other way than the stubbed runners, the probe would serve until killed rather
     than return.
+
+    ``VLLM_TARGET_DEVICE=cpu`` because building the parser already resolves a device: vLLM's
+    defaults include a device config that refuses to construct when no platform is detected, and
+    a CUDA wheel on a machine with no GPU detects none. That variable is vLLM's own switch for
+    running an accelerator wheel on a CPU-only host; should it stop being honoured, the probe
+    fails with "Failed to infer device type".
     """
     result = subprocess.run(  # noqa: S603 - this interpreter re-running this very script
         [sys.executable, str(Path(__file__).resolve()), _PROBE_FLAG],
@@ -396,6 +402,7 @@ def check_vllm_command_line() -> None:
         text=True,
         check=False,
         timeout=_PROBE_TIMEOUT_S,
+        env={**os.environ, "VLLM_TARGET_DEVICE": "cpu"},
     )
     sys.stdout.write(result.stdout)  # carries the probe's annotations through to the log
     if result.returncode != 0:
