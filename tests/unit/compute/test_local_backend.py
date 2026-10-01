@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -627,6 +628,44 @@ class TestVerifiedCleanup:
         assert not await asyncio.to_thread(secrets_dir.exists)
         with pytest.raises(ValueError, match="unknown job"):
             await backend.status(job)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+    async def test_a_directory_that_cannot_be_looked_at_is_not_read_as_gone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `Path.exists` returns False on ANY error, so with the parent unsearchable a surviving
+        # directory read as removed and the job that named it was dropped.
+        parent = tmp_path / "tmp"
+        parent.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(parent))
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                # The parent is locked while the job runs, so the removal on exit fails too.
+                run=(
+                    'dirname "$FORGE_SECRETS_FILE" > dir.txt.tmp && mv dir.txt.tmp dir.txt; '
+                    "while [ ! -e go ]; do sleep 0.05; done"
+                ),
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        dir_file = tmp_path / "dir.txt"
+        await _wait_until(dir_file.exists)
+        secrets_dir = Path(dir_file.read_text().strip())
+        assert secrets_dir.parent == parent
+        await asyncio.to_thread(parent.chmod, 0o000)
+        try:
+            (tmp_path / "go").touch()
+            await _wait_until_terminal(backend, job)
+            with pytest.raises(CleanupError, match="survived cleanup"):
+                await backend.cleanup(job)
+        finally:
+            await asyncio.to_thread(parent.chmod, 0o700)
+        assert await asyncio.to_thread(secrets_dir.is_dir)
+        await backend.cleanup(job)
+        assert not await asyncio.to_thread(secrets_dir.exists)
 
     async def test_a_job_whose_directory_is_already_gone_is_dropped(self, tmp_path: Path) -> None:
         backend = LocalBackend()

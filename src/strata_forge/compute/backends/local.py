@@ -567,10 +567,17 @@ def _remove_secrets_dir(state: _JobState) -> bool:
     if directory is None:
         return True
     shutil.rmtree(directory, ignore_errors=True)
-    if directory.exists(follow_symlinks=False):
+    # `lstat`, not `exists`: `exists` returns False on ANY error, so a parent that cannot be
+    # searched (EACCES) would read as "gone" while the file is still there. Only "no such
+    # entry" proves it.
+    try:
+        directory.lstat()
+    except FileNotFoundError, NotADirectoryError:
+        state.secrets_dir = None
+        return True
+    except OSError:
         return False
-    state.secrets_dir = None
-    return True
+    return False
 
 
 def _slice_stream(
