@@ -903,10 +903,10 @@ class TestRunnerMain:
         progress = tmp_path / "p.jsonl"
         monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
-        monkeypatch.setenv("HF_WRITE_TOKEN", token)
+        _deliver(monkeypatch, tmp_path, {"HF_TOKEN": token})
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
-            del writer, token
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer, secrets
             msg = f"401 for https://host/x?t={leak}"
             raise RunError(msg)
 
@@ -925,15 +925,17 @@ class TestRunnerMain:
         progress = tmp_path / "p.jsonl"
         monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
         monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
-        monkeypatch.setenv("HF_WRITE_TOKEN", "hf_x1")
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": "hf_x1"})
         ran: list[bool] = []
 
-        async def _execute(writer: JsonlProgressWriter | None, token: str | None) -> None:
-            del writer, token
+        async def _execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            del writer, secrets
             ran.append(True)
 
         assert await runner_main(_execute) == 1
         assert ran == []
+        # Refused after the read, so the file is gone all the same.
+        assert not path.exists()
         err = capsys.readouterr().err
         assert "redaction value" in err
         assert "hf_x1" not in err
