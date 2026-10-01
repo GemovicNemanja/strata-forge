@@ -545,6 +545,39 @@ class TestSecretDelivery:
         await _wait_until_terminal(backend, job)
         assert "PATH_SEEN=NONE" in await backend.logs(job)
 
+    async def test_setup_never_sees_the_path_and_its_own_trap_cannot_keep_the_file(
+        self, tmp_path: Path
+    ) -> None:
+        # The setup installs its own EXIT trap, as an orchestrator's bootstrap does; in the
+        # child's own shell that would replace the one removing the file.
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                setup=(
+                    "trap 'echo stopped > ticker.txt' EXIT; "
+                    'echo "${FORGE_SECRETS_FILE:-UNSET}" > setup_saw.txt'
+                ),
+                run='echo "$FORGE_SECRETS_FILE" > run_saw.txt; exit 3',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        status = await backend.status(job)
+        assert status.exit_code == 3, await backend.logs(job)
+        assert (tmp_path / "setup_saw.txt").read_text().strip() == "UNSET"
+        assert (tmp_path / "run_saw.txt").read_text().strip().endswith("/.secrets.json")
+        assert (tmp_path / "ticker.txt").read_text().strip() == "stopped"
+
+    async def test_a_task_that_skipped_validation_is_revalidated_before_delivery(self) -> None:
+        backend = LocalBackend()
+        task = Task(name="s", run="true", secrets={"HF_TOKEN": SecretStr(_SENTINEL)}).model_copy(
+            update={"env": {"HF_TOKEN": "x"}}
+        )
+        with pytest.raises(ValueError, match="both env and secrets"):
+            await backend.submit(task)
+
     async def test_without_inheritance_the_child_still_finds_its_file(self) -> None:
         backend = LocalBackend(env_inherit=False)
         job = await backend.submit(

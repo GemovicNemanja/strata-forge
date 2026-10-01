@@ -9,6 +9,7 @@ and :class:`SkyPilotBackend` lazy-import their SDKs behind the
 from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
     Backend,
+    SubmitCleanupError,
     safe_workdir_relpath,
 )
 from strata_forge.compute.backends.local import LocalBackend
@@ -21,5 +22,6 @@ __all__ = [
     "LocalBackend",
     "SSHBackend",
     "SkyPilotBackend",
+    "SubmitCleanupError",
     "safe_workdir_relpath",
 ]

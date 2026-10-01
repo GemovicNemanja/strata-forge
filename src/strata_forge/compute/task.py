@@ -27,7 +27,15 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 __all__ = [
     "MAX_SECRETS",
@@ -48,6 +56,36 @@ SECRETS_FILE_NAME = ".secrets.json"
 MAX_SECRETS = 8
 # Shaped like an environment variable name, because that is how a job refers to the value.
 _SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+class _Withheld:
+    """Stands in for a ``secrets`` value that is not a string, so no error can print it."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<withheld>"
+
+
+def _mask_secret_values(value: object) -> object:
+    """``value`` with every entry a :class:`~pydantic.SecretStr`, before anything can echo it.
+
+    A string becomes a ``SecretStr`` and anything else that is not one becomes
+    :class:`_Withheld`, which then fails the field's type check with a masked input. A value
+    that is not a mapping at all is withheld whole.
+    """
+    if not isinstance(value, dict):
+        return _Withheld()
+    entries = cast("dict[object, object]", value)
+    masked: dict[object, object] = {}
+    for key, item in entries.items():
+        if isinstance(item, SecretStr):
+            masked[key] = item
+        elif isinstance(item, str):
+            masked[key] = SecretStr(item)
+        else:
+            masked[key] = _Withheld()
+    return masked
 
 
 class ResourceSpec(BaseModel):
@@ -111,8 +149,11 @@ class Task(BaseModel):
             no such channel. A key may not also appear in ``env``.
     """
 
-    # `hide_input_in_errors`: a validation error otherwise echoes the offending input, and for
-    # `secrets` that input is the plaintext value. Errors still name the field and the reason.
+    # `hide_input_in_errors`: a validation error's str() otherwise echoes the offending input,
+    # and for `secrets` that input is the plaintext value. It does not cover `errors()` or
+    # `json()`, which still carry each error's input — so the values are also masked before any
+    # validator runs (`_mask_secrets`), and every check on them is a FIELD validator, whose
+    # error input is the masked field rather than the caller's raw arguments.
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     name: str = Field(min_length=1)
@@ -126,6 +167,18 @@ class Task(BaseModel):
     metadata: dict[str, Any] = Field(default={})
     secrets: dict[str, SecretStr] = Field(default={}, exclude=True, repr=False)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _mask_secrets(cls, data: Any) -> Any:
+        # Before anything else sees the input: a model-level error reports the caller's raw
+        # arguments as its input, so the values are wrapped while they are still arguments.
+        if not isinstance(data, dict):
+            return data
+        raw = cast("dict[str, Any]", data)
+        if "secrets" not in raw:
+            return raw
+        return {**raw, "secrets": _mask_secret_values(raw["secrets"])}
+
     @field_validator("env")
     @classmethod
     def _env_does_not_name_the_secrets_file(cls, env: dict[str, str]) -> dict[str, str]:
@@ -138,7 +191,9 @@ class Task(BaseModel):
 
     @field_validator("secrets")
     @classmethod
-    def _check_secrets(cls, secrets: dict[str, SecretStr]) -> dict[str, SecretStr]:
+    def _check_secrets(
+        cls, secrets: dict[str, SecretStr], info: ValidationInfo
+    ) -> dict[str, SecretStr]:
         # Messages name keys only: a key is a variable name, never a value.
         if len(secrets) > MAX_SECRETS:
             msg = f"at most {MAX_SECRETS} secrets per task; got {len(secrets)}"
@@ -151,17 +206,26 @@ class Task(BaseModel):
         if empty:
             msg = f"secret values must be non-empty; empty for {empty!r}"
             raise ValueError(msg)
-        return secrets
-
-    @model_validator(mode="after")
-    def _secrets_are_not_also_env(self) -> Task:
         # The same name in both would put the value in the job's environment after all, which is
-        # the one place a secret must never be.
-        clash = sorted(set(self.secrets) & set(self.env))
+        # the one place a secret must never be. Checked here rather than in a model validator,
+        # whose error would carry the caller's unmasked arguments; `env` is declared first, so
+        # it has been validated by now (it is absent only when it failed on its own).
+        env = cast("dict[str, str]", info.data.get("env", {}))
+        clash = sorted(set(secrets) & set(env))
         if clash:
             msg = f"keys {clash!r} appear in both env and secrets; a secret travels only in secrets"
             raise ValueError(msg)
-        return self
+        return secrets
+
+    def revalidated(self) -> Task:
+        """This task, built again through every validator.
+
+        ``model_copy(update=...)`` and ``model_construct`` skip validation, so a task built that
+        way can carry a plain-string secret, a malformed key, or a key also set in ``env``. A
+        backend calls this before it delivers anything, so those reach the job as a refusal
+        rather than as a secret in the wrong place.
+        """
+        return type(self).model_validate({**self.model_dump(), "secrets": dict(self.secrets)})
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Task:

@@ -18,6 +18,7 @@ from strata_forge.compute.backends import (
     LocalBackend,
     SkyPilotBackend,
     SSHBackend,
+    SubmitCleanupError,
     safe_workdir_relpath,
 )
 from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
@@ -48,6 +49,7 @@ __all__ = [
     "SSHBackend",
     "ServingEndpoint",
     "SkyPilotBackend",
+    "SubmitCleanupError",
     "Task",
     "build_sglang_task",
     "build_tgi_task",

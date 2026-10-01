@@ -25,10 +25,12 @@ the only remaining evidence. It is opt-in so that a library user who
 never asks for it never finds log files appearing beside their code.
 
 ``Task.secrets`` are written to a 0600 file in a private (0700)
-temporary directory of the job's own, and the child finds its path
-in ``FORGE_SECRETS_FILE``; the values are never in the child's
-environment. The child's shell removes the file on exit, and the
-backend removes the directory once the child is gone.
+temporary directory of the job's own, and the task's ``run`` step
+finds its path in ``FORGE_SECRETS_FILE`` (``setup`` does not); the
+values are never in the child's environment. The child's outer shell
+removes the file on exit, below a subshell the task's own traps
+cannot displace, and the backend removes the directory once the
+child is gone.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shlex
 import shutil
 import signal
 import tempfile
@@ -48,6 +51,7 @@ from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
     MAX_READ_FILE_BYTES,
     safe_workdir_relpath,
+    secrets_guarded_script,
 )
 from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
 from strata_forge.compute.task import SECRETS_FILE_ENV, SECRETS_FILE_NAME, render_secrets_payload
@@ -209,8 +213,9 @@ class LocalBackend:
             inherit the parent's ``os.environ`` (minus any
             ``FORGE_SECRETS_FILE``, which names the parent's file,
             not the child's). When ``False``, the child sees only
-            ``Task.env`` (plus ``FORGE_SECRETS_FILE`` when the task
-            has secrets).
+            ``Task.env``. A task with secrets also exports
+            ``FORGE_SECRETS_FILE`` to its ``run`` step, never to
+            ``setup``.
         log_dir: When set, every job also tees its stdout/stderr
             to ``serve.stdout.log`` / ``serve.stderr.log`` under
             this directory, written as the bytes arrive and left
@@ -243,6 +248,9 @@ class LocalBackend:
         if task.num_nodes != 1:
             err = f"LocalBackend can only run single-node tasks; got num_nodes={task.num_nodes}"
             raise ValueError(err)
+        # A task built with `model_copy(update=...)` skipped every validator; nothing is
+        # delivered until its secrets have been through them.
+        task = task.revalidated()
 
         job_id = uuid.uuid4().hex
         state = _JobState()
@@ -253,10 +261,12 @@ class LocalBackend:
         script = self._build_script(task)
         if task.secrets:
             state.secrets_dir = _write_secrets_file(task)
-            env[SECRETS_FILE_ENV] = str(state.secrets_dir / SECRETS_FILE_NAME)
-            # The child's own shell removes the file however it exits, so it does not outlive a
-            # setup that failed before anything read it. The directory goes with the job.
-            script = f"trap 'rm -f \"${SECRETS_FILE_ENV}\"' EXIT\n{script}"
+            # The child's outer shell removes the file however it exits, so it does not outlive
+            # a setup that failed before anything read it, and only `run` is told where it is.
+            # The directory goes with the job.
+            script = secrets_guarded_script(
+                shlex.quote(str(state.secrets_dir / SECRETS_FILE_NAME)), task.setup, task.run
+            )
         self._jobs[job_id] = state
 
         async def _runner() -> None:

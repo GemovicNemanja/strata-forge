@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -271,6 +271,39 @@ class TestTaskSecrets:
             Task(name="", run="r", secrets={"HF_TOKEN": SecretStr(_SENTINEL)})
         assert _SENTINEL not in str(excinfo.value)
         assert _SENTINEL not in repr(excinfo.value.errors())
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"secrets": {"bad-key": _SENTINEL}},
+            {"secrets": {f"K{i}": _SENTINEL for i in range(9)}},
+            {"env": {"HF_TOKEN": "x"}, "secrets": {"HF_TOKEN": _SENTINEL}},
+            {"secrets": {"HF_TOKEN": _SENTINEL, "OTHER": 5}},
+            {"secrets": [_SENTINEL]},
+            {"name": "", "secrets": {"HF_TOKEN": _SENTINEL}},
+        ],
+        ids=["bad-key", "too-many", "env-clash", "non-string", "not-a-mapping", "other-field"],
+    )
+    def test_no_error_rendering_carries_a_value(self, kwargs: dict[str, Any]) -> None:
+        # `hide_input_in_errors` covers only str(); errors() and json() carry each error's input,
+        # so the values are masked before any validator could fail on them.
+        arguments: dict[str, Any] = {"name": "t", "run": "r", **kwargs}
+        for build in (lambda: Task(**arguments), lambda: Task.model_validate(arguments)):
+            with pytest.raises(ValidationError) as excinfo:
+                build()
+            error = excinfo.value
+            for rendering in (str(error), repr(error), repr(error.errors()), error.json()):
+                assert _SENTINEL not in rendering
+
+    def test_revalidated_catches_what_model_copy_skipped(self) -> None:
+        task = Task(name="t", run="r", secrets={"HF_TOKEN": SecretStr(_SENTINEL)})
+        with pytest.raises(ValidationError, match="both env and secrets") as excinfo:
+            task.model_copy(update={"env": {"HF_TOKEN": "x"}}).revalidated()
+        assert _SENTINEL not in excinfo.value.json()
+        plain = task.model_copy(update={"secrets": {"HF_TOKEN": _SENTINEL}}).revalidated()
+        assert isinstance(plain.secrets["HF_TOKEN"], SecretStr)
+        assert plain.secrets["HF_TOKEN"].get_secret_value() == _SENTINEL
+        assert plain.model_dump() == task.model_dump()
 
     def test_the_payload_is_the_plain_mapping(self) -> None:
         task = Task(
