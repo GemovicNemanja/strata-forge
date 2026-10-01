@@ -116,16 +116,20 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `Backend.cleanup` returning now means the job's state is gone, on every backend, so an
   orchestrator can retry a cleanup until it succeeds; a caller that relied on `cleanup` never
   raising now sees `CleanupError` for a removal that failed. State that is already gone is still
-  a success, and a transport failure still propagates as itself. `SSHBackend.cleanup` runs
-  `rm -rf <wd> && test ! -e <wd> && test ! -L <wd>` and checks the exit status itself (a nonzero
-  status, or none at all, raises), and a failed submit's workdir discard uses the same command.
-  `LocalBackend.cleanup` keeps the job, and raises, until its secrets directory is gone.
-  `SkyPilotBackend.cleanup` raises when `down` fails and treats `ClusterDoesNotExist` as success.
+  a success, and a transport failure still propagates as itself. `SSHBackend.cleanup` enters
+  the remote root and removes and checks the workdir from there, since `test` reads a lookup it
+  may not make as "absent"; a root it cannot enter counts as clean only when it is provably
+  absent. It checks the exit status itself (a nonzero status, or none at all, raises), and a
+  failed submit's workdir discard uses the same command. `LocalBackend.cleanup` keeps the job,
+  and raises, until `lstat` finds nothing at its secrets directory's path.
+  `SkyPilotBackend.cleanup` resolves the request id `down` returns before returning, raises when
+  the teardown fails, and treats `ClusterDoesNotExist` as success.
 - `strata-forge compute cleanup` exits 1 and keeps the saved job when the backend reports the
   job's state survived, so running it again retries.
-- `SSHBackend` refuses a job whose `remote_workdir` names the remote root itself (`<root>/`,
-  `<root>/.`, `<root>//`, or any empty or `.` component below the root) with the same
-  `ValueError` as a workdir outside the root.
+- `SSHBackend` refuses a job whose `remote_workdir` is not exactly one directory directly in the
+  remote root, which is all `submit` creates: the root itself (`<root>/`, `<root>/.`,
+  `<root>//`) or a nested path (`<root>/a/b`) gets the same `ValueError` as a workdir outside the
+  root.
 
 ### Deprecated
 
@@ -171,7 +175,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   inherited it) or inherited by the model server.
 - A cleanup that leaves a job's workdir, and any secrets file in it, behind is reported instead of
   silent, and a job record that names the SSH remote root can no longer make `cleanup` remove
-  every job's workdir, a running job's unread secrets file included.
+  every job's workdir, a running job's unread secrets file included. A remote root, or a local
+  secrets directory's parent, that cannot be searched no longer reads as empty.
 
 ## [0.3.0] - 2026-10-01
 

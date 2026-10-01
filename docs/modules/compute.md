@@ -599,8 +599,9 @@ does not). Modes are set explicitly, so a restrictive umask cannot
 lock the child out. The child's outer shell removes the file on exit,
 below the subshell that runs the task; the backend removes the
 directory once the child is gone, and again in ``cleanup``, which
-forgets the job only once nothing is left at the directory's path: a
-directory that survives raises ``CleanupError`` and the job stays
+forgets the job only once ``lstat`` reports nothing at the directory's
+path: a directory that survives, or one that cannot be looked at (its
+parent is not searchable), raises ``CleanupError`` and the job stays
 known, so a retry still has something that names it. With
 ``env_inherit=True`` an inherited ``FORGE_SECRETS_FILE`` is dropped:
 it names the parent's file, which the child must not read (and, by
@@ -656,17 +657,27 @@ removal, so the file goes when setup fails, when the job ends and when
 removes the file itself after its final SIGKILL, and ``cleanup``
 removes the whole workdir.
 
-``cleanup`` runs ``rm -rf <workdir> && test ! -e <workdir> && test ! -L
-<workdir>``, so its exit status means "nothing is there now" rather
-than "``rm`` did not complain"; a nonzero status, or a channel that
-closed with none, raises ``CleanupError`` without echoing the remote's
-stderr (which would name the files ``rm`` could not remove). An absent
-workdir is a success. Every method that composes a remote path from a
-job's ``remote_workdir`` first checks it is a directory *below*
-``remote_root``: an absolute path, a ``..`` component, or a path that
-names the root itself (``<root>/``, ``<root>/.``, ``<root>//``) is a
-``ValueError``, since ``rm -rf`` of the root would remove every job's
-workdir.
+``cleanup`` enters ``remote_root`` with ``cd -P`` and runs ``rm -rf``
+on the job's directory and ``test ! -e`` / ``test ! -L`` on its name
+from there, so its exit status means "nothing is there now" rather
+than "``rm`` did not complain". The checks run inside the root because
+``test`` reads a lookup it is not allowed to make as "absent": run
+from outside a root at mode 000, BSD ``rm -rf`` exits 0 and both tests
+pass while the workdir and its secrets file stay. A root that cannot
+be entered counts as clean only when the root itself is provably
+absent, proved the same way one directory up; ``CDPATH`` is unset so a
+relative root cannot resolve to a directory of the same name
+elsewhere. A nonzero status, or a channel that closed with none,
+raises ``CleanupError`` ("not confirmed removed") without echoing the
+remote's stderr (which would name the files ``rm`` could not remove).
+An absent workdir is a success. Every method that composes a remote
+path from a job's ``remote_workdir`` first checks it is exactly one
+directory directly in ``remote_root``, which is all ``submit`` creates:
+an absolute path elsewhere, a ``..`` component, a path that names the
+root itself (``<root>/``, ``<root>/.``, ``<root>//``), or a nested one
+(``<root>/a/b``) is a ``ValueError``. ``rm -rf`` of the root would
+remove every job's workdir, and a check run in the root proves nothing
+about a directory deeper down.
 
 A submit that fails after creating the workdir removes it, within a
 10 s bound. If that removal fails too (the connection is gone), an
@@ -703,9 +714,12 @@ job states to the canonical five; unknown states fall back to
 ``running`` so callers don't crash on new SkyPilot versions.
 
 ``cleanup`` calls ``sky.down`` on the cluster — be aware that
-this tears down the entire cluster, not just the job. A failed
-``down`` raises ``CleanupError`` (chained to the SDK's error, naming
-only its type); SkyPilot's ``ClusterDoesNotExist`` counts as success.
+this tears down the entire cluster, not just the job. The
+request-based SDK's ``down`` returns a request id and reports the
+outcome only when that request is resolved, so ``cleanup`` resolves it
+with ``get`` before returning. A failed teardown raises
+``CleanupError`` (chained to the SDK's error, naming only its type);
+SkyPilot's ``ClusterDoesNotExist`` counts as success.
 
 ``submit`` raises ``ValueError`` for a task with ``secrets``, before
 any SkyPilot call: the SDK's only channel for a value is ``envs``,
