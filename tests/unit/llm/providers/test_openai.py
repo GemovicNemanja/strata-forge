@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from strata_forge.llm.providers.config import OpenAIConfig
-from strata_forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
+from strata_forge.llm.providers.openai import (
+    OpenAIProvider,
+    to_openai_responses_tool_schema,
+    to_openai_tool_schema,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -160,3 +164,31 @@ class TestOpenAIToolSchema:
         # (We allow the dict to be shared by reference for efficiency; if a
         # future caller needs ownership semantics, deep-copy at the call
         # site.)
+
+
+class TestResponsesAuthKwargs:
+    """LiteLLM's Responses path drops ``organization``; it rides as a header instead."""
+
+    def test_organization_becomes_a_header(self) -> None:
+        provider = OpenAIProvider(OpenAIConfig(api_key=SecretStr("sk"), org_id="org-1"))
+        assert provider.responses_auth_kwargs() == {
+            "api_key": "sk",
+            "extra_headers": {"OpenAI-Organization": "org-1"},
+        }
+        assert provider.auth_kwargs()["organization"] == "org-1"
+
+    def test_no_organization_no_header(self) -> None:
+        provider = OpenAIProvider(OpenAIConfig(api_key=SecretStr("sk")))
+        assert provider.responses_auth_kwargs() == {"api_key": "sk"}
+
+
+class TestResponsesToolSchema:
+    def test_internally_tagged_and_not_strict(self) -> None:
+        schema = to_openai_responses_tool_schema("f", "d", {"type": "object"})
+        assert schema == {
+            "type": "function",
+            "name": "f",
+            "description": "d",
+            "parameters": {"type": "object"},
+            "strict": False,
+        }

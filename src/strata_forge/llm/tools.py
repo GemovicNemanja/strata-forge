@@ -26,7 +26,10 @@ from pydantic import ValidationError as PydanticValidationError
 
 from strata_forge.core.errors import ForgeError, ValidationError
 from strata_forge.llm.providers.anthropic import to_anthropic_tool_schema
-from strata_forge.llm.providers.openai import to_openai_tool_schema
+from strata_forge.llm.providers.openai import (
+    to_openai_responses_tool_schema,
+    to_openai_tool_schema,
+)
 from strata_forge.llm.providers.vertex import to_gemini_tool_schema
 
 if TYPE_CHECKING:
@@ -103,6 +106,12 @@ class Tool:
         """OpenAI-format tool descriptor."""
         return to_openai_tool_schema(self.name, self.description, self.parameters_schema())
 
+    def to_openai_responses_schema(self) -> dict[str, Any]:
+        """OpenAI Responses API function-tool descriptor."""
+        return to_openai_responses_tool_schema(
+            self.name, self.description, self.parameters_schema()
+        )
+
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Anthropic-format tool descriptor."""
         return to_anthropic_tool_schema(self.name, self.description, self.parameters_schema())
@@ -157,6 +166,12 @@ class ToolDeclaration:
     def to_openai_schema(self) -> dict[str, Any]:
         """OpenAI-format tool descriptor."""
         return to_openai_tool_schema(self.name, self.description, self.parameters_schema())
+
+    def to_openai_responses_schema(self) -> dict[str, Any]:
+        """OpenAI Responses API function-tool descriptor."""
+        return to_openai_responses_tool_schema(
+            self.name, self.description, self.parameters_schema()
+        )
 
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Anthropic-format tool descriptor."""

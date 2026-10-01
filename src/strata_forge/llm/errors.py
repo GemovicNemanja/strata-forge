@@ -41,13 +41,13 @@ from strata_forge.core.errors import (
     ProviderTimeoutError,
 )
 
-__all__ = ["map_litellm_exception", "raise_as_provider_error"]
+__all__ = ["map_litellm_exception", "map_responses_error", "raise_as_provider_error"]
 
 
 def _classes(*names: str) -> tuple[type[BaseException], ...]:
     """Resolve LiteLLM exception classes by NAME, skipping any this LiteLLM does not define.
 
-    ``litellm>=1.55`` is a floor with no ceiling, so this module runs against versions that
+    The ``litellm`` pin admits a range of releases, so this module runs against versions that
     predate classes it would like to match. Naming one directly costs an ``AttributeError`` —
     raised from inside the mapper, which only runs when something has ALREADY failed. The
     original diagnosis is then replaced by an unrelated one about a missing attribute, and every
@@ -184,6 +184,31 @@ def map_litellm_exception(
         provider=provider,
         status_code=status_code,
     )
+
+
+_RESPONSES_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded"})
+_RESPONSES_SERVER_CODES = frozenset({"server_error", "internal_error", "service_unavailable"})
+
+
+def map_responses_error(
+    code: str | None,
+    message: str,
+    *,
+    model: str | None = None,
+    provider: str | None = None,
+) -> ProviderError:
+    """Translate a Responses API failure (a ``response.failed`` or ``error`` stream event).
+
+    These arrive inside a stream that already returned HTTP 200, so LiteLLM never sees an
+    exception to map. ``code`` selects the class: rate limiting, a server-side failure, or
+    (anything else) a bad request.
+    """
+    rendered = f"{code}: {message}" if code else message
+    if code in _RESPONSES_RATE_LIMIT_CODES:
+        return ProviderRateLimitError(rendered, model=model, provider=provider)
+    if code is None or code in _RESPONSES_SERVER_CODES:
+        return ProviderServerError(rendered, model=model, provider=provider)
+    return ProviderBadRequestError(rendered, model=model, provider=provider)
 
 
 def raise_as_provider_error(

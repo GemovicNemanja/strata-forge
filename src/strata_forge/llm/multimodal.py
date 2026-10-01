@@ -93,6 +93,11 @@ class ImageContent(ContentPart):
             "image_url": {"url": f"data:{self.mime_type};base64,{self.data}"},
         }
 
+    def to_openai_responses_format(self) -> dict[str, Any]:
+        """Render as the Responses API's ``input_image`` content part."""
+        url = self.url if self.url is not None else f"data:{self.mime_type};base64,{self.data}"
+        return {"type": "input_image", "image_url": url, "detail": "auto"}
+
     def to_anthropic_format(self) -> dict[str, Any]:
         """Render as Anthropic's ``image`` content part."""
         if self.url is not None:

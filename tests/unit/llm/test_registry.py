@@ -143,6 +143,41 @@ class TestModelValidation:
         m = _make_model()
         assert m.route_for("azure") is None
 
+    def test_wire_api_defaults_to_chat_completions(self) -> None:
+        route = ProviderRoute(provider="openai", provider_model_id="x", is_default=True)
+        assert route.wire_api == "chat_completions"
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_responses_wire_api_allowed_on_openai_providers(self, provider: str) -> None:
+        route = ProviderRoute(
+            provider=provider,  # type: ignore[arg-type]
+            provider_model_id="x",
+            wire_api="responses",
+        )
+        assert route.wire_api == "responses"
+
+    @pytest.mark.parametrize("provider", ["anthropic", "bedrock", "vertex", "openai_compat"])
+    def test_responses_wire_api_rejected_elsewhere(self, provider: str) -> None:
+        # Only OpenAI and Azure serve the Responses API; OpenRouter, a local vLLM and Ollama
+        # are reached as openai_compat and speak Chat Completions.
+        with pytest.raises(PydanticValidationError, match="cannot speak it"):
+            ProviderRoute(
+                provider=provider,  # type: ignore[arg-type]
+                provider_model_id="x",
+                wire_api="responses",
+            )
+
+    def test_wire_api_rejects_unknown_value(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            ProviderRoute(
+                provider="openai",
+                provider_model_id="x",
+                wire_api="assistants",  # type: ignore[arg-type]
+            )
+
+    def test_sampling_params_default_true(self) -> None:
+        assert Capabilities().sampling_params is True
+
 
 # ---------------------------------------------------------------------------
 # Registry assembly + validation
@@ -296,6 +331,12 @@ class TestLoader:
 class TestGlobalRegistry:
     EXPECTED_MODEL_NAMES: frozenset[str] = frozenset(
         {
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-sonnet-4-6",
@@ -317,16 +358,28 @@ class TestGlobalRegistry:
         assert actual == self.EXPECTED_MODEL_NAMES
 
     def test_anthropic_models_have_three_routes(self) -> None:
-        for name in ("claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"):
-            model = global_registry.get(name)
+        for model in global_registry.list_models(vendor="anthropic"):
             providers = {r.provider for r in model.routes}
-            assert providers == {"anthropic", "bedrock", "vertex"}
+            assert providers == {"anthropic", "bedrock", "vertex"}, model.name
+
+    def test_gpt_6_models_have_only_the_native_route(self) -> None:
+        # Azure deployment ids for GPT-6 are not published on the vendor model pages, so
+        # no azure route is registered for them.
+        for name in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"):
+            model = global_registry.get(name)
+            assert [r.provider for r in model.routes] == ["openai"]
 
     def test_openai_models_have_two_routes(self) -> None:
-        for name in ("gpt-5.5", "gpt-5.5-pro", "gpt-5.5-thinking", "gpt-5.5-instant"):
+        for name in ("gpt-5.5", "gpt-5.5-thinking", "gpt-5.5-instant"):
             model = global_registry.get(name)
             providers = {r.provider for r in model.routes}
             assert providers == {"openai", "azure"}
+
+    def test_gpt_5_5_pro_has_only_the_native_route(self) -> None:
+        # Azure does not list gpt-5.5-pro for the Responses API, and the model takes no
+        # tools on Chat Completions, so an azure route would fail every tool call.
+        model = global_registry.get("gpt-5.5-pro")
+        assert [r.provider for r in model.routes] == ["openai"]
 
     def test_gemini_models_only_on_vertex(self) -> None:
         for name in ("gemini-3.1-pro", "gemini-3.1-flash-lite"):
@@ -339,10 +392,71 @@ class TestGlobalRegistry:
             defaults = [r for r in model.routes if r.is_default]
             assert len(defaults) == 1, f"{model.name} has {len(defaults)} default routes"
 
-    def test_every_model_supports_tool_calling(self) -> None:
-        # Initial registry: all 10 foundation models support tool calling.
-        for model in global_registry.list_models():
-            assert model.capabilities.tool_calling, f"{model.name} missing tool_calling"
+    def test_every_model_takes_tools_on_its_routes_wire(self) -> None:
+        # GPT-6 Astra and GPT-6.1 Sol call tools only through the Responses API, which
+        # their `openai` routes speak, so no registered model is tool-less.
+        without_tools = {
+            m.name for m in global_registry.list_models() if not m.capabilities.tool_calling
+        }
+        assert without_tools == set()
+
+    def test_every_openai_route_speaks_responses(self) -> None:
+        # A future OpenAI entry on Chat Completions must be an explicit, commented exception
+        # here: GPT-5.4 and later take tools on Chat Completions only at effort `none`.
+        for model in global_registry.list_models(vendor="openai"):
+            route = model.route_for("openai")
+            assert route is not None, model.name
+            assert route.wire_api == "responses", model.name
+
+    def test_no_tool_capable_openai_model_has_a_chat_completions_route(self) -> None:
+        # Current OpenAI models take tools on Chat Completions only at effort `none`, if at
+        # all, so a tool-capable OpenAI entry on that wire would refuse the tools it claims.
+        on_chat_completions = {
+            (m.name, r.provider)
+            for m in global_registry.list_models(vendor="openai")
+            if m.capabilities.tool_calling
+            for r in m.routes
+            if r.wire_api == "chat_completions"
+        }
+        assert on_chat_completions == set()
+
+    def test_only_openai_and_azure_routes_speak_responses(self) -> None:
+        responses = {
+            (m.name, r.provider)
+            for m in global_registry.list_models()
+            for r in m.routes
+            if r.wire_api == "responses"
+        }
+        assert {provider for _, provider in responses} == {"openai", "azure"}
+        # Azure documents the Responses API for these deployments; gpt-5.5-pro is absent
+        # from its list, so it has no azure route.
+        assert {name for name, provider in responses if provider == "azure"} == {
+            "gpt-5.5",
+            "gpt-5.5-thinking",
+            "gpt-5.5-instant",
+        }
+
+    def test_sampling_params_off_where_the_default_effort_rejects_them(self) -> None:
+        without_sampling = {
+            m.name for m in global_registry.list_models() if not m.capabilities.sampling_params
+        }
+        assert without_sampling == {
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.5-thinking",
+        }
+
+    def test_forced_tool_models_do_not_claim_structured_output(self) -> None:
+        # Structured output on an Anthropic route is a forced tool call, which these
+        # models reject with a 400.
+        for name in ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"):
+            assert not global_registry.get(name).capabilities.structured_output, name
 
     def test_pricing_is_non_negative(self) -> None:
         for model in global_registry.list_models():
@@ -359,6 +473,9 @@ class TestGlobalRegistry:
         [
             ("opus", "claude-opus-4-7"),
             ("sonnet", "claude-sonnet-4-6"),
+            ("fable-5.1", "claude-fable-5-1"),
+            ("opus-5.5", "claude-opus-5-5"),
+            ("sonnet-5.5", "claude-sonnet-5-5"),
             ("haiku", "claude-haiku-4-5"),
             ("gpt55", "gpt-5.5"),
             ("gemini-pro", "gemini-3.1-pro"),

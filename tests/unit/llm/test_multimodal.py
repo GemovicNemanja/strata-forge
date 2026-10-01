@@ -202,3 +202,18 @@ class TestDownscale:
         out_img = Image.open(io.BytesIO(out_bytes))
         # Pillow's thumbnail() never enlarges, so dims stay at 300x200.
         assert out_img.size == (300, 200)
+
+
+class TestOpenAIResponsesFormat:
+    def test_url_image(self) -> None:
+        part = ImageContent.from_url("https://example.com/a.png").to_openai_responses_format()
+        assert part == {
+            "type": "input_image",
+            "image_url": "https://example.com/a.png",
+            "detail": "auto",
+        }
+
+    def test_inline_image_is_a_data_url(self) -> None:
+        part = ImageContent.from_bytes(b"abc", mime_type="image/png").to_openai_responses_format()
+        encoded = base64.b64encode(b"abc").decode("ascii")
+        assert part["image_url"] == f"data:image/png;base64,{encoded}"

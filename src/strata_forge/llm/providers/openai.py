@@ -21,7 +21,7 @@ from strata_forge.llm.providers.config import OpenAIConfig
 if TYPE_CHECKING:
     from strata_forge.llm.registry import ProviderName
 
-__all__ = ["OpenAIProvider", "to_openai_tool_schema"]
+__all__ = ["OpenAIProvider", "to_openai_responses_tool_schema", "to_openai_tool_schema"]
 
 
 class OpenAIProvider(ProviderClient):
@@ -47,6 +47,18 @@ class OpenAIProvider(ProviderClient):
         if self.config.org_id is not None:
             # LiteLLM forwards "organization" to the OpenAI SDK.
             kwargs["organization"] = self.config.org_id
+        return kwargs
+
+    def responses_auth_kwargs(self) -> dict[str, Any]:
+        """Return the auth kwargs for a Responses API call.
+
+        LiteLLM's Responses path does not forward ``organization``, so the organization rides
+        as the ``OpenAI-Organization`` header instead.
+        """
+        kwargs = self.auth_kwargs()
+        organization = kwargs.pop("organization", None)
+        if organization is not None:
+            kwargs["extra_headers"] = {"OpenAI-Organization": organization}
         return kwargs
 
 
@@ -84,4 +96,28 @@ def to_openai_tool_schema(
             "description": description,
             "parameters": parameters_schema,
         },
+    }
+
+
+def to_openai_responses_tool_schema(
+    name: str,
+    description: str,
+    parameters_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert a tool definition into the Responses API's function-tool schema.
+
+    The Responses API tags function tools internally (no nested ``function`` object).
+    ``strict`` is sent explicitly as ``False``: the API treats an omitted ``strict`` as
+    a request for strict mode, which rejects the non-strict JSON Schemas tools carry.
+
+    Returns:
+        ``{"type": "function", "name": ..., "description": ..., "parameters": ...,
+        "strict": False}``
+    """
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": parameters_schema,
+        "strict": False,
     }

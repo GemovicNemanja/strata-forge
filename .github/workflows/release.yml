@@ -7,8 +7,9 @@
 #   2. Merge to main through the normal dev -> main promotion.
 #   3. Tag main: `git tag v0.1.0 && git push origin v0.1.0`.
 #
-# A tag whose version disagrees with pyproject.toml fails the build job before anything
-# is uploaded — PyPI releases are immutable, so the check is deliberately pre-publish.
+# A tag whose version disagrees with pyproject.toml, or that points at a commit not on main,
+# fails the build job before anything is uploaded — PyPI releases are immutable, so the checks
+# are deliberately pre-publish.
 #
 # `workflow_dispatch` publishes to TestPyPI instead, for rehearsing a release.
 
@@ -28,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
@@ -43,6 +46,17 @@ jobs:
           pkg="$(uv run --no-project python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
           if [ "$tag" != "$pkg" ]; then
             echo "::error::tag v$tag does not match pyproject version $pkg"
+            exit 1
+          fi
+
+      # Downstream deploys assume a release is cut from main (the promoted, staging-verified
+      # line); a tag pushed on a topic or dev commit would publish code main never received.
+      - name: Verify the tagged commit is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME points at a commit that is not on main"
             exit 1
           fi
 

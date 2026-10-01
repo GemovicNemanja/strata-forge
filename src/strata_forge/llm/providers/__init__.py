@@ -20,7 +20,11 @@ from strata_forge.llm.providers.config import (
     ProviderConfig,
     VertexConfig,
 )
-from strata_forge.llm.providers.openai import OpenAIProvider, to_openai_tool_schema
+from strata_forge.llm.providers.openai import (
+    OpenAIProvider,
+    to_openai_responses_tool_schema,
+    to_openai_tool_schema,
+)
 from strata_forge.llm.providers.openai_compat import OpenAICompatProvider
 from strata_forge.llm.providers.vertex import VertexProvider, to_gemini_tool_schema
 
@@ -41,5 +45,6 @@ __all__ = [
     "VertexProvider",
     "to_anthropic_tool_schema",
     "to_gemini_tool_schema",
+    "to_openai_responses_tool_schema",
     "to_openai_tool_schema",
 ]
