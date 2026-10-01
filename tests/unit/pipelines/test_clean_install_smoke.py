@@ -58,6 +58,9 @@ class TestFinetuneCases:
         # A format no enabled method trains on would be untested by the smoke; there is none.
         assert reached == set(FORMATS)
 
+    # The runner refuses a qlora spec on a machine without bitsandbytes, and the dev environment
+    # does not install [finetuning]; the clean install the smoke runs in does.
+    @pytest.mark.usefixtures("bitsandbytes_installed")
     @pytest.mark.parametrize(("method", "fmt", "adapter"), smoke.finetune_cases())
     def test_spec_passes_the_runner_and_builds_its_config(
         self, method: str, fmt: str, adapter: str, tmp_path: Path
