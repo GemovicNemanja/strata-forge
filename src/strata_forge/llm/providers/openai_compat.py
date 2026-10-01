@@ -7,12 +7,22 @@ discriminator is the ``api_base`` kwarg pointing at the user's deployment.
 The model id after the ``openai/`` prefix is whatever the self-hosted
 server advertises (often the original Hugging Face model name, e.g.
 ``meta-llama/Llama-3.1-70B-Instruct``). The registry doesn't carry these
-because they're operator-specific; callers supply them at the call site
-once ``strata_forge.compute`` ships in Phase 5.
+because they're operator-specific; callers supply them at the call site.
 
 Tool calling: OpenAI-compatible servers that support function calling use
 OpenAI's tool schema verbatim. Callers reuse
 :func:`strata_forge.llm.providers.openai.to_openai_tool_schema`.
+
+``base_url`` is caller-trusted. The key and the whole conversation go to whatever URL is
+configured, unchecked: no scheme, host, path or address validation, and deliberately no
+private-address block, because loopback is the normal case (a model server on the same
+machine). A caller that takes ``base_url`` from someone it does not trust validates it first,
+against the whole URL rather than only its host.
+
+The transport follows redirects. A hop to another origin drops the ``Authorization`` header,
+so the key stays on the configured host, but a 307/308 re-sends the request body and the reply
+(or an error quoting it) comes back to the caller. Trusting a ``base_url`` therefore
+includes trusting every redirect its server issues, on any path the caller lets through.
 """
 
 from __future__ import annotations

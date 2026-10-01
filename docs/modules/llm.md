@@ -33,6 +33,7 @@ agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/ll
   - [Messages and content parts](#messages-and-content-parts)
   - [Responses](#responses)
 - [Routing](#routing)
+  - [OpenAI-compatible endpoints: `base_url` is caller-trusted](#openai-compatible-endpoints-base_url-is-caller-trusted)
 - [Two-axis fallback](#two-axis-fallback)
 - [Cache](#cache)
 - [Structured output](#structured-output)
@@ -362,6 +363,46 @@ route = resolve("opus", provider="bedrock")
 Aliases are resolved before lookup. Unknown models raise
 `RegistryError(reason="unknown_model")`; an unsupported `(model,
 provider)` combo raises `RegistryError(reason="unsupported_route")`.
+
+### OpenAI-compatible endpoints: `base_url` is caller-trusted
+
+The `openai_compat` provider sends its key and the whole conversation to
+`OpenAICompatConfig.base_url` and validates nothing about that URL: not the
+scheme, the host, the path, or the addresses the host resolves to. There is
+deliberately no private-address block, because loopback is the normal case:
+the batch inference runner talks to a vLLM server on `127.0.0.1` on the same
+machine.
+
+The transport (LiteLLM over the OpenAI client and `httpx`) follows every
+HTTP redirect, and the final reply comes back to the caller: as the
+response text when it parses as a completion, quoted in the raised error's
+message when it does not. What each hop carries:
+
+| Hop | `Authorization` (the key) | Request body |
+|---|---|---|
+| 307 / 308 to another origin | dropped | re-sent, same method |
+| 301 / 302 / 303 to another origin | dropped | not sent (becomes a `GET`) |
+| `http` to `https`, same host, default ports | kept | as the status code above says |
+| any redirect within the same origin | kept | as the status code above says |
+
+So a caller that takes `base_url` from a party it does not trust (a web
+request, a user setting) owns that validation, and does it before building
+the provider config:
+
+- match the **whole URL** against what it allows, not only the host: the
+  client appends `/chat/completions` to whatever path it is given, so a
+  host-only check still lets the requester choose any path on an allowed
+  origin, including one that redirects elsewhere;
+- check every address the host resolves to, if internal addresses must be
+  unreachable;
+- treat an allowed origin as trusted for its redirects too. The key never
+  leaves the configured host, but the conversation and the reply can.
+
+Forge does not refuse cross-origin redirects itself: that would mean
+replacing the HTTP client LiteLLM builds and caches for each endpoint with
+one Forge owns per provider. Once the caller matches the whole URL, a
+redirect can only come from the allowed endpoint itself, which is the same
+trust a native provider places in its vendor's API.
 
 ---
 
