@@ -9,7 +9,8 @@ reliability property rather than a convenience:
   beside the job, never in the environment; the runner reads it and deletes it before it does
   anything else, so the file exists only until the run starts. The values travel as
   :class:`~pydantic.SecretStr` in a :class:`RunSecrets` and are revealed only at the call that
-  needs them.
+  needs them. Every Hub read passes :meth:`RunSecrets.hub_credential` explicitly, so a run never
+  falls back to a credential the machine happens to hold.
 - **Scrubbing** (:func:`run_redactor`, :func:`sanitize`). Every message a runner emits — an
   error, a phase caption, a per-row error it writes into its results — passes through the one
   :class:`~strata_forge.core.redact.Redactor`, which removes the write token in every encoding
@@ -46,7 +47,7 @@ import sys
 from functools import partial
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -115,6 +116,37 @@ __all__ = [
 REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 # A safe single path segment for an on-VM output dir name (no slash / traversal / shell chars).
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# The builder names ``datasets.load_dataset`` resolves BEFORE the Hub (its packaged modules, as of
+# datasets 5, plus the ones that take their source as an argument). Each is a well-formed bare id,
+# and each reads data files from the caller's working directory, not a repo; ``pandas`` unpickles.
+_PACKAGED_DATASET_BUILDERS = frozenset(
+    {
+        "arrow",
+        "audiofolder",
+        "cache",
+        "conll",
+        "csv",
+        "eval",
+        "generator",
+        "hdf5",
+        "iceberg",
+        "imagefolder",
+        "json",
+        "lance",
+        "meshfolder",
+        "niftifolder",
+        "pandas",
+        "parquet",
+        "pdffolder",
+        "spark",
+        "sql",
+        "text",
+        "tsfile",
+        "videofolder",
+        "webdataset",
+        "xml",
+    }
+)
 # A phase message is a short human phrase. Capped because the sink is reachable from public API:
 # a caller's hook must not be able to grow the file the orchestrator tails without bound.
 MAX_PHASE_CHARS = 200
@@ -203,6 +235,19 @@ class RunSecrets(BaseModel):
     def hf_token_value(self) -> str | None:
         """The token in plaintext, for the one call that needs it (and the scrubber)."""
         return self.hf_token.get_secret_value() if self.hf_token is not None else None
+
+    def hub_credential(self) -> str | Literal[False]:
+        """The ``token=`` argument for a Hub read: the delivered token, or ``False``.
+
+        Never ``None``: every Hugging Face library reads ``None`` as "use whatever credential this
+        machine has" (an ``HF_TOKEN`` variable, a cached login, forge's own settings), and a run
+        authenticates to the Hub with exactly the credential the control plane delivered, or with
+        none. ``False`` governs what is sent, not what is on disk: the Hub libraries answer a
+        refused request from a copy already in the machine's cache, so a gated or private repo an
+        earlier run cached still loads. That cache belongs to the account the runner runs as.
+        """
+        token = self.hf_token_value()
+        return token if token else False
 
 
 def load_secrets() -> RunSecrets:
@@ -326,6 +371,9 @@ def validate_repo_id(repo_id: str, what: str) -> str:
     # fullmatch (not match): match's `$` accepts a trailing newline ("org/x\n").
     if ".." in repo_id or not REPO_ID_RE.fullmatch(repo_id):
         msg = f"invalid {what} id"
+        raise RunError(msg)
+    if what == "dataset" and repo_id.lower() in _PACKAGED_DATASET_BUILDERS:
+        msg = f"invalid dataset id: {repo_id} names a local-file builder, not a Hub repo"
         raise RunError(msg)
     return repo_id
 

@@ -138,15 +138,21 @@ synchronously off-loaded to a thread.
 ```python
 HFHubClient(
     *,
-    token: str | None = None,
+    token: str | Literal[False] | None = None,
     endpoint: str | None = None,
     api: Any | None = None,
 )
 ```
 
-- `token`: HuggingFace access token. When `None`, the
-  underlying `HfApi` falls back to `HF_TOKEN` env var or cached
-  login.
+- `token`: HuggingFace access token. When `None`, the client
+  falls back to forge settings (`HF_TOKEN` from the environment
+  or `.env`), then to `huggingface_hub`'s own resolution (env var
+  or cached login). `False` sends no token and skips every
+  fallback: the request is anonymous whatever credential the
+  machine holds. It governs what is sent, not what is on disk: a
+  download that `huggingface_hub` can answer from its local cache
+  (it does so on a 401 or a gated refusal) still succeeds. A caller that must read with exactly one credential (the
+  VM runners) passes the token or `False`, never `None`.
 - `endpoint`: custom Hub URL — useful for the Enterprise tier
   or air-gapped Hub deployments.
 - `api`: pre-built `HfApi` for tests or for sharing across

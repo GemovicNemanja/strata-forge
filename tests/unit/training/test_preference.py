@@ -91,13 +91,14 @@ def fake_ml_stack(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         @classmethod
         def from_pretrained(cls, model_id: str, **kwargs: Any) -> Any:
             state["model_loaded"] = {"model_id": model_id, "kwargs": kwargs}
+            state.setdefault("model_loads", []).append({"model_id": model_id, "kwargs": kwargs})
             return MagicMock(name=f"model({model_id})")
 
     class _FakeAutoTokenizer:
         @classmethod
         def from_pretrained(cls, model_id: str, **kwargs: Any) -> Any:
-            del kwargs
             state["tokenizer_loaded"] = model_id
+            state["tokenizer_kwargs"] = kwargs
             return MagicMock(name=f"tokenizer({model_id})")
 
     class _FakeBnbConfig:
@@ -257,3 +258,75 @@ class TestPreferenceRunner:
         runner = PreferenceRunner(cfg, peft_config=peft)
         assert runner.config is cfg
         assert runner.peft_config is peft
+
+
+_TOKEN = "hf_secretreadtoken1234567890"
+_LOAD_TERMS = {"token": _TOKEN, "trust_remote_code": False, "use_safetensors": True}
+
+
+class TestHubLoads:
+    """Every load states its terms: the caller's token, no remote code, safetensors only."""
+
+    def test_the_token_reaches_every_load_and_never_the_trl_config(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        cfg = DPOConfig(model_id="org/gated", output_dir="./out")
+        PreferenceRunner(cfg, peft_config=LoRAConfig()).train(train_dataset=["row"], token=_TOKEN)
+        assert fake_ml_stack["model_loads"] == [{"model_id": "org/gated", "kwargs": _LOAD_TERMS}]
+        assert fake_ml_stack["tokenizer_kwargs"] == {"token": _TOKEN, "trust_remote_code": False}
+        assert _TOKEN not in repr(fake_ml_stack["trl_config_kwargs"])
+        assert "token" not in fake_ml_stack["trl_config_kwargs"]
+
+    @pytest.mark.parametrize("config_cls", [DPOConfig, KTOConfig])
+    def test_a_full_fine_tune_loads_its_reference_with_the_same_terms(
+        self, fake_ml_stack: dict[str, Any], config_cls: type[DPOConfig | KTOConfig]
+    ) -> None:
+        # Left to TRL, the reference is re-downloaded by name with none of these terms: no token
+        # (a gated base fails) and no safetensors requirement.
+        cfg = config_cls(model_id="org/gated", output_dir="./out")
+        PreferenceRunner(cfg).train(train_dataset=["row"], token=_TOKEN)
+        loads = fake_ml_stack["model_loads"]
+        assert loads == [{"model_id": "org/gated", "kwargs": _LOAD_TERMS}] * 2
+        ref = fake_ml_stack["trainer_kwargs"]["ref_model"]
+        assert ref is not fake_ml_stack["trainer_kwargs"]["model"]
+
+    def test_an_adapter_run_needs_no_reference_model(self, fake_ml_stack: dict[str, Any]) -> None:
+        cfg = DPOConfig(model_id="gpt2", output_dir="./out")
+        PreferenceRunner(cfg, peft_config=LoRAConfig()).train(train_dataset=["row"])
+        assert len(fake_ml_stack["model_loads"]) == 1
+        assert "ref_model" not in fake_ml_stack["trainer_kwargs"]
+
+    def test_orpo_loads_no_reference_model(self, fake_ml_stack: dict[str, Any]) -> None:
+        PreferenceRunner(ORPOConfig(model_id="gpt2", output_dir="./out")).train(
+            train_dataset=["row"]
+        )
+        assert len(fake_ml_stack["model_loads"]) == 1
+
+    def test_precomputed_reference_log_probs_need_no_reference_model(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        cfg = DPOConfig(
+            model_id="gpt2",
+            output_dir="./out",
+            extra_trainer_args={"precompute_ref_log_probs": True},
+        )
+        PreferenceRunner(cfg).train(train_dataset=["row"])
+        assert len(fake_ml_stack["model_loads"]) == 1
+        assert "ref_model" not in fake_ml_stack["trainer_kwargs"]
+
+    def test_a_caller_supplied_model_is_not_reloaded(self, fake_ml_stack: dict[str, Any]) -> None:
+        cfg = DPOConfig(model_id="gpt2", output_dir="./out")
+        PreferenceRunner(cfg).train(
+            train_dataset=["row"], model=MagicMock(name="mine"), tokenizer=MagicMock()
+        )
+        assert "model_loads" not in fake_ml_stack
+
+    def test_without_a_token_the_library_default_applies_but_remote_code_stays_off(
+        self, fake_ml_stack: dict[str, Any]
+    ) -> None:
+        PreferenceRunner(ORPOConfig(model_id="gpt2", output_dir="./out")).train(
+            train_dataset=["row"]
+        )
+        kwargs = fake_ml_stack["model_loads"][0]["kwargs"]
+        assert kwargs == {"token": None, "trust_remote_code": False, "use_safetensors": True}
+        assert fake_ml_stack["tokenizer_kwargs"]["trust_remote_code"] is False

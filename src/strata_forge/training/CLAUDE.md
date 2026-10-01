@@ -87,12 +87,26 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   Each config has a ``to_trl_kwargs()`` (or ``to_peft_config()``)
   method that renders the typed shape into the kwargs TRL / peft
   expects. ``extra_trainer_args`` is the verbatim passthrough
-  escape hatch.
+  escape hatch for a Python caller. The fine-tuning VM runner
+  refuses, from a run spec, the keys that load, push or report
+  under other terms than the run's
+  (``pipelines.finetune_runner._SPEC_REFUSED_TRAINER_ARGS``); add a
+  TRL knob of that kind there when an upgrade introduces one.
 - **Runners are thin orchestration.** No work in the constructor.
   ``_load_modules()`` lazy-imports the heavy stack; ``train()``
   builds the trainer, runs it, saves, and returns a Pydantic
   result. Callers can supply ``model=`` / ``tokenizer=`` /
   ``ref_model=`` to skip the default ``from_pretrained`` calls.
+- **Every Hub load states its terms.** A ``from_pretrained`` call
+  goes through ``loading.model_load_kwargs(token)`` /
+  ``loading.tokenizer_load_kwargs(token)``: ``trust_remote_code=False``
+  always, ``use_safetensors=True`` on models, and the caller's
+  ``token``. The token is a keyword argument of ``build_trainer`` /
+  ``train`` and is never a config field: a config's fields reach
+  ``to_trl_kwargs`` and TRL pickles those into ``training_args.bin``.
+  When a runner loads the DPO / KTO policy without an adapter it also
+  loads the reference model itself, on the same terms; never leave
+  that load to TRL, which re-downloads by name with none of them.
 - **PEFT is opt-in.** Runners accept ``peft_config=None``;
   when set, the adapter config flows into TRL's
   ``peft_config=`` and (for QLoRA) the BitsAndBytes config flows

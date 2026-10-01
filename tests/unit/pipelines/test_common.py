@@ -248,6 +248,25 @@ class TestValidateRepoId:
         with pytest.raises(RunError, match="invalid model id"):
             validate_repo_id(bad, "model")
 
+    @pytest.mark.parametrize("builder", ["json", "csv", "text", "parquet", "pandas", "JSON"])
+    def test_refuses_a_dataset_id_that_names_a_local_file_builder(self, builder: str) -> None:
+        # `load_dataset("json", split=...)` resolves the packaged builder before the Hub and reads
+        # data files from the runner's working directory; `pandas` unpickles them.
+        with pytest.raises(RunError, match="names a local-file builder"):
+            validate_repo_id(builder, "dataset")
+
+    def test_a_builder_name_under_an_owner_is_an_ordinary_dataset(self) -> None:
+        assert validate_repo_id("org/json", "dataset") == "org/json"
+        assert validate_repo_id("imdb", "dataset") == "imdb"
+
+    def test_the_builder_list_covers_the_installed_datasets(self) -> None:
+        packaged = pytest.importorskip("datasets.packaged_modules")
+        from strata_forge.pipelines import _common
+
+        installed = set(packaged._PACKAGED_DATASETS_MODULES)
+        missing = installed - _common._PACKAGED_DATASET_BUILDERS  # pyright: ignore[reportPrivateUsage]
+        assert not missing
+
 
 # ------------------------------ the config ------------------------------------
 

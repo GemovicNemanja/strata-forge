@@ -94,8 +94,9 @@ result = runner.train(train_dataset=preference_dataset)
 
 :class:`SFTConfig` mirrors the TRL ``SFTConfig`` knobs Forge
 exposes by default. The ``extra_trainer_args`` field is a
-verbatim passthrough to TRL — Forge never blocks access to the
-underlying surface.
+verbatim passthrough to TRL — Forge never blocks a Python caller's
+access to the underlying surface (a run spec is narrower; see
+[Driving training from a declaration](#driving-training-from-a-declaration)).
 
 Key fields:
 
@@ -122,12 +123,40 @@ Key fields:
 1. Lazy-imports ``transformers`` / ``trl`` / ``datasets``.
 2. Loads model + tokenizer via ``AutoModelForCausalLM`` /
    ``AutoTokenizer`` (or uses the ``model=`` / ``tokenizer=``
-   the caller provided).
+   the caller provided), on the terms in
+   [Loading from the Hub](#loading-from-the-hub).
 3. Builds ``trl.SFTTrainer`` with the rendered kwargs + optional
    PEFT config.
 4. Runs ``trainer.train()``, calls ``trainer.save_model``.
 5. Returns an :class:`SFTRunResult` with ``train_loss``,
    ``train_runtime_s``, etc.
+
+## Loading from the Hub
+
+Every model and tokenizer load the runners make states its terms
+explicitly, from :mod:`strata_forge.training.loading`
+(``model_load_kwargs`` / ``tokenizer_load_kwargs``):
+
+| Argument | Value | Why |
+|---|---|---|
+| ``trust_remote_code`` | ``False`` | A repo's own Python never runs. |
+| ``use_safetensors`` | ``True`` (models) | A pickle checkpoint (``*.bin`` / ``*.pt``) can execute code when unpickled; a repo that ships only those fails to load instead. |
+| ``token`` | the caller's | ``build_trainer(..., token=...)`` / ``train(..., token=...)``. |
+
+``token`` is a :data:`HubToken`: a token string, ``False`` to send
+no credential at all, or ``None`` (the default) for the library's
+own lookup (an ``HF_TOKEN`` variable or a cached login). It is a
+keyword argument of the load and is **never stored on a config**:
+every ``XxxConfig`` rejects a ``token`` field, and nothing in
+``to_trl_kwargs`` carries one, so it cannot reach TRL's arguments or
+the ``training_args.bin`` TRL pickles beside each checkpoint (a
+pushed output directory would carry that file to the Hub).
+
+The VM runner in :mod:`strata_forge.pipelines.finetune_runner`
+passes the run's delivered token, or ``False`` when none was
+delivered, to every load, including the merge step's base model,
+adapter and tokenizer, so a run never falls back to a credential
+the machine happens to hold.
 
 ## Preference tuning
 
@@ -172,6 +201,19 @@ Forwarding rules:
 - ``ref_model`` flows into the trainer only for ``dpo`` and
   ``kto`` (ORPO doesn't use a reference model; GRPO doesn't
   either).
+- When the runner loads the policy itself for ``dpo`` / ``kto``
+  **without** an adapter, it loads the reference model too, with
+  the same load arguments (token, no remote code, safetensors
+  only, same precision). Left to TRL, the reference is re-downloaded
+  by the policy's name with none of them, so a gated base would fail
+  there. With an adapter (TRL disables it to recover the reference)
+  or ``precompute_ref_log_probs`` no reference is loaded. A caller
+  that passes ``model=`` owns that load and should pass
+  ``ref_model=`` with it. Both models load with no device placement
+  of their own, as the policy always has, so a full-weight DPO / KTO
+  run holds two copies of the base in host memory until the trainer
+  moves them to the accelerator (TRL placed its own reference load
+  with ``device_map="auto"``): size host RAM for twice the model.
 - ``reward_funcs`` is required for ``grpo`` and rejected
   elsewhere.
 - ``peft_config`` flows into every trainer when set; QLoRA's
@@ -356,6 +398,19 @@ submitted hyperparam could train a different model than the record names and wri
 the progress log to any absolute path — walking past the very `validate_repo_id` re-check the VM
 side exists to perform. `extra_trainer_args` is checked for the same three keys, since
 `to_trl_kwargs` applies it last and it reaches TRL's own `output_dir`.
+
+**A spec's `extra_trainer_args` may not set the TRL knobs that act under other terms than the
+run's.** It is TRL's and `transformers`' whole argument surface, and some of it loads, pushes or
+reports outside everything the runner sets on its own loads (see
+[Loading from the Hub](#loading-from-the-hub)): `chat_template_path` (a tokenizer load of any repo
+or local path, with the machine's own credential), `trust_remote_code` and `model_init_kwargs` /
+`ref_model_init_kwargs` (remote code, or a load configured elsewhere), `push_to_hub` and every
+`hub_*` / `trackio_*` setting (a push with the machine's own credential), `resume_from_checkpoint`,
+`deepspeed`, `fsdp_config` and `accelerator_config` (files on the machine, unpickled in the
+checkpoint case), `logging_dir` (outside the artifact directory) and `report_to` (a third-party
+service). From a spec each is refused by name
+(`hyperparams may not set extra_trainer_args.…`), all of them in one message; every other key
+passes through.
 
 This bounds only the **declaration** path. `extra_trainer_args` remains an unrestricted escape
 hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the

@@ -45,6 +45,27 @@ def _no_ambient_secrets(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ig
     monkeypatch.delenv(LEGACY_TOKEN_ENV, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def hub_snapshots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[str, Any]]:
+    """Stand in for the Hub download the runner makes before serving; record each call.
+
+    Patched on the real ``huggingface_hub`` module, so the runner's own ``HFHubClient`` call path
+    (token resolution included) is what is exercised. The snapshot holds one safetensors file.
+    """
+    calls: list[dict[str, Any]] = []
+    snapshot = tmp_path / "hub-snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"")
+
+    def _snapshot_download(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return str(snapshot)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _snapshot_download)
+    return calls
+
+
 def _deliver_token(monkeypatch: pytest.MonkeyPatch, directory: Path) -> Path:
     """Hand the runner the write token the way a backend does: a 0600 file it is pointed at."""
     path = directory / ".secrets.json"
@@ -225,9 +246,26 @@ def test_load_rows_caps_materialization(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
     spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"row_limit": 3}))
-    rows = ir._load_rows(spec, None)  # pyright: ignore[reportPrivateUsage]
+    rows = ir._load_rows(spec, False)  # pyright: ignore[reportPrivateUsage]
     assert len(rows) == 3
     assert counter["consumed"] == 3  # islice stopped at the cap; the split was NOT materialized
+
+
+@pytest.mark.parametrize("token", [_TOKEN, False])
+def test_load_rows_passes_the_credential_explicitly(
+    monkeypatch: pytest.MonkeyPatch, token: str | bool
+) -> None:
+    # `None` would let `datasets` reach for the VM's own login; the runner never passes it.
+    seen: dict[str, Any] = {}
+
+    def _load_dataset(*_a: Any, **kwargs: Any) -> _NeverEndingDataset:
+        seen.update(kwargs)
+        return _NeverEndingDataset({"consumed": 0})
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
+    spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"row_limit": 1}))
+    ir._load_rows(spec, token)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    assert seen["token"] is token
 
 
 def test_build_requests_index_aligned() -> None:
@@ -428,6 +466,7 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     kinds = [e["kind"] for e in events]
     assert [e["message"] for e in events if e["kind"] == "phase"] == [
         "Loading the dataset",
+        "Downloading the model",
         "Generating responses",
         "Writing results",
         "Uploading results to the Hub",
@@ -566,6 +605,190 @@ async def test_the_model_server_environment_holds_no_secret(
         assert name not in env
     assert env["CUDA_VISIBLE_DEVICES"] == "0"
     assert "PATH" in env
+
+
+# --------------------------- main: the model download ------------------------
+
+
+async def test_the_model_is_fetched_with_the_delivered_token_before_serving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # The runner downloads the model itself, with the token it was handed, and only the servable
+    # files. Forge settings and the VM's own HF_TOKEN hold a different credential that must not be
+    # the one used: the constructor argument is the whole of the run's authority.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _deliver_token(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_ambientvmtoken0123456789")
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert len(hub_snapshots) == 1
+    call = hub_snapshots[0]
+    assert call["repo_id"] == "org/model"
+    assert call["token"] == _TOKEN
+    assert call["allow_patterns"] == list(ir.SNAPSHOT_PATTERNS)
+    assert call["ignore_patterns"] == list(ir.SNAPSHOT_IGNORED)
+
+
+def test_the_snapshot_never_admits_pickle_checkpoints_or_code() -> None:
+    # Through the Hub client's own filter, not a re-implementation of it: what matters is what
+    # `snapshot_download` admits, case sensitivity and path handling included.
+    # The function `snapshot_download` itself calls; re-exported by `utils` without an `__all__`.
+    from huggingface_hub.utils import (
+        filter_repo_objects,  # pyright: ignore[reportPrivateImportUsage]
+    )
+
+    kept = (
+        "model.safetensors",
+        "model-00001-of-00002.safetensors",
+        "model.safetensors.index.json",
+        "config.json",
+        "generation_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "tokenizer.model",
+        "tokenizer.model.v3",
+        "spiece.model",
+        "qwen.tiktoken",
+        "chat_template.jinja",
+        "merges.txt",
+        "vocab.txt",
+    )
+    refused = (
+        "pytorch_model.bin",
+        "pytorch_model-00001-of-00002.bin",
+        "model.pt",
+        "consolidated.00.pth",
+        "modeling_custom.py",
+        "tokenizer.py",
+        "tokenization_custom.py",
+        "original/consolidated.00.pth",
+        "original/params.json",
+        # What a bare `tokenizer*` prefix would have let in beside the weights.
+        "tokenizer.so",
+        "tokenizer.pyc",
+        "tokenizer.sh",
+        "tokenizer.joblib",
+        "tokenizer.npz",
+        "tokenizer.msgpack",
+        "tokenizer.pkl.gz",
+        "tokenizer.PY",
+        "tokenizer.BIN",
+        "tokenizer.model.pkl",
+        "tokenizer.model.so",
+    )
+    admitted = set(
+        filter_repo_objects(
+            [*kept, *refused],
+            allow_patterns=list(ir.SNAPSHOT_PATTERNS),
+            ignore_patterns=list(ir.SNAPSHOT_IGNORED),
+        )
+    )
+    assert admitted == set(kept)
+
+
+async def test_a_run_with_no_token_downloads_anonymously(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # No token delivered means no token used — not the VM's ambient one, not forge's settings.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(output_repo_id=None))
+    monkeypatch.setenv("HF_TOKEN", "hf_ambientvmtoken0123456789")
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 0
+    assert hub_snapshots[0]["token"] is False
+
+
+async def test_the_model_server_loads_the_local_snapshot_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # vLLM is pointed at the directory the runner downloaded, answers to the Hub id the client
+    # uses, and runs with the Hub switched off: it never holds the token and fetches nothing.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    del hub_snapshots
+    task = record["task"]
+    snapshot = str(tmp_path / "hub-snapshot")
+    assert f"--model {snapshot}" in task.run
+    assert "--served-model-name org/model" in task.run
+    # Safetensors by name, not vLLM's `auto`, which falls back to a pickle checkpoint that an
+    # earlier unfiltered download may have left in the shared cache directory.
+    assert "--load-format safetensors" in task.run
+    assert task.env["HF_HUB_OFFLINE"] == "1"
+    assert not task.secrets
+    assert _TOKEN not in json.dumps(task.env)
+    assert _TOKEN not in task.run
+
+
+async def test_a_model_without_safetensors_weights_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # A repo that ships only pickle weights downloads nothing loadable. Say so by name, before
+    # the server starts, rather than as a model-server failure minutes later.
+    del hub_snapshots
+    (tmp_path / "hub-snapshot" / "model.safetensors").unlink()
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert "task" not in record  # the server never started
+    assert "no safetensors weights" in progress.read_text()
+
+
+async def test_safetensors_only_in_a_subfolder_are_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # The model server reads the directory root. Safetensors in a subfolder beside a root pickle
+    # checkpoint (one an earlier unfiltered download left in the shared cache folder) would pass a
+    # recursive check while the server loaded the pickle.
+    del hub_snapshots
+    snapshot = tmp_path / "hub-snapshot"
+    (snapshot / "model.safetensors").unlink()
+    (snapshot / "pytorch_model.bin").write_bytes(b"pickle")
+    (snapshot / "sub").mkdir()
+    (snapshot / "sub" / "model.safetensors").write_bytes(b"weights")
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert "task" not in record  # the server never started
+    assert "no safetensors weights" in progress.read_text()
+
+
+async def test_a_failed_model_download_names_the_model_and_scrubs_the_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    def _gated(**kwargs: Any) -> str:
+        msg = f"403 Forbidden: access to this repo is restricted (token {kwargs['token']})"
+        raise OSError(msg)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _gated)
+
+    assert await ir.main() == 1
+    text = progress.read_text()
+    assert "could not download the model org/model" in text
+    assert _TOKEN not in text
+    assert "task" not in record
 
 
 async def test_main_accepts_the_deprecated_env_token_and_says_so(

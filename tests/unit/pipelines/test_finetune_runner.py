@@ -321,6 +321,73 @@ class TestTrainerConfig:
                 tmp_path,
             )
 
+    @pytest.mark.parametrize(
+        "key",
+        [
+            # A Hub read with the VM's own credential, of any repo or local path.
+            "chat_template_path",
+            # Remote code, or a load configured outside the runner's terms.
+            "trust_remote_code",
+            "model_init_kwargs",
+            "ref_model_init_kwargs",
+            # A push with the VM's own credential.
+            "push_to_hub",
+            "push_to_hub_token",
+            "hub_token",
+            "hub_model_id",
+            "hub_private_repo",
+            "hub_strategy",
+            "hub_revision",
+            "trackio_space_id",
+            # A file on the VM, unpickled in the checkpoint case.
+            "resume_from_checkpoint",
+            "deepspeed",
+            "fsdp_config",
+            "accelerator_config",
+            # Outside the artifact directory, or off the machine entirely.
+            "logging_dir",
+            "report_to",
+        ],
+    )
+    def test_extra_trainer_args_cannot_load_push_or_report_under_other_terms(
+        self, tmp_path: Path, key: str
+    ) -> None:
+        # extra_trainer_args reaches TRL verbatim, so these keys would act with the VM's ambient
+        # credential, run a repo's code, read a VM file or ship the run to a third party: past
+        # every term the runner sets on its own loads. A spec names them; it does not get them.
+        from strata_forge.training.methods import pick_method
+
+        with pytest.raises(RunError, match=rf"may not set extra_trainer_args\.{key}\b"):
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": {key: "attacker/evil"}}),
+                pick_method("sft"),
+                tmp_path,
+            )
+
+    def test_every_refused_trainer_arg_is_named_at_once(self, tmp_path: Path) -> None:
+        from strata_forge.training.methods import pick_method
+
+        extra = {"report_to": "wandb", "hub_token": "x", "learning_rate": 1e-4}
+        with pytest.raises(RunError) as excinfo:
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": extra}), pick_method("dpo"), tmp_path
+            )
+        message = str(excinfo.value)
+        assert "extra_trainer_args.hub_token" in message
+        assert "extra_trainer_args.report_to" in message
+        assert "learning_rate" not in message
+
+    def test_an_ordinary_trainer_arg_still_passes_through(self, tmp_path: Path) -> None:
+        # The refusal is a deny-list of what reaches past the run, not a closing of the hatch.
+        from strata_forge.training.methods import pick_method
+
+        cfg = fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+            _spec(hyperparams={"extra_trainer_args": {"lr_scheduler_type": "cosine"}}),
+            pick_method("sft"),
+            tmp_path,
+        )
+        assert cfg.to_trl_kwargs()["lr_scheduler_type"] == "cosine"
+
     def test_the_derived_fields_are_the_spec_s_own(self, tmp_path: Path) -> None:
         # The positive half: what the run RECORDS is what the trainer is pointed at.
         from strata_forge.training.methods import pick_method
@@ -380,7 +447,7 @@ class TestLoadSplit:
             [{"question": "q", "answer": "a", "id": 1}], ["question", "answer", "id"]
         )
         _fake_datasets(monkeypatch, split)
-        rows = fr._load_split(_spec(), "train", None)  # pyright: ignore[reportPrivateUsage]
+        rows = fr._load_split(_spec(), "train", False)  # pyright: ignore[reportPrivateUsage]
         # Everything the trainer did not ask for is dropped: a stray column changes what TRL infers.
         assert rows == [{"prompt": "q", "completion": "a"}]
 
@@ -397,7 +464,7 @@ class TestLoadSplit:
                     yield {"question": "q", "answer": "a"}
 
         _fake_datasets(monkeypatch, _NeverEnding())  # pyright: ignore[reportArgumentType]
-        rows = fr._load_split(_spec(row_limit=3), "train", None)  # pyright: ignore[reportPrivateUsage]
+        rows = fr._load_split(_spec(row_limit=3), "train", False)  # pyright: ignore[reportPrivateUsage]
         assert len(rows) == 3
 
     def test_a_missing_column_names_the_split_and_the_columns(
@@ -405,7 +472,7 @@ class TestLoadSplit:
     ) -> None:
         _fake_datasets(monkeypatch, _FakeSplit([{"q": "x"}], ["q"]))
         with pytest.raises(RunError) as exc:
-            fr._load_split(_spec(), "train", None)  # pyright: ignore[reportPrivateUsage]
+            fr._load_split(_spec(), "train", False)  # pyright: ignore[reportPrivateUsage]
         assert "train:" in str(exc.value)
         assert "question" in str(exc.value)
 
@@ -617,6 +684,135 @@ class TestExecute:
         )
         assert merged == [True]
         assert any("Merging the adapter" in e.get("message", "") for e in events)
+
+
+# ------------------------------ the Hub credential -----------------------------
+
+
+class TestHubCredential:
+    """Every Hub read gets the delivered token explicitly, or ``False`` — never ``None``."""
+
+    @pytest.mark.parametrize(("token", "expected"), [(_TOKEN, _TOKEN), (None, False)])
+    def test_every_hub_read_gets_the_same_explicit_credential(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        token: str | None,
+        expected: str | bool,
+    ) -> None:
+        seen: dict[str, list[Any]] = {"split": [], "build": [], "merge": []}
+
+        def _rows(_spec_arg: Any, _split: str, credential: Any) -> list[dict[str, Any]]:
+            seen["split"].append(credential)
+            return [{"prompt": "q", "completion": "a"}]
+
+        def _build(*args: Any) -> object:
+            seen["build"].append(args[-1])
+            return object()
+
+        def _merge(_spec_arg: Any, _dir: Any, credential: Any) -> None:
+            seen["merge"].append(credential)
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        def _fake_train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+            return _TRAINED
+
+        def _dir(_run_id: str | None, *, name: str) -> Path:
+            return tmp_path / name
+
+        monkeypatch.setattr(fr, "_load_split", _rows)
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
+        monkeypatch.setattr(fr, "_build_trainer", _build)
+        monkeypatch.setattr(fr, "_train", _fake_train)
+        monkeypatch.setattr(fr, "_merge_adapter", _merge)
+        monkeypatch.setattr(fr, "results_dir", _dir)
+        import asyncio
+
+        secrets = RunSecrets(hf_token=SecretStr(token) if token else None)
+        asyncio.run(
+            fr._execute(_spec(output_repo_id=None, merge_adapter=True), secrets, None)  # pyright: ignore[reportPrivateUsage]
+        )
+        assert seen == {"split": [expected], "build": [expected], "merge": [expected]}
+
+    def test_the_trainer_build_hands_the_credential_to_the_method_runner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        received: dict[str, Any] = {}
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
+
+        class _Runner:
+            def build_trainer(self, **kwargs: Any) -> object:
+                received.update(kwargs)
+                return object()
+
+        class _Method:
+            def build_runner(self, config: Any, *, peft_config: Any) -> _Runner:
+                del config, peft_config
+                return _Runner()
+
+        fr._build_trainer(  # pyright: ignore[reportPrivateUsage]
+            _Method(),  # pyright: ignore[reportArgumentType]
+            object(),
+            None,
+            [],
+            None,
+            _TOKEN,
+        )
+        assert received["token"] == _TOKEN
+
+    def test_the_merge_loads_with_the_credential_and_no_remote_code(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        loads: dict[str, Any] = {}
+
+        class _AutoModel:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs: Any) -> Any:
+                loads["model"] = (model_id, kwargs)
+                return MagicMock(name="base")
+
+        class _AutoTokenizer:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs: Any) -> Any:
+                loads["tokenizer"] = (model_id, kwargs)
+                return MagicMock(name="tokenizer")
+
+        class _PeftModel:
+            @staticmethod
+            def from_pretrained(base: Any, path: str, **kwargs: Any) -> Any:
+                del base
+                loads["adapter"] = (path, kwargs)
+                return MagicMock(name="peft")
+
+        transformers_mod = types.ModuleType("transformers")
+        transformers_mod.AutoModelForCausalLM = _AutoModel  # pyright: ignore[reportAttributeAccessIssue]
+        transformers_mod.AutoTokenizer = _AutoTokenizer  # pyright: ignore[reportAttributeAccessIssue]
+        peft_mod = types.ModuleType("peft")
+        peft_mod.PeftModel = _PeftModel  # pyright: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+        monkeypatch.setitem(sys.modules, "peft", peft_mod)
+
+        fr._merge_adapter(_spec(), tmp_path, _TOKEN)  # pyright: ignore[reportPrivateUsage]
+
+        model_id, model_kwargs = loads["model"]
+        assert model_id == "org/model"
+        assert model_kwargs == {
+            "token": _TOKEN,
+            "trust_remote_code": False,
+            "use_safetensors": True,
+        }
+        assert loads["tokenizer"] == ("org/model", {"token": _TOKEN, "trust_remote_code": False})
+        assert loads["adapter"] == (str(tmp_path), {"token": _TOKEN})
 
 
 class TestPhaseBoundary:

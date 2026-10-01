@@ -20,11 +20,18 @@ Security boundary (the VM is where allow-listed config meets real credentials + 
     ``eval``/``pickle``/``yaml.unsafe_load``. ``column_mapping``/``hyperparams``/``lora`` are
     inert values handed to typed configs, never executed. Nothing in the spec can name Python
     to run, which is why GRPO — whose reward is a callable — is not reachable from here.
-  - The HF write token arrives in a private secrets file the backend wrote beside the job
+  - The Hugging Face token arrives in a private secrets file the backend wrote beside the job
     (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
     :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
-    the environment. It is passed EXPLICITLY to the Hub/dataset clients (never the VM's ambient
-    ``HF_TOKEN``), and is scrubbed from every surfaced message.
+    the environment. It is passed EXPLICITLY to every Hub read and write — the split, the base
+    model and its tokenizer, the merge, the push — and a run that received none sends no
+    credential rather than the VM's ambient ``HF_TOKEN`` or cached login (a repo the VM's Hub
+    cache already holds still loads from that cache). It is scrubbed from every surfaced message.
+  - Every model load refuses remote code and pickle checkpoints (``trust_remote_code=False``,
+    ``use_safetensors=True`` — see :mod:`strata_forge.training.loading`): the base model is
+    named by the spec, and its repo is not the operator's. The spec's ``extra_trainer_args``
+    cannot reopen any of this: the TRL knobs that load, push or report under other terms are
+    refused by name (:data:`_SPEC_REFUSED_TRAINER_ARGS`).
   - Progress events carry step counts, float metrics and a repo id — never a training example.
     A fine-tuning corpus is often the most sensitive thing in a run, and none of it is in the
     channel the control plane relays to a browser.
@@ -45,7 +52,7 @@ import asyncio
 import itertools
 import sys
 from collections.abc import Mapping  # runtime: isinstance below
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -68,6 +75,7 @@ from strata_forge.training.dataset_format import (
     validate_mapping,
 )
 from strata_forge.training.hardware import GpuSampler
+from strata_forge.training.loading import model_load_kwargs, tokenizer_load_kwargs
 from strata_forge.training.methods import (
     UnsupportedMethodError,
     check_format,
@@ -217,6 +225,57 @@ def _reject_runner_owned(hyperparams: dict[str, Any]) -> None:
         raise RunError(msg)
 
 
+#: TRL / ``transformers`` arguments an INERT spec may not set through ``extra_trainer_args``. That
+#: passthrough is the libraries' whole argument surface, and these knobs act outside the terms this
+#: runner sets on every load and push: they read from or write to the Hub with whatever credential
+#: the VM holds rather than the one the run was delivered (``chat_template_path``, ``push_to_hub``,
+#: the ``hub_*`` and ``trackio_*`` settings), run or configure a load of a repo's own code
+#: (``trust_remote_code``, ``model_init_kwargs``), read a file on the VM, which for a checkpoint
+#: means unpickling it (``resume_from_checkpoint``, ``deepspeed``, ``fsdp_config``,
+#: ``accelerator_config``), write outside the artifact directory (``logging_dir``), or send the
+#: run to a third-party service (``report_to``). Exact names first, then name prefixes.
+_SPEC_REFUSED_TRAINER_ARGS = frozenset(
+    {
+        "accelerator_config",
+        "chat_template_path",
+        "deepspeed",
+        "fsdp_config",
+        "logging_dir",
+        "model_init_kwargs",
+        "ref_model_init_kwargs",
+        "report_to",
+        "resume_from_checkpoint",
+        "trust_remote_code",
+    }
+)
+_SPEC_REFUSED_TRAINER_ARG_PREFIXES = ("hub_", "push_to_hub", "trackio_")
+
+
+def _reject_unsafe_trainer_args(hyperparams: dict[str, Any]) -> None:
+    """Refuse an ``extra_trainer_args`` key that reaches past the run's own credential and files.
+
+    The escape hatch stays whole for a caller driving :mod:`strata_forge.training` from Python,
+    who is the operator of the machine. A spec is submitted by someone who is not, so from a spec
+    these keys are named and refused, like every other inapplicable knob, rather than dropped.
+    """
+    extra = hyperparams.get("extra_trainer_args")
+    if not isinstance(extra, Mapping):
+        return
+    keys = [key for key in cast("Mapping[object, object]", extra) if isinstance(key, str)]
+    refused = sorted(
+        f"extra_trainer_args.{key}"
+        for key in keys
+        if key in _SPEC_REFUSED_TRAINER_ARGS or key.startswith(_SPEC_REFUSED_TRAINER_ARG_PREFIXES)
+    )
+    if refused:
+        msg = (
+            f"hyperparams may not set {', '.join(refused)}: from a run spec these reach a "
+            "credential, remote code, a file on the machine or a third-party service that the "
+            "run does not govern"
+        )
+        raise RunError(msg)
+
+
 def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) -> Any:
     """Build the method's typed config from the inert spec.
 
@@ -232,9 +291,12 @@ def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) ->
     to perform. ``extra_trainer_args`` is checked for the same reason: it is applied LAST inside
     ``to_trl_kwargs``, so it reaches TRL's own ``output_dir`` even when this layer is correct. That
     stays a deliberate, documented escape hatch for a caller driving the runners from Python; it is
-    only from an INERT SPEC, where the submitter is not the operator, that it must not aim.
+    only from an INERT SPEC, where the submitter is not the operator, that it must not aim — and
+    for the same reason :func:`_reject_unsafe_trainer_args` keeps a spec's ``extra_trainer_args``
+    off the knobs that read, push or run anything under terms other than the run's own.
     """
     _reject_runner_owned(spec.hyperparams)
+    _reject_unsafe_trainer_args(spec.hyperparams)
     kwargs: dict[str, Any] = {
         **spec.hyperparams,
         "model_id": spec.model_id,
@@ -254,7 +316,9 @@ def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) ->
         raise RunError(msg) from exc
 
 
-def _load_split(spec: FinetuneSpec, split: str, hf_token: str | None) -> list[dict[str, Any]]:
+def _load_split(
+    spec: FinetuneSpec, split: str, token: str | Literal[False]
+) -> list[dict[str, Any]]:
     """Materialise one split's rows, projected onto the chosen format's roles."""
     try:
         # Lazy optional-extra import (forge convention: `Any` so pyright skips the unresolved
@@ -268,7 +332,7 @@ def _load_split(spec: FinetuneSpec, split: str, hf_token: str | None) -> list[di
         name=spec.dataset_config,
         split=split,
         revision=spec.dataset_commit_sha,
-        token=hf_token or None,
+        token=token,
         streaming=False,
     )
     try:
@@ -296,6 +360,7 @@ def _build_trainer(
     peft_config: LoRAConfig | QLoRAConfig | None,
     train_rows: list[dict[str, Any]],
     eval_rows: list[dict[str, Any]] | None,
+    token: str | Literal[False],
 ) -> Any:
     """Construct the trainer WITHOUT starting it. Blocking — call it in a worker thread.
 
@@ -308,6 +373,7 @@ def _build_trainer(
     return runner.build_trainer(
         train_dataset=_to_dataset(train_rows),
         eval_dataset=_to_dataset(eval_rows) if eval_rows else None,
+        token=token,
     )
 
 
@@ -323,7 +389,7 @@ def _train(trainer: Any, output_dir: Path) -> tuple[dict[str, float], int | None
     return numeric_metrics(output), coerce_int(getattr(output, "global_step", None))
 
 
-def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path) -> Path:
+def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path, token: str | Literal[False]) -> Path:
     """Fold the trained adapter into the base weights, in place.
 
     Loads the base model and applies the saved adapter, then writes the merged weights over the
@@ -335,12 +401,18 @@ def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path) -> Path:
     except ImportError as exc:
         msg = "the [finetuning] extra is required to merge an adapter"
         raise RunError(msg) from exc
-    base = transformers_mod.AutoModelForCausalLM.from_pretrained(spec.model_id)
-    merged = peft_mod.PeftModel.from_pretrained(base, str(artifact_dir)).merge_and_unload()
+    base = transformers_mod.AutoModelForCausalLM.from_pretrained(
+        spec.model_id, **model_load_kwargs(token)
+    )
+    merged = peft_mod.PeftModel.from_pretrained(
+        base, str(artifact_dir), token=token
+    ).merge_and_unload()
     merged.save_pretrained(str(artifact_dir))
     # The tokenizer rides along: a merged model that cannot be tokenised is not loadable, and the
     # adapter directory does not carry one.
-    transformers_mod.AutoTokenizer.from_pretrained(spec.model_id).save_pretrained(str(artifact_dir))
+    transformers_mod.AutoTokenizer.from_pretrained(
+        spec.model_id, **tokenizer_load_kwargs(token)
+    ).save_pretrained(str(artifact_dir))
     return artifact_dir
 
 
@@ -364,6 +436,7 @@ async def _execute(
     spec: FinetuneSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
     hf_token = secrets.hf_token_value()
+    hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, so the
     # `load_model` and `push` stretches -- where nothing is countable -- still show the box
     # working. The trainer callback covers `run` with its own.
@@ -375,9 +448,9 @@ async def _execute(
     # before any countable milestone. to_thread, not a direct call: load_dataset blocks, and a
     # blocked event loop stops the very ticker that says the step is still running.
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
-        train_rows = await asyncio.to_thread(_load_split, spec, spec.split, hf_token)
+        train_rows = await asyncio.to_thread(_load_split, spec, spec.split, hub_token)
         eval_rows = (
-            await asyncio.to_thread(_load_split, spec, spec.eval_split, hf_token)
+            await asyncio.to_thread(_load_split, spec, spec.eval_split, hub_token)
             if spec.eval_split
             else None
         )
@@ -397,7 +470,7 @@ async def _execute(
     # the run, and nothing else reports it.
     async with ticking_phase(phase, "Loading the model onto the GPU", stage="load_model"):
         trainer = await asyncio.to_thread(
-            _build_trainer, method, config, peft_config, train_rows, eval_rows
+            _build_trainer, method, config, peft_config, train_rows, eval_rows, hub_token
         )
 
     # And deliberately NO phase around the loop itself. From here the trainer's own callback
@@ -409,7 +482,7 @@ async def _execute(
 
     if spec.merge_adapter:
         async with ticking_phase(phase, "Merging the adapter into the base model", stage="push"):
-            await asyncio.to_thread(_merge_adapter, spec, artifact_dir)
+            await asyncio.to_thread(_merge_adapter, spec, artifact_dir, hub_token)
 
     if hf_token and spec.output_repo_id:
         try:
