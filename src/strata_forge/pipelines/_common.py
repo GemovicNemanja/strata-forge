@@ -116,6 +116,37 @@ __all__ = [
 REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 # A safe single path segment for an on-VM output dir name (no slash / traversal / shell chars).
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# The builder names ``datasets.load_dataset`` resolves BEFORE the Hub (its packaged modules, as of
+# datasets 5, plus the ones that take their source as an argument). Each is a well-formed bare id,
+# and each reads data files from the caller's working directory, not a repo; ``pandas`` unpickles.
+_PACKAGED_DATASET_BUILDERS = frozenset(
+    {
+        "arrow",
+        "audiofolder",
+        "cache",
+        "conll",
+        "csv",
+        "eval",
+        "generator",
+        "hdf5",
+        "iceberg",
+        "imagefolder",
+        "json",
+        "lance",
+        "meshfolder",
+        "niftifolder",
+        "pandas",
+        "parquet",
+        "pdffolder",
+        "spark",
+        "sql",
+        "text",
+        "tsfile",
+        "videofolder",
+        "webdataset",
+        "xml",
+    }
+)
 # A phase message is a short human phrase. Capped because the sink is reachable from public API:
 # a caller's hook must not be able to grow the file the orchestrator tails without bound.
 MAX_PHASE_CHARS = 200
@@ -210,7 +241,10 @@ class RunSecrets(BaseModel):
 
         Never ``None``: every Hugging Face library reads ``None`` as "use whatever credential this
         machine has" (an ``HF_TOKEN`` variable, a cached login, forge's own settings), and a run
-        reads the Hub with exactly the credential the control plane delivered, or with none.
+        authenticates to the Hub with exactly the credential the control plane delivered, or with
+        none. ``False`` governs what is sent, not what is on disk: the Hub libraries answer a
+        refused request from a copy already in the machine's cache, so a gated or private repo an
+        earlier run cached still loads. That cache belongs to the account the runner runs as.
         """
         token = self.hf_token_value()
         return token if token else False
@@ -337,6 +371,9 @@ def validate_repo_id(repo_id: str, what: str) -> str:
     # fullmatch (not match): match's `$` accepts a trailing newline ("org/x\n").
     if ".." in repo_id or not REPO_ID_RE.fullmatch(repo_id):
         msg = f"invalid {what} id"
+        raise RunError(msg)
+    if what == "dataset" and repo_id.lower() in _PACKAGED_DATASET_BUILDERS:
+        msg = f"invalid dataset id: {repo_id} names a local-file builder, not a Hub repo"
         raise RunError(msg)
     return repo_id
 
