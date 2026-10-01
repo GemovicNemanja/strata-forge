@@ -36,7 +36,11 @@ type FinishReason = Literal[
 
 
 class Usage(BaseModel):
-    """Token accounting for a single completion."""
+    """Token accounting for a single completion.
+
+    ``input_tokens`` is the uncached input: providers count cached reads and cache writes in
+    their input total, and Forge reports them net of both so each bucket is priced once.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -48,7 +52,7 @@ class Usage(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def total_tokens(self) -> int:
-        """Input + output. Cache reads/writes are reported separately."""
+        """Uncached input + output. Cache reads/writes are reported separately."""
         return self.input_tokens + self.output_tokens
 
 

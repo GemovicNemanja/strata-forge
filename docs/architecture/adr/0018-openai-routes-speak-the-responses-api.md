@@ -47,7 +47,7 @@ LiteLLM 1.83 offers two ways in:
   the request body and parses the typed event stream itself (`strata_forge.llm.responses_wire`);
   the bridge in (1) is not used. The official `openai` SDK is not added as a dependency.
 - Requests are stateless: `store: false`, `include: ["reasoning.encrypted_content"]`, never
-  `previous_response_id`. Each turn's output items (encrypted reasoning, text with its `phase`,
+  `previous_response_id`; `provider_extras` cannot set a stateful field. Each turn's output items (encrypted reasoning, text with its `phase`,
   function-call references) ride on `AssistantMessage.provider_items`, a closed, typed union
   tagged with the provider that produced it. They are replayed verbatim to that provider and
   replaced by plain text plus `function_call` items for any other, so a provider switch or a

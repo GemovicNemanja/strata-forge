@@ -595,7 +595,9 @@ class LLMClient:
             )
             await self._consume_budget(response)
             if self._cache is not None:
-                await self._cache.set(cache_k, response)
+                # The key is provider- and credential-agnostic, and encrypted reasoning
+                # replays only under the organization that produced it, so it is not stored.
+                await self._cache.set(cache_k, response.model_copy(update={"provider_items": None}))
             return response
 
         return await run_with_fallback(
@@ -1306,9 +1308,16 @@ class LLMClient:
         budget = current_budget()
         if budget is None:
             return
+        usage = response.usage
+        # ``input_tokens`` is net of cache, so a token ceiling counts every bucket explicitly.
         await budget.consume(
             usd=response.cost_usd,
-            tokens=response.usage.total_tokens,
+            tokens=(
+                usage.input_tokens
+                + usage.cache_read_tokens
+                + usage.cache_write_tokens
+                + usage.output_tokens
+            ),
         )
 
     async def _record_success(

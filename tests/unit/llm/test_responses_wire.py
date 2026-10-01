@@ -12,6 +12,7 @@ from strata_forge.core.errors import (
     ProviderBadRequestError,
     ProviderRateLimitError,
     ProviderServerError,
+    ValidationError,
 )
 from strata_forge.llm.messages import (
     AssistantMessage,
@@ -127,7 +128,7 @@ class TestBuildInput:
         }
         assert content[2]["image_url"].startswith("data:image/png;base64,")
 
-    def test_matching_provider_items_are_replayed_in_order_without_status(self) -> None:
+    def test_matching_provider_items_are_replayed_in_order(self) -> None:
         _, items = build_input([Message.user("q"), _tool_turn()], "openai")
         assert items[1:] == [
             {
@@ -140,7 +141,15 @@ class TestBuildInput:
                 "type": "message",
                 "id": "msg_1",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": "Let me check.", "annotations": []}],
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Let me check.",
+                        "annotations": [],
+                        "logprobs": [],
+                    }
+                ],
                 "phase": "commentary",
             },
             {
@@ -151,7 +160,8 @@ class TestBuildInput:
                 "id": "fc_1",
             },
         ]
-        assert all("status" not in item for item in items)
+        # Status is a required field of the output-message input shape only.
+        assert [item.get("status") for item in items[1:]] == [None, "completed", None]
 
     def test_items_from_another_provider_are_synthesized_without_ids(self) -> None:
         _, items = build_input([Message.user("q"), _tool_turn(provider="azure")], "openai")
@@ -281,14 +291,64 @@ class TestBuildRequest:
         assert "reasoning_effort" not in body
         assert "response_format" not in body
 
-    def test_extras_win_over_the_computed_body(self) -> None:
+    @pytest.mark.parametrize(
+        "field", ["store", "previous_response_id", "conversation", "background"]
+    )
+    def test_extras_cannot_make_the_request_stateful(self, field: str) -> None:
+        with pytest.raises(ValidationError, match=field):
+            build_request(messages=[Message.user("hi")], provider="openai", extras={field: True})
+
+    def test_extras_include_adds_to_the_encrypted_reasoning(self) -> None:
         body = build_request(
             messages=[Message.user("hi")],
             provider="openai",
-            extras={"include": [], "store": True},
+            extras={"include": ["message.output_text.logprobs", INCLUDE_ENCRYPTED_REASONING]},
         )
-        assert body["include"] == []
-        assert body["store"] is True
+        assert body["include"] == [INCLUDE_ENCRYPTED_REASONING, "message.output_text.logprobs"]
+        assert body["store"] is False
+
+    @pytest.mark.parametrize("include", ["reasoning.encrypted_content", [1], {"a": 1}])
+    def test_extras_include_must_be_a_list_of_strings(self, include: Any) -> None:
+        with pytest.raises(ValidationError, match="include"):
+            build_request(
+                messages=[Message.user("hi")], provider="openai", extras={"include": include}
+            )
+
+    def test_extras_text_merges_into_the_structured_output_format(self) -> None:
+        response_format = to_openai_response_format(_Answer)
+        body = build_request(
+            messages=[Message.user("hi")],
+            provider="openai",
+            response_format=response_format,
+            extras={"text": {"verbosity": "low"}},
+        )
+        assert body["text"]["verbosity"] == "low"
+        assert body["text"]["format"]["name"] == "_Answer"
+
+    def test_extras_chat_completions_verbosity_becomes_text_verbosity(self) -> None:
+        body = build_request(
+            messages=[Message.user("hi")], provider="openai", extras={"verbosity": "high"}
+        )
+        assert body["text"] == {"verbosity": "high"}
+        assert "verbosity" not in body
+
+    def test_extras_text_format_replaces_the_computed_one(self) -> None:
+        body = build_request(
+            messages=[Message.user("hi")],
+            provider="openai",
+            response_format=to_openai_response_format(_Answer),
+            extras={"text": {"format": {"type": "text"}}},
+        )
+        assert body["text"] == {"format": {"type": "text"}}
+
+    def test_other_extras_are_set_on_the_body(self) -> None:
+        body = build_request(
+            messages=[Message.user("hi")],
+            provider="openai",
+            extras={"prompt_cache_key": "k", "extra_body": {"x": 1}},
+        )
+        assert body["prompt_cache_key"] == "k"
+        assert body["extra_body"] == {"x": 1}
 
     def test_full_body_snapshot(self, snapshot: SnapshotAssertion) -> None:
         body = build_request(
@@ -741,6 +801,46 @@ class TestResponsesStreamParser:
         parser = ResponsesStreamParser("openai")
         with pytest.raises(ProviderRateLimitError, match="slow"):
             parser.feed({"type": "error", "code": "rate_limit_exceeded", "message": "slow"})
+
+    @pytest.mark.parametrize(
+        ("code", "error_type"),
+        [
+            ("rate_limit_exceeded", ProviderRateLimitError),
+            ("context_length_exceeded", ProviderBadRequestError),
+            ("server_error", ProviderServerError),
+        ],
+    )
+    def test_nested_error_event_keeps_its_code_and_message(
+        self, code: str, error_type: type[Exception]
+    ) -> None:
+        parser = ResponsesStreamParser("openai", model="gpt-6.1-sol")
+        event = {
+            "type": "error",
+            "sequence_number": 3,
+            "error": {"type": "invalid_request_error", "code": code, "message": "too much"},
+        }
+        with pytest.raises(error_type, match=f"{code}: too much"):
+            parser.feed(event)
+
+    def test_nested_error_event_from_litellm_types(self) -> None:
+        from litellm.types.llms.openai import (  # pyright: ignore[reportMissingTypeStubs]
+            ErrorEvent,
+        )
+
+        event = ErrorEvent.model_validate(
+            {
+                "type": "error",
+                "sequence_number": 1,
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "message": "slow down",
+                },
+            }
+        )
+        parser = ResponsesStreamParser("openai")
+        with pytest.raises(ProviderRateLimitError, match="rate_limit_exceeded: slow down"):
+            parser.feed(event)
 
     def test_unknown_and_hosted_tool_events_are_ignored(self) -> None:
         parser = ResponsesStreamParser("openai")

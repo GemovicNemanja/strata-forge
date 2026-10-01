@@ -45,16 +45,24 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `litellm.aresponses`; `openai_compat` (OpenRouter, a self-hosted vLLM, Ollama), Anthropic,
   Vertex and Bedrock stay on Chat Completions. The call surface is unchanged.
   - Requests are stateless (`store: false`, `include: ["reasoning.encrypted_content"]`, never
-    `previous_response_id`). A turn's output items (encrypted reasoning, text with its `phase`,
-    function-call references) come back on `LLMResponse.provider_items` and the final
-    `ResponseChunk`, ride on `AssistantMessage.provider_items` through both tool loops and
-    `PendingToolCalls.messages`, and are replayed verbatim to the provider that produced them.
+    `previous_response_id`), and `provider_extras` that set `store`, `previous_response_id`,
+    `conversation` or `background` raise `ValidationError`. A turn's output items (encrypted
+    reasoning, text with its `phase`, function-call references) come back on
+    `LLMResponse.provider_items` and the final `ResponseChunk`, ride on
+    `AssistantMessage.provider_items` through both tool loops and `PendingToolCalls.messages`,
+    and are replayed verbatim to the provider that produced them (a replayed message with the
+    `status` its input shape requires). The `complete()` cache never stores them.
+  - In `provider_extras`, an `include` adds to the encrypted-reasoning include, a `text` object
+    merges into the computed one (a structured-output format survives unless it sets its own),
+    and `reasoning_effort` / `verbosity` / `response_format` become `reasoning.effort` /
+    `text.verbosity` / `text.format`.
   - A registered model that LiteLLM's model map lacks is registered with LiteLLM from the Forge
     registry (streaming flag, limits, prices) before a Responses call. LiteLLM fakes the stream
     of a model it cannot look up, so the GPT-6 and `gpt-5.5` streams otherwise depended on
     LiteLLM fetching its remote map at import.
   - `response.incomplete` reports `length` / `content_filter`, `response.failed` and `error`
-    events raise a mapped `ProviderError` (`map_responses_error`), and a stream that ends before
+    events raise a mapped `ProviderError` (`map_responses_error`, reading an `error` event's code
+    and message at its top level or in its nested `error` object), and a stream that ends before
     its terminal event raises `ProviderServerError` instead of reporting a clean stop.
   - `AzureConfig.responses_api_version` (default `v1`, env `AZURE_OPENAI_RESPONSES_API_VERSION`)
     selects Azure's `/openai/v1/responses` endpoint; Chat Completions keeps `api_version`. An
@@ -80,7 +88,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `Usage.input_tokens` is reported net of cached reads and cache writes on every route. Providers
   include both in their input count while `compute_cost` prices each bucket separately, so cached
   tokens were billed twice; Chat Completions usage now also reports `cache_write_tokens` from
-  LiteLLM's `cache_creation_input_tokens`.
+  LiteLLM's `cache_creation_input_tokens`. A `BudgetContext` token ceiling counts every bucket
+  (uncached input, cache reads and writes, output), so the netting does not loosen it.
 - The `unknown_model` message from `resolve()` states only the failure (`Unknown model: '<id>' is
   not available on ...`), because it can reach an application's end users; the remediation (the
   registry file, the `openai_compat` escape hatch) is logged as an `unknown_model` warning. The

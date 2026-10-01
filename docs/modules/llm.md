@@ -169,7 +169,9 @@ the request and parses the result. The call surface (`complete`, `stream`,
 
 - Every request is stateless: `store: false` and
   `include: ["reasoning.encrypted_content"]`; `previous_response_id` is
-  never sent.
+  never sent, and `provider_extras` that set `store`,
+  `previous_response_id`, `conversation` or `background` are refused with
+  `ValidationError`.
 - The leading system messages become `instructions`; a later system message
   (the structured-output reprompt) becomes a `developer` message in place.
 - `max_tokens` becomes `max_output_tokens`, which bounds reasoning AND
@@ -179,9 +181,16 @@ the request and parses the result. The call surface (`complete`, `stream`,
 - `response_format` becomes `text.format`; tools become internally tagged
   function tools with `strict: false` (an omitted `strict` would request
   strict mode, which rejects ordinary JSON Schemas).
-- In `provider_extras`, a Chat Completions style `reasoning_effort` becomes
-  `reasoning.effort` and a `response_format` becomes `text.format`; every
-  other key is forwarded verbatim and wins over the computed body.
+- In `provider_extras`, the Chat Completions style `reasoning_effort`,
+  `verbosity` and `response_format` become `reasoning.effort`,
+  `text.verbosity` and `text.format`; a `text` object is merged into the
+  computed one (its `format` replaces a structured-output format only when
+  it sets one); an `include` list adds to the encrypted-reasoning include.
+  Every other key is set on the body as given, but LiteLLM drops a key its
+  `aresponses` does not know, so a field it lacks goes in `extra_body`.
+- A replayed assistant message carries `status: "completed"`, which the
+  output-message input shape requires (LiteLLM strips it on Azure); reasoning
+  and function-call items do not.
 - Azure routes use `AzureConfig.responses_api_version` (`v1` by default,
   env `AZURE_OPENAI_RESPONSES_API_VERSION`), which selects Azure's
   `/openai/v1/responses` endpoint. OpenAI routes send `OPENAI_ORG_ID` as the
@@ -215,7 +224,9 @@ as the encrypted reasoning (tens of kilobytes per tool turn is normal), and a
 A `response.incomplete` turn reports `finish_reason` `length`
 (`max_output_tokens`) or `content_filter`, a refusal reports
 `content_filter`, and `response.failed` / an `error` event raise a
-`ProviderError` subclass chosen by the error code (`map_responses_error`).
+`ProviderError` subclass chosen by the error code (`map_responses_error`),
+whether the event carries its `code` and `message` at the top level or in a
+nested `error` object.
 A stream that ends before its terminal event raises `ProviderServerError`
 rather than reporting a clean stop.
 
@@ -231,6 +242,10 @@ pre-flight with `ValidationError` where the model would reject them:
   any model;
 - on any other route, whenever the entry's `sampling_params` is `false`
   (the Claude 5.x entries).
+
+The registry does not record which reasoning efforts a model offers, so
+effort `none` on a model without it (GPT-6.1 Sol and GPT-6 Astra start at
+`low`) passes the guard and the provider rejects the request.
 
 An `openai_compat` pin is never checked: its endpoint serves the operator's
 own model.
@@ -415,7 +430,10 @@ schemas, and any `provider_extras`. The provider serving the call is
 served the call is just as valid when the next call would have gone to
 Bedrock — including the provider would defeat the cache during
 provider-level failover. A turn's `provider_items` (Responses API state) are
-likewise not in the key; they are opaque per-provider state.
+likewise not in the key, and they are not stored either: the encrypted
+reasoning replays only under the organization that produced it, and the key
+holds no credentials, so a hit returns the text and tool calls with
+`provider_items=None` and the next turn replays without that reasoning.
 
 ```python
 from strata_forge.llm import InMemoryCache, LLMClient, Message
@@ -774,7 +792,8 @@ per-million-token rates, taking into account cache-read / cache-write
 prices when usage reports them. `cache_hit=True` responses report
 `cost_usd=0.0`. Providers report an input count that INCLUDES cached reads
 (and, for Anthropic through LiteLLM, cache writes); `Usage.input_tokens` is
-reported net of both, so each token is priced once at its own rate.
+reported net of both, so each token is priced once at its own rate, and
+`Usage.total_tokens` is that uncached input plus the output.
 
 **`openai_compat` routes are unpriced and report `cost_usd=0.0`.** Their
 model ids are operator-specific, so the curated registry has no entry and
@@ -799,8 +818,9 @@ async with BudgetContext(max_usd=1.00) as budget:
 ```
 
 `LLMClient` consumes against the active budget after every successful
-call. If the next call would exceed the ceiling, `BudgetExceededError`
-fires *before* the spend happens. Nested budgets share the parent
+call; a token ceiling counts every bucket (uncached input, cache reads,
+cache writes and output), not `Usage.total_tokens`. If the next call would
+exceed the ceiling, `BudgetExceededError` fires *before* the spend happens. Nested budgets share the parent
 ceiling unless explicitly `isolated=True`.
 
 ### Diagnostic NDJSON dump

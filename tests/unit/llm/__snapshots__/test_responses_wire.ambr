@@ -26,6 +26,8 @@
           dict({
             'annotations': list([
             ]),
+            'logprobs': list([
+            ]),
             'text': 'Let me check.',
             'type': 'output_text',
           }),
@@ -33,6 +35,7 @@
         'id': 'msg_1',
         'phase': 'commentary',
         'role': 'assistant',
+        'status': 'completed',
         'type': 'message',
       }),
       dict({

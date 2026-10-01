@@ -47,7 +47,9 @@ from strata_forge.llm.messages import (
 from strata_forge.llm.tools import ToolDeclaration, ToolLoopExceededError, tool
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Iterator, Mapping
+
+    import httpx
 
     from strata_forge.llm.providers.base import ProviderClient
     from strata_forge.llm.registry import ProviderName
@@ -509,6 +511,12 @@ def _aresponses_stream(*turns: list[dict[str, Any]]) -> AsyncMock:
 class TestResponsesRoute:
     """Routes with ``wire_api: responses`` call ``litellm.aresponses``, never ``acompletion``."""
 
+    @pytest.fixture(autouse=True)
+    def _never_chat_completions(self, mock_litellm: AsyncMock) -> Iterator[None]:
+        # A silent fall back to Chat Completions fails here at once, not after real retries.
+        yield
+        assert mock_litellm.await_count == 0, "a Responses route called litellm.acompletion"
+
     async def test_complete_calls_aresponses_with_a_stateless_body(
         self,
         mock_litellm: AsyncMock,
@@ -538,6 +546,87 @@ class TestResponsesRoute:
         assert resp.provider_items.items[0] == TextItem(
             id="msg_1", phase="final_answer", text="hi there"
         )
+
+    async def test_the_diagnostic_dump_redacts_encrypted_reasoning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+    ) -> None:
+        dump = tmp_path / "diag.ndjson"
+        monkeypatch.setenv("FORGE_DIAGNOSTIC_ENABLED", "true")
+        monkeypatch.setenv("FORGE_DIAGNOSTIC_PATH", str(dump))
+        aresponses = AsyncMock(
+            return_value=_rs_completed([_rs_reasoning(blob="gAAAA-fresh-blob"), _rs_message("ok")])
+        )
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        prior = AssistantMessage(
+            content="Let me check.",
+            tool_calls=[ToolCall(id="call_1", name="_get_weather", arguments={"location": "Oslo"})],
+            provider_items=ProviderItems(
+                provider="openai",
+                items=(
+                    ReasoningItem(id="rs_0", encrypted_content="gAAAA-replayed-blob"),
+                    CallRef(id="fc_1", call_id="call_1"),
+                ),
+            ),
+        )
+        await LLMClient("gpt-6.1-sol").complete(
+            [
+                Message.system("be brief"),
+                Message.user("weather?"),
+                prior,
+                ToolResultMessage(tool_call_id="call_1", content="18C"),
+            ]
+        )
+        # The request itself carried the blob; only the dump is redacted.
+        sent = json.dumps(_kwargs(aresponses)["input"])
+        assert "gAAAA-replayed-blob" in sent
+        record = json.loads(dump.read_text(encoding="utf-8").splitlines()[-1])
+        text = json.dumps(record)
+        assert "gAAAA-replayed-blob" not in text
+        assert "gAAAA-fresh-blob" not in text
+        assert f"<{len('gAAAA-replayed-blob')} bytes>" in text
+        assert record["messages"][0] == {"type": "instructions", "content": "be brief"}
+
+    def test_a_turn_whose_items_name_an_unknown_call_keeps_only_its_text_and_calls(self) -> None:
+        from strata_forge.llm.client import _assistant_turn  # pyright: ignore[reportPrivateUsage]
+
+        calls = [ToolCall(id="call_1", name="_get_weather", arguments={})]
+        items = ProviderItems(
+            provider="openai",
+            items=(
+                ReasoningItem(id="rs_1", encrypted_content="blob"),
+                CallRef(id="fc_9", call_id="call_9"),
+            ),
+        )
+        turn = _assistant_turn("checking", calls, items)
+        assert turn.provider_items is None
+        assert turn.content == "checking"
+        assert [call.id for call in turn.tool_calls] == ["call_1"]
+        kept = _assistant_turn(
+            "checking",
+            calls,
+            ProviderItems(provider="openai", items=(CallRef(id="fc_1", call_id="call_1"),)),
+        )
+        assert kept.provider_items is not None
+
+    async def test_the_cache_never_stores_provider_items(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock(
+            return_value=_rs_completed([_rs_reasoning(), _rs_message("hi there")])
+        )
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        cache = InMemoryCache()
+        client = LLMClient("gpt-6.1-sol", cache=cache)
+        fresh = await client.complete([Message.user("hi")])
+        assert fresh.provider_items is not None  # the caller still gets this turn's items
+        hit = await client.complete([Message.user("hi")])
+        assert hit.cache_hit
+        assert hit.text == "hi there"
+        assert hit.provider_items is None
+        assert aresponses.await_count == 1
 
     async def test_usage_is_net_of_cache_and_priced_per_bucket(
         self,
@@ -614,17 +703,6 @@ class TestResponsesRoute:
         assert text_format["name"] == "_Summary"
         assert text_format["strict"] is True
         assert "response_format" not in _kwargs(aresponses)
-
-    async def test_openai_compat_pin_of_the_same_id_stays_on_chat_completions(
-        self,
-        mock_litellm: AsyncMock,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        aresponses = AsyncMock()
-        monkeypatch.setattr("litellm.aresponses", aresponses)
-        await LLMClient("gpt-6.1-sol", provider="openai_compat").complete([Message.user("hi")])
-        assert aresponses.await_count == 0
-        assert mock_litellm.await_count == 1
 
     async def test_failed_response_raises_a_mapped_error(
         self,
@@ -753,8 +831,14 @@ class TestResponsesRoute:
                 "type": "message",
                 "id": "msg_pre",
                 "role": "assistant",
+                "status": "completed",
                 "content": [
-                    {"type": "output_text", "text": "Checking the weather.", "annotations": []}
+                    {
+                        "type": "output_text",
+                        "text": "Checking the weather.",
+                        "annotations": [],
+                        "logprobs": [],
+                    }
                 ],
                 "phase": "commentary",
             },
@@ -890,6 +974,78 @@ class TestResponsesRoute:
         assert second_input[2]["id"] == "fc_1"
 
 
+class TestChatCompletionsBesideResponses:
+    """Chat Completions routes keep their wire when Responses API turns are around them."""
+
+    async def test_openai_compat_pin_of_the_same_id_stays_on_chat_completions(
+        self,
+        mock_litellm: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aresponses = AsyncMock()
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        await LLMClient("gpt-6.1-sol", provider="openai_compat").complete([Message.user("hi")])
+        assert aresponses.await_count == 0
+        assert mock_litellm.await_count == 1
+
+    async def test_a_turn_with_provider_items_reaches_chat_completions_as_plain_history(
+        self, mock_litellm: AsyncMock
+    ) -> None:
+        # A conversation resumed on another provider carries the OpenAI turn's items.
+        turn = AssistantMessage(
+            content="Let me check.",
+            tool_calls=[ToolCall(id="call_1", name="_get_weather", arguments={"location": "Oslo"})],
+            provider_items=ProviderItems(
+                provider="openai",
+                items=(
+                    ReasoningItem(id="rs_1", encrypted_content="gAAAA-secret-blob"),
+                    TextItem(id="msg_1", phase="commentary", text="Let me check."),
+                    CallRef(id="fc_1", call_id="call_1"),
+                ),
+            ),
+        )
+        messages = [
+            Message.user("weather?"),
+            turn,
+            ToolResultMessage(tool_call_id="call_1", content="18C"),
+        ]
+        for model in ("claude-opus-4-7", "gpt-6.1-sol"):
+            provider = "openai_compat" if model.startswith("gpt") else None
+            await LLMClient(model, provider=provider).complete(messages)
+            wire = _kwargs(mock_litellm)["messages"]
+            assistant = wire[1]
+            assert assistant["role"] == "assistant"
+            assert set(assistant) <= {"role", "content", "tool_calls"}
+            assert assistant["tool_calls"][0]["id"] == "call_1"
+            assert "gAAAA-secret-blob" not in json.dumps(wire)
+            assert "rs_1" not in json.dumps(wire)
+
+    async def test_fallback_from_chat_completions_to_a_responses_route(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from litellm.exceptions import RateLimitError as LLRateLimitError
+
+        acompletion = AsyncMock(
+            side_effect=LLRateLimitError(message="429", model="claude", llm_provider="anthropic")
+        )
+        aresponses = AsyncMock(return_value=_rs_completed([_rs_message("from sol")]))
+        monkeypatch.setattr("litellm.acompletion", acompletion)
+        monkeypatch.setattr("litellm.aresponses", aresponses)
+        client = LLMClient(
+            chain=["claude-opus-4-7", "gpt-6.1-sol"],
+            retry_max_attempts=1,
+            retry_initial_wait=0.0,
+            retry_max_wait=0.0,
+        )
+        resp = await client.complete([Message.user("hi")], max_tokens=1_000)
+        assert resp.text == "from sol"
+        assert resp.route.model == "gpt-6.1-sol"
+        assert resp.route.wire_api == "responses"
+        assert acompletion.await_count == 1
+        assert _kwargs(aresponses)["max_output_tokens"] == 1_000
+        assert "messages" not in _kwargs(aresponses)
+
+
 class TestSamplingParamsGuard:
     """``temperature`` / ``top_p`` are refused pre-flight where the model rejects them."""
 
@@ -914,6 +1070,7 @@ class TestSamplingParamsGuard:
 
     async def test_allowed_when_the_caller_sets_effort_none(
         self,
+        mock_litellm: AsyncMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
@@ -926,15 +1083,18 @@ class TestSamplingParamsGuard:
         kwargs = _kwargs(aresponses)
         assert kwargs["temperature"] == 0.2
         assert kwargs["reasoning"] == {"effort": "none"}
+        assert mock_litellm.await_count == 0
 
     async def test_allowed_on_a_model_whose_default_effort_is_none(
         self,
+        mock_litellm: AsyncMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         aresponses = AsyncMock(return_value=_rs_completed([_rs_message("ok")]))
         monkeypatch.setattr("litellm.aresponses", aresponses)
         await LLMClient("gpt-5.5-instant").complete([Message.user("hi")], temperature=0.3)
         assert _kwargs(aresponses)["temperature"] == 0.3
+        assert mock_litellm.await_count == 0
 
     async def test_refused_with_an_explicit_effort_other_than_none(
         self,
@@ -1115,6 +1275,16 @@ class TestBudgetIntegration:
         async with BudgetContext(max_usd=1.00) as budget:
             await client.complete([Message.user("hi")])
             assert budget.spent_usd > 0
+
+    async def test_budget_tokens_count_cached_input(self, mock_litellm: AsyncMock) -> None:
+        # 50 prompt tokens of which 40 were cache reads: the input is reported net (10), but a
+        # token ceiling still counts all 50 plus the output.
+        mock_litellm.return_value = _fake_response(prompt_tokens=50, cache_read=40)
+        client = LLMClient("claude-opus-4-7")
+        async with BudgetContext(max_tokens=1_000) as budget:
+            resp = await client.complete([Message.user("hi")])
+        assert resp.usage.input_tokens == 10
+        assert budget.spent_tokens == 52
 
     async def test_budget_exceeded_raises(self, mock_litellm: AsyncMock) -> None:
         client = LLMClient("claude-opus-4-7")
@@ -2588,6 +2758,28 @@ class TestResponsesHttpBody:
         assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "18C in Oslo"
         self._assert_bodies(bodies)
         assert [body.get("stream") for body in bodies] == [True, True]
+
+    async def test_the_organization_rides_as_a_header(self, http: Any) -> None:
+        from pydantic import SecretStr
+
+        from strata_forge.llm.providers import OpenAIProvider
+        from strata_forge.llm.providers.config import OpenAIConfig
+
+        bodies: list[dict[str, Any]] = []
+        headers: list[httpx.Headers] = []
+        respond = self._handler(bodies)
+
+        def _capture(request: httpx.Request) -> httpx.Response:
+            headers.append(request.headers)
+            return respond(request)
+
+        http.post("https://api.openai.com/v1/responses").mock(side_effect=_capture)
+        provider = OpenAIProvider(OpenAIConfig(api_key=SecretStr("sk-test"), org_id="org-123"))
+        client = LLMClient("gpt-6.1-sol", provider_clients={"openai": provider})
+        await client.complete([Message.user("weather?")])
+        assert headers[0]["openai-organization"] == "org-123"
+        assert headers[0]["authorization"] == "Bearer sk-test"
+        assert "organization" not in bodies[0]
 
     async def test_azure_uses_the_v1_responses_endpoint(self, http: Any) -> None:
         from pydantic import SecretStr

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel
 
+from strata_forge.core.errors import ValidationError
 from strata_forge.llm.errors import map_responses_error
 from strata_forge.llm.messages import (
     AssistantMessage,
@@ -62,6 +63,9 @@ OpenAI returns it by default when ``store`` is ``false``; Azure requires it expl
 """
 
 _PHASES = frozenset({"commentary", "final_answer"})
+
+_STATEFUL_FIELDS = frozenset({"store", "previous_response_id", "conversation", "background"})
+"""Request fields that would make the provider keep conversation state between calls."""
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +147,16 @@ def _replayed_item(item: ProviderItem, calls: Mapping[str, ToolCall]) -> dict[st
             "encrypted_content": item.encrypted_content,
         }
     if isinstance(item, TextItem):
+        # A message item carrying its id is the documented output-message input shape, whose
+        # `status` and output-text `logprobs` are required fields.
         message: dict[str, Any] = {
             "type": "message",
             "id": item.id,
             "role": "assistant",
-            "content": [{"type": "output_text", "text": item.text, "annotations": []}],
+            "status": "completed",
+            "content": [
+                {"type": "output_text", "text": item.text, "annotations": [], "logprobs": []}
+            ],
         }
         if item.phase is not None:
             message["phase"] = item.phase
@@ -159,7 +168,8 @@ def _assistant_items(message: AssistantMessage, provider: str) -> list[dict[str,
     """One assistant turn as Responses input items.
 
     The turn's own ``provider_items`` are replayed verbatim (ids, ``phase``, encrypted
-    reasoning) when they came from ``provider``; ``status`` is never sent. Otherwise the turn
+    reasoning) when they came from ``provider``. Only a message item carries ``status``, which
+    its input shape requires; LiteLLM strips it on Azure, which rejects it. Otherwise the turn
     is synthesized from its plain ``content`` and ``tool_calls``, which is valid input for any
     model and only loses the reasoning context.
     """
@@ -266,9 +276,17 @@ def build_request(
     """Build the Responses request body (everything but ``model`` and auth).
 
     ``max_tokens`` becomes ``max_output_tokens``, which bounds reasoning AND visible output.
-    ``response_format`` becomes ``text.format``. In ``extras``, a Chat Completions style
-    ``reasoning_effort`` becomes ``reasoning.effort`` and a ``response_format`` becomes
-    ``text.format``; every other key is forwarded verbatim and wins over the computed body.
+    ``response_format`` becomes ``text.format``. In ``extras``, the Chat Completions style
+    ``reasoning_effort`` / ``verbosity`` / ``response_format`` become ``reasoning.effort`` /
+    ``text.verbosity`` / ``text.format``, a ``text`` object is merged into the computed one
+    (its ``format`` replaces the computed format only when it sets one), and ``include`` adds
+    to the encrypted-reasoning include. Every other key is set on the body as given; LiteLLM
+    drops a key its ``aresponses`` does not know, so such a field goes in ``extra_body``.
+
+    Raises:
+        ValidationError: ``extras`` set a field that makes the request stateful (``store``,
+            ``previous_response_id``, ``conversation``, ``background``), or an ``include``
+            that is not a list of strings.
     """
     instructions, input_items = build_input(messages, provider)
     body: dict[str, Any] = {
@@ -290,21 +308,54 @@ def build_request(
         body["text"] = {"format": _text_format(response_format)}
 
     if extras:
-        remaining = dict(extras)
-        effort = remaining.pop("reasoning_effort", None)
-        if effort is not None:
-            reasoning = remaining.get("reasoning")
-            merged = dict(cast("dict[str, Any]", reasoning)) if isinstance(reasoning, dict) else {}
-            merged.setdefault("effort", effort)
-            remaining["reasoning"] = merged
-        extra_format = remaining.pop("response_format", None)
-        if isinstance(extra_format, dict):
-            body["text"] = {"format": _text_format(cast("dict[str, Any]", extra_format))}
-        body.update(remaining)
+        _merge_extras(body, extras)
 
     if stream:
         body["stream"] = True
     return body
+
+
+def _merge_extras(body: dict[str, Any], extras: Mapping[str, Any]) -> None:
+    """Fold a caller's ``provider_extras`` into ``body`` (see :func:`build_request`)."""
+    stateful = sorted(_STATEFUL_FIELDS.intersection(extras))
+    if stateful:
+        msg = "Responses API requests are stateless; provider_extras may not set " + ", ".join(
+            stateful
+        )
+        raise ValidationError(msg)
+    remaining = dict(extras)
+
+    include = remaining.pop("include", None)
+    if include is not None:
+        if not isinstance(include, (list, tuple)) or not all(
+            isinstance(value, str) for value in cast("Sequence[Any]", include)
+        ):
+            msg = "provider_extras 'include' must be a list of strings"
+            raise ValidationError(msg)
+        added = [value for value in cast("Sequence[str]", include) if value not in body["include"]]
+        body["include"] = [*body["include"], *added]
+
+    effort = remaining.pop("reasoning_effort", None)
+    if effort is not None:
+        reasoning = remaining.get("reasoning")
+        merged = dict(cast("dict[str, Any]", reasoning)) if isinstance(reasoning, dict) else {}
+        merged.setdefault("effort", effort)
+        remaining["reasoning"] = merged
+
+    text = dict(cast("dict[str, Any]", body.get("text") or {}))
+    extra_text = remaining.pop("text", None)
+    if isinstance(extra_text, dict):
+        text.update(cast("dict[str, Any]", extra_text))
+    extra_format = remaining.pop("response_format", None)
+    if isinstance(extra_format, dict):
+        text["format"] = _text_format(cast("dict[str, Any]", extra_format))
+    verbosity = remaining.pop("verbosity", None)
+    if verbosity is not None:
+        text.setdefault("verbosity", verbosity)
+    if text:
+        body["text"] = text
+
+    body.update(remaining)
 
 
 def redact_encrypted_content(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -416,6 +467,23 @@ def _failure(response: Any, *, model: str | None, provider: str | None) -> Excep
     return map_responses_error(
         _str_or_none(_get(error, "code")),
         _str_or_none(_get(error, "message")) or "The response failed",
+        model=model,
+        provider=provider,
+    )
+
+
+def _stream_error(event: Any, *, model: str | None, provider: str | None) -> Exception:
+    """Map an ``error`` stream event onto a ``ProviderError``.
+
+    The code and message sit at the top level of the event, or inside its ``error`` object
+    (the shape LiteLLM's typed ``ErrorEvent`` carries).
+    """
+    nested = _get(event, "error")
+    code = _str_or_none(_get(event, "code")) or _str_or_none(_get(nested, "code"))
+    message = _str_or_none(_get(event, "message")) or _str_or_none(_get(nested, "message"))
+    return map_responses_error(
+        code,
+        message or "The response stream reported an error",
         model=model,
         provider=provider,
     )
@@ -610,12 +678,7 @@ class ResponsesStreamParser:
         if event_type == "response.failed":
             raise _failure(_get(event, "response"), model=self._model, provider=self._provider)
         if event_type == "error":
-            raise map_responses_error(
-                _str_or_none(_get(event, "code")),
-                _str_or_none(_get(event, "message")) or "The response stream reported an error",
-                model=self._model,
-                provider=self._provider,
-            )
+            raise _stream_error(event, model=self._model, provider=self._provider)
         return None
 
     def _finish(self, response: Any, *, incomplete: bool) -> ResponseChunk:
