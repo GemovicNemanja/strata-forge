@@ -9,6 +9,7 @@ a long phase from looking hung, unwinding on SIGTERM, and reporting an outcome e
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import os
@@ -1136,7 +1137,7 @@ class TestLoadSecrets:
             (f'{{"HF_TOKEN": "{_TOKEN}"', "not valid JSON"),
             (f'["{_TOKEN}"]', "JSON object"),
             ({"HF_TOKEN": 12345}, "string values"),
-            ({"HF_TOKEN": _TOKEN, "OTHER_KEY": _TOKEN}, "OTHER_KEY"),
+            ({"HF_TOKEN": _TOKEN, "OTHER_KEY": _TOKEN}, r"1 key\(s\) this engine does not read"),
         ],
     )
     def test_a_malformed_file_never_echoes_its_contents(
@@ -1147,6 +1148,37 @@ class TestLoadSecrets:
             load_secrets()
         assert _TOKEN not in str(excinfo.value)
         assert excinfo.value.__cause__ is None
+        assert not path.exists()
+
+    def test_unknown_key_names_are_counted_not_echoed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The names come from the file, unvalidated: one could be anything, of any length.
+        hostile = "X" * 200 + _TOKEN
+        _deliver(monkeypatch, tmp_path, {hostile: "v", "ANOTHER": "v"})
+        with pytest.raises(RunError, match=r"2 key\(s\)") as excinfo:
+            load_secrets()
+        assert hostile not in str(excinfo.value)
+        assert "ANOTHER" not in str(excinfo.value)
+        assert "HF_TOKEN" in str(excinfo.value)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX FIFOs")
+    def test_a_fifo_is_refused_without_waiting_for_a_writer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / ".secrets.json"
+        os.mkfifo(path, 0o600)
+        monkeypatch.setenv("FORGE_SECRETS_FILE", str(path))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(load_secrets)
+            try:
+                error = future.exception(timeout=5)
+            except concurrent.futures.TimeoutError:
+                # A blocking open waits for a writer; give it one so the test ends, then fail.
+                os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+                pytest.fail("opening a FIFO blocked waiting for a writer")
+        assert isinstance(error, RunError)
+        assert "not a regular file" in str(error)
         assert not path.exists()
 
     def test_an_oversized_file_is_refused(

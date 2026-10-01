@@ -54,6 +54,7 @@ from strata_forge import __version__
 from strata_forge.compute.serving import format_elapsed
 from strata_forge.compute.task import SECRETS_FILE_ENV, SECRETS_FILE_NAME
 from strata_forge.core.redact import Redactor
+from strata_forge.pipelines import HF_TOKEN_SECRET
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
@@ -141,8 +142,6 @@ UNCHECKED_ENGINE_MESSAGE = (
 # The spec's claim is echoed back in the mismatch message; a control plane's value is short,
 # and a longer one would only bloat the error event and stderr line the record keeps.
 _MAX_ECHOED_CLAIM_CHARS = 100
-# The key, in the secrets file, of the Hugging Face token a run reads and pushes with.
-HF_TOKEN_SECRET = "HF_TOKEN"  # noqa: S105 — a key name, not a credential
 # The keys a runner reads from its secrets file. Anything else is refused by name: a key this
 # engine does not know means the orchestrator was built against a different contract.
 _KNOWN_SECRETS = frozenset({HF_TOKEN_SECRET})
@@ -240,7 +239,9 @@ def _read_and_unlink(path: Path) -> bytes:
         raise RunError(msg)
     try:
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            # O_NONBLOCK: opening a FIFO for reading otherwise blocks until a writer appears,
+            # which would hang the run before the regular-file check below could refuse it.
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             msg = f"the secrets file {path} does not exist (already read, or never written)"
             raise RunError(msg) from None
@@ -289,11 +290,13 @@ def _parse_secrets(raw: bytes) -> RunSecrets:
         msg = "the secrets file must map names to string values"
         raise RunError(msg)
     values = cast("dict[str, str]", entries)
-    unknown = sorted(set(values) - _KNOWN_SECRETS)
+    unknown = set(values) - _KNOWN_SECRETS
     if unknown:
+        # Counted, not named: the names come from a file, unvalidated and of any length.
         msg = (
-            f"the secrets file carries keys this engine does not read: {unknown[:8]!r} "
-            f"(an orchestrator built for a different strata-forge?)"
+            f"the secrets file carries {len(unknown)} key(s) this engine does not read; it "
+            f"reads only {sorted(_KNOWN_SECRETS)!r} (an orchestrator built for a different "
+            f"strata-forge?)"
         )
         raise RunError(msg)
     token = values.get(HF_TOKEN_SECRET) or None
