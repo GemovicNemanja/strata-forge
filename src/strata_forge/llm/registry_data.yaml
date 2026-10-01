@@ -7,8 +7,107 @@
 # Pricing values are in USD per million tokens. Lines with `# TBD verify`
 # are reasonable estimates pending confirmation against the vendor's
 # public pricing page.
+#
+# This file is also the allowlist for the vendor-native routes (`anthropic`,
+# `openai`, ...): `routing.resolve()` refuses any model id that is not
+# registered here unless the caller pins `openai_compat`. Every id, limit and
+# price below is copied from the vendor's own documentation, never from
+# memory or a third-party catalog; each entry's source comment names the page.
 
 models:
+  # =========================================================================
+  # Anthropic Claude 5.x
+  # =========================================================================
+
+  # Source: platform.claude.com/docs/en/about-claude/models/overview and
+  # platform.claude.com/docs/en/about-claude/pricing (verified 2026-10-01).
+  # cache_write is the 5-minute cache write, as for every Claude entry.
+  # Thinking is adaptive and always on for Fable 5.1 and Opus 5.5, and every
+  # Claude 5.x model below rejects forced tool use (`tool_choice` any/tool)
+  # with a 400. Structured output here is emulated through a forced tool
+  # call, so `structured_output` is false for all three; plain tool calling
+  # (`tool_choice` auto) is supported.
+  - name: claude-fable-5-1
+    vendor: anthropic
+    tier: reasoning
+    context_window: 1000000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: false
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 10.00
+      output: 50.00
+      cache_read: 0.25
+      cache_write: 12.50
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-fable-5-1
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-fable-5-1
+      - provider: vertex
+        provider_model_id: claude-fable-5-1
+    aliases: [fable-5.1]
+
+  - name: claude-opus-5-5
+    vendor: anthropic
+    tier: flagship
+    context_window: 1000000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: false
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 4.00
+      output: 20.00
+      cache_read: 0.20
+      cache_write: 5.00
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-opus-5-5
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-opus-5-5
+      - provider: vertex
+        provider_model_id: claude-opus-5-5
+    aliases: [opus-5.5]
+
+  - name: claude-sonnet-5-5
+    vendor: anthropic
+    tier: balanced
+    context_window: 1000000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: false
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 2.00
+      output: 10.00
+      cache_read: 0.20
+      cache_write: 2.50
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-sonnet-5-5
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-sonnet-5-5
+      - provider: vertex
+        provider_model_id: claude-sonnet-5-5
+    aliases: [sonnet-5.5]
+
   # =========================================================================
   # Anthropic Claude 4.x
   # =========================================================================
@@ -121,6 +220,90 @@ models:
       - provider: vertex
         provider_model_id: claude-haiku-4-5
     aliases: [haiku, haiku-4.5]
+
+  # =========================================================================
+  # OpenAI GPT-6 family
+  # =========================================================================
+
+  # Source: developers.openai.com/api/docs/models/gpt-6-astra,
+  # developers.openai.com/api/docs/models/gpt-6.1-sol and
+  # developers.openai.com/api/docs/models/gpt-6-luna (verified 2026-10-01).
+  # Prices are the base rates; a prompt above 272K input tokens bills the
+  # whole request at 2x input and cache rates and 1.5x output, which the
+  # registry does not model. The `openai` provider calls Chat Completions.
+  - name: gpt-6-astra
+    vendor: openai
+    tier: flagship
+    context_window: 1050000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 10.00
+      output: 50.00
+      cache_read: 1.00
+      cache_write: 12.50
+    routes:
+      - provider: openai
+        provider_model_id: gpt-6-astra
+        is_default: true
+
+  # "Use the Responses API for tool calling. Chat Completions is supported
+  # without tool calling." (vendor model page). Tool calling is therefore off
+  # for this entry: a call with tools fails pre-flight with
+  # `capability_missing` instead of reaching the provider.
+  - name: gpt-6.1-sol
+    vendor: openai
+    tier: balanced
+    context_window: 1050000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: false
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 2.00
+      output: 10.00
+      cache_read: 0.10
+      cache_write: 2.50
+    routes:
+      - provider: openai
+        provider_model_id: gpt-6.1-sol
+        is_default: true
+
+  # "Chat Completions supports function calling only with `reasoning_effort`
+  # set to `none`." (vendor model page). The route sends that effort on every
+  # call that carries tools; a call without tools keeps the default effort.
+  - name: gpt-6-luna
+    vendor: openai
+    tier: fast
+    context_window: 1050000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+    pricing_per_million_tokens:
+      input: 0.10
+      output: 0.50
+      cache_read: 0.01
+      cache_write: 0.125
+    routes:
+      - provider: openai
+        provider_model_id: gpt-6-luna
+        is_default: true
+        tool_call_reasoning_effort: none
 
   # =========================================================================
   # OpenAI GPT-5.5 family

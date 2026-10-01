@@ -143,6 +143,38 @@ class TestModelValidation:
         m = _make_model()
         assert m.route_for("azure") is None
 
+    def test_tool_call_reasoning_effort_defaults_to_none(self) -> None:
+        route = ProviderRoute(provider="openai", provider_model_id="x", is_default=True)
+        assert route.tool_call_reasoning_effort is None
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_tool_call_reasoning_effort_allowed_on_openai_wire(self, provider: str) -> None:
+        route = ProviderRoute(
+            provider=provider,  # type: ignore[arg-type]
+            provider_model_id="x",
+            tool_call_reasoning_effort="none",
+        )
+        assert route.tool_call_reasoning_effort == "none"
+
+    @pytest.mark.parametrize("provider", ["anthropic", "bedrock", "vertex", "openai_compat"])
+    def test_tool_call_reasoning_effort_rejected_elsewhere(self, provider: str) -> None:
+        # LiteLLM turns reasoning_effort into a thinking config on these providers, which
+        # a model whose thinking cannot be configured that way would reject.
+        with pytest.raises(PydanticValidationError, match="cannot carry it"):
+            ProviderRoute(
+                provider=provider,  # type: ignore[arg-type]
+                provider_model_id="x",
+                tool_call_reasoning_effort="none",
+            )
+
+    def test_tool_call_reasoning_effort_rejects_unknown_level(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            ProviderRoute(
+                provider="openai",
+                provider_model_id="x",
+                tool_call_reasoning_effort="extreme",  # type: ignore[arg-type]
+            )
+
 
 # ---------------------------------------------------------------------------
 # Registry assembly + validation
@@ -296,6 +328,12 @@ class TestLoader:
 class TestGlobalRegistry:
     EXPECTED_MODEL_NAMES: frozenset[str] = frozenset(
         {
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-sonnet-4-6",
@@ -317,10 +355,16 @@ class TestGlobalRegistry:
         assert actual == self.EXPECTED_MODEL_NAMES
 
     def test_anthropic_models_have_three_routes(self) -> None:
-        for name in ("claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"):
-            model = global_registry.get(name)
+        for model in global_registry.list_models(vendor="anthropic"):
             providers = {r.provider for r in model.routes}
-            assert providers == {"anthropic", "bedrock", "vertex"}
+            assert providers == {"anthropic", "bedrock", "vertex"}, model.name
+
+    def test_gpt_6_models_have_only_the_native_route(self) -> None:
+        # Azure deployment ids for GPT-6 are not published on the vendor model pages, so
+        # no azure route is registered for them.
+        for name in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"):
+            model = global_registry.get(name)
+            assert [r.provider for r in model.routes] == ["openai"]
 
     def test_openai_models_have_two_routes(self) -> None:
         for name in ("gpt-5.5", "gpt-5.5-pro", "gpt-5.5-thinking", "gpt-5.5-instant"):
@@ -339,10 +383,28 @@ class TestGlobalRegistry:
             defaults = [r for r in model.routes if r.is_default]
             assert len(defaults) == 1, f"{model.name} has {len(defaults)} default routes"
 
-    def test_every_model_supports_tool_calling(self) -> None:
-        # Initial registry: all 10 foundation models support tool calling.
-        for model in global_registry.list_models():
-            assert model.capabilities.tool_calling, f"{model.name} missing tool_calling"
+    def test_tool_calling_is_off_only_where_the_wire_cannot_carry_it(self) -> None:
+        # GPT-6.1 Sol calls tools through the Responses API only; the `openai` provider
+        # speaks Chat Completions, so a tool call there must fail pre-flight.
+        without_tools = {
+            m.name for m in global_registry.list_models() if not m.capabilities.tool_calling
+        }
+        assert without_tools == {"gpt-6.1-sol"}
+
+    def test_forced_tool_models_do_not_claim_structured_output(self) -> None:
+        # Structured output on an Anthropic route is a forced tool call, which these
+        # models reject with a 400.
+        for name in ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"):
+            assert not global_registry.get(name).capabilities.structured_output, name
+
+    def test_only_gpt_6_luna_pins_a_tool_call_reasoning_effort(self) -> None:
+        pinned = {
+            (m.name, r.provider, r.tool_call_reasoning_effort)
+            for m in global_registry.list_models()
+            for r in m.routes
+            if r.tool_call_reasoning_effort is not None
+        }
+        assert pinned == {("gpt-6-luna", "openai", "none")}
 
     def test_pricing_is_non_negative(self) -> None:
         for model in global_registry.list_models():
@@ -359,6 +421,9 @@ class TestGlobalRegistry:
         [
             ("opus", "claude-opus-4-7"),
             ("sonnet", "claude-sonnet-4-6"),
+            ("fable-5.1", "claude-fable-5-1"),
+            ("opus-5.5", "claude-opus-5-5"),
+            ("sonnet-5.5", "claude-sonnet-5-5"),
             ("haiku", "claude-haiku-4-5"),
             ("gpt55", "gpt-5.5"),
             ("gemini-pro", "gemini-3.1-pro"),

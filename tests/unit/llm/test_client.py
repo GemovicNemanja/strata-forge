@@ -364,6 +364,84 @@ class TestRequireToolSupport:
 # ---------------------------------------------------------------------------
 
 
+class TestToolCallReasoningEffort:
+    """A route's ``tool_call_reasoning_effort`` rides every call that carries tools.
+
+    GPT-6 Luna takes function calling on Chat Completions only at ``reasoning_effort``
+    ``none``; at its default effort the provider rejects every tool call.
+    """
+
+    async def test_tools_send_the_pinned_effort(self, mock_litellm: AsyncMock) -> None:
+        client = LLMClient("gpt-6-luna", provider="openai")
+        await client.complete([Message.user("hi")], tools=[_get_weather])
+        kwargs = _kwargs(mock_litellm)
+        assert kwargs["model"] == "openai/gpt-6-luna"
+        assert kwargs["reasoning_effort"] == "none"
+        # LiteLLM's own model map may not list a fresh release as a reasoning model.
+        assert kwargs["allowed_openai_params"] == ["reasoning_effort"]
+
+    async def test_no_tools_keeps_the_default_effort(self, mock_litellm: AsyncMock) -> None:
+        client = LLMClient("gpt-6-luna", provider="openai")
+        await client.complete([Message.user("hi")])
+        assert "reasoning_effort" not in _kwargs(mock_litellm)
+        await client.complete([Message.user("hi again")], tools=[])
+        assert "reasoning_effort" not in _kwargs(mock_litellm)
+
+    async def test_unpinned_model_sends_no_effort(self, mock_litellm: AsyncMock) -> None:
+        client = LLMClient("gpt-6-astra", provider="openai")
+        await client.complete([Message.user("hi")], tools=[_get_weather])
+        kwargs = _kwargs(mock_litellm)
+        assert "reasoning_effort" not in kwargs
+        assert "allowed_openai_params" not in kwargs
+
+    async def test_openai_compat_id_is_never_pinned(self, mock_litellm: AsyncMock) -> None:
+        # The same id through an operator endpoint is not the registered route.
+        client = LLMClient("gpt-6-luna", provider="openai_compat")
+        await client.complete([Message.user("hi")], tools=[_get_weather])
+        assert "reasoning_effort" not in _kwargs(mock_litellm)
+
+    async def test_caller_provider_extras_still_win(self, mock_litellm: AsyncMock) -> None:
+        client = LLMClient("gpt-6-luna", provider="openai")
+        await client.complete(
+            [Message.user("hi")],
+            tools=[_get_weather],
+            provider_extras={"openai": {"reasoning_effort": "low"}},
+        )
+        assert _kwargs(mock_litellm)["reasoning_effort"] == "low"
+
+    async def test_every_stream_tool_loop_leg_sends_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock = _streaming_acompletion(
+            [
+                _stream_tool(0, id="c1", name="_get_weather", args='{"location": "Oslo"}'),
+                _stream_tool(0, finish_reason="tool_calls"),
+            ],
+            [_stream_text("done", finish_reason="stop")],
+        )
+        monkeypatch.setattr("litellm.acompletion", mock)
+        client = LLMClient("gpt-6-luna", provider="openai")
+        events = await _collect(
+            client.stream_tool_loop([Message.user("weather?")], tools=[_get_weather])
+        )
+        assert isinstance(events[-1], Done)
+        assert mock.await_count == 2
+        for call in mock.await_args_list:
+            assert call.kwargs["stream"] is True
+            assert call.kwargs["reasoning_effort"] == "none"
+
+    async def test_tools_on_a_model_without_tool_calling_fail_preflight(
+        self,
+        mock_litellm: AsyncMock,
+    ) -> None:
+        client = LLMClient("gpt-6.1-sol", provider="openai")
+        with pytest.raises(RegistryError, match="does not support tool calling") as info:
+            await client.complete([Message.user("hi")], tools=[_get_weather])
+        assert info.value.reason == "capability_missing"
+        assert mock_litellm.await_count == 0
+
+
 class TestCacheIntegration:
     async def test_cache_hit_returns_cached_with_zero_cost(
         self,

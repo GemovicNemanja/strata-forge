@@ -20,12 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from strata_forge.core.errors import RegistryError
 
 __all__ = [
+    "REGISTRY_DATA_FILE",
     "Capabilities",
     "Modality",
     "Model",
     "Pricing",
     "ProviderName",
     "ProviderRoute",
+    "ReasoningEffort",
     "Registry",
     "Tier",
     "Vendor",
@@ -44,16 +46,39 @@ ProviderName = Literal[
     "azure",
     "openai_compat",
 ]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+# The providers whose wire format carries OpenAI's ``reasoning_effort``. Elsewhere LiteLLM
+# translates the parameter into a vendor-specific thinking configuration, which a registry flag
+# must never trigger by accident.
+_EFFORT_PROVIDERS: frozenset[ProviderName] = frozenset({"openai", "azure"})
 
 
 class ProviderRoute(BaseModel):
-    """A concrete ``(provider, provider_model_id)`` dispatch target for a model."""
+    """A concrete ``(provider, provider_model_id)`` dispatch target for a model.
+
+    ``tool_call_reasoning_effort`` is the ``reasoning_effort`` this route must
+    send on every call that carries tools, for a model whose Chat Completions
+    endpoint accepts function calling only at one effort level. ``None`` (the
+    default) sends no effort and leaves the provider's default in place.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: ProviderName
     provider_model_id: str
     is_default: bool = False
+    tool_call_reasoning_effort: ReasoningEffort | None = None
+
+    @model_validator(mode="after")
+    def _validate_reasoning_effort(self) -> ProviderRoute:
+        if self.tool_call_reasoning_effort is not None and self.provider not in _EFFORT_PROVIDERS:
+            msg = (
+                f"tool_call_reasoning_effort is an OpenAI Chat Completions parameter; "
+                f"route {self.provider!r} cannot carry it"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class Pricing(BaseModel):
@@ -194,7 +219,10 @@ class Registry:
 # Module-level singleton loaded from registry_data.yaml at import time.
 # ---------------------------------------------------------------------------
 
-_REGISTRY_DATA_PATH = Path(__file__).parent / "registry_data.yaml"
+REGISTRY_DATA_FILE = "strata_forge/llm/registry_data.yaml"
+"""The curated registry file, as the package-relative path error messages name."""
+
+_REGISTRY_DATA_PATH = Path(__file__).parent / Path(REGISTRY_DATA_FILE).name
 
 
 def _load_registry(path: Path = _REGISTRY_DATA_PATH) -> Registry:

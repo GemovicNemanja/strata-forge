@@ -76,9 +76,16 @@ ADR. Pricing is in USD per million tokens.
 
 | Logical name | Vendor | Tier | Context | Routes | Input / Output |
 |---|---|---|---|---|---|
+| `claude-fable-5-1` | Anthropic | reasoning | 1 M | anthropic (default), bedrock, vertex | $10.00 / $50.00 |
+| `claude-opus-5-5` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $4.00 / $20.00 |
+| `claude-sonnet-5-5` | Anthropic | balanced | 1 M | anthropic (default), bedrock, vertex | $2.00 / $10.00 |
+| `claude-opus-4-8` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 |
 | `claude-opus-4-7` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 |
 | `claude-sonnet-4-6` | Anthropic | balanced | 1 M | anthropic (default), bedrock, vertex | $3.00 / $15.00 |
 | `claude-haiku-4-5` | Anthropic | fast | 200 K | anthropic (default), bedrock, vertex | $1.00 / $5.00 |
+| `gpt-6-astra` | OpenAI | flagship | 1.05 M | openai (default) | $10.00 / $50.00 |
+| `gpt-6.1-sol` | OpenAI | balanced | 1.05 M | openai (default) | $2.00 / $10.00 |
+| `gpt-6-luna` | OpenAI | fast | 1.05 M | openai (default) | $0.10 / $0.50 |
 | `gpt-5.5` | OpenAI | flagship | 400 K | openai (default), azure | $5.00 / $30.00 |
 | `gpt-5.5-pro` | OpenAI | reasoning | 400 K | openai (default), azure | $30.00 / $180.00 |
 | `gpt-5.5-thinking` | OpenAI | reasoning | 400 K | openai (default), azure | $5.00 / $30.00 |
@@ -86,10 +93,45 @@ ADR. Pricing is in USD per million tokens.
 | `gemini-3.1-pro` | Google | flagship | 2 M | vertex (default) | $2.00 / $12.00 |
 | `gemini-3.1-flash-lite` | Google | fast | 1 M | vertex (default) | $0.10 / $1.00 |
 
-Aliases (`opus`, `sonnet`, `haiku`, `gpt55`, `gemini-pro`, …) resolve to
-their canonical name before lookup. The source of truth is
+Aliases (`opus`, `sonnet`, `haiku`, `opus-5.5`, `gpt55`, `gemini-pro`, …)
+resolve to their canonical name before lookup. The source of truth is
 [`src/strata_forge/llm/registry_data.yaml`](../../src/strata_forge/llm/registry_data.yaml);
-edits to it must keep YAML and this table in sync.
+edits to it must keep YAML and this table in sync, and every id, limit and
+price in it is copied from the vendor's own documentation (each entry's
+source comment names the page).
+
+Per-model caveats the registry encodes:
+
+- **Claude Fable 5.1, Opus 5.5, Sonnet 5.5** reject forced tool use
+  (`tool_choice` `any` / `tool`) with a 400. Structured output on an
+  Anthropic route is a forced tool call, so their `structured_output` flag is
+  `false`; ordinary tool calling (`tool_choice` `auto`) works.
+- **GPT-6.1 Sol** calls tools only through OpenAI's Responses API. The
+  `openai` provider speaks Chat Completions, so the entry has
+  `tool_calling: false` and a call with `tools=` fails pre-flight with
+  `capability_missing` (see [Capability gate](#capability-gate)).
+- **GPT-6 Luna** accepts function calling on Chat Completions only at
+  `reasoning_effort` `none`. Its `openai` route sets
+  `tool_call_reasoning_effort: none`, which `LLMClient` sends on every call
+  that carries tools (and only then); a `provider_extras` value for
+  `reasoning_effort` still overrides it.
+- The GPT-6 prices are base rates: a prompt above 272 K input tokens bills
+  at 2x input and cache rates and 1.5x output, which `cost_usd` does not
+  model.
+
+### Native routes and the allowlist
+
+A vendor-native route (`anthropic`, `openai`, `vertex`, `bedrock`, `azure`)
+resolves only models registered here: the registry is the allowlist for
+them. An id the vendor has released but the registry does not carry raises
+`RegistryError(reason="unknown_model")` whose message names
+`strata_forge/llm/registry_data.yaml` and the `openai_compat` escape hatch.
+`openai_compat` alone passes operator-specific ids through unregistered.
+
+A route may carry `tool_call_reasoning_effort` (`ProviderRoute`, one of
+`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`); it is
+valid only on the `openai` and `azure` routes, where `reasoning_effort` is a
+wire parameter rather than a translated thinking configuration.
 
 Programmatic access:
 
@@ -97,7 +139,7 @@ Programmatic access:
 from strata_forge.llm import registry
 
 model = registry.get("opus")        # alias -> Model("claude-opus-4-7")
-all_models = registry.list_models() # 9 entries
+all_models = registry.list_models() # 16 entries
 default_route = model.default_route()
 ```
 
@@ -718,6 +760,9 @@ API when you need incremental output.
 **`RegistryError: Unknown model: 'gpt-5'`.**
 The registry only knows the names listed above. Use the closest
 canonical name or one of its registered aliases (`gpt55`, `opus`, …).
+If the vendor has released the model and it is simply not registered yet,
+add its entry to `registry_data.yaml` from the vendor's own model page (the
+message names the file); a native route cannot reach it until then.
 
 **`RegistryError: ... has no route for provider 'X'`.**
 The `(model, provider)` combo isn't a registered route. Check the
@@ -726,8 +771,8 @@ Anthropic or Bedrock route.
 
 **`RegistryError: ... does not support tool calling`.**
 You passed `tools=` to a model whose `capabilities.tool_calling = False`
-in the registry. No model in the current registry actually trips this
-gate, but tightening capabilities later will surface it here.
+in the registry. `gpt-6.1-sol` trips this gate: it calls tools only through
+the Responses API, which the `openai` provider does not speak.
 
 **`RegistryError: Tool support for model '...' cannot be confirmed`.**
 You constructed the client with `require_tool_support=True` and passed

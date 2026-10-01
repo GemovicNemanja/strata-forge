@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from strata_forge.core.errors import RegistryError
-from strata_forge.llm.registry import ProviderName, Registry
+from strata_forge.llm.registry import REGISTRY_DATA_FILE, ProviderName, Registry
 from strata_forge.llm.registry import registry as _global_registry
 
 __all__ = ["ModelRoute", "resolve"]
@@ -81,7 +81,19 @@ def resolve(
         )
 
     reg = registry if registry is not None else _global_registry
-    entry = reg.get(model)  # raises RegistryError(reason="unknown_model")
+    try:
+        entry = reg.get(model)
+    except RegistryError as exc:
+        # A vendor-native route resolves ONLY through the curated registry, so a model the
+        # vendor has released but this package has not registered fails here. Name the file
+        # that has to change, so the failure is actionable wherever it surfaces.
+        route = f"The {provider!r} route" if provider is not None else "A default route"
+        msg = (
+            f"Unknown model: {model!r}. {route} resolves only models registered in "
+            f"{REGISTRY_DATA_FILE}; register it there, or pin provider='openai_compat' "
+            f"to pass an operator-specific id through."
+        )
+        raise RegistryError(msg, model=model, provider=provider, reason="unknown_model") from exc
 
     if provider is None:
         provider_route = entry.default_route()

@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
 from strata_forge.core.errors import RegistryError
+from strata_forge.llm.cost import compute_cost
 from strata_forge.llm.registry import (
+    REGISTRY_DATA_FILE,
     Capabilities,
     Model,
     Pricing,
+    ProviderName,
     ProviderRoute,
     Registry,
 )
+from strata_forge.llm.registry import registry as global_registry
+from strata_forge.llm.responses import Usage
 from strata_forge.llm.routing import ModelRoute, resolve
 
 
@@ -186,6 +192,79 @@ class TestResolveUnknownModel:
         with pytest.raises(RegistryError) as exc:
             resolve("never-heard-of-it", provider="anthropic", registry=reg)
         assert exc.value.reason == "unknown_model"
+        assert exc.value.provider == "anthropic"
+
+    @pytest.mark.parametrize("provider", [None, "anthropic", "openai"])
+    def test_unknown_native_id_names_the_registry_file(self, provider: ProviderName | None) -> None:
+        # A vendor id the registry does not know fails on every native route; the message
+        # must point at the file to change, since it is often all a caller surfaces.
+        with pytest.raises(RegistryError) as exc:
+            resolve("claude-not-yet-registered", provider=provider)
+        assert exc.value.reason == "unknown_model"
+        message = str(exc.value)
+        assert message.startswith("Unknown model: 'claude-not-yet-registered'")
+        assert REGISTRY_DATA_FILE in message
+        assert "openai_compat" in message
+        assert Path(REGISTRY_DATA_FILE).name == "registry_data.yaml"
+
+
+# Each vendor's own API, the route its models must resolve on without a pin.
+_NATIVE_PROVIDER: dict[str, ProviderName] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "google": "vertex",
+}
+
+
+class TestNativeRouteAllowlist:
+    """The registry is the allowlist for vendor-native routes.
+
+    A model a caller reaches on its vendor's own API must resolve there, be priceable
+    on the way back, and say truthfully whether it takes tools; otherwise the call fails
+    with ``unknown_model`` before (or ``RegistryError`` after) the provider answers.
+    """
+
+    @pytest.mark.parametrize("model", global_registry.list_models(), ids=lambda m: m.name)
+    def test_every_entry_resolves_on_its_native_provider(self, model: Model) -> None:
+        native = _NATIVE_PROVIDER[model.vendor]
+        assert model.default_route().provider == native
+        pinned = resolve(model.name, provider=native)
+        assert pinned.model == model.name
+        assert pinned.provider == native
+        assert pinned.provider_model_id
+
+    @pytest.mark.parametrize("model", global_registry.list_models(), ids=lambda m: m.name)
+    def test_every_entry_is_priced(self, model: Model) -> None:
+        usage = Usage(input_tokens=1_000, output_tokens=1_000)
+        assert compute_cost(usage, model.name) > 0
+
+    # The vendors' current lineups (Anthropic models overview, OpenAI model pages):
+    # (logical name, native provider, provider model id, takes tools on that route).
+    CURRENT_LINEUP: tuple[tuple[str, ProviderName, str, bool], ...] = (
+        ("claude-fable-5-1", "anthropic", "claude-fable-5-1", True),
+        ("claude-opus-5-5", "anthropic", "claude-opus-5-5", True),
+        ("claude-sonnet-5-5", "anthropic", "claude-sonnet-5-5", True),
+        ("claude-haiku-4-5", "anthropic", "claude-haiku-4-5-20251001", True),
+        ("gpt-6-astra", "openai", "gpt-6-astra", True),
+        ("gpt-6.1-sol", "openai", "gpt-6.1-sol", False),
+        ("gpt-6-luna", "openai", "gpt-6-luna", True),
+    )
+
+    @pytest.mark.parametrize(
+        ("name", "provider", "provider_model_id", "tools"),
+        CURRENT_LINEUP,
+        ids=[row[0] for row in CURRENT_LINEUP],
+    )
+    def test_current_lineup_resolves_natively(
+        self,
+        name: str,
+        provider: ProviderName,
+        provider_model_id: str,
+        tools: bool,
+    ) -> None:
+        route = resolve(name, provider=provider)
+        assert route.provider_model_id == provider_model_id
+        assert global_registry.get(name).capabilities.tool_calling is tools
 
 
 class TestResolveOpenAICompatBypass:

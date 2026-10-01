@@ -231,6 +231,27 @@ def _tools_for_provider(tools: Sequence[AnyTool], provider: ProviderName) -> lis
     return [t.to_openai_schema() for t in tools]
 
 
+def _tool_call_params(route: ModelRoute) -> dict[str, Any]:
+    """The request params the route's registry entry requires on a call that carries tools.
+
+    Some models accept function calling on Chat Completions only at one ``reasoning_effort``
+    (the registry's ``tool_call_reasoning_effort``); without it the provider rejects every tool
+    call at its default effort. LiteLLM checks ``reasoning_effort`` against its own model map,
+    which can lag a vendor release, so the registry (the authority here) lets it through
+    explicitly. An unregistered ``openai_compat`` id has no entry and gets nothing. Caller
+    ``provider_extras`` are applied afterwards and still win.
+    """
+    if route.model not in registry:
+        return {}
+    registered = registry.get(route.model).route_for(route.provider)
+    if registered is None or registered.tool_call_reasoning_effort is None:
+        return {}
+    return {
+        "reasoning_effort": registered.tool_call_reasoning_effort,
+        "allowed_openai_params": ["reasoning_effort"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Response normalization (OpenAI-shaped — LiteLLM normalizes for us)
 # ---------------------------------------------------------------------------
@@ -692,6 +713,8 @@ class LLMClient:
             kwargs["top_p"] = top_p
         if tools is not None:
             kwargs["tools"] = _tools_for_provider(tools, route.provider)
+        if tools:
+            kwargs.update(_tool_call_params(route))
         if provider_extras is not None:
             extras = provider_extras.get(route.provider)
             if extras is not None:
@@ -1077,6 +1100,8 @@ class LLMClient:
             kwargs["top_p"] = top_p
         if tools is not None:
             kwargs["tools"] = _tools_for_provider(tools, route.provider)
+        if tools:
+            kwargs.update(_tool_call_params(route))
         if response_format is not None:
             kwargs["response_format"] = response_format
         if provider_extras is not None:
