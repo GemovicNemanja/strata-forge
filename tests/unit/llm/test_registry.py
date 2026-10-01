@@ -370,10 +370,16 @@ class TestGlobalRegistry:
             assert [r.provider for r in model.routes] == ["openai"]
 
     def test_openai_models_have_two_routes(self) -> None:
-        for name in ("gpt-5.5", "gpt-5.5-pro", "gpt-5.5-thinking", "gpt-5.5-instant"):
+        for name in ("gpt-5.5", "gpt-5.5-thinking", "gpt-5.5-instant"):
             model = global_registry.get(name)
             providers = {r.provider for r in model.routes}
             assert providers == {"openai", "azure"}
+
+    def test_gpt_5_5_pro_has_only_the_native_route(self) -> None:
+        # Azure does not list gpt-5.5-pro for the Responses API, and the model takes no
+        # tools on Chat Completions, so an azure route would fail every tool call.
+        model = global_registry.get("gpt-5.5-pro")
+        assert [r.provider for r in model.routes] == ["openai"]
 
     def test_gemini_models_only_on_vertex(self) -> None:
         for name in ("gemini-3.1-pro", "gemini-3.1-flash-lite"):
@@ -402,6 +408,18 @@ class TestGlobalRegistry:
             assert route is not None, model.name
             assert route.wire_api == "responses", model.name
 
+    def test_no_tool_capable_openai_model_has_a_chat_completions_route(self) -> None:
+        # Current OpenAI models take tools on Chat Completions only at effort `none`, if at
+        # all, so a tool-capable OpenAI entry on that wire would refuse the tools it claims.
+        on_chat_completions = {
+            (m.name, r.provider)
+            for m in global_registry.list_models(vendor="openai")
+            if m.capabilities.tool_calling
+            for r in m.routes
+            if r.wire_api == "chat_completions"
+        }
+        assert on_chat_completions == set()
+
     def test_only_openai_and_azure_routes_speak_responses(self) -> None:
         responses = {
             (m.name, r.provider)
@@ -411,7 +429,7 @@ class TestGlobalRegistry:
         }
         assert {provider for _, provider in responses} == {"openai", "azure"}
         # Azure documents the Responses API for these deployments; gpt-5.5-pro is absent
-        # from its list, so that route stays on Chat Completions.
+        # from its list, so it has no azure route.
         assert {name for name, provider in responses if provider == "azure"} == {
             "gpt-5.5",
             "gpt-5.5-thinking",

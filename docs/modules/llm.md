@@ -89,7 +89,7 @@ ADR. Pricing is in USD per million tokens.
 | `gpt-6.1-sol` | OpenAI | balanced | 1.05 M | openai* (default) | $2.00 / $10.00 |
 | `gpt-6-luna` | OpenAI | fast | 1.05 M | openai* (default) | $0.10 / $0.50 |
 | `gpt-5.5` | OpenAI | flagship | 1.05 M | openai* (default), azure* | $5.00 / $30.00 |
-| `gpt-5.5-pro` | OpenAI | reasoning | 1.05 M | openai* (default), azure | $30.00 / $180.00 |
+| `gpt-5.5-pro` | OpenAI | reasoning | 1.05 M | openai* (default) | $30.00 / $180.00 |
 | `gpt-5.5-thinking` | OpenAI | reasoning | 400 K | openai* (default), azure* | $5.00 / $30.00 |
 | `gpt-5.5-instant` | OpenAI | fast | 128 K | openai* (default), azure* | $1.25 / $10.00 |
 | `gemini-3.1-pro` | Google | flagship | 2 M | vertex (default) | $2.00 / $12.00 |
@@ -123,9 +123,10 @@ Per-model caveats the registry encodes:
   Completions only at reasoning effort `none`. Every `openai` route therefore
   speaks the Responses API, where all of them call tools at their default
   effort, and `tool_calling` is `true` for every registered model.
-- **gpt-5.5-pro** is not served on Chat Completions at all. Azure does not
-  list it for the Responses API, so its `azure` route stays on Chat
-  Completions until Azure documents the model.
+- **gpt-5.5-pro** is not served on Chat Completions at all, and Azure does not
+  list it for the Responses API, so it has no `azure` route until Azure
+  documents the model. No tool-capable OpenAI entry has a Chat Completions
+  route (`test_registry` enforces it).
 - The GPT-6 prices are base rates: a prompt above 272 K input tokens bills
   at 2x input and cache rates and 1.5x output, which `cost_usd` does not
   model.

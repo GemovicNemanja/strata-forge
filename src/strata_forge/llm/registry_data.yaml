@@ -385,8 +385,8 @@ models:
   # 2026-10-01): Chat Completions "Not supported", Responses supported,
   # "Reasoning.effort supports: medium, high (default) and xhigh", 1,050,000
   # context window, 128,000 max output tokens. Azure's Responses API model
-  # list does not include gpt-5.5-pro, so its `azure` route is unverified and
-  # left on Chat Completions until Azure documents the model.
+  # list does not include gpt-5.5-pro and the model cannot take tools on Chat
+  # Completions, so no `azure` route is registered until Azure documents it.
   - name: gpt-5.5-pro
     vendor: openai
     tier: reasoning
@@ -408,8 +408,6 @@ models:
         provider_model_id: gpt-5.5-pro
         is_default: true
         wire_api: responses
-      - provider: azure
-        provider_model_id: gpt-5.5-pro
     aliases: [gpt55-pro]
 
   # Placeholder: served by o4-mini, which supports Chat Completions and

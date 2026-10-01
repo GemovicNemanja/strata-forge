@@ -89,6 +89,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - The `litellm` floor is `>=1.83,<2`, the release the Responses path is tested against (releases
   before 1.66 have no `litellm.aresponses`).
 
+### Removed
+
+- The `azure` route of `gpt-5.5-pro`. Azure does not list the model for its Responses API, and the
+  model takes no tools on Chat Completions, so the route failed every tool call; a registry test
+  now refuses a Chat Completions route on any tool-capable OpenAI model.
+
 ## [0.2.0] - 2026-08-27
 
 The first release this changelog records. Earlier history is in the git log.

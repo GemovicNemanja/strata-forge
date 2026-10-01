@@ -344,7 +344,6 @@ class TestResolveWireApi:
             ("gpt-6-luna", "openai", "responses"),
             ("gpt-5.5", "azure", "responses"),
             ("gpt-5.5-pro", "openai", "responses"),
-            ("gpt-5.5-pro", "azure", "chat_completions"),
             ("claude-opus-4-7", None, "chat_completions"),
             ("claude-opus-4-7", "bedrock", "chat_completions"),
             ("gemini-3.1-pro", None, "chat_completions"),

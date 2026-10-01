@@ -55,6 +55,8 @@ LiteLLM 1.83 offers two ways in:
 - A failure inside the stream (`response.failed`, `error`) raises a `ProviderError` subclass, a
   `response.incomplete` turn reports `length` or `content_filter`, and a stream that ends before
   its terminal event raises. Truncation is never reported as success.
+- No tool-capable OpenAI model has a Chat Completions route: an `azure` route exists only where
+  Azure documents the model for its Responses API.
 - `capabilities.sampling_params` records whether a model takes `temperature` / `top_p` at its
   default reasoning effort; the client refuses them pre-flight where the provider would reject
   them.
