@@ -64,7 +64,7 @@ class SubmitCleanupError(RuntimeError):
         self.job = job
 
 
-class CleanupError(ForgeError):
+class CleanupError(ForgeError, OSError):
     """:meth:`Backend.cleanup` ran, and the job's backend-side state is still there.
 
     The state may hold the job's secrets file, so a caller that sees this has NOT cleaned up and
@@ -73,6 +73,10 @@ class CleanupError(ForgeError):
     an exception type), never what the remote printed or what the state contains, so it is safe
     to store and show. A transport failure (the host is unreachable, the command timed out) is
     raised as itself, not as this: it says nothing about whether the state survived.
+
+    It is also an :class:`OSError`, as the failure of :func:`shutil.rmtree` it stands for would
+    be, so an orchestrator that already treats an ``OSError`` from ``cleanup`` as "not cleaned"
+    keeps doing so rather than letting this one escape.
     """
 
 

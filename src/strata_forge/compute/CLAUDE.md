@@ -56,7 +56,7 @@ The module's ``__init__.py`` re-exports:
   :data:`SECRETS_FILE_NAME` (its basename).
 - Protocol: :class:`Backend`.
 - Errors: :class:`CleanupError` (``cleanup`` ran and the job's
-  state survived it) and :class:`SubmitCleanupError` (a failed
+  state survived it; also an ``OSError``) and :class:`SubmitCleanupError` (a failed
   submit left state behind; its ``job`` is the handle to clean).
 - Backend implementations: :class:`LocalBackend`,
   :class:`SSHBackend`, :class:`SkyPilotBackend`.

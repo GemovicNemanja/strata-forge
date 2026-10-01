@@ -71,9 +71,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `SecretStr`. A path that is not an absolute `.secrets.json`, a symlink, a file another user
   could read, a FIFO (refused without waiting for a writer), an unknown key (counted, never
   named) or malformed JSON is a named error that never carries the file's contents.
-- `CleanupError` (a `ForgeError`, exported from `strata_forge.compute`): `Backend.cleanup` raises
-  it when the job's backend-side state survived the removal. Its message names the job and an
-  exit status or exception type, never the remote's output or the state's contents.
+- `CleanupError` (a `ForgeError` and an `OSError`, exported from `strata_forge.compute`):
+  `Backend.cleanup` raises it when the job's backend-side state survived the removal. Its message
+  names the job and an exit status or exception type, never the remote's output or the state's
+  contents. Being an `OSError`, it lands in a caller's existing `except OSError` around
+  `cleanup` rather than escaping it.
 
 ### Changed
 

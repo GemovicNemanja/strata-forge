@@ -412,9 +412,11 @@ cleanup until it succeeds, and it can only do that if a failed one
 says so. The contract every backend keeps:
 
 - **State that survived raises** :class:`CleanupError` (a
-  :class:`ForgeError`). Its message names the job and how the removal
-  failed (an exit status, an exception type), never what the remote
-  printed or what the state contains, so it is safe to store and show.
+  :class:`ForgeError`, and an ``OSError`` so that a caller already
+  treating an ``OSError`` from ``cleanup`` as "not cleaned" catches
+  it). Its message names the job and how the removal failed (an exit
+  status, an exception type), never what the remote printed or what
+  the state contains, so it is safe to store and show.
 - **State that is already absent is a success**, so the method is
   idempotent: a retry after a removal that did, in the end, happen
   returns normally.

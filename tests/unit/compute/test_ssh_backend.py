@@ -1335,6 +1335,18 @@ class TestVerifiedCleanup:
         assert error.__cause__ is None
         assert error.__context__ is None
 
+    async def test_a_caller_that_treats_oserror_as_not_cleaned_still_does(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        # The shape an orchestrator written before this error existed already has: an `OSError`
+        # from cleanup means "not cleaned". The error must land there, not escape past it.
+        fake_connection.queue(_FakeProcessResult(exit_status=1))
+        cleaned = False
+        with contextlib.suppress(OSError, ValueError):
+            await backend.cleanup(_cleanup_job())
+            cleaned = True
+        assert cleaned is False
+
     async def test_a_transport_failure_is_raised_as_itself(
         self, backend: SSHBackend, fake_connection: _FakeSSHConnection
     ) -> None:
