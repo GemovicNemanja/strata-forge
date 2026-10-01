@@ -28,6 +28,16 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   resumed mid-transcript: the held tail and the first `max_len - 1` characters after the hole
   are masked. `docs/modules/compute.md` states the contract a console relay follows.
 - `strata_forge.pipelines._common.run_redactor` builds a run's redactor from its write token.
+- A nightly clean-install job (`.github/workflows/clean-install.yml`). It installs each extras
+  string a run's machine installs (`[finetuning,storage]`, `[serving,storage,hf]`) plus `[all]`
+  into empty Python 3.14 venvs from the public index, with no lockfile and no constraints, and
+  `scripts/smoke_clean_install.py` then builds, offline and without a GPU, every enabled
+  fine-tuning method x dataset format x adapter through the runner's own spec path (down to the
+  TRL config and trainer class, the peft config and the bitsandbytes config), the batch-inference
+  spec, requests and results parquet, and the vLLM command line through the installed vLLM's own
+  entrypoint parser. A breaking upstream release fails there the day it ships instead of on a
+  user's machine. It also runs on any branch push that changes `pyproject.toml`, and a manual
+  run takes an `override` requirement as a drill that must turn it red.
 
 ### Changed
 
