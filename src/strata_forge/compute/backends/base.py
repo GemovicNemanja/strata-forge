@@ -72,7 +72,13 @@ class Backend(Protocol):
         ...  # pragma: no cover — Protocol body
 
     async def submit(self, task: Task) -> Job:
-        """Submit ``task`` for execution; return its :class:`Job` handle."""
+        """Submit ``task`` for execution; return its :class:`Job` handle.
+
+        ``task.secrets`` are written to a private (0600) file whose absolute path the job finds
+        in ``FORGE_SECRETS_FILE``, never into the job's environment, a command line, a script or
+        the returned job's metadata. A backend with no such channel raises rather than falling
+        back to the environment.
+        """
         ...  # pragma: no cover — Protocol body
 
     async def status(self, job: Job) -> JobStatus:

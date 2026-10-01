@@ -30,10 +30,12 @@ from strata_forge.compute.serving import (
     serving_endpoint,
     wait_for_endpoint,
 )
-from strata_forge.compute.task import ResourceSpec, Task
+from strata_forge.compute.task import SECRETS_FILE_ENV, SECRETS_FILE_NAME, ResourceSpec, Task
 
 __all__ = [
     "MAX_CONSOLE_CHUNK_BYTES",
+    "SECRETS_FILE_ENV",
+    "SECRETS_FILE_NAME",
     "Backend",
     "BatchInferenceResult",
     "BatchInferenceRunner",

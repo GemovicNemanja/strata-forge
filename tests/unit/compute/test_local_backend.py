@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import SecretStr
 
 from strata_forge.compute import Backend, LocalBackend, Task
 from strata_forge.compute.backends import local as local_backend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from strata_forge.compute.job import Job
 
@@ -472,6 +474,88 @@ class TestEnvInherit:
             assert "MARK=MISSING" in logs
         finally:
             os.environ.pop("FORGE_TEST_MARKER", None)
+
+
+_SENTINEL = "hf_SENTINELlocalsecret0123456789"
+
+
+class TestSecretDelivery:
+    """Secrets reach the child as a private file it is pointed at, never as its environment."""
+
+    async def test_the_child_environment_never_holds_the_value(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run='env > env.txt; cat "$FORGE_SECRETS_FILE" > copy.json; '
+                'ls -l "$FORGE_SECRETS_FILE" > mode.txt',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        assert (await backend.status(job)).state == "succeeded", await backend.logs(job)
+        environ = (tmp_path / "env.txt").read_text()
+        assert _SENTINEL not in environ
+        assert "FORGE_SECRETS_FILE=" in environ
+        # The file held the value, and only its owner could read it.
+        assert json.loads((tmp_path / "copy.json").read_text()) == {"HF_TOKEN": _SENTINEL}
+        assert (tmp_path / "mode.txt").read_text().startswith("-rw-------")
+        assert _SENTINEL not in json.dumps(job.model_dump(mode="json"))
+
+    async def test_the_file_and_its_directory_are_gone_after_the_job(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run='dirname "$FORGE_SECRETS_FILE" > dir.txt; false',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        secrets_dir = Path((tmp_path / "dir.txt").read_text().strip())
+        assert not await asyncio.to_thread(secrets_dir.exists)
+
+    async def test_a_hostile_umask_does_not_lock_the_child_out(self, tmp_path: Path) -> None:
+        previous = os.umask(0o777)
+        try:
+            backend = LocalBackend()
+            job = await backend.submit(
+                Task(
+                    name="s",
+                    workdir=str(tmp_path),
+                    run='test -r "$FORGE_SECRETS_FILE" && echo READABLE',
+                    secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+                )
+            )
+        finally:
+            os.umask(previous)
+        await _wait_until_terminal(backend, job)
+        assert "READABLE" in await backend.logs(job)
+
+    async def test_a_parent_secrets_path_is_not_inherited(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A runner that starts a child has the path to ITS file in its environment. The child
+        # must not inherit it: it is not the child's to read, and reading it means deleting it.
+        monkeypatch.setenv("FORGE_SECRETS_FILE", "/parent/.secrets.json")
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="s", run="echo PATH_SEEN=${FORGE_SECRETS_FILE:-NONE}"))
+        await _wait_until_terminal(backend, job)
+        assert "PATH_SEEN=NONE" in await backend.logs(job)
+
+    async def test_without_inheritance_the_child_still_finds_its_file(self) -> None:
+        backend = LocalBackend(env_inherit=False)
+        job = await backend.submit(
+            Task(
+                name="s",
+                run='test -f "$FORGE_SECRETS_FILE" && echo FOUND',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        assert "FOUND" in await backend.logs(job)
 
 
 class TestStreamedOutput:
