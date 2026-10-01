@@ -160,18 +160,26 @@ task = Task(
 
 - It is ``dict[str, SecretStr]``, excluded from ``model_dump`` /
   ``model_dump_json`` / ``to_yaml`` and from ``repr``, and never
-  read from YAML. Validation errors on a ``Task`` never echo the
-  input (``hide_input_in_errors``).
+  read from YAML. The values are masked before any validator runs,
+  so no rendering of a validation error (``str``, ``errors()``,
+  ``json()``) carries one. A pickled ``Task`` does carry them: never
+  pickle a task with secrets.
 - Keys look like environment variable names
   (``^[A-Z][A-Z0-9_]{0,63}$``); at most 8; values non-empty; a key
   may not also appear in ``env``. ``env`` may not set
-  ``FORGE_SECRETS_FILE``.
+  ``FORGE_SECRETS_FILE``. Set secrets through ``Task(...)`` or
+  ``Task.model_validate``: ``model_copy(update=...)`` skips the
+  validators, so every backend rebuilds the task through them
+  (``Task.revalidated()``) before it delivers anything.
 - The backend writes them as one JSON object to a 0600
-  ``.secrets.json`` in a 0700 directory and sets
-  ``FORGE_SECRETS_FILE`` (``strata_forge.compute.SECRETS_FILE_ENV``)
-  to its absolute path. That path is the only secret-related thing
-  in the job's environment. The job's shell removes the file on
-  exit, setup failure and SIGTERM included.
+  ``.secrets.json`` in a 0700 directory and exports
+  ``FORGE_SECRETS_FILE`` (``strata_forge.compute.SECRETS_FILE_ENV``),
+  its absolute path, to the task's ``run`` step only; ``setup`` does
+  not see it. That path is the only secret-related thing in the
+  job's environment. An outer shell removes the file on exit, setup
+  failure and SIGTERM included, while ``setup`` and ``run`` execute
+  in a subshell below it, so a ``trap ... EXIT`` the task sets
+  cannot displace that removal.
 - A backend with no private channel refuses a task with secrets
   rather than falling back to the environment
   (:class:`SkyPilotBackend` raises ``ValueError``).
@@ -286,7 +294,10 @@ machine it does not own holds up its side of the contract in four places:
   reads at most 64 KiB, and unlinks it whatever the outcome, so the file is
   gone before the runner makes a network call or starts a subprocess. The
   file is a JSON object; ``HF_TOKEN`` is the only key a runner reads, and
-  any other key is refused by name. A missing, unreadable, misowned or
+  any other key is refused (counted, never named). The key is exported
+  as ``strata_forge.pipelines.HF_TOKEN_SECRET`` for orchestrators. The
+  open uses ``O_NONBLOCK``, so a FIFO at the path is refused rather than
+  waited on. A missing, unreadable, misowned or
   malformed file fails the run with a named error that never carries the
   file's contents. The values reach the runner as ``SecretStr`` in a
   ``RunSecrets`` (``hf_token``), the callable ``runner_main`` drives takes
@@ -298,7 +309,9 @@ machine it does not own holds up its side of the contract in four places:
   ``XDG_CACHE_HOME``, ``HF_HOME``, ``HF_HUB_CACHE``,
   ``TRANSFORMERS_CACHE``, ``PYTHONUNBUFFERED`` and the ``CUDA_*`` /
   ``NVIDIA_*`` / ``NCCL_*`` / ``VLLM_*`` families, minus any name that
-  says it holds a credential) and does not inherit the runner's own.
+  says it holds a credential) and does not inherit the runner's own. That
+  also keeps an ambient ``HF_TOKEN``, ``HF_ENDPOINT`` or ``HF_HUB_*``
+  setting from reaching the server.
   Transition: with no ``FORGE_SECRETS_FILE`` set, a 0.4 runner still reads
   the token from ``HF_WRITE_TOKEN``, removes it from its own environment,
   and records a ``phase`` event (and a stderr ``warning:``) saying that
@@ -370,6 +383,8 @@ commit differs.
 class Backend(Protocol):
     name: str
     async def submit(self, task: Task) -> Job: ...      # task.secrets -> a 0600 file, or raise
+    # A submit that fails and cannot remove what it created raises SubmitCleanupError,
+    # whose .job only cleanup() accepts.
     async def status(self, job: Job) -> JobStatus: ...
     async def logs(self, job: Job, *, tail: int | None = None) -> str: ...
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str: ...
@@ -546,9 +561,10 @@ job id), so give concurrent jobs their own directories.
 
 A task's ``secrets`` are written to ``.secrets.json`` (0600, created
 ``O_EXCL | O_NOFOLLOW``) in a fresh 0700 temporary directory, and the
-child finds it through ``FORGE_SECRETS_FILE``. Modes are set
-explicitly, so a restrictive umask cannot lock the child out. The
-child's shell removes the file on exit; the backend removes the
+task's ``run`` step finds it through ``FORGE_SECRETS_FILE`` (``setup``
+does not). Modes are set explicitly, so a restrictive umask cannot
+lock the child out. The child's outer shell removes the file on exit,
+below the subshell that runs the task; the backend removes the
 directory once the child is gone, and again in ``cleanup``. With
 ``env_inherit=True`` an inherited ``FORGE_SECRETS_FILE`` is dropped:
 it names the parent's file, which the child must not read (and, by
@@ -582,15 +598,39 @@ narrowed to 0700, and the job's directory is created with
 ``mkdir -m 700`` and no ``-p``, so a directory or symlink already at
 that path fails the submit. File contents never travel in a command
 string, which every user on the host can read in
-``/proc/<pid>/cmdline``: the wrapper and, when the task has secrets,
-``.secrets.json`` are written with ``umask 077 && set -C && cat >``
-and their bytes sent on the channel's stdin. The wrapper exports
-``FORGE_SECRETS_FILE`` (the file's absolute path, never its contents)
-and, before ``set -e``, the task's ``env`` or its setup, installs
-``trap 'rm -f "$FORGE_SECRETS_FILE"' EXIT``, so the file is removed
-when setup fails, when the job ends and when ``cancel``'s SIGTERM
-arrives. Only a SIGKILL skips the trap, and ``cleanup`` removes the
-whole workdir after that.
+``/proc/<pid>/cmdline``: the wrapper and then, when the task has
+secrets, ``.secrets.json`` are written with their bytes on the
+channel's stdin. Each write runs under ``umask 077``, ``cd -P`` into
+the workdir and checks ``test -O .`` (so the path is resolved once and
+a swapped component cannot redirect it), refuses anything already at
+the name, and creates the file under ``set -C``. The explicit refusal
+matters: bash's noclobber still opens an existing FIFO or device for
+writing. The secrets file is written last, immediately before the
+launch.
+
+With secrets, the wrapper holds the file's absolute path in an
+unexported variable, installs ``trap 'rm -f "$_forge_secrets_file"'
+EXIT`` in its own shell, and runs ``set -e``, the task's ``env``,
+``setup`` and ``run`` in a subshell below that trap, exporting
+``FORGE_SECRETS_FILE`` (the path, never the contents) only between
+``setup`` and ``run``. The subshell keeps a ``trap ... EXIT`` that the
+task sets (an orchestrator's bootstrap sets one) from replacing the
+removal, so the file goes when setup fails, when the job ends and when
+``cancel``'s SIGTERM arrives. Only a SIGKILL skips the trap; ``cancel``
+removes the file itself after its final SIGKILL, and ``cleanup``
+removes the whole workdir.
+
+A submit that fails after creating the workdir removes it, within a
+10 s bound. If that removal fails too (the connection is gone), an
+ordinary failure is re-raised as ``SubmitCleanupError`` (a
+``RuntimeError``, from the original failure) whose ``job`` is a handle
+``cleanup`` accepts; a cancellation stays a cancellation. As a backstop
+that needs no handle, every submit's workdir step removes
+``.secrets.json`` files older than 10 minutes from job directories
+that have no pid file, i.e. submits that never launched. That sweep and
+the ``chmod 700`` mean ``remote_root`` must be a directory dedicated to
+Forge. A remote command that ends without an exit status counts as a
+failure.
 
 Pass a pre-built ``asyncssh.SSHClientConnection`` via
 ``connection=`` to share a connection across multiple submits.

@@ -97,7 +97,12 @@ or :class:`ValueError` for input validation.
   delivers it as a 0600 file in a 0700 directory whose path the job
   finds in ``FORGE_SECRETS_FILE``, writing the bytes through a
   channel no other user can read (SSH stdin; an ``O_EXCL`` local
-  write), and makes the job's shell remove the file on exit. A
+  write), and removes the file on exit through a trap in an OUTER
+  shell, with the task's ``setup`` and ``run`` in a subshell below it
+  (``backends.base.secrets_guarded_script``): a ``trap ... EXIT`` the
+  task sets would otherwise replace the removal. Only ``run`` is given
+  the path. Every backend re-validates the task first
+  (``Task.revalidated()``), since ``model_copy`` skips validators. A
   backend with no such channel raises on non-empty ``secrets``
   (SkyPilot does) rather than falling back to the environment.
 - **Frozen tuple-typed collections** as elsewhere in
