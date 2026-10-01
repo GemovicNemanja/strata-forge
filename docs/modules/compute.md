@@ -9,7 +9,9 @@ ships typed task / job / status Pydantic shapes, a
 :class:`LLMClient`, and small task-builder functions for
 self-hosted inference servers (vLLM, TGI, SGLang). See
 [ADR 0013](../architecture/adr/0013-compute-task-and-backend-shapes.md)
-for the task-as-data + Protocol design rationale.
+for the task-as-data + Protocol design rationale, and
+[ADR 0018](../architecture/adr/0018-secrets-travel-beside-the-task.md)
+for how a job's credentials reach it.
 
 Integration points:
 
@@ -41,6 +43,7 @@ Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 
 - [Quickstart](#quickstart)
 - [Task and ResourceSpec](#task-and-resourcespec)
+  - [Secrets](#secrets)
 - [Job lifecycle](#job-lifecycle)
   - [The runner contract](#the-runner-contract)
 - [Backend protocol](#backend-protocol)
@@ -138,6 +141,44 @@ roundtripped = Task.from_yaml_str(yaml_text)
 ``resources`` entirely; SSH inherits whatever the host has;
 SkyPilot forwards it verbatim.
 
+### Secrets
+
+A credential the job needs goes in ``secrets``, never in ``env``:
+
+```python
+from pydantic import SecretStr
+
+task = Task(
+    name="push-results",
+    run="python -m my_pipeline",
+    env={"WANDB_PROJECT": "forge-experiments"},
+    secrets={"HF_TOKEN": SecretStr(token)},
+)
+```
+
+``Task.secrets`` travels beside the task rather than in it:
+
+- It is ``dict[str, SecretStr]``, excluded from ``model_dump`` /
+  ``model_dump_json`` / ``to_yaml`` and from ``repr``, and never
+  read from YAML. Validation errors on a ``Task`` never echo the
+  input (``hide_input_in_errors``).
+- Keys look like environment variable names
+  (``^[A-Z][A-Z0-9_]{0,63}$``); at most 8; values non-empty; a key
+  may not also appear in ``env``. ``env`` may not set
+  ``FORGE_SECRETS_FILE``.
+- The backend writes them as one JSON object to a 0600
+  ``.secrets.json`` in a 0700 directory and sets
+  ``FORGE_SECRETS_FILE`` (``strata_forge.compute.SECRETS_FILE_ENV``)
+  to its absolute path. That path is the only secret-related thing
+  in the job's environment. The job's shell removes the file on
+  exit, setup failure and SIGTERM included.
+- A backend with no private channel refuses a task with secrets
+  rather than falling back to the environment
+  (:class:`SkyPilotBackend` raises ``ValueError``).
+
+A job reads the file once and deletes it; the pipeline runners do
+that before anything else (see [the runner contract](#the-runner-contract)).
+
 ## Job lifecycle
 
 Backends return :class:`Job` handles from ``submit``. A
@@ -220,8 +261,8 @@ The package ships two runners over that plumbing:
 ``inference_runner`` (serve a model with vLLM, run a batch over a dataset)
 and ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
 adapter or merged model to the Hub). Both read an inert JSON spec from
-``STRATA_RUN_CONFIG``, take the HF write token only from its own
-``HF_WRITE_TOKEN`` env var, and append the same ``ProgressEvent`` stream to
+``STRATA_RUN_CONFIG``, take the HF write token only from the private
+secrets file the backend wrote beside the job, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
 
@@ -234,9 +275,35 @@ machine it does not own holds up its side of the contract in four places:
   a Pydantic model with ``extra="forbid"``, so a key the installed engine
   does not know is a named failure, never an ignored instruction. Nothing
   in a spec names code to run.
-- **The write token travels apart from the spec**, in ``HF_WRITE_TOKEN``,
-  and the runner scrubs it (and anything token-shaped) from every message
-  it emits.
+- **The write token travels apart from the spec**, as
+  ``Task.secrets={"HF_TOKEN": SecretStr(token)}``, which the backend writes
+  to the private file named by ``FORGE_SECRETS_FILE`` (see
+  [Secrets](#secrets)). ``runner_main`` calls
+  ``strata_forge.pipelines._common.load_secrets()`` before anything else:
+  it refuses a path that is not an absolute ``.../.secrets.json`` without
+  touching it, opens the file without following a symlink, requires a
+  regular file owned by the runner's user with no group or other bits,
+  reads at most 64 KiB, and unlinks it whatever the outcome, so the file is
+  gone before the runner makes a network call or starts a subprocess. The
+  file is a JSON object; ``HF_TOKEN`` is the only key a runner reads, and
+  any other key is refused by name. A missing, unreadable, misowned or
+  malformed file fails the run with a named error that never carries the
+  file's contents. The values reach the runner as ``SecretStr`` in a
+  ``RunSecrets`` (``hf_token``), the callable ``runner_main`` drives takes
+  ``(writer, secrets)``, and the runner scrubs the token (and anything
+  token-shaped) from every message it emits. The model server the
+  inference runner starts gets an allow-listed environment
+  (``model_server_environ()``: ``PATH``, ``HOME``, ``USER``, ``LOGNAME``,
+  ``LANG``, ``LC_ALL``, ``LC_CTYPE``, ``TMPDIR``, ``LD_LIBRARY_PATH``,
+  ``XDG_CACHE_HOME``, ``HF_HOME``, ``HF_HUB_CACHE``,
+  ``TRANSFORMERS_CACHE``, ``PYTHONUNBUFFERED`` and the ``CUDA_*`` /
+  ``NVIDIA_*`` / ``NCCL_*`` / ``VLLM_*`` families, minus any name that
+  says it holds a credential) and does not inherit the runner's own.
+  Transition: with no ``FORGE_SECRETS_FILE`` set, a 0.4 runner still reads
+  the token from ``HF_WRITE_TOKEN``, removes it from its own environment,
+  and records a ``phase`` event (and a stderr ``warning:``) saying that
+  delivery is deprecated; with a file set, the variable is never read.
+  The fallback is removed in 0.5.0.
 - **Progress is one protocol.** Both runners append the same
   ``ProgressEvent`` stream to ``FORGE_PROGRESS_PATH``, and the exit code is
   the run's verdict.
@@ -302,7 +369,7 @@ commit differs.
 ```python
 class Backend(Protocol):
     name: str
-    async def submit(self, task: Task) -> Job: ...
+    async def submit(self, task: Task) -> Job: ...      # task.secrets -> a 0600 file, or raise
     async def status(self, job: Job) -> JobStatus: ...
     async def logs(self, job: Job, *, tail: int | None = None) -> str: ...
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str: ...
@@ -477,6 +544,16 @@ caller who never asks for it never finds log files appearing. The
 names are fixed (an orchestrator finds them without knowing the
 job id), so give concurrent jobs their own directories.
 
+A task's ``secrets`` are written to ``.secrets.json`` (0600, created
+``O_EXCL | O_NOFOLLOW``) in a fresh 0700 temporary directory, and the
+child finds it through ``FORGE_SECRETS_FILE``. Modes are set
+explicitly, so a restrictive umask cannot lock the child out. The
+child's shell removes the file on exit; the backend removes the
+directory once the child is gone, and again in ``cleanup``. With
+``env_inherit=True`` an inherited ``FORGE_SECRETS_FILE`` is dropped:
+it names the parent's file, which the child must not read (and, by
+reading, delete).
+
 A job ends when the child is reaped, not when its pipes close: a
 process the child backgrounded inherits those descriptors and can
 hold them open indefinitely, and gating the lifecycle on EOF
@@ -492,11 +569,28 @@ backend = SSHBackend(host="gpu-host.example.com", username="ml-team")
 job = await backend.submit(Task(name="t", run="python train.py"))
 ```
 
-Submission scripts a wrapper on the remote host (under
-``~/.forge-compute/<job_id>/``) and launches it under ``nohup``,
-capturing the PID and exit code in files. ``status`` probes
-``kill -0`` for liveness, then falls back to the exit-code file.
-``cancel`` sends SIGTERM, waits 2 s, then SIGKILL.
+Submission creates a private workdir on the remote host
+(``~/.forge-compute/<job_id>/``), writes a wrapper into it and
+launches it under ``nohup``, capturing the PID and exit code in
+files. ``status`` probes ``kill -0`` for liveness, then falls back
+to the exit-code file. ``cancel`` sends SIGTERM to the job's process
+group, gives it up to 10 s, then SIGKILL.
+
+The workdir is made by one ``bash -c`` step under ``umask 077``: the
+remote root must be a directory owned by the login user and is
+narrowed to 0700, and the job's directory is created with
+``mkdir -m 700`` and no ``-p``, so a directory or symlink already at
+that path fails the submit. File contents never travel in a command
+string, which every user on the host can read in
+``/proc/<pid>/cmdline``: the wrapper and, when the task has secrets,
+``.secrets.json`` are written with ``umask 077 && set -C && cat >``
+and their bytes sent on the channel's stdin. The wrapper exports
+``FORGE_SECRETS_FILE`` (the file's absolute path, never its contents)
+and, before ``set -e``, the task's ``env`` or its setup, installs
+``trap 'rm -f "$FORGE_SECRETS_FILE"' EXIT``, so the file is removed
+when setup fails, when the job ends and when ``cancel``'s SIGTERM
+arrives. Only a SIGKILL skips the trap, and ``cleanup`` removes the
+whole workdir after that.
 
 Pass a pre-built ``asyncssh.SSHClientConnection`` via
 ``connection=`` to share a connection across multiple submits.
@@ -522,6 +616,11 @@ job states to the canonical five; unknown states fall back to
 
 ``cleanup`` calls ``sky.down`` on the cluster — be aware that
 this tears down the entire cluster, not just the job.
+
+``submit`` raises ``ValueError`` for a task with ``secrets``, before
+any SkyPilot call: the SDK's only channel for a value is ``envs``,
+which is the job's environment, so there is no delivery that keeps
+the credential out of it.
 
 ## Batch inference
 

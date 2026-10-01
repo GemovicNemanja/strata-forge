@@ -48,6 +48,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   and an `ImportError`): the up-front check that a QLoRA run can quantise its model. It looks
   `bitsandbytes` up without importing it, and refuses one whose metadata records a version below
   the `[finetuning]` floor, naming that version. `QLoRAConfig.to_bnb_config()` calls it first.
+- `Task.secrets: dict[str, SecretStr]` carries the credentials a job needs beside the task
+  rather than in it: excluded from `model_dump`, `to_yaml`, `repr` and YAML loading, keys shaped
+  like environment variable names, at most 8, never also in `env`, and validation errors on a
+  `Task` no longer echo their input. Every backend delivers them as a 0600 `.secrets.json` in a
+  0700 directory whose absolute path the job reads from `FORGE_SECRETS_FILE`
+  (`strata_forge.compute.SECRETS_FILE_ENV`), and the job's shell removes the file on exit
+  (ADR 0018). `SkyPilotBackend.submit` refuses a task with secrets.
+- `strata_forge.pipelines._common.load_secrets()` and `RunSecrets`: a runner reads its secrets
+  file first, deletes it before any network call or subprocess, and gets the values as
+  `SecretStr`. A path that is not an absolute `.secrets.json`, a symlink, a file another user
+  could read, an unknown key or malformed JSON is a named error that never carries the file's
+  contents.
 
 ### Changed
 
@@ -63,6 +75,22 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (`CLAUDE.md` §9b).
 - `strata-forge train sft|dpo` builds the adapter config before it resolves the dataset, so the
   QLoRA check runs before the dataset store is read.
+- `SSHBackend.submit` creates the job's workdir mode 0700 with no `-p` (an existing directory or
+  symlink fails the submit), requires the remote root to be owned by the login user and narrows
+  it to 0700, and writes the wrapper (and the secrets file) through the SSH channel's stdin with
+  `umask 077` and an exclusive create, so no file content is ever on a remote command line.
+- The inference runner starts its model server with `LocalBackend(env_inherit=False)` and an
+  allow-listed environment (`model_server_environ()`), so the server never sees the spec, the
+  secrets file's path or a token. `LocalBackend` no longer passes an inherited
+  `FORGE_SECRETS_FILE` to a child.
+- `runner_main`'s callable takes `(writer, RunSecrets)` instead of `(writer, str | None)`.
+
+### Deprecated
+
+- The `HF_WRITE_TOKEN` environment variable as the runners' token channel. With no
+  `FORGE_SECRETS_FILE` set, a runner still reads it, removes it from its own environment and
+  records a `phase` event (and a stderr `warning:`) saying the delivery is deprecated; with a
+  secrets file set it is never read. It is removed in 0.5.0.
 
 ### Fixed
 
@@ -96,6 +124,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (`docs/modules/llm.md`, "OpenAI-compatible endpoints"). Unit tests run the real LiteLLM, OpenAI
   client and `httpx` stack, streaming and not, against loopback servers and pin both halves, so a
   dependency upgrade that changes either fails there.
+- A Hugging Face token handed to a run is no longer written into `wrapper.sh`, placed on a remote
+  command line, exported into the job's environment (where the setup step's package installs
+  inherited it) or inherited by the model server.
 
 ## [0.3.0] - 2026-10-01
 
