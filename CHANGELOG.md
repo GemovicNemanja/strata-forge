@@ -8,6 +8,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - Every runner spec (`RunSpec`, `FinetuneSpec`) carries `engine_version: str | None`, the engine
@@ -112,5 +114,6 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 The first release this changelog records. Earlier history is in the git log.
 
-[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/GemovicNemanja/strata-forge/releases/tag/v0.2.0
