@@ -34,8 +34,8 @@ classifiers = [
 # shipped that morning and a breaking upstream release lands as a mid-run crash on the user's
 # hardware rather than as a red build here. Raise a ceiling deliberately, with the call sites
 # checked against the new major -- never to make a resolver stop complaining.
-# .github/workflows/clean-install.yml performs that fresh install every night (and on any push
-# touching this file) and builds every config a run builds.
+# .github/workflows/clean-install.yml performs that fresh install every night (and on any branch
+# push touching this file) and builds every config a run builds.
 dependencies = [
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.6,<3",

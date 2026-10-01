@@ -21,26 +21,33 @@ Usage::
 
 The argument is the extras string the venv was installed with; it selects which checks apply.
 Exits non-zero when any check fails, after running all of them.
+
+``--write-override PATH TEXT`` validates the drill's override requirements and writes them to
+``PATH``, one per line; it needs only the standard library, so it runs before the install.
 """
 
 from __future__ import annotations
 
 import os
 
-# Before anything imports huggingface_hub, which reads these once at import time: nothing here may
-# reach the Hub or phone home, so a check cannot pass or fail on the network's say-so.
+# Before anything imports huggingface_hub or litellm, which read these once at import time: nothing
+# here may reach the Hub or phone home, so a check cannot pass or fail on the network's say-so.
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["VLLM_NO_USAGE_STATS"] = "1"
 os.environ["DO_NOT_TRACK"] = "1"
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import argparse
 import asyncio
 import contextlib
 import importlib
 import importlib.metadata
+import importlib.util
+import inspect
 import json
 import pkgutil
+import re
 import shlex
 import subprocess
 import sys
@@ -75,9 +82,53 @@ _OUTPUT = "smoke-org/smoke-output"
 
 _ADAPTERS = ("none", "lora", "qlora")
 
+#: The variables the inference runner sets on the served process beside the command line. vLLM
+#: ignores a variable it does not know, so a rename upstream would silently undo the runner's
+#: setting; the probe checks each ``VLLM_`` name is still one vLLM reads. A unit test keeps this in
+#: step with the runner.
+_RUNNER_SERVE_ENV = {"PYTHONUNBUFFERED": "1", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+
+#: One requirement the override drill may force: a project name, optional extras and one or more
+#: version comparisons. No URL, path, marker or option can match, so the drill can only pick
+#: another release from the public index.
+_OVERRIDE_TOKEN = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+    r"(?:\[[A-Za-z0-9._,-]+\])?"
+    r"(?:===|==|!=|~=|<=|>=|<|>)[A-Za-z0-9.*+!_-]+"
+    r"(?:,(?:===|==|!=|~=|<=|>=|<|>)[A-Za-z0-9.*+!_-]+)*"
+)
+
+_OVERRIDE_FLAG = "--write-override"
+
 
 class SmokeError(RuntimeError):
     """A check that ran to completion and found the wrong thing."""
+
+
+def override_requirements(text: str) -> list[str]:
+    """The drill's whitespace-separated requirements, refused unless each is a plain pin."""
+    tokens = text.split()
+    refused = [token for token in tokens if not _OVERRIDE_TOKEN.fullmatch(token)]
+    if refused:
+        msg = (
+            f"override refused {[token[:80] for token in refused[:5]]}: each requirement must be "
+            "a name, optional extras and a version comparison, such as transformers==4.57.6"
+        )
+        raise SmokeError(msg)
+    return tokens
+
+
+def write_override(path: str, text: str) -> int:
+    """Validate the drill's override and write it as an override file, one requirement a line."""
+    try:
+        tokens = override_requirements(text)
+    except SmokeError as exc:
+        annotate("error", "Override refused", str(exc))
+        return 2
+    Path(path).write_text("".join(f"{token}\n" for token in tokens), encoding="utf-8")
+    if tokens:
+        annotate("warning", "Override drill", f"resolving with: {' '.join(tokens)}")
+    return 0
 
 
 # --------------------------------------------------------------------------------------------
@@ -253,39 +304,100 @@ def bf16_as_on_a_gpu() -> Generator[None]:
         setattr(training_args, probe, original)
 
 
-def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
-    """One case end to end, up to the point where a real run would download the model."""
-    datasets_mod: Any = importlib.import_module("datasets")
+class _Constructed(BaseException):
+    """Raised in place of building a trainer once its arguments have bound.
+
+    A ``BaseException`` for the same reason as :class:`_Parsed`.
+    """
+
+
+def trainer_class(method_name: str) -> Any:
+    """The TRL trainer class the runner for ``method_name`` constructs."""
     trl_mod: Any = importlib.import_module("trl")
-    from strata_forge.training.dataset_format import build_training_rows, validate_mapping
-    from strata_forge.training.peft import QLoRAConfig
     from strata_forge.training.preference import (
         _TRAINER_CLASS,  # pyright: ignore[reportPrivateUsage]
-        _TRL_CONFIG_CLASS,  # pyright: ignore[reportPrivateUsage]
         _resolve_trl_class,  # pyright: ignore[reportPrivateUsage]
     )
 
-    spec = finetune_spec(method_name, fmt, adapter)
-    with tempfile.TemporaryDirectory() as tmp:
-        method, config, peft = build_finetune_config(spec, Path(tmp) / "out")
-        if method.name == "sft":
-            trl_config_cls: Any = trl_mod.SFTConfig
-            trainer_cls: Any = trl_mod.SFTTrainer
-        else:
-            trl_config_cls = _resolve_trl_class(
-                trl_mod, method.name, _TRL_CONFIG_CLASS[method.name]
-            )
-            trainer_cls = _resolve_trl_class(trl_mod, method.name, _TRAINER_CLASS[method.name])
-        if not callable(trainer_cls):
-            msg = f"{method.name} trainer {trainer_cls!r} is not a class"
-            raise SmokeError(msg)
-        with bf16_as_on_a_gpu():
-            trl_config_cls(**config.to_trl_kwargs())
-        if peft is not None:
-            peft.to_peft_config()
-            if isinstance(peft, QLoRAConfig):
-                peft.to_bnb_config()
+    if method_name == "sft":
+        return trl_mod.SFTTrainer
+    return _resolve_trl_class(trl_mod, method_name, _TRAINER_CLASS[method_name])
 
+
+@contextlib.contextmanager
+def binding_only(trainer_cls: Any) -> Generator[None]:
+    """Make ``trainer_cls(...)`` bind its arguments against the real signature, then stop.
+
+    The runner then builds everything it builds for a trainer (the TRL config included) and calls
+    the installed class with its own keywords, so a renamed or removed trainer argument fails
+    here, but nothing is loaded, wrapped or trained.
+    """
+    signature = inspect.signature(trainer_cls.__init__)
+    had_own = "__init__" in vars(trainer_cls)
+    original: Any = getattr(trainer_cls, "__init__", None) if had_own else None
+
+    def bind(self: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            signature.bind(self, *args, **kwargs)
+        except TypeError as exc:
+            msg = f"{trainer_cls.__name__} no longer accepts the runner's arguments: {exc}"
+            raise SmokeError(msg) from exc
+        raise _Constructed
+
+    trainer_cls.__init__ = bind
+    try:
+        yield
+    finally:
+        if had_own:
+            trainer_cls.__init__ = original
+        else:
+            del trainer_cls.__init__
+
+
+def bitsandbytes_declared(extra: str = "finetuning") -> bool:
+    """Whether the installed distribution's ``extra`` installs bitsandbytes."""
+    marker = re.compile(rf"""extra\s*==\s*["']{re.escape(extra)}["']""")
+    for requirement in importlib.metadata.requires("strata-forge") or []:
+        name = re.split(r"[\s\[<>=!~;(@]", requirement, maxsplit=1)[0]
+        if name.lower().replace("_", "-") == "bitsandbytes" and marker.search(requirement):
+            return True
+    return False
+
+
+#: Gaps already annotated in this process, so a gap shared by many cases is reported once.
+_REPORTED_GAPS: set[str] = set()
+
+
+def check_qlora_loadable() -> None:
+    """QLoRA quantises the model at load time, which needs bitsandbytes on the run's machine.
+
+    ``BitsAndBytesConfig`` constructs without it, so the config checks alone would pass on an
+    install where every QLoRA run fails at ``from_pretrained``. While ``[finetuning]`` does not
+    name it, that is reported once as a warning; once it does, a missing install fails the case.
+    """
+    installed = importlib.util.find_spec("bitsandbytes") is not None
+    if bitsandbytes_declared():
+        if not installed:
+            msg = "[finetuning] names bitsandbytes but it is not importable in this install"
+            raise SmokeError(msg)
+        return
+    if "qlora" not in _REPORTED_GAPS:
+        _REPORTED_GAPS.add("qlora")
+        annotate(
+            "warning",
+            "QLoRA cannot load a model on a fine-tuning machine",
+            "[finetuning] does not install bitsandbytes, so a qlora run fails at from_pretrained; "
+            "the qlora cases check the configs only",
+        )
+
+
+def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
+    """One case end to end, up to the point where a real run would download the model."""
+    datasets_mod: Any = importlib.import_module("datasets")
+    from strata_forge.training.dataset_format import build_training_rows, validate_mapping
+    from strata_forge.training.peft import QLoRAConfig
+
+    spec = finetune_spec(method_name, fmt, adapter)
     rows = finetune_rows(fmt)
     columns = list(rows[0])
     validate_mapping(fmt, spec["column_mapping"], columns)
@@ -294,6 +406,30 @@ def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
     if set(dataset.column_names) != set(spec["column_mapping"]):
         msg = f"training rows carry {dataset.column_names}, expected the roles only"
         raise SmokeError(msg)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        method, config, peft = build_finetune_config(spec, Path(tmp) / "out")
+        trainer_cls = trainer_class(method.name)
+        if not inspect.isclass(trainer_cls):
+            msg = f"{method.name} trainer {trainer_cls!r} is not a class"
+            raise SmokeError(msg)
+        runner = method.build_runner(config, peft_config=peft)
+        # A model and a tokenizer are passed in so the runner does not download them; the eval
+        # split is passed because the spec names one, so its keyword is bound as well.
+        with bf16_as_on_a_gpu(), binding_only(trainer_cls):
+            try:
+                runner.build_trainer(
+                    train_dataset=dataset, eval_dataset=dataset, model=object(), tokenizer=object()
+                )
+            except _Constructed:
+                pass
+            else:
+                msg = f"{method.name}: the runner built a trainer without calling {trainer_cls}"
+                raise SmokeError(msg)
+        if isinstance(peft, QLoRAConfig):
+            # Passing a model above skipped the quantisation config; a real run builds it.
+            peft.to_bnb_config()
+            check_qlora_loadable()
 
 
 def check_inference_spec() -> None:
@@ -394,7 +530,8 @@ def check_vllm_command_line() -> None:
     defaults include a device config that refuses to construct when no platform is detected, and
     a CUDA wheel on a machine with no GPU detects none. That variable is vLLM's own switch for
     running an accelerator wheel on a CPU-only host; should it stop being honoured, the probe
-    fails with "Failed to infer device type".
+    fails with "Failed to infer device type". The child also carries the variables the runner
+    sets on the served process, so the entrypoint sees what it sees on a run's machine.
     """
     result = subprocess.run(  # noqa: S603 - this interpreter re-running this very script
         [sys.executable, str(Path(__file__).resolve()), _PROBE_FLAG],
@@ -402,7 +539,7 @@ def check_vllm_command_line() -> None:
         text=True,
         check=False,
         timeout=_PROBE_TIMEOUT_S,
-        env={**os.environ, "VLLM_TARGET_DEVICE": "cpu"},
+        env={**os.environ, **_RUNNER_SERVE_ENV, "VLLM_TARGET_DEVICE": "cpu"},
     )
     sys.stdout.write(result.stdout)  # carries the probe's annotations through to the log
     if result.returncode != 0:
@@ -416,8 +553,9 @@ def probe_vllm() -> int:
     The module is run as ``__main__`` exactly as ``python -m`` would, so its argument parser and
     its validation both see every flag the runner emits. The event-loop runners are swapped for a
     stub that stops at the moment the server would start, which keeps this offline and GPU-free
-    without naming a single vLLM internal: a removed entrypoint, a renamed flag or a rejected
-    value all fail here. A deprecation the entrypoint announces is reported, not fatal.
+    without naming a vLLM internal on the parsing path: a removed entrypoint, a renamed flag or a
+    rejected value all fail here. A deprecation the entrypoint announces is reported, not fatal.
+    Each ``VLLM_`` variable the runner sets must still be one vLLM reads.
     """
     import runpy
 
@@ -450,6 +588,17 @@ def probe_vllm() -> int:
     for warning in caught:
         if issubclass(warning.category, DeprecationWarning) and "vllm" in str(warning.filename):
             annotate("warning", "vLLM deprecation on the serving path", str(warning.message))
+
+    # The one vLLM internal named here: the table its environment lookups are served from.
+    envs: Any = importlib.import_module("vllm.envs")
+    known = getattr(envs, "environment_variables", None)
+    if not isinstance(known, dict):
+        print("vllm.envs no longer exposes environment_variables", file=sys.stderr)
+        return 1
+    unread = sorted(n for n in _RUNNER_SERVE_ENV if n.startswith("VLLM_") and n not in known)
+    if unread:
+        print(f"vLLM no longer reads {unread}, which the runner sets", file=sys.stderr)
+        return 1
     print(f"vLLM accepted: {shlex.join(args)}")
     return 0
 
@@ -502,30 +651,49 @@ def report_versions() -> None:
             continue
 
 
-def main() -> int:
-    if sys.argv[1:] == [_PROBE_FLAG]:
-        return probe_vllm()
-    parser = argparse.ArgumentParser(description="Build what a run builds, in a clean install.")
-    parser.add_argument("extras", help="the extras string the venv was installed with")
-    extras = selected_extras(parser.parse_args().extras)
+def run_checks(checks: list[tuple[str, Callable[[], None]]]) -> int:
+    """Run every check, report each, and return the exit status: 0 only if all of them passed.
 
-    print(f"python {sys.version.split()[0]} at {sys.executable}")
-    print(f"extras: {', '.join(sorted(extras))}")
-    report_versions()
-
+    A ``SystemExit`` from a dependency inside a check counts as that check failing; otherwise a
+    stray ``sys.exit(0)`` would end the run green with the remaining checks never run.
+    """
     failures = 0
-    for name, check in plan(extras):
+    executed = 0
+    for name, check in checks:
+        executed += 1
         try:
             check()
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             failures += 1
             print(f"FAIL  {name}")
             traceback.print_exc()
             annotate("error", f"clean install: {name}", f"{type(exc).__name__}: {exc}")
         else:
             print(f"ok    {name}")
-    print(f"{failures} failed" if failures else "all checks passed")
+    if not checks or executed != len(checks):
+        annotate("error", "clean install", f"ran {executed} of {len(checks)} checks")
+        return 1
+    print(f"{failures} of {executed} failed" if failures else f"all {executed} checks passed")
     return 1 if failures else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if args == [_PROBE_FLAG]:
+        return probe_vllm()
+    if args[:1] == [_OVERRIDE_FLAG]:
+        if len(args) != 3:
+            print(f"usage: {_OVERRIDE_FLAG} PATH TEXT", file=sys.stderr)
+            return 2
+        return write_override(args[1], args[2])
+    parser = argparse.ArgumentParser(description="Build what a run builds, in a clean install.")
+    parser.add_argument("extras", help="the extras string the venv was installed with")
+    extras = selected_extras(parser.parse_args(args).extras)
+
+    print(f"python {sys.version.split()[0]} at {sys.executable}")
+    print(f"extras: {', '.join(sorted(extras))}")
+    report_versions()
+    return run_checks(plan(extras))
 
 
 if __name__ == "__main__":

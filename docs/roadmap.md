@@ -663,12 +663,15 @@ The test infrastructure itself:
   run's machine installs (`[finetuning,storage]`,
   `[serving,storage,hf]`) plus `[all]` into empty 3.14 venvs with no
   lockfile or constraints, then builds every fine-tuning config down
-  to the TRL/peft/bitsandbytes objects, the batch-inference spec,
+  to the TRL/peft/bitsandbytes objects and binds the runner's trainer
+  keywords against the installed trainer, the batch-inference spec,
   requests and results parquet, and the vLLM command line through the
   installed vLLM's own entrypoint parser. Offline and GPU-free; runs
-  nightly against `dev` and on any push touching `pyproject.toml`. A
-  `workflow_dispatch` `override` input forces a requirement over the
-  resolution as a drill that must turn the job red.
+  nightly against `dev` (the schedule dispatches it there, so it never
+  runs in `main`'s cache scope) and on any branch push touching
+  `pyproject.toml`. A `workflow_dispatch` `override` input forces
+  plain version pins over the resolution as a drill that must turn the
+  job red.
 - **Security audit**: `pip-audit --strict` runs in the nightly
   with the `|| true` swallow removed, so new CVEs surface as a
   job failure. (A CodeQL workflow is deliberately absent: code

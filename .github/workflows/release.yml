@@ -31,9 +31,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # No Actions cache: a tag restores the default branch's, and whatever wrote that scope would
+      # then shape the distributions the publish job uploads. A release build is rare enough to
+      # resolve from scratch.
       - uses: astral-sh/setup-uv@v3
         with:
-          enable-cache: true
+          enable-cache: false
       - run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Verify the tag matches the packaged version
