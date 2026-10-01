@@ -38,8 +38,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   requests and results parquet, and the vLLM command line through the installed vLLM's own
   entrypoint parser, with each `VLLM_` variable the runner sets checked as one vLLM still reads.
   A breaking upstream release fails there the day it ships instead of on a user's machine. A
-  QLoRA case warns while `[finetuning]` does not install `bitsandbytes` (QLoRA cannot load a model
-  on such a machine) and fails once the extra names it but the install lacks it. It also runs on
+  QLoRA case first checks that `[finetuning]` names `bitsandbytes` and the install has it (QLoRA
+  cannot load a model without it), and fails before it builds anything otherwise. It also runs on
   any branch push other than `main` that changes `pyproject.toml`, and a manual run takes an
   `override` of plain version pins (no URL, path or option) as a drill that must turn it red. The
   schedule, which runs from `main`, only dispatches the job on `dev` and reports that run's

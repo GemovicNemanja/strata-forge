@@ -397,10 +397,10 @@ adapter through the runner's own spec path and its own `build_trainer`, down to
 the TRL config, the peft config, the bitsandbytes config and the trainer call,
 whose keywords are bound against the installed trainer's signature (a model and
 a tokenizer are passed in, so nothing is downloaded). A renamed kwarg fails there
-on the day the release ships. A QLoRA case also checks the machine can quantise:
-while `[finetuning]` does not install `bitsandbytes`, the job warns that QLoRA
-cannot load a model on a fine-tuning machine, and once the extra names it, a
-missing install fails. It also runs on any branch push (main excepted) that
+on the day the release ships. A QLoRA case first checks the machine can
+quantise: it fails when `[finetuning]` stops naming `bitsandbytes` or the install
+lacks it, before it builds anything, so the gap is reported as itself rather than
+as the runner's own refusal. It also runs on any branch push (main excepted) that
 changes `pyproject.toml`, so a pin change is resolved fresh before it merges.
 
 Because it executes upstream code no lockfile vouches for, the install never

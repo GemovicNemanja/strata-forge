@@ -258,6 +258,11 @@ class TestBindingOnly:
         assert "__init__" not in vars(self._Inherits)
 
 
+def _installed(_name: str) -> object:
+    """A ``find_spec`` that finds every package."""
+    return object()
+
+
 class TestQLoRA:
     @pytest.mark.parametrize(
         ("requires", "declared"),
@@ -291,15 +296,51 @@ class TestQLoRA:
         with pytest.raises(smoke.SmokeError, match="names bitsandbytes"):
             smoke.check_qlora_loadable()
 
-    def test_an_undeclared_bitsandbytes_is_warned_once(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_an_undeclared_bitsandbytes_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Even with the package present: the run's machine installs only what the extra names.
         monkeypatch.setattr(smoke, "bitsandbytes_declared", lambda: False)
-        no_gaps: set[str] = set()
-        monkeypatch.setattr(smoke, "_REPORTED_GAPS", no_gaps)
+        monkeypatch.setattr(smoke.importlib.util, "find_spec", _installed)
+        with pytest.raises(smoke.SmokeError, match="does not name bitsandbytes"):
+            smoke.check_qlora_loadable()
+
+    def test_a_declared_and_installed_bitsandbytes_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(smoke, "bitsandbytes_declared", lambda: True)
+        monkeypatch.setattr(smoke.importlib.util, "find_spec", _installed)
         smoke.check_qlora_loadable()
-        smoke.check_qlora_loadable()
-        assert capsys.readouterr().out.count("::warning title=QLoRA cannot load") == 1
+
+    def test_the_finetuning_extra_names_it(self) -> None:
+        # The distribution this suite runs against; the smoke reads the same metadata.
+        assert smoke.bitsandbytes_declared() is True
+
+    def test_a_qlora_case_checks_bitsandbytes_before_anything_else(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def missing() -> None:
+            raise smoke.SmokeError("bitsandbytes gap")
+
+        def unreachable(*_args: object) -> None:
+            pytest.fail("the case built its config before checking bitsandbytes")
+
+        monkeypatch.setattr(smoke, "check_qlora_loadable", missing)
+        monkeypatch.setattr(smoke, "build_finetune_config", unreachable)
+        # The dataset library is the case's first import; reaching it would also be too late.
+        monkeypatch.setitem(sys.modules, "datasets", None)
+        with pytest.raises(smoke.SmokeError, match="bitsandbytes gap"):
+            smoke.check_finetune_case("sft", "text", "qlora")
+
+    @pytest.mark.parametrize("adapter", ["none", "lora"])
+    def test_only_a_qlora_case_checks_bitsandbytes(
+        self, monkeypatch: pytest.MonkeyPatch, adapter: str
+    ) -> None:
+        def unexpected() -> None:
+            pytest.fail(f"a {adapter} case checked bitsandbytes")
+
+        monkeypatch.setattr(smoke, "check_qlora_loadable", unexpected)
+        monkeypatch.setitem(sys.modules, "datasets", None)
+        with pytest.raises(ImportError):
+            smoke.check_finetune_case("sft", "text", adapter)
 
 
 def test_probe_carries_every_vllm_variable_the_runner_sets() -> None:
