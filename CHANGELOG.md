@@ -23,6 +23,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `redact` of the concatenated input whatever the piece boundaries, so a secret split across two
   console reads is still caught. `gap()` handles a read that dropped bytes: the held tail and the
   first `max_len - 1` characters after the hole are masked.
+- `strata_forge.pipelines._common.run_redactor` builds a run's redactor from its write token.
+
+### Changed
+
+- `sanitize` and every runner message (phase captions, error events, the stderr failure reason)
+  go through `Redactor`, so they also catch the token's encoded forms and the wider set of
+  credential shapes. A write token shorter than 8 characters fails the run before any work.
+
+### Security
+
+- The batch-inference runner's per-row `error` column, written into the results and pushed to
+  the Hub, is redacted. It used to carry each failed row's exception text unscrubbed.
 
 ## [0.3.0] - 2026-10-01
 

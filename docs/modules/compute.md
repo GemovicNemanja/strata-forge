@@ -209,6 +209,13 @@ rest of the plumbing every VM-side runner shares (token scrubbing, repo-id
 re-validation, the elapsed-stamping phase ticker, and the entry point that
 reports an outcome exactly once).
 
+Scrubbing is :class:`strata_forge.core.redact.Redactor`, built once per run
+from the write token (``run_redactor``) and applied to every phase caption,
+every error event, the failure reason printed to stderr, and the per-row
+``error`` column the inference runner writes into its results and pushes to
+the Hub. A token too short to redact safely fails the run before it starts.
+See [Redacting the console](#redacting-the-console) for the half a relay owns.
+
 The package ships two runners over that plumbing:
 ``inference_runner`` (serve a model with vLLM, run a batch over a dataset)
 and ``finetune_runner`` (train with :mod:`strata_forge.training`, push the

@@ -23,9 +23,10 @@ credentials + the network):
     ``STRATA_RUN_CONFIG``, is passed EXPLICITLY to the Hub/dataset clients (never the
     VM's ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only). Phase
-    messages go through the same scrub as errors, because ``serving_endpoint``'s phase hook
-    is public API and a caller's phrase is not under this module's control.
+    repo id; result rows are ``{custom_id, output, error}`` (model text only). The ``error``
+    column, phase messages and the run's own error all go through the one run redactor: the
+    column is pushed to the Hub with the results, an exception's text is not under this
+    module's control, and neither is a phrase from ``serving_endpoint``'s public phase hook.
 
 The exit code is the run's VERDICT, and the control plane reads it as such. Individual row
 failures are collected rather than fatal (a few filtered rows must not discard thousands of good
@@ -57,6 +58,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.core.redact import Redactor
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
@@ -69,6 +71,7 @@ from strata_forge.pipelines._common import (
     load_config,
     phase_sink,
     results_dir,
+    run_redactor,
     runner_main,
     ticking_phase,
     validate_repo_id,
@@ -256,6 +259,7 @@ async def _run_batches(
     writer: JsonlProgressWriter | None,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
     gpu: GpuSampler | None = None,
+    redactor: Redactor | None = None,
 ) -> list[dict[str, Any]]:
     """Run the prompts in progress-chunked batches; reconcile results positionally.
 
@@ -265,8 +269,13 @@ async def _run_batches(
     client RETRIES each one, so a dead server turns into a long expensive silence instead of an
     error: the rest of the run is spent timing out one row at a time, and the failure that
     eventually surfaces describes a connection, not the crash that caused it.
+
+    A failed row's ``error`` is redacted before it is stored: the column is written into the
+    results and pushed to the Hub, and an exception's text can quote whatever the failing call
+    held. Without ``redactor`` the credential shapes alone are removed.
     """
     hp = spec.hyperparams
+    scrub = redactor if redactor is not None else Redactor()
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
     total = len(prompts)
     out: list[dict[str, Any]] = []
@@ -306,7 +315,8 @@ async def _run_batches(
                 latencies_ms.append(result.response.latency_ms)
                 output_tokens += result.response.usage.output_tokens
             else:
-                out.append({"custom_id": cid, "output": None, "error": repr(result.error)})
+                error = scrub.redact(repr(result.error))
+                out.append({"custom_id": cid, "output": None, "error": error})
                 failed += 1
         emit(
             writer,
@@ -488,7 +498,14 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         # chunk absorbs the client's cold start on top of its generations.
         async with ticking_phase(phase, "Generating responses", stage="run"):
             out = await _run_batches(
-                spec, client, prompts, custom_ids, writer, endpoint.is_alive, gpu
+                spec,
+                client,
+                prompts,
+                custom_ids,
+                writer,
+                endpoint.is_alive,
+                gpu,
+                redactor=run_redactor(hf_token),
             )
 
     # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.

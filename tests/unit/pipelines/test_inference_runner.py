@@ -712,6 +712,50 @@ async def test_the_stderr_failure_reason_is_scrubbed(
     assert "***" in err
 
 
+async def test_the_error_column_pushed_with_the_results_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The per-row `error` column is written into the results file and pushed to the Hub with
+    # it, so an exception quoting the write token must not carry it there. Encoded forms too:
+    # an HTTP error usually quotes the request URL.
+    quoted = _TOKEN.replace("_", "%5F")
+    written: list[list[dict[str, Any]]] = []
+    code, _ = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}, {"question": "b"}, {"question": "c"}],
+        scripted=[
+            _ok("A"),
+            _fail(RuntimeError(f"upstream rejected {_TOKEN} for org")),
+            _fail(RuntimeError(f"401 for https://host/x?token={quoted}")),
+        ],
+        written=written,
+    )
+
+    assert code == 0
+    rows = written[-1]
+    assert rows[1]["error"] == "RuntimeError('upstream rejected *** for org')"
+    assert rows[2]["error"] == "RuntimeError('401 for https://host/x?token=***')"
+    assert not any(_TOKEN in str(row) or quoted in str(row) for row in rows)
+
+
+async def test_an_error_row_loses_credential_shapes_without_a_run_redactor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A caller driving the batch directly still gets the credential shapes removed: the column
+    # is never written raw.
+    foreign = "sk-ant-api03-AbCdEfGhIjKlMnOpQrSt"
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    prompts, ids = ir._build_requests(spec, [{"question": "a"}])  # pyright: ignore[reportPrivateUsage]
+    _FakeRunner.scripted = [_fail(RuntimeError(f"bad key {foreign}"))]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+
+    out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+        spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=None
+    )
+    assert out[0]["error"] == "RuntimeError('bad key ***')"
+
+
 async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

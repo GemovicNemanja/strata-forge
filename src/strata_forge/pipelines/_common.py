@@ -5,9 +5,10 @@ Hugging Face write token, driven by a spec that arrived over the wire. Several o
 has to get right are identical whatever it is running, and each of them is a security or
 reliability property rather than a convenience:
 
-- **Scrubbing** (:func:`sanitize`). Every message a runner emits — an error, a phase caption —
-  passes through one function that removes the write token and anything token-shaped. A second
-  copy of this is how one copy stops being maintained.
+- **Scrubbing** (:func:`run_redactor`, :func:`sanitize`). Every message a runner emits — an
+  error, a phase caption, a per-row error it writes into its results — passes through the one
+  :class:`~strata_forge.core.redact.Redactor`, which removes the write token in every encoding
+  and anything credential-shaped. A second copy of this is how one copy stops being maintained.
 - **Re-validating ids** (:func:`validate_repo_id`). The control plane allow-lists them, but the VM
   is the boundary that actually fetches and pushes, so it checks again.
 - **The version handshake** (:func:`check_engine_version`, applied by :func:`load_config`). The
@@ -43,6 +44,7 @@ from pydantic import BaseModel
 
 from strata_forge import __version__
 from strata_forge.compute.serving import format_elapsed
+from strata_forge.core.redact import Redactor
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
@@ -83,6 +85,7 @@ __all__ = [
     "phase_sink",
     "progress_path",
     "results_dir",
+    "run_redactor",
     "runner_main",
     "sanitize",
     "ticking_phase",
@@ -95,9 +98,6 @@ __all__ = [
 REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 # A safe single path segment for an on-VM output dir name (no slash / traversal / shell chars).
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-# Scrub token-shaped substrings from any surfaced message (defense in depth on top of replacing
-# the known token value).
-_TOKEN_RE = re.compile(r"(hf_[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._\-]+)")
 # A phase message is a short human phrase. Capped because the sink is reachable from public API:
 # a caller's hook must not be able to grow the file the orchestrator tails without bound.
 MAX_PHASE_CHARS = 200
@@ -141,11 +141,22 @@ def validate_repo_id(repo_id: str, what: str) -> str:
     return repo_id
 
 
+def run_redactor(token: str | None) -> Redactor:
+    """The redactor for one run: its write token, when it has one, plus every credential shape.
+
+    Raises :class:`~strata_forge.core.errors.ValidationError` for a token too short to redact
+    safely: such a run must fail rather than emit text the token could hide in.
+    """
+    return Redactor([token] if token else [])
+
+
 def sanitize(text: str, token: str | None) -> str:
-    """Strip the write token + any token-shaped substring from a message before it's emitted."""
-    if token:
-        text = text.replace(token, "***")
-    return _TOKEN_RE.sub("***", text)
+    """Strip the write token + anything credential-shaped from a message before it's emitted.
+
+    A convenience over :func:`run_redactor` for a single message; a caller scrubbing many builds
+    the redactor once.
+    """
+    return run_redactor(token).redact(text)
 
 
 def installed_engine_commit(distribution: str = ENGINE_DISTRIBUTION) -> str | None:
@@ -343,7 +354,11 @@ def phase_sink(
     When ``gpu`` is given, its counters ride every phase event. That matters most exactly here:
     loading a model or uploading results can take minutes during which nothing is countable, and
     the hardware gauges are the only thing left that still moves.
+
+    Redaction runs before the cap, so a clip can never leave half a token that the redactor
+    would have recognised whole.
     """
+    redactor = run_redactor(hf_token)
 
     def _phase(message: str, *, stage: RunStage | None = None) -> None:
         emit(
@@ -351,7 +366,7 @@ def phase_sink(
             ProgressEvent(
                 kind="phase",
                 stage=stage,
-                message=sanitize(message, hf_token)[:MAX_PHASE_CHARS],
+                message=redactor.redact(message)[:MAX_PHASE_CHARS],
                 metrics=gpu.sample() if gpu is not None else {},
             ),
         )
@@ -461,15 +476,20 @@ async def runner_main(
     """Run one pipeline to completion and return a process exit code (0 ok, 1 failure).
 
     Owns the three things a runner's outcome depends on and none of its work: the write token is
-    read here and never leaks (every message goes through :func:`sanitize`), a cancellation is
-    reported as a cancellation rather than as a failure of the work, and the progress writer is
-    closed whatever happens.
+    read here and never leaks (every message goes through :func:`run_redactor`), a cancellation
+    is reported as a cancellation rather than as a failure of the work, and the progress writer
+    is closed whatever happens.
+
+    A token too short to redact fails the run before any work starts: everything the run would
+    print could carry it. The refusal itself is scrubbed by the credential shapes alone.
     """
     hf_token = os.environ.get("HF_WRITE_TOKEN") or None
     path = progress_path()
     writer = JsonlProgressWriter(path) if path else None
     install_termination_handlers()
+    redactor = Redactor()
     try:
+        redactor = run_redactor(hf_token)
         await execute(writer, hf_token)
     except asyncio.CancelledError:
         # Asked to stop. The `finally` blocks unwinding beneath this are the point — they are
@@ -479,7 +499,7 @@ async def runner_main(
         print("run cancelled", file=sys.stderr, flush=True)
         return 1
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
-        detail = sanitize(str(exc), hf_token)
+        detail = redactor.redact(str(exc))
         emit(writer, ProgressEvent(kind="error", message=detail))
         # Also to stderr, because that is where the control plane reads a failed run's reason
         # from. Catching the exception here means no traceback is printed, so without this the
