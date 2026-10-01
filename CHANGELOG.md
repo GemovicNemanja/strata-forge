@@ -8,6 +8,22 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.core.redact`: `Redactor`, the one redaction implementation for every string a
+  credential-holding process surfaces and every console a relay forwards. It removes each given
+  value as written, line by line, in all four Unicode normal forms, base64-encoded at any
+  alignment (standard and URL-safe), percent-encoded and JSON- or `repr`-escaped, plus
+  `DEFAULT_PATTERNS` (Hugging Face, OpenAI/Anthropic `sk-`, GitHub, AWS access key ids, JWTs,
+  URL userinfo, bearer credentials, and PEM private-key blocks with or without their footer).
+  Each maximal redacted run becomes one fixed `***`, so the output never encodes a secret's
+  length. A value shorter than 8 characters is refused with `ValidationError`.
+- `Redactor.stream()` returns a `RedactingStream` for text read incrementally: `feed` holds back
+  the last `max_len - 1` characters, `flush` releases them, and the concatenated output equals
+  `redact` of the concatenated input whatever the piece boundaries, so a secret split across two
+  console reads is still caught. `gap()` handles a read that dropped bytes: the held tail and the
+  first `max_len - 1` characters after the hole are masked.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

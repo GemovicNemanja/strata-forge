@@ -358,6 +358,48 @@ SkyPilot raises ``NotImplementedError``: ``sky logs`` has no way to ask for a
 suffix, and re-fetching the whole log per poll is linear in memory as well as in
 time inside a process shared by every account.
 
+### Redacting the console
+
+``console``, ``logs`` and ``read_file`` return what the job wrote, unredacted:
+a backend cannot know which secrets its caller injected. Whoever relays that
+text redacts it, with one :class:`~strata_forge.core.redact.Redactor` built
+from every secret the job was given plus the default credential shapes, and
+with the stream API rather than per-chunk calls, because a secret can straddle
+two incremental reads:
+
+```python
+redactor = Redactor([hf_token, private_key, known_hosts])
+out, err = redactor.stream(), redactor.stream()  # one per stream, kept across polls
+chunk = await backend.console(job)
+while not done:
+    chunk = await backend.console(
+        job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
+    )
+    if chunk.dropped_bytes:
+        render(out.gap(), err.gap())  # a hole: neither side of a cut secret survives
+    render(out.feed(chunk.stdout), err.feed(chunk.stderr))
+render(out.flush(), err.flush())  # once the job is terminal
+```
+
+The contract a relay relies on:
+
+- **A stream holds back ``max_len - 1`` characters** (a few hundred) and releases
+  them on ``flush``. Its concatenated output equals redacting the whole transcript
+  at once, so piece boundaries never decide what is released. Keep one stream per
+  console stream for the life of the job; a fresh stream per poll is a per-chunk
+  redactor again.
+- **A hole needs ``gap()``.** ``dropped_bytes`` counts bytes from either stream,
+  so call it on both. It masks the held tail and the first ``max_len - 1``
+  characters after the hole, and keeps a private-key block that was open across
+  it open.
+- **Redact before clipping**, and before parsing a structured line: a clip can
+  cut a token below the length a pattern recognises, and a JSON string escapes a
+  multi-line secret (the redactor matches the escaped form too).
+- **Decoding.** A slice boundary can split a multi-byte character, which decodes
+  to a replacement character on each side. Every credential shape the redactor
+  knows is ASCII, so this cannot split one of those; a non-ASCII secret value
+  split that way is not matched.
+
 Methods that don't apply to a particular backend raise
 :class:`NotImplementedError` rather than silently passing — that
 way callers can ``try/except`` if needed instead of relying on

@@ -1,4 +1,4 @@
-"""Cross-cutting utilities: errors, retry, logging, budget, repro, ids."""
+"""Cross-cutting utilities: errors, retry, logging, budget, repro, ids, redaction."""
 
 from strata_forge.core.budget import BudgetContext, current_budget
 from strata_forge.core.errors import (
@@ -25,12 +25,21 @@ from strata_forge.core.ids import (
     uuid7,
 )
 from strata_forge.core.logging import configure_logging, get_logger, traced_span
+from strata_forge.core.redact import (
+    DEFAULT_PATTERNS,
+    PLACEHOLDER,
+    RedactingStream,
+    Redactor,
+    TokenPattern,
+)
 from strata_forge.core.repro import content_hash, env_snapshot, set_seed
 from strata_forge.core.retry import DEFAULT_RETRY_ON, retry
 from strata_forge.core.types import JSONValue, PathLike
 
 __all__ = [
+    "DEFAULT_PATTERNS",
     "DEFAULT_RETRY_ON",
+    "PLACEHOLDER",
     "BudgetContext",
     "BudgetExceededError",
     "CacheError",
@@ -46,7 +55,10 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderServerError",
     "ProviderTimeoutError",
+    "RedactingStream",
+    "Redactor",
     "RegistryError",
+    "TokenPattern",
     "ValidationError",
     "configure_logging",
     "content_hash",
