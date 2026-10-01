@@ -117,14 +117,19 @@ def clean_forge_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def bitsandbytes_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make bitsandbytes look installed, whatever this environment has.
+    """Make bitsandbytes look installed at the extra's floor, whatever this environment has.
 
-    QLoRA paths look the package up before building anything, and the dev environment does not
-    install the ``[finetuning]`` extra. Only the lookup is satisfied: nothing here imports it.
+    QLoRA paths look the package and its version up before building anything, and the dev
+    environment does not install the ``[finetuning]`` extra. Only the lookups are satisfied:
+    nothing here imports it.
     """
+    from strata_forge.training import peft
+
     module = types.ModuleType("bitsandbytes")
     module.__spec__ = importlib.machinery.ModuleSpec("bitsandbytes", None)
     monkeypatch.setitem(sys.modules, "bitsandbytes", module)
+    floor = ".".join(str(part) for part in peft._BITSANDBYTES_FLOOR)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(peft, "_bitsandbytes_version", lambda: floor)
 
 
 @pytest.fixture

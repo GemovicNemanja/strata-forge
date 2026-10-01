@@ -211,21 +211,29 @@ up front instead:
 ```python
 from strata_forge.training import MissingBitsAndBytesError, require_bitsandbytes
 
-require_bitsandbytes()  # MissingBitsAndBytesError when it is not installed
+require_bitsandbytes()  # MissingBitsAndBytesError when it is missing or below 0.49
 ```
 
 ``to_bnb_config()`` calls it before building anything, the ``finetune_runner`` calls it while
 validating the spec (before the dataset download) for ``adapter="qlora"``, and the
 ``strata-forge train ... --adapter qlora`` commands call it before resolving the dataset.
 :class:`MissingBitsAndBytesError` is a ``ForgeError`` and an ``ImportError``. The check looks the
-package up without importing it, since importing it loads its native library.
+package up without importing it, since importing it loads its native library, and reads its version
+from the distribution's metadata: a bitsandbytes below the extra's floor (one installed outside the
+extra, which pip would otherwise have upgraded) is refused the same way, naming the installed
+version. A version the metadata does not record is not refused.
 
 Why ``0.49``: the floor has to carry a CUDA 13.0 kernel (what the ``torch`` pin resolves to on
 Linux; first shipped in 0.48) and publish a wheel on each platform that ``torch>=2.9`` publishes a
 Python 3.14 wheel for (Linux x86_64 and aarch64, Windows x64, macOS arm64; the macOS wheel first
-shipped in 0.49). bitsandbytes publishes no sdist, so a platform without a wheel cannot install
-the extra at all: that is why there is no platform marker, and also why an Apple Silicon Mac on
-macOS 12 or 13 cannot install ``[finetuning]`` (bitsandbytes' macOS wheel needs macOS 14).
+shipped in 0.49). Because every one of those platforms has a wheel, the pin needs no platform
+marker, and QLoRA is not ruled out on any of them (bitsandbytes lists CUDA, Apple MPS and CPU among
+its devices). The cost is macOS 12 and 13: bitsandbytes' macOS wheel needs macOS 14 and it
+publishes no sdist to build from, so an Apple Silicon Mac on 12 or 13, where ``torch`` would settle
+on an older macOS 11 wheel, cannot install ``[finetuning]``. Both are past Apple's support window.
+A marker such as ``sys_platform != 'darwin' or platform_release >= '23'`` would keep them
+installable without QLoRA; it is not used, since those releases are out of support and the marker
+would be one more thing a resolver has to get right.
 
 ## Chat-template formatting
 
@@ -430,7 +438,9 @@ the :class:`MissingBitsAndBytesError` subclass).
   training stack but not ``bitsandbytes`` (an install that predates
   it joining ``[finetuning]``, or one made without the extra).
   Reinstall ``strata-forge[finetuning]``, or train with
-  ``adapter="lora"``.
+  ``adapter="lora"``. When the message names an installed version,
+  that ``bitsandbytes`` is older than the extra's floor; upgrade it
+  with the ``pip install`` line the message prints.
 - **OOM in SFT:** lower ``per_device_batch_size``, raise
   ``gradient_accumulation_steps``, enable
   ``gradient_checkpointing`` (default on), or switch to QLoRA.

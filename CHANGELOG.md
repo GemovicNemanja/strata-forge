@@ -46,7 +46,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   result, so the unlocked install never runs in the default branch's cache scope.
 - `strata_forge.training.require_bitsandbytes()` and `MissingBitsAndBytesError` (a `ForgeError`
   and an `ImportError`): the up-front check that a QLoRA run can quantise its model. It looks
-  `bitsandbytes` up without importing it. `QLoRAConfig.to_bnb_config()` calls it first.
+  `bitsandbytes` up without importing it, and refuses one whose metadata records a version below
+  the `[finetuning]` floor, naming that version. `QLoRAConfig.to_bnb_config()` calls it first.
 
 ### Changed
 

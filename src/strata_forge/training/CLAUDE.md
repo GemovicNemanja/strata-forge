@@ -74,8 +74,9 @@ The module's ``__init__.py`` re-exports:
 Errors raised from this module are :class:`ValueError` for
 input validation or :class:`ImportError` when the
 ``[finetuning]`` extra is missing. A missing ``bitsandbytes`` for
-QLoRA is :class:`MissingBitsAndBytesError` (a ``ForgeError`` and an
-``ImportError``), raised before anything is downloaded: every QLoRA
+QLoRA, or one below the extra's floor (read from its metadata, never
+imported), is :class:`MissingBitsAndBytesError` (a ``ForgeError``
+and an ``ImportError``), raised before anything is downloaded: every QLoRA
 entry point (``to_bnb_config``, the fine-tune runner's spec check,
 the ``train`` CLI) calls :func:`require_bitsandbytes` first.
 

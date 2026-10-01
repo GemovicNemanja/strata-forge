@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from strata_forge.core.errors import ForgeError
+from strata_forge.training import peft as peft_module
 from strata_forge.training.peft import (
     LoRAConfig,
     MissingBitsAndBytesError,
@@ -209,3 +210,57 @@ class TestRequireBitsandbytes:
             require_bitsandbytes()
         assert looked_up == ["bitsandbytes"]
         assert "bitsandbytes" not in sys.modules
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    @pytest.mark.parametrize("installed", ["0.45.5", "0.48.2", "0.48.2.dev0"])
+    def test_refuses_a_version_below_the_extras_floor(
+        self, monkeypatch: pytest.MonkeyPatch, installed: str
+    ) -> None:
+        # Installed outside the extra: pip would have upgraded it to satisfy the pin.
+        monkeypatch.setattr(peft_module, "_bitsandbytes_version", lambda: installed)
+        with pytest.raises(MissingBitsAndBytesError) as exc_info:
+            require_bitsandbytes()
+        message = str(exc_info.value)
+        assert "needs bitsandbytes>=0.49" in message
+        assert f"{installed} is installed" in message
+        assert "pip install 'bitsandbytes>=0.49,<1'" in message
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    @pytest.mark.parametrize("installed", ["0.49.0", "0.50.2", "1.0.0", None, "unknown"])
+    def test_accepts_the_floor_and_above_and_an_unreadable_version(
+        self, monkeypatch: pytest.MonkeyPatch, installed: str | None
+    ) -> None:
+        monkeypatch.setattr(peft_module, "_bitsandbytes_version", lambda: installed)
+        require_bitsandbytes()
+
+    def test_the_floor_is_the_extras_lower_bound(self) -> None:
+        # The check and the pin must move together, or the check refuses what the extra installs.
+        import re
+        import tomllib
+        from pathlib import Path
+
+        pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+        extras = tomllib.loads(pyproject.read_text())["project"]["optional-dependencies"]
+        pins = [req for req in extras["finetuning"] if req.startswith("bitsandbytes")]
+        assert len(pins) == 1
+        lower = re.search(r">=(\d+)\.(\d+)", pins[0])
+        assert lower is not None
+        floor = peft_module._BITSANDBYTES_FLOOR  # pyright: ignore[reportPrivateUsage]
+        assert (int(lower[1]), int(lower[2])) == floor
+
+    def test_the_version_comes_from_the_distribution_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib.metadata
+
+        def _not_installed(_name: str) -> str:
+            raise importlib.metadata.PackageNotFoundError(_name)
+
+        monkeypatch.setattr(importlib.metadata, "version", _not_installed)
+        assert peft_module._bitsandbytes_version() is None  # pyright: ignore[reportPrivateUsage]
+
+        def _installed(_name: str) -> str:
+            return "0.50.2"
+
+        monkeypatch.setattr(importlib.metadata, "version", _installed)
+        assert peft_module._bitsandbytes_version() == "0.50.2"  # pyright: ignore[reportPrivateUsage]

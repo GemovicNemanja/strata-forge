@@ -210,6 +210,10 @@ class TestLoadSpec:
         assert asyncio.run(fr.main()) == 1
         assert downloads == []
         assert "run failed: adapter 'qlora' needs bitsandbytes" in capsys.readouterr().err
+        # The progress file is the run's own account of the failure, so the reason is there too.
+        events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
+        assert events[-1]["kind"] == "error"
+        assert "adapter 'qlora' needs bitsandbytes" in events[-1]["message"]
 
 
 # ------------------------------ adapter + trainer config ---------------------
