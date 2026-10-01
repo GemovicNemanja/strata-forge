@@ -276,7 +276,13 @@ class SkyPilotBackend:
         client = self._get_client()
 
         def _down() -> None:
-            client.down(cluster_name=cluster)
+            request_id: Any = client.down(cluster_name=cluster)
+            # The request-based SDK returns a request id at once and reports the outcome,
+            # `ClusterDoesNotExist` included, only when that request is resolved. Returning
+            # before then would mean "teardown queued", not "cluster gone". An older SDK
+            # returned nothing and did the work in the call.
+            if request_id is not None:
+                client.get(request_id)
 
         try:
             await asyncio.to_thread(_down)

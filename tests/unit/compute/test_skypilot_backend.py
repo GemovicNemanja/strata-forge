@@ -296,6 +296,42 @@ class TestCleanup:
         await backend.cleanup(job)
 
 
+class TestCleanupOnTheRequestBasedSdk:
+    """`down` returns a request id there, and only resolving it says what happened."""
+
+    @pytest.fixture
+    def request_sky(self, fake_sky: _FakeSky, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        monkeypatch.setattr(fake_sky, "down", MagicMock(return_value="req-1"))
+        get = MagicMock(return_value=None)
+        monkeypatch.setattr(fake_sky, "get", get, raising=False)
+        return get
+
+    async def test_the_teardown_request_is_resolved_before_returning(
+        self, backend: SkyPilotBackend, request_sky: MagicMock
+    ) -> None:
+        job = await backend.submit(Task(name="t", run="hi"))
+        await backend.cleanup(job)
+        request_sky.assert_called_once_with("req-1")
+
+    async def test_a_teardown_that_fails_when_resolved_raises(
+        self, backend: SkyPilotBackend, request_sky: MagicMock
+    ) -> None:
+        job = await backend.submit(Task(name="t", run="hi"))
+        request_sky.side_effect = RuntimeError("the cloud refused")
+        with pytest.raises(CleanupError, match=r"was not torn down \(RuntimeError\)"):
+            await backend.cleanup(job)
+
+    async def test_a_cluster_reported_gone_when_resolved_is_a_success(
+        self, backend: SkyPilotBackend, request_sky: MagicMock
+    ) -> None:
+        class ClusterDoesNotExist(ValueError):  # noqa: N818 — SkyPilot's own name for it
+            pass
+
+        job = await backend.submit(Task(name="t", run="hi"))
+        request_sky.side_effect = ClusterDoesNotExist("gone")
+        await backend.cleanup(job)
+
+
 class TestJobOwnership:
     async def test_wrong_backend_rejected(self, backend: SkyPilotBackend) -> None:
         from strata_forge.compute.job import Job
