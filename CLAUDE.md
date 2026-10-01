@@ -120,6 +120,7 @@ Most of these are enforced by `ruff` and `pyright`. Local violations without jus
 - VCR cassettes scrub secrets in `before_record_request`. Recording without scrubbing = leaking credentials; rotate them.
 - Snapshot tests (`syrupy`) for provider format mappings — a failing snapshot is an early-warning signal, not noise to suppress.
 - Marker discipline: `live`, `redis`, `slow`, `integration` (declared in `pyproject.toml`; new markers go there).
+- Dependency pins are proven by `.github/workflows/clean-install.yml`, not by the lockfile: a run's machine installs this package fresh, so the job installs the same extras strings into empty venvs with no constraints and builds every config a run builds (`scripts/smoke_clean_install.py`). Its matrix is the extras strings the orchestrator installs on a run's machine, verbatim; when those change, the matrix changes in the same step. A new extras string a runner needs, or a new thing a runner constructs before loading weights, goes into the matrix or the smoke script in the same PR.
 
 ---
 

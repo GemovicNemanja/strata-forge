@@ -353,6 +353,16 @@ user's VM at run time with no lockfile, so an unbounded specifier means every
 run resolves against whatever shipped that morning, and a breaking upstream
 release surfaces as a crash on the user's hardware rather than a red build.
 
+The nightly clean-install job (`.github/workflows/clean-install.yml`) is the
+control for that. Every night it installs, into empty Python 3.14 venvs with no
+lockfile and no constraints, each extras string a run's machine installs
+(`[finetuning,storage]`, `[serving,storage,hf]`) plus `[all]`, and then
+`scripts/smoke_clean_install.py` builds every enabled method x dataset format x
+adapter through the runner's own spec path, down to the TRL config and trainer
+class, the peft config and the bitsandbytes config. A renamed kwarg fails there
+on the day the release ships. It also runs on any push that changes
+`pyproject.toml`, so a pin change is resolved fresh before it merges.
+
 ## Lazy-import contract
 
 Importing ``strata_forge.training`` works without the ``[finetuning]``
