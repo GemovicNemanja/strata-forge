@@ -503,7 +503,17 @@ class SSHBackend:
         # Confined here rather than in each caller, so every method that composes a remote path
         # from it inherits the guard `cleanup` already asks for. A record whose metadata said
         # "../../../../etc" would otherwise have `logs`/`console`/`read_file` reading /etc.
-        if ".." in workdir.split("/") or not workdir.startswith(self._remote_root + "/"):
+        #
+        # The part below the root must name a directory IN it, not the root itself: "root/",
+        # "root/." and "root//" all pass a prefix check, and `cleanup`'s `rm -rf` of any of them
+        # removes every job's workdir, a running job's secrets file included.
+        prefix = self._remote_root + "/"
+        below = workdir[len(prefix) :] if workdir.startswith(prefix) else ""
+        if (
+            ".." in workdir.split("/")
+            or not below
+            or any(part in ("", ".") for part in below.split("/"))
+        ):
             err = (
                 f"SSHBackend: job {job.id!r} workdir {workdir!r} is not under "
                 f"remote_root {self._remote_root!r}"

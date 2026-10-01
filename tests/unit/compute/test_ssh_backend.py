@@ -2089,3 +2089,43 @@ class TestWorkdirConfinement:
         )
         with pytest.raises(ValueError, match="remote_root"):
             await backend.console(job)
+
+    @pytest.mark.parametrize(
+        "workdir",
+        [
+            ".forge-compute/",
+            ".forge-compute/.",
+            ".forge-compute//",
+            ".forge-compute/./",
+            ".forge-compute//x",
+            ".forge-compute/x/",
+        ],
+    )
+    async def test_a_workdir_that_names_the_root_itself_is_refused(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection, workdir: str
+    ) -> None:
+        # Each passes `startswith(root + "/")`, and `cleanup`'s `rm -rf` of the root itself would
+        # remove every job's workdir — a running job's secrets file included.
+        job = _cleanup_job(workdir)
+        for call in (backend.cleanup(job), backend.console(job), backend.logs(job)):
+            with pytest.raises(ValueError, match="remote_root"):
+                await call
+        assert fake_connection.commands == []
+
+    async def test_a_nested_workdir_below_the_root_is_still_accepted(
+        self, backend: SSHBackend, fake_connection: _FakeSSHConnection
+    ) -> None:
+        await backend.cleanup(_cleanup_job(".forge-compute/team/job"))
+        assert fake_connection.commands[-1].startswith("rm -rf .forge-compute/team/job && ")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell semantics")
+    async def test_the_root_and_its_other_jobs_survive_a_refused_cleanup(
+        self, tmp_path: Path
+    ) -> None:
+        sibling = tmp_path / ".forge-compute" / ("f" * 32)
+        sibling.mkdir(parents=True)
+        (sibling / ".secrets.json").write_text(_SENTINEL)
+        backend = SSHBackend(connection=_ShellConnection(tmp_path))
+        with pytest.raises(ValueError, match="remote_root"):
+            await backend.cleanup(_cleanup_job(".forge-compute/"))
+        assert (sibling / ".secrets.json").read_text() == _SENTINEL
