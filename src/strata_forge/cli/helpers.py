@@ -47,7 +47,9 @@ def run_async[T](coro: Awaitable[T]) -> T:
 
 def error_exit(message: str, *, code: int = 1) -> NoReturn:
     """Print ``message`` to stderr and exit with ``code``."""
-    _ERROR_CONSOLE.print(f"error: {message}")
+    # Not markup: messages name extras (``strata-forge[finetuning]``) and carry exception text,
+    # and rich would read either as a style tag and drop it from the line.
+    _ERROR_CONSOLE.print(f"error: {message}", markup=False)
     raise typer.Exit(code=code)
 
 

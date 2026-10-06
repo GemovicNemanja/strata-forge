@@ -35,10 +35,13 @@ if TYPE_CHECKING:
 from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
     MAX_READ_FILE_BYTES,
+    CleanupError,
+    SubmitCleanupError,
     safe_workdir_relpath,
+    secrets_guarded_script,
 )
 from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
-from strata_forge.compute.task import Task  # noqa: TC001 — runtime use in submit
+from strata_forge.compute.task import SECRETS_FILE_NAME, Task, render_secrets_payload
 
 __all__ = ["SSHBackend"]
 
@@ -100,6 +103,15 @@ _COMMAND_TIMEOUT_S = 120.0
 #: How long to wait for a closed channel to finish tearing down. Short and separate from the
 #: command deadline because it runs AFTER that deadline may already have been spent.
 _CLOSE_DRAIN_S = 5.0
+#: How long a failed submit may spend removing the workdir it created. Short for the same reason:
+#: it runs after the caller's own deadline or cancellation may already have fired, and a host
+#: that cannot answer a one-line `rm` in this long is not going to.
+_DISCARD_TIMEOUT_S = 10.0
+#: A secrets file older than this in a workdir that has no pid file belongs to a submit that never
+#: launched: the file is written immediately before the launch, which writes the pid file, and
+#: one remote command (``_COMMAND_TIMEOUT_S``) separates the two. Every submit sweeps such files,
+#: so one a dead connection stranded is gone before any later job's setup can read it.
+_ORPHAN_SECRETS_AGE_MIN = 10
 
 
 class SSHBackend:
@@ -117,7 +129,10 @@ class SSHBackend:
             tightly controlled networks).
         passphrase: Optional passphrase for encrypted keys.
         remote_root: Directory under ``~`` where Forge creates
-            per-job workdirs. Default ``".forge-compute"``.
+            per-job workdirs. Default ``".forge-compute"``. It must
+            be a directory DEDICATED to Forge and owned by the login
+            user: every submit narrows it to mode 0700 and removes
+            stranded secrets files from the job directories in it.
         name: Backend identifier reported via :attr:`name`. Default
             ``"ssh"``.
         connection: Optional pre-built ``asyncssh.SSHClientConnection``
@@ -241,50 +256,109 @@ class SSHBackend:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(process.wait_closed(), _CLOSE_DRAIN_S)
 
-    async def _run_remote(self, command: str, *, check: bool = False) -> tuple[int, str, str]:
-        """Run ``command`` on the remote host; return (exit, stdout, stderr)."""
+    async def _run_remote(
+        self, command: str, *, check: bool = False, stdin: str | None = None
+    ) -> tuple[int, str, str]:
+        """Run ``command`` on the remote host; return (exit, stdout, stderr).
+
+        ``stdin`` is written to the command's standard input and then closed. It is how file
+        CONTENTS reach the remote: a command string is visible to every user on the host in
+        ``/proc/<pid>/cmdline`` for as long as the command runs, and stdin is not.
+        """
         connection = await self._get_connection()
-        result = await connection.run(command, check=check, timeout=_COMMAND_TIMEOUT_S)
-        return (
-            int(result.exit_status or 0),
-            str(result.stdout or ""),
-            str(result.stderr or ""),
+        if stdin is None:
+            result = await connection.run(command, check=check, timeout=_COMMAND_TIMEOUT_S)
+        else:
+            result = await connection.run(
+                command, check=check, timeout=_COMMAND_TIMEOUT_S, input=stdin
+            )
+        # asyncssh reports no exit status (None) when the channel closed without one: the
+        # connection dropped, or the remote was killed by a signal. That is not a success, and
+        # reading it as 0 would let the workdir checks and the private writes fail open.
+        exit_status = -1 if result.exit_status is None else int(result.exit_status)
+        return (exit_status, str(result.stdout or ""), str(result.stderr or ""))
+
+    async def _write_private_file(
+        self, remote_workdir: str, name: str, content: str, what: str
+    ) -> None:
+        """Create ``name`` in the job's workdir, mode 0600, with ``content`` sent over stdin.
+
+        ``umask 077`` is set by the command itself rather than inherited, so a permissive umask
+        in the login shell cannot widen the mode. The command first changes INTO the workdir and
+        checks it is the login user's own, then writes by bare name: the path is resolved once,
+        and a path component swapped after that cannot redirect the write. Anything already at
+        the name is refused outright — ``set -C`` alone would not do, because bash's noclobber
+        still opens an existing FIFO or device for writing — and ``set -C`` then makes the create
+        itself exclusive.
+        """
+        quoted = shlex.quote(name)
+        script = (
+            f"umask 077 && cd -P -- {shlex.quote(remote_workdir)} && test -O . "
+            f"&& test ! -e {quoted} && test ! -L {quoted} && set -C && cat > {quoted}"
         )
-
-    async def submit(self, task: Task) -> Job:
-        if task.num_nodes != 1:
-            err = f"SSHBackend can only run single-node tasks; got num_nodes={task.num_nodes}"
-            raise ValueError(err)
-
-        job_id = uuid.uuid4().hex
-        remote_workdir = f"{self._remote_root}/{job_id}"
-
-        # Create the workdir.
-        await self._run_remote(f"mkdir -p {shlex.quote(remote_workdir)}", check=True)
-
-        # Build the env preamble and the wrapper script.
-        env_lines = [f"export {k}={shlex.quote(v)}" for k, v in task.env.items()]
-        body_lines: list[str] = []
-        if task.setup:
-            body_lines.append(task.setup)
-        body_lines.append(task.run)
-        body = " && ".join(body_lines) if len(body_lines) > 1 else body_lines[0]
-
-        wrapper_script = "\n".join(
-            [
-                "#!/usr/bin/env bash",
-                "set -e",
-                *env_lines,
-                body,
-            ]
+        exit_status, _stdout, _stderr = await self._run_remote(
+            f"bash -c {shlex.quote(script)}", stdin=content
         )
-        # Write the wrapper.
-        await self._run_remote(
-            f"cat > {shlex.quote(remote_workdir)}/wrapper.sh <<'__FORGE_EOF__'\n"
-            f"{wrapper_script}\n__FORGE_EOF__\n"
-            f"chmod +x {shlex.quote(remote_workdir)}/wrapper.sh",
-            check=True,
+        if exit_status != 0:
+            # Neither the content nor the remote's stderr is echoed: the first may be a secret,
+            # and the second is composed by a shell on a machine this process does not control.
+            err = f"SSHBackend: could not write the job's {what} (exit {exit_status})"
+            raise RuntimeError(err)
+
+    async def _make_private_workdir(self, remote_workdir: str) -> None:
+        """Create the job's workdir mode 0700, refusing one that already exists.
+
+        The root is created if missing and must be owned by the login user, and is narrowed to
+        0700: a root another user controls could rename a job's directory away and put one of
+        theirs in its place between this step and the next. The leaf is created WITHOUT ``-p``,
+        so a directory or symlink already at the path fails the step rather than being reused —
+        the job's secrets are about to be written into it. The checks run under an explicit
+        ``bash`` because ``test -O`` is not portable across the login shells sshd may pick.
+
+        The same step sweeps the root for secrets files stranded by submits that never launched
+        (see ``_ORPHAN_SECRETS_AGE_MIN``) — before this job's setup, which runs as the same user,
+        could read one.
+        """
+        root = shlex.quote(_not_an_option(self._remote_root))
+        workdir = shlex.quote(_not_an_option(remote_workdir))
+        # A job directory with a pid file was launched, and its own wrapper (or `cleanup`) owns
+        # its secrets file; only an old file with no pid file beside it is an orphan.
+        sweep = (
+            f"for f in {root}/*/{SECRETS_FILE_NAME}; do "
+            f'd="${{f%/*}}"; if [ -f "$f" ] && [ ! -e "$d/{_PID_FILE}" ] '
+            f'&& [ -n "$(find "$f" -mmin +{_ORPHAN_SECRETS_AGE_MIN} 2>/dev/null)" ]; '
+            f'then rm -f "$f"; fi; done'
         )
+        script = (
+            f"umask 077 && mkdir -p {root} && test -d {root} && test -O {root} "
+            f"&& chmod 700 {root} && {{ {sweep}; true; }} && mkdir -m 700 {workdir} "
+            f"&& test ! -L {workdir} && test -O {workdir}"
+        )
+        exit_status, _stdout, _stderr = await self._run_remote(f"bash -c {shlex.quote(script)}")
+        if exit_status != 0:
+            err = (
+                f"SSHBackend: could not create a private workdir {remote_workdir!r} "
+                f"(exit {exit_status}): it already exists, or {self._remote_root!r} is not a "
+                f"directory owned by the login user"
+            )
+            raise RuntimeError(err)
+
+    async def _populate_and_launch(self, task: Task, remote_workdir: str) -> tuple[str, bool]:
+        """Write the job's files into its fresh workdir and launch it; return (pid, own_group)."""
+        await self._write_private_file(
+            remote_workdir, "wrapper.sh", _wrapper_script(task), "wrapper script"
+        )
+        if task.secrets:
+            # Through stdin, never a command string or the wrapper: those are readable by any
+            # user on the host while they exist, and the wrapper outlives the run. Written LAST,
+            # immediately before the launch, so a submit that fails earlier leaves no secret
+            # behind at all, and the window in which one could be stranded is a single command.
+            await self._write_private_file(
+                remote_workdir,
+                SECRETS_FILE_NAME,
+                render_secrets_payload(task.secrets),
+                "secrets file",
+            )
 
         # Launch detached, capture the PID, write the exit code on exit.
         #
@@ -345,6 +419,62 @@ class SSHBackend:
             raise RuntimeError(err)
         measured_pgid = fields.get("g", "")
         own_group = fields.get("m") == "1" and measured_pgid in ("", pid)
+        return pid, own_group
+
+    async def _discard_workdir(self, job_id: str) -> bool:
+        """Remove the workdir a failed submit created; return whether it is known to be gone.
+
+        Bounded by ``_DISCARD_TIMEOUT_S`` rather than the command timeout, and it never raises:
+        the submit's own failure is the one the caller must see.
+        """
+        try:
+            exit_status, _stdout, _stderr = await asyncio.wait_for(
+                self._run_remote(_remove_dir_command(self._remote_root, job_id)),
+                _DISCARD_TIMEOUT_S,
+            )
+        except Exception:  # any failure here means "not known to be gone"
+            return False
+        return exit_status == 0
+
+    async def submit(self, task: Task) -> Job:
+        if task.num_nodes != 1:
+            err = f"SSHBackend can only run single-node tasks; got num_nodes={task.num_nodes}"
+            raise ValueError(err)
+        # A task built with `model_copy(update=...)` skipped every validator; nothing is
+        # delivered until its secrets have been through them.
+        task = task.revalidated()
+
+        job_id = uuid.uuid4().hex
+        remote_workdir = f"{self._remote_root}/{job_id}"
+
+        await self._make_private_workdir(remote_workdir)
+        try:
+            pid, own_group = await self._populate_and_launch(task, remote_workdir)
+        except Exception as exc:
+            # A submit that raises hands back no job, so nothing would ever clean this workdir —
+            # and it may hold the secrets file, which only a wrapper that ran would have removed.
+            if not await self._discard_workdir(job_id):
+                handle = Job(
+                    id=job_id,
+                    backend=self._name,
+                    task_name=task.name,
+                    metadata={
+                        "remote_workdir": remote_workdir,
+                        "host": self._host,
+                        "submitted_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                err = (
+                    f"SSHBackend: submit failed ({type(exc).__name__}) and its workdir "
+                    f"{remote_workdir!r} could not be removed; pass this error's job to cleanup"
+                )
+                raise SubmitCleanupError(err, handle) from exc
+            raise
+        except BaseException:
+            # A cancellation is re-raised as itself, whatever the discard managed: swallowing it
+            # would break the caller's own timeout. The next submit's sweep is the backstop.
+            await self._discard_workdir(job_id)
+            raise
 
         return Job(
             id=job_id,
@@ -374,7 +504,15 @@ class SSHBackend:
         # Confined here rather than in each caller, so every method that composes a remote path
         # from it inherits the guard `cleanup` already asks for. A record whose metadata said
         # "../../../../etc" would otherwise have `logs`/`console`/`read_file` reading /etc.
-        if ".." in workdir.split("/") or not workdir.startswith(self._remote_root + "/"):
+        #
+        # The part below the root must name ONE directory directly in it, which is all `submit`
+        # ever creates. Not the root itself: "root/", "root/." and "root//" all pass a prefix
+        # check, and `cleanup`'s `rm -rf` of any of them removes every job's workdir, a running
+        # job's secrets file included. And not deeper: `cleanup` verifies the removal from inside
+        # the root, which proves nothing about a directory between the root and the job's.
+        prefix = self._remote_root + "/"
+        below = workdir[len(prefix) :] if workdir.startswith(prefix) else ""
+        if ".." in workdir.split("/") or below in ("", ".", "..") or "/" in below:
             err = (
                 f"SSHBackend: job {job.id!r} workdir {workdir!r} is not under "
                 f"remote_root {self._remote_root!r}"
@@ -578,14 +716,38 @@ class SSHBackend:
             f"for _ in $(seq 1 {_CANCEL_GRACE_S * 2}); do "
             f"kill -0 -- {quoted} 2>/dev/null || break; sleep 0.5; done; "
             f"kill -KILL -- {quoted} 2>/dev/null; "
+            # The wrapper's trap removes the secrets file on SIGTERM, but a legacy job (no group
+            # of its own) signals only the bookkeeping shell, and SIGKILL skips every trap. The
+            # job is down by now, so whatever is still there has no reader left.
+            f"rm -f {shlex.quote(_not_an_option(workdir))}/{SECRETS_FILE_NAME}; "
             "true"
         )
         await self._run_remote(cmd)
 
     async def cleanup(self, job: Job) -> None:
-        # `_job_workdir` confines to the remote_root, which is what makes this `rm -rf` safe.
+        """Remove the job's workdir and confirm it is gone; raise :class:`CleanupError` if not.
+
+        The workdir may still hold the job's secrets file (a SIGKILL skips the wrapper's trap),
+        so a removal that failed has to be visible to a caller that retries until one succeeds.
+        """
+        # `_job_workdir` confines to ONE directory directly in the remote_root, which is what makes
+        # this `rm -rf` safe and lets the removal be checked from inside the root.
         workdir = self._job_workdir(job)
-        await self._run_remote(f"rm -rf {shlex.quote(workdir)}")
+        name = workdir[len(self._remote_root) + 1 :]
+        exit_status, _stdout, _stderr = await self._run_remote(
+            _remove_dir_command(self._remote_root, name)
+        )
+        # The status is checked here rather than with `check=True`. asyncssh raises only on a
+        # NONZERO status, so a channel that closed with none (a dropped connection, a killed
+        # shell) would pass; and its error carries the remote's stderr, which names the files
+        # `rm` could not remove. Neither the stderr nor the path's contents are echoed. A status
+        # of -1 (no status at all) says nothing about the workdir, hence "not confirmed".
+        if exit_status != 0:
+            err = (
+                f"SSHBackend: job {job.id!r}'s workdir was not confirmed removed "
+                f"(exit {exit_status})"
+            )
+            raise CleanupError(err)
 
     async def close(self) -> None:
         """Close the underlying SSH connection if we own it."""
@@ -593,6 +755,78 @@ class SSHBackend:
             self._connection.close()
             await self._connection.wait_closed()
             self._connection = None
+
+
+def _not_an_option(path: str) -> str:
+    """``path``, made unable to read as a command option.
+
+    ``./`` rather than ``--``: the BSD userland's ``chmod`` has no ``--``.
+    """
+    return f"./{path}" if path.startswith("-") else path
+
+
+# Removes "$1/$2" and exits 0 only if nothing is left there. `test` cannot tell "absent" from
+# "cannot look": a stat that fails with EACCES reads as absent. So every check runs from INSIDE a
+# directory the shell has just entered, which proves it can search it, and therefore that a
+# negative `test` there means absent. Without that, a root at mode 000 made BSD `rm -rf root/job`
+# exit 0 and both tests pass while the workdir and its secrets file stayed.
+#
+# A root that cannot be entered proves the job's directory absent only when the root itself is
+# absent, and that is proved the same way, one directory up; the walk goes up until a directory
+# can be entered, and exits 1 at the top. `-L` as well as `-e` because `test -e` follows a
+# symlink and a dangling one would read as gone. CDPATH is unset because it would send a
+# relative `cd` to a directory of the same name elsewhere. POSIX `sh` only.
+_REMOVE_DIR_SCRIPT = (
+    "unset CDPATH; "
+    'if cd -P "$1" >/dev/null 2>&1; then '
+    'rm -rf "./$2" && test ! -e "./$2" && test ! -L "./$2"; exit; fi; '
+    "p=$1; while :; do "
+    "case $p in */*) d=${p%/*} b=${p##*/} ;; *) d=. b=$p ;; esac; "
+    '[ -n "$d" ] || d=/; '
+    'if cd -P "$d" >/dev/null 2>&1; then test ! -e "./$b" && test ! -L "./$b"; exit; fi; '
+    '[ "$d" != "$p" ] || exit 1; p=$d; done'
+)
+
+
+def _remove_dir_command(root: str, name: str) -> str:
+    """A command that removes ``root/name`` and exits 0 only if nothing is left at it.
+
+    ``name`` is ONE path component: the checks run in ``root`` (see ``_REMOVE_DIR_SCRIPT``), and
+    a deeper path would put an unsearchable directory back between them and what they test.
+    ``rm -rf`` exits 0 for a path that is absent, which is what makes a repeated removal a
+    success. Both go in as arguments, never as script text.
+    """
+    if not name or "/" in name or name in (".", ".."):
+        err = f"SSHBackend: {name!r} is not a single directory name"
+        raise ValueError(err)
+    return (
+        f"sh -c {shlex.quote(_REMOVE_DIR_SCRIPT)} sh "
+        f"{shlex.quote(_not_an_option(root))} {shlex.quote(name)}"
+    )
+
+
+def _wrapper_script(task: Task) -> str:
+    """The script the job runs as: the env, then setup and run, behind the secrets file's trap.
+
+    It carries no secret. When the task has secrets the wrapper names only the PATH of the file
+    they were written to, and its first act is a trap that removes that file on exit, so the
+    file goes even when setup fails before the runner (which deletes it on read) ever starts.
+    The trap lives in the wrapper's own shell and everything else runs in a subshell below it,
+    so a trap the task's commands set cannot displace it (see
+    :func:`~strata_forge.compute.backends.base.secrets_guarded_script`). The path is resolved
+    when the wrapper starts, which is always inside the workdir.
+    """
+    exports = [f"export {k}={shlex.quote(v)}" for k, v in task.env.items()]
+    if task.secrets:
+        guarded = secrets_guarded_script(
+            f'"$(pwd -P)/{SECRETS_FILE_NAME}"',
+            task.setup,
+            task.run,
+            prelude=["set -e", *exports],
+        )
+        return f"#!/usr/bin/env bash\n{guarded}\n"
+    body = f"{task.setup} && {task.run}" if task.setup else task.run
+    return "\n".join(["#!/usr/bin/env bash", "set -e", *exports, body]) + "\n"
 
 
 def _console_budget(max_bytes: int) -> int:

@@ -83,6 +83,15 @@ class TestToolSchemaDelegation:
             fn=_fn,
         )
 
+    def test_openai_responses_schema_is_internally_tagged_and_not_strict(self) -> None:
+        schema = self._make().to_openai_responses_schema()
+        assert schema["type"] == "function"
+        assert schema["name"] == "get_weather"
+        assert schema["description"] == "Get current weather for a city."
+        assert schema["parameters"]["type"] == "object"
+        assert schema["strict"] is False
+        assert "function" not in schema
+
     def test_openai_schema(self) -> None:
         t = self._make()
         schema = t.to_openai_schema()
@@ -154,6 +163,7 @@ class TestToolDeclaration:
     def test_provider_schemas_match_equivalent_tool(self) -> None:
         d, t = self._decl(), self._tool()
         assert d.to_openai_schema() == t.to_openai_schema()
+        assert d.to_openai_responses_schema() == t.to_openai_responses_schema()
         assert d.to_anthropic_schema() == t.to_anthropic_schema()
         assert d.to_gemini_schema() == t.to_gemini_schema()
 

@@ -7,12 +7,29 @@ discriminator is the ``api_base`` kwarg pointing at the user's deployment.
 The model id after the ``openai/`` prefix is whatever the self-hosted
 server advertises (often the original Hugging Face model name, e.g.
 ``meta-llama/Llama-3.1-70B-Instruct``). The registry doesn't carry these
-because they're operator-specific; callers supply them at the call site
-once ``strata_forge.compute`` ships in Phase 5.
+because they're operator-specific; callers supply them at the call site.
 
 Tool calling: OpenAI-compatible servers that support function calling use
 OpenAI's tool schema verbatim. Callers reuse
 :func:`strata_forge.llm.providers.openai.to_openai_tool_schema`.
+
+``base_url`` is caller-trusted. The key and the whole conversation go to whatever URL is
+configured, unchecked: no scheme, host, path or address validation, and deliberately no
+private-address block, because loopback is the normal case (a model server on the same
+machine). A caller that takes ``base_url`` from someone it does not trust validates it first:
+exact equality with a URL it allows, never a prefix or host-only match (the OpenAI client
+resolves ``..`` segments and sends ``%``-encoded ones raw). A call-site ``api_base`` overrides
+``base_url`` and is the same trust surface. Such a caller also passes ``api_key`` explicitly
+(:data:`UNAUTHENTICATED_API_KEY` when it has none): left unset, the config reads
+``FORGE_OPENAI_COMPAT_API_KEY`` and the client falls back to an ambient ``OPENAI_API_KEY``,
+either of which then goes to that URL.
+
+The transport follows redirects. A hop to another host or port drops the ``Authorization``
+header, so the configured ``api_key`` stays on the configured host (an ``http`` to ``https``
+upgrade on the same host keeps it). Nothing else is dropped: a 307/308 re-sends the request
+body, a credential in ``extra_headers`` follows every hop, and the reply (or an error quoting
+it) comes back to the caller. Trusting a ``base_url`` therefore includes trusting every
+redirect its server issues, on any path the caller lets through.
 """
 
 from __future__ import annotations

@@ -44,7 +44,11 @@ from strata_forge.core.errors import (
     ProviderTimeoutError,
 )
 from strata_forge.llm import errors
-from strata_forge.llm.errors import map_litellm_exception, raise_as_provider_error
+from strata_forge.llm.errors import (
+    map_litellm_exception,
+    map_responses_error,
+    raise_as_provider_error,
+)
 
 
 def _make_response(status: int = 500) -> httpx.Response:
@@ -234,7 +238,7 @@ class TestRaiseAsProviderError:
 class TestLiteLlmVersionCompatibility:
     """The mapper must not depend on classes a permitted LiteLLM might not define.
 
-    `litellm>=1.55` is a floor with no ceiling, so this module runs against versions predating
+    The `litellm` pin admits a range of releases, so this module runs against versions predating
     classes it wants to match. Naming one directly costs an AttributeError raised from INSIDE the
     mapper — which only runs once something has already failed, so the real diagnosis is replaced
     by an unrelated one and every call looks like the same bug. A batch run returned 2098 identical
@@ -279,3 +283,27 @@ class TestLiteLlmVersionCompatibility:
         mapped = map_litellm_exception(RuntimeError("the real problem"), model="m", provider="p")
         assert isinstance(mapped, ProviderError)
         assert "the real problem" in str(mapped)
+
+
+class TestMapResponsesError:
+    """Failures reported inside a 200 Responses stream (``response.failed`` / ``error``)."""
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("rate_limit_exceeded", ProviderRateLimitError),
+            ("server_error", ProviderServerError),
+            ("internal_error", ProviderServerError),
+            (None, ProviderServerError),
+            ("invalid_prompt", ProviderBadRequestError),
+            ("context_length_exceeded", ProviderBadRequestError),
+        ],
+    )
+    def test_code_selects_the_class(self, code: str | None, expected: type[ProviderError]) -> None:
+        err = map_responses_error(code, "msg", model="gpt-6.1-sol", provider="openai")
+        assert type(err) is expected
+        assert err.model == "gpt-6.1-sol"
+        assert err.provider == "openai"
+        assert "msg" in str(err)
+        if code is not None:
+            assert code in str(err)

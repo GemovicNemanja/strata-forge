@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 # Runtime imports — Pydantic needs the actual classes at model-build time to
 # resolve field annotations. Keeping them out of a TYPE_CHECKING block.
-from strata_forge.llm.messages import ToolCall  # noqa: TC001
+from strata_forge.llm.messages import ProviderItems, ToolCall  # noqa: TC001
 from strata_forge.llm.routing import ModelRoute  # noqa: TC001
 
 __all__ = [
@@ -36,7 +36,11 @@ type FinishReason = Literal[
 
 
 class Usage(BaseModel):
-    """Token accounting for a single completion."""
+    """Token accounting for a single completion.
+
+    ``input_tokens`` is the uncached input: providers count cached reads and cache writes in
+    their input total, and Forge reports them net of both so each bucket is priced once.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -48,12 +52,16 @@ class Usage(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def total_tokens(self) -> int:
-        """Input + output. Cache reads/writes are reported separately."""
+        """Uncached input + output. Cache reads/writes are reported separately."""
         return self.input_tokens + self.output_tokens
 
 
 class LLMResponse(BaseModel):
-    """The result of a non-streaming LLM call."""
+    """The result of a non-streaming LLM call.
+
+    ``provider_items`` carries a Responses API turn's replayable output (see
+    :class:`~strata_forge.llm.messages.ProviderItems`); it is ``None`` on every other route.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -65,6 +73,7 @@ class LLMResponse(BaseModel):
     route: ModelRoute
     cache_hit: bool = False
     latency_ms: float = Field(default=0.0, ge=0)
+    provider_items: ProviderItems | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +103,7 @@ class ResponseChunk(BaseModel):
 
     ``delta_text`` is the new text fragment (may be empty when only tool
     calls are streaming). ``finish_reason`` and ``usage`` are present
-    only on the final chunk.
+    only on the final chunk, as is ``provider_items`` on a Responses API route.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -103,3 +112,4 @@ class ResponseChunk(BaseModel):
     delta_tool_calls: list[ToolCallDelta] = []
     finish_reason: FinishReason | None = None
     usage: Usage | None = None
+    provider_items: ProviderItems | None = None

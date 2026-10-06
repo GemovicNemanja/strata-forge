@@ -38,7 +38,9 @@ until ``train()`` is called.
   ``dataset_format.py``.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
   for the conversation shapes consumed by
-  :mod:`strata_forge.training.chat_template`. Nothing else.
+  :mod:`strata_forge.training.chat_template`, and
+  :mod:`strata_forge.core.errors` for the ``ForgeError`` base of
+  :class:`MissingBitsAndBytesError`. Nothing else.
 - **Does NOT import** :mod:`strata_forge.tracing`, :mod:`strata_forge.agents`,
   :mod:`strata_forge.evals`, :mod:`strata_forge.rag`, :mod:`strata_forge.datasets`,
   :mod:`strata_forge.compute`. Trainer scripts that ride on
@@ -46,8 +48,11 @@ until ``train()`` is called.
   user-controlled scripts; the dependency arrow stays unbroken.
 - **External deps:** Pydantic in the core install. ``torch``,
   ``transformers``, ``trl``, ``peft``, ``datasets``,
-  ``accelerate`` live behind the ``[finetuning]`` extra and are
-  lazy-imported inside the runner methods that touch them.
+  ``accelerate``, ``bitsandbytes`` live behind the ``[finetuning]``
+  extra and are lazy-imported inside the runner methods that touch
+  them. ``bitsandbytes`` is never imported here at all: transformers
+  imports it when it quantises, and :func:`require_bitsandbytes`
+  only looks it up.
 
 ## Public API
 
@@ -56,6 +61,8 @@ The module's ``__init__.py`` re-exports:
 - Configs: :class:`SFTConfig`, :class:`DPOConfig`,
   :class:`ORPOConfig`, :class:`KTOConfig`, :class:`GRPOConfig`,
   :class:`LoRAConfig`, :class:`QLoRAConfig`.
+- QLoRA precondition: :func:`require_bitsandbytes`,
+  :class:`MissingBitsAndBytesError`.
 - Runners: :class:`SFTRunner`, :class:`PreferenceRunner`.
 - Result types: :class:`SFTRunResult`,
   :class:`PreferenceRunResult`.
@@ -66,7 +73,12 @@ The module's ``__init__.py`` re-exports:
 
 Errors raised from this module are :class:`ValueError` for
 input validation or :class:`ImportError` when the
-``[finetuning]`` extra is missing.
+``[finetuning]`` extra is missing. A missing ``bitsandbytes`` for
+QLoRA, or one below the extra's floor (read from its metadata, never
+imported), is :class:`MissingBitsAndBytesError` (a ``ForgeError``
+and an ``ImportError``), raised before anything is downloaded: every QLoRA
+entry point (``to_bnb_config``, the fine-tune runner's spec check,
+the ``train`` CLI) calls :func:`require_bitsandbytes` first.
 
 ## Internal patterns
 
@@ -75,12 +87,26 @@ input validation or :class:`ImportError` when the
   Each config has a ``to_trl_kwargs()`` (or ``to_peft_config()``)
   method that renders the typed shape into the kwargs TRL / peft
   expects. ``extra_trainer_args`` is the verbatim passthrough
-  escape hatch.
+  escape hatch for a Python caller. The fine-tuning VM runner
+  refuses, from a run spec, the keys that load, push or report
+  under other terms than the run's
+  (``pipelines.finetune_runner._SPEC_REFUSED_TRAINER_ARGS``); add a
+  TRL knob of that kind there when an upgrade introduces one.
 - **Runners are thin orchestration.** No work in the constructor.
   ``_load_modules()`` lazy-imports the heavy stack; ``train()``
   builds the trainer, runs it, saves, and returns a Pydantic
   result. Callers can supply ``model=`` / ``tokenizer=`` /
   ``ref_model=`` to skip the default ``from_pretrained`` calls.
+- **Every Hub load states its terms.** A ``from_pretrained`` call
+  goes through ``loading.model_load_kwargs(token)`` /
+  ``loading.tokenizer_load_kwargs(token)``: ``trust_remote_code=False``
+  always, ``use_safetensors=True`` on models, and the caller's
+  ``token``. The token is a keyword argument of ``build_trainer`` /
+  ``train`` and is never a config field: a config's fields reach
+  ``to_trl_kwargs`` and TRL pickles those into ``training_args.bin``.
+  When a runner loads the DPO / KTO policy without an adapter it also
+  loads the reference model itself, on the same terms; never leave
+  that load to TRL, which re-downloads by name with none of them.
 - **PEFT is opt-in.** Runners accept ``peft_config=None``;
   when set, the adapter config flows into TRL's
   ``peft_config=`` and (for QLoRA) the BitsAndBytes config flows

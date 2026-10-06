@@ -6,7 +6,9 @@ The public surface is:
 - :class:`DPOConfig` / :class:`ORPOConfig` / :class:`KTOConfig` /
   :class:`GRPOConfig` / :class:`PreferenceRunner` /
   :class:`PreferenceRunResult`
-- :class:`LoRAConfig` / :class:`QLoRAConfig`
+- :class:`LoRAConfig` / :class:`QLoRAConfig`, and
+  :func:`require_bitsandbytes` / :class:`MissingBitsAndBytesError`
+  -- the up-front check that a QLoRA run can quantise its model.
 - :func:`apply_chat_template` / :func:`conversation_to_dicts` /
   :func:`conversation_to_text`
 - :func:`pack_sequences` / :class:`PackedSequence`
@@ -21,7 +23,7 @@ The public surface is:
   dataset-shape declaration those callers map columns with.
 
 Heavy ML dependencies (``torch``, ``transformers``, ``trl``,
-``peft``, ``datasets``) ride behind the ``[finetuning]`` extra
+``peft``, ``datasets``, ``bitsandbytes``) ride behind the ``[finetuning]`` extra
 and are lazy-imported inside the runners' ``train`` methods, so
 ``import strata_forge.training`` works without them.
 """
@@ -41,6 +43,7 @@ from strata_forge.training.dataset_format import (
     sft_text_field,
     validate_mapping,
 )
+from strata_forge.training.loading import HubToken, model_load_kwargs, tokenizer_load_kwargs
 from strata_forge.training.methods import (
     METHODS,
     MethodName,
@@ -51,7 +54,12 @@ from strata_forge.training.methods import (
     pick_method,
 )
 from strata_forge.training.packing import PackedSequence, pack_sequences
-from strata_forge.training.peft import LoRAConfig, QLoRAConfig
+from strata_forge.training.peft import (
+    LoRAConfig,
+    MissingBitsAndBytesError,
+    QLoRAConfig,
+    require_bitsandbytes,
+)
 from strata_forge.training.preference import (
     AnyPreferenceConfig,
     DPOConfig,
@@ -77,11 +85,13 @@ __all__ = [
     "DatasetFormatError",
     "FormatSpec",
     "GRPOConfig",
+    "HubToken",
     "JsonlProgressWriter",
     "KTOConfig",
     "LoRAConfig",
     "MethodName",
     "MethodSpec",
+    "MissingBitsAndBytesError",
     "ORPOConfig",
     "PackedSequence",
     "PreferenceRunResult",
@@ -98,10 +108,13 @@ __all__ = [
     "conversation_to_dicts",
     "conversation_to_text",
     "enabled_methods",
+    "model_load_kwargs",
     "pack_sequences",
     "pick_format",
     "pick_method",
+    "require_bitsandbytes",
     "sft_text_field",
+    "tokenizer_load_kwargs",
     "trainer_callback",
     "validate_mapping",
 ]

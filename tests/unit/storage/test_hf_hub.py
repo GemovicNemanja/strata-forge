@@ -298,3 +298,42 @@ class TestPushPull:
         await client.pull_dataset("me/eval-set", "./data")
         kwargs = fake_hf["snapshot_calls"][0]
         assert kwargs["repo_type"] == "dataset"
+
+
+# ---------------------------------------------------------------------------
+# Credential resolution
+# ---------------------------------------------------------------------------
+
+_AMBIENT = "hf_ambientsettingstoken0123456789"
+
+
+class TestExplicitCredential:
+    """An explicit token, or ``False``, is the whole of the call's authority."""
+
+    async def test_an_explicit_token_beats_settings_and_the_environment(
+        self, fake_hf: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HF_TOKEN", _AMBIENT)  # what forge settings would resolve
+        await HFHubClient(token="hf_delivered").download_snapshot("me/gated")
+        assert fake_hf["snapshot_calls"][0]["token"] == "hf_delivered"
+
+    async def test_none_falls_back_to_settings(
+        self, fake_hf: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HF_TOKEN", _AMBIENT)
+        await HFHubClient().download_snapshot("me/model")
+        assert fake_hf["snapshot_calls"][0]["token"] == _AMBIENT
+
+    async def test_false_is_anonymous_whatever_the_machine_holds(
+        self, fake_hf: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HF_TOKEN", _AMBIENT)
+        client = HFHubClient(token=False)
+        await client.download_snapshot("me/model")
+        await client.download_file("me/model", "config.json")
+        await client.create_repo("me/out")
+        # `False` reaches the library, which reads it as "send no token" -- not `None`, which it
+        # would read as "use the cached login".
+        assert fake_hf["snapshot_calls"][0]["token"] is False
+        assert fake_hf["download_file_calls"][0]["token"] is False
+        assert fake_hf["HfApi_kwargs"]["token"] is False

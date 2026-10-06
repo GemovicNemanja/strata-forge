@@ -19,9 +19,11 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
+from pydantic import SecretStr
 
+from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import finetune_runner as fr
-from strata_forge.pipelines._common import RunError, ticking_phase
+from strata_forge.pipelines._common import RunError, RunSecrets, ticking_phase
 from strata_forge.training.progress import JsonlProgressWriter
 
 if TYPE_CHECKING:
@@ -50,7 +52,10 @@ async def _fast_ticking_phase(
 
 
 def _spec_json(**overrides: Any) -> str:
+    # Stamped the way a real launch is: a spec with no claim is accepted but recorded as an
+    # unchecked launch, and that record is its own test, not noise in every other one.
     base: dict[str, Any] = {
+        "engine_version": SPEC_VERSION,
         "method": "sft",
         "model_id": "org/model",
         "dataset_id": "org/ds",
@@ -81,6 +86,18 @@ class TestLoadSpec:
         spec = fr.load_spec()
         assert spec.method == "sft"
         assert spec.adapter == "lora"  # the default: a full fine-tune must be asked for
+
+    def test_refuses_a_spec_validated_by_another_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The handshake is applied to the real spec, not only to the shared loader.
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version="0.0.1"))
+        with pytest.raises(RunError, match="engine version mismatch"):
+            fr.load_spec()
+
+    def test_accepts_a_spec_validated_by_this_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version=SPEC_VERSION))
+        assert fr.load_spec().engine_version == SPEC_VERSION
 
     def test_rejects_an_unknown_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # extra="forbid" is why a spec cannot smuggle an instruction past the runner.
@@ -147,6 +164,57 @@ class TestLoadSpec:
     def test_a_full_finetune_without_a_merge_is_fine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter="none"))
         assert fr.load_spec().adapter == "none"
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_a_qlora_run_without_bitsandbytes_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The quantising model load is the first thing that would notice, and it runs after the
+        # dataset and the weights have been downloaded onto a rented GPU.
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter="qlora"))
+        with pytest.raises(RunError, match=r"adapter 'qlora' needs bitsandbytes"):
+            fr.load_spec()
+
+    @pytest.mark.usefixtures("bitsandbytes_installed")
+    def test_a_qlora_run_with_bitsandbytes_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter="qlora"))
+        assert fr.load_spec().adapter == "qlora"
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    @pytest.mark.parametrize("adapter", ["none", "lora"])
+    def test_only_qlora_needs_bitsandbytes(
+        self, monkeypatch: pytest.MonkeyPatch, adapter: str
+    ) -> None:
+        monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(adapter=adapter))
+        assert fr.load_spec().adapter == adapter
+
+    @pytest.mark.usefixtures("bitsandbytes_missing")
+    def test_the_refusal_is_the_runs_reported_failure_and_nothing_is_downloaded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import asyncio
+
+        downloads: list[str] = []
+
+        def _no_download(_spec: Any, split: str, _token: str | None) -> list[dict[str, Any]]:
+            downloads.append(split)
+            return []
+
+        monkeypatch.setattr(fr, "_load_split", _no_download)
+        progress = tmp_path / "progress.jsonl"
+        monkeypatch.setenv(
+            "STRATA_RUN_CONFIG", _spec_json(adapter="qlora", progress_path=str(progress))
+        )
+        monkeypatch.delenv("HF_WRITE_TOKEN", raising=False)
+        assert asyncio.run(fr.main()) == 1
+        assert downloads == []
+        assert "run failed: adapter 'qlora' needs bitsandbytes" in capsys.readouterr().err
+        # The progress file is the run's own account of the failure, so the reason is there too.
+        events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
+        assert events[-1]["kind"] == "error"
+        assert "adapter 'qlora' needs bitsandbytes" in events[-1]["message"]
 
 
 # ------------------------------ adapter + trainer config ---------------------
@@ -253,6 +321,73 @@ class TestTrainerConfig:
                 tmp_path,
             )
 
+    @pytest.mark.parametrize(
+        "key",
+        [
+            # A Hub read with the VM's own credential, of any repo or local path.
+            "chat_template_path",
+            # Remote code, or a load configured outside the runner's terms.
+            "trust_remote_code",
+            "model_init_kwargs",
+            "ref_model_init_kwargs",
+            # A push with the VM's own credential.
+            "push_to_hub",
+            "push_to_hub_token",
+            "hub_token",
+            "hub_model_id",
+            "hub_private_repo",
+            "hub_strategy",
+            "hub_revision",
+            "trackio_space_id",
+            # A file on the VM, unpickled in the checkpoint case.
+            "resume_from_checkpoint",
+            "deepspeed",
+            "fsdp_config",
+            "accelerator_config",
+            # Outside the artifact directory, or off the machine entirely.
+            "logging_dir",
+            "report_to",
+        ],
+    )
+    def test_extra_trainer_args_cannot_load_push_or_report_under_other_terms(
+        self, tmp_path: Path, key: str
+    ) -> None:
+        # extra_trainer_args reaches TRL verbatim, so these keys would act with the VM's ambient
+        # credential, run a repo's code, read a VM file or ship the run to a third party: past
+        # every term the runner sets on its own loads. A spec names them; it does not get them.
+        from strata_forge.training.methods import pick_method
+
+        with pytest.raises(RunError, match=rf"may not set extra_trainer_args\.{key}\b"):
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": {key: "attacker/evil"}}),
+                pick_method("sft"),
+                tmp_path,
+            )
+
+    def test_every_refused_trainer_arg_is_named_at_once(self, tmp_path: Path) -> None:
+        from strata_forge.training.methods import pick_method
+
+        extra = {"report_to": "wandb", "hub_token": "x", "learning_rate": 1e-4}
+        with pytest.raises(RunError) as excinfo:
+            fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+                _spec(hyperparams={"extra_trainer_args": extra}), pick_method("dpo"), tmp_path
+            )
+        message = str(excinfo.value)
+        assert "extra_trainer_args.hub_token" in message
+        assert "extra_trainer_args.report_to" in message
+        assert "learning_rate" not in message
+
+    def test_an_ordinary_trainer_arg_still_passes_through(self, tmp_path: Path) -> None:
+        # The refusal is a deny-list of what reaches past the run, not a closing of the hatch.
+        from strata_forge.training.methods import pick_method
+
+        cfg = fr._trainer_config(  # pyright: ignore[reportPrivateUsage]
+            _spec(hyperparams={"extra_trainer_args": {"lr_scheduler_type": "cosine"}}),
+            pick_method("sft"),
+            tmp_path,
+        )
+        assert cfg.to_trl_kwargs()["lr_scheduler_type"] == "cosine"
+
     def test_the_derived_fields_are_the_spec_s_own(self, tmp_path: Path) -> None:
         # The positive half: what the run RECORDS is what the trainer is pointed at.
         from strata_forge.training.methods import pick_method
@@ -312,7 +447,7 @@ class TestLoadSplit:
             [{"question": "q", "answer": "a", "id": 1}], ["question", "answer", "id"]
         )
         _fake_datasets(monkeypatch, split)
-        rows = fr._load_split(_spec(), "train", None)  # pyright: ignore[reportPrivateUsage]
+        rows = fr._load_split(_spec(), "train", False)  # pyright: ignore[reportPrivateUsage]
         # Everything the trainer did not ask for is dropped: a stray column changes what TRL infers.
         assert rows == [{"prompt": "q", "completion": "a"}]
 
@@ -329,7 +464,7 @@ class TestLoadSplit:
                     yield {"question": "q", "answer": "a"}
 
         _fake_datasets(monkeypatch, _NeverEnding())  # pyright: ignore[reportArgumentType]
-        rows = fr._load_split(_spec(row_limit=3), "train", None)  # pyright: ignore[reportPrivateUsage]
+        rows = fr._load_split(_spec(row_limit=3), "train", False)  # pyright: ignore[reportPrivateUsage]
         assert len(rows) == 3
 
     def test_a_missing_column_names_the_split_and_the_columns(
@@ -337,7 +472,7 @@ class TestLoadSplit:
     ) -> None:
         _fake_datasets(monkeypatch, _FakeSplit([{"q": "x"}], ["q"]))
         with pytest.raises(RunError) as exc:
-            fr._load_split(_spec(), "train", None)  # pyright: ignore[reportPrivateUsage]
+            fr._load_split(_spec(), "train", False)  # pyright: ignore[reportPrivateUsage]
         assert "train:" in str(exc.value)
         assert "question" in str(exc.value)
 
@@ -401,7 +536,8 @@ def _drive(
     if push is not None:
         monkeypatch.setattr(fr, "_push_artifact", push)
 
-    destination = asyncio.run(fr._execute(spec or _spec(), token, writer))  # pyright: ignore[reportPrivateUsage]
+    secrets = RunSecrets(hf_token=SecretStr(token) if token else None)
+    destination = asyncio.run(fr._execute(spec or _spec(), secrets, writer))  # pyright: ignore[reportPrivateUsage]
     writer.close()
     events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]
     return destination, events
@@ -528,7 +664,7 @@ class TestExecute:
         monkeypatch.setattr(fr, "results_dir", _dir)
         import asyncio
 
-        asyncio.run(fr._execute(_spec(eval_split="test", output_repo_id=None), None, None))  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(fr._execute(_spec(eval_split="test", output_repo_id=None), RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
         assert seen == ["train", "test"]
 
     def test_the_merge_step_runs_only_when_asked_for(
@@ -548,6 +684,135 @@ class TestExecute:
         )
         assert merged == [True]
         assert any("Merging the adapter" in e.get("message", "") for e in events)
+
+
+# ------------------------------ the Hub credential -----------------------------
+
+
+class TestHubCredential:
+    """Every Hub read gets the delivered token explicitly, or ``False`` — never ``None``."""
+
+    @pytest.mark.parametrize(("token", "expected"), [(_TOKEN, _TOKEN), (None, False)])
+    def test_every_hub_read_gets_the_same_explicit_credential(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        token: str | None,
+        expected: str | bool,
+    ) -> None:
+        seen: dict[str, list[Any]] = {"split": [], "build": [], "merge": []}
+
+        def _rows(_spec_arg: Any, _split: str, credential: Any) -> list[dict[str, Any]]:
+            seen["split"].append(credential)
+            return [{"prompt": "q", "completion": "a"}]
+
+        def _build(*args: Any) -> object:
+            seen["build"].append(args[-1])
+            return object()
+
+        def _merge(_spec_arg: Any, _dir: Any, credential: Any) -> None:
+            seen["merge"].append(credential)
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        def _fake_train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+            return _TRAINED
+
+        def _dir(_run_id: str | None, *, name: str) -> Path:
+            return tmp_path / name
+
+        monkeypatch.setattr(fr, "_load_split", _rows)
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
+        monkeypatch.setattr(fr, "_build_trainer", _build)
+        monkeypatch.setattr(fr, "_train", _fake_train)
+        monkeypatch.setattr(fr, "_merge_adapter", _merge)
+        monkeypatch.setattr(fr, "results_dir", _dir)
+        import asyncio
+
+        secrets = RunSecrets(hf_token=SecretStr(token) if token else None)
+        asyncio.run(
+            fr._execute(_spec(output_repo_id=None, merge_adapter=True), secrets, None)  # pyright: ignore[reportPrivateUsage]
+        )
+        assert seen == {"split": [expected], "build": [expected], "merge": [expected]}
+
+    def test_the_trainer_build_hands_the_credential_to_the_method_runner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        received: dict[str, Any] = {}
+
+        def _identity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return rows
+
+        monkeypatch.setattr(fr, "_to_dataset", _identity)
+
+        class _Runner:
+            def build_trainer(self, **kwargs: Any) -> object:
+                received.update(kwargs)
+                return object()
+
+        class _Method:
+            def build_runner(self, config: Any, *, peft_config: Any) -> _Runner:
+                del config, peft_config
+                return _Runner()
+
+        fr._build_trainer(  # pyright: ignore[reportPrivateUsage]
+            _Method(),  # pyright: ignore[reportArgumentType]
+            object(),
+            None,
+            [],
+            None,
+            _TOKEN,
+        )
+        assert received["token"] == _TOKEN
+
+    def test_the_merge_loads_with_the_credential_and_no_remote_code(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        loads: dict[str, Any] = {}
+
+        class _AutoModel:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs: Any) -> Any:
+                loads["model"] = (model_id, kwargs)
+                return MagicMock(name="base")
+
+        class _AutoTokenizer:
+            @staticmethod
+            def from_pretrained(model_id: str, **kwargs: Any) -> Any:
+                loads["tokenizer"] = (model_id, kwargs)
+                return MagicMock(name="tokenizer")
+
+        class _PeftModel:
+            @staticmethod
+            def from_pretrained(base: Any, path: str, **kwargs: Any) -> Any:
+                del base
+                loads["adapter"] = (path, kwargs)
+                return MagicMock(name="peft")
+
+        transformers_mod = types.ModuleType("transformers")
+        transformers_mod.AutoModelForCausalLM = _AutoModel  # pyright: ignore[reportAttributeAccessIssue]
+        transformers_mod.AutoTokenizer = _AutoTokenizer  # pyright: ignore[reportAttributeAccessIssue]
+        peft_mod = types.ModuleType("peft")
+        peft_mod.PeftModel = _PeftModel  # pyright: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+        monkeypatch.setitem(sys.modules, "peft", peft_mod)
+
+        fr._merge_adapter(_spec(), tmp_path, _TOKEN)  # pyright: ignore[reportPrivateUsage]
+
+        model_id, model_kwargs = loads["model"]
+        assert model_id == "org/model"
+        assert model_kwargs == {
+            "token": _TOKEN,
+            "trust_remote_code": False,
+            "use_safetensors": True,
+        }
+        assert loads["tokenizer"] == ("org/model", {"token": _TOKEN, "trust_remote_code": False})
+        assert loads["adapter"] == (str(tmp_path), {"token": _TOKEN})
 
 
 class TestPhaseBoundary:
@@ -597,7 +862,7 @@ class TestPhaseBoundary:
         # A fast tick, so an equally-long build and loop are told apart by their row counts.
         monkeypatch.setattr(fr, "ticking_phase", _fast_ticking_phase)
 
-        asyncio.run(fr._execute(_spec(output_repo_id=None), None, writer))  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(fr._execute(_spec(output_repo_id=None), RunSecrets(), writer))  # pyright: ignore[reportPrivateUsage]
         writer.close()
 
         events = [json.loads(ln) for ln in progress.read_text().splitlines() if ln.strip()]

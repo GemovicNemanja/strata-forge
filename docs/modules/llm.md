@@ -26,11 +26,14 @@ agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/ll
 
 - [Quickstart](#quickstart)
 - [Model registry](#model-registry)
+  - [The Responses API](#the-responses-api)
+  - [Sampling parameters](#sampling-parameters)
 - [Public API](#public-api)
   - [`LLMClient`](#llmclient)
   - [Messages and content parts](#messages-and-content-parts)
   - [Responses](#responses)
 - [Routing](#routing)
+  - [OpenAI-compatible endpoints: `base_url` is caller-trusted](#openai-compatible-endpoints-base_url-is-caller-trusted)
 - [Two-axis fallback](#two-axis-fallback)
 - [Cache](#cache)
 - [Structured output](#structured-output)
@@ -76,20 +79,77 @@ ADR. Pricing is in USD per million tokens.
 
 | Logical name | Vendor | Tier | Context | Routes | Input / Output |
 |---|---|---|---|---|---|
+| `claude-fable-5-1` | Anthropic | reasoning | 1 M | anthropic (default), bedrock, vertex | $10.00 / $50.00 |
+| `claude-opus-5-5` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $4.00 / $20.00 |
+| `claude-sonnet-5-5` | Anthropic | balanced | 1 M | anthropic (default), bedrock, vertex | $2.00 / $10.00 |
+| `claude-opus-4-8` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 |
 | `claude-opus-4-7` | Anthropic | flagship | 1 M | anthropic (default), bedrock, vertex | $5.00 / $25.00 |
 | `claude-sonnet-4-6` | Anthropic | balanced | 1 M | anthropic (default), bedrock, vertex | $3.00 / $15.00 |
 | `claude-haiku-4-5` | Anthropic | fast | 200 K | anthropic (default), bedrock, vertex | $1.00 / $5.00 |
-| `gpt-5.5` | OpenAI | flagship | 400 K | openai (default), azure | $5.00 / $30.00 |
-| `gpt-5.5-pro` | OpenAI | reasoning | 400 K | openai (default), azure | $30.00 / $180.00 |
-| `gpt-5.5-thinking` | OpenAI | reasoning | 400 K | openai (default), azure | $5.00 / $30.00 |
-| `gpt-5.5-instant` | OpenAI | fast | 128 K | openai (default), azure | $1.25 / $10.00 |
+| `gpt-6-astra` | OpenAI | flagship | 1.05 M | openai* (default) | $10.00 / $50.00 |
+| `gpt-6.1-sol` | OpenAI | balanced | 1.05 M | openai* (default) | $2.00 / $10.00 |
+| `gpt-6-luna` | OpenAI | fast | 1.05 M | openai* (default) | $0.10 / $0.50 |
+| `gpt-5.5` | OpenAI | flagship | 1.05 M | openai* (default), azure* | $5.00 / $30.00 |
+| `gpt-5.5-pro` | OpenAI | reasoning | 1.05 M | openai* (default) | $30.00 / $180.00 |
+| `gpt-5.5-thinking` | OpenAI | reasoning | 400 K | openai* (default), azure* | $5.00 / $30.00 |
+| `gpt-5.5-instant` | OpenAI | fast | 128 K | openai* (default), azure* | $1.25 / $10.00 |
 | `gemini-3.1-pro` | Google | flagship | 2 M | vertex (default) | $2.00 / $12.00 |
 | `gemini-3.1-flash-lite` | Google | fast | 1 M | vertex (default) | $0.10 / $1.00 |
 
-Aliases (`opus`, `sonnet`, `haiku`, `gpt55`, `gemini-pro`, …) resolve to
-their canonical name before lookup. The source of truth is
+A route marked `*` speaks OpenAI's Responses API (`wire_api: responses`, see
+[The Responses API](#the-responses-api)); every other route speaks Chat
+Completions through LiteLLM.
+
+Aliases (`opus`, `sonnet`, `haiku`, `opus-5.5`, `gpt55`, `gemini-pro`, …)
+resolve to their canonical name before lookup. The source of truth is
 [`src/strata_forge/llm/registry_data.yaml`](../../src/strata_forge/llm/registry_data.yaml);
-edits to it must keep YAML and this table in sync.
+edits to it must keep YAML and this table in sync. An entry whose source
+comment names a vendor page copies its ids, limits, prices and capability
+flags from that page and the vendor guides it names; a value not yet checked
+against the vendor carries `# TBD verify`, and the `gpt-5.5-thinking` /
+`gpt-5.5-instant` placeholders name the current model that stands in for
+them.
+
+Per-model caveats the registry encodes:
+
+- **Claude Fable 5.1, Opus 5.5, Sonnet 5.5** reject forced tool use
+  (`tool_choice` `any` / `tool`) with a 400. Structured output on an
+  Anthropic route is a forced tool call, so their `structured_output` flag is
+  `false` and `complete_structured` refuses them pre-flight with
+  `capability_missing`; ordinary tool calling (`tool_choice` `auto`) works.
+  They also reject any non-default `temperature` / `top_p`, so
+  `sampling_params` is `false` (see [Sampling parameters](#sampling-parameters)).
+- **GPT-6 Astra and GPT-6.1 Sol** call tools only through the Responses API,
+  and **GPT-6 Luna** and every GPT-5.4-and-later model take tools on Chat
+  Completions only at reasoning effort `none`. Every `openai` route therefore
+  speaks the Responses API, where all of them call tools at their default
+  effort, and `tool_calling` is `true` for every registered model.
+- **gpt-5.5-pro** is not served on Chat Completions at all, and Azure does not
+  list it for the Responses API, so it has no `azure` route until Azure
+  documents the model. No tool-capable OpenAI entry has a Chat Completions
+  route (`test_registry` enforces it).
+- The GPT-6 prices are base rates: a prompt above 272 K input tokens bills
+  at 2x input and cache rates and 1.5x output, which `cost_usd` does not
+  model.
+
+### Native routes and the allowlist
+
+A vendor-native route (`anthropic`, `openai`, `vertex`, `bedrock`, `azure`)
+resolves only models registered here: the registry is the allowlist for
+them. An id the vendor has released but the registry does not carry raises
+`RegistryError(reason="unknown_model")`. Its message (`Unknown model: '<id>'
+is not available on ...`) can reach an application's end users, so it states
+only the failure; the remediation (register the id in
+`strata_forge/llm/registry_data.yaml`, or pin `openai_compat`) is logged as an
+`unknown_model` warning. `openai_compat` alone passes operator-specific ids
+through unregistered.
+
+A route carries `wire_api` (`ProviderRoute`, `chat_completions` by default or
+`responses`); `responses` is valid only on the `openai` and `azure` routes,
+and `resolve()` copies it onto the `ModelRoute`. An `openai_compat` route
+always speaks Chat Completions, so OpenRouter, a local vLLM and Ollama keep
+the Chat Completions path even for an id that is registered with a Responses
+route.
 
 Programmatic access:
 
@@ -97,11 +157,102 @@ Programmatic access:
 from strata_forge.llm import registry
 
 model = registry.get("opus")        # alias -> Model("claude-opus-4-7")
-all_models = registry.list_models() # 9 entries
+all_models = registry.list_models() # 16 entries
 default_route = model.default_route()
 ```
 
+### The Responses API
+
+A route with `wire_api: responses` sends `POST /v1/responses` through
+`litellm.aresponses` ([ADR 0018]); `strata_forge.llm.responses_wire` builds
+the request and parses the result. The call surface (`complete`, `stream`,
+`complete_structured`, both tool loops) is unchanged. On the wire:
+
+- Every request is stateless: `store: false` and
+  `include: ["reasoning.encrypted_content"]`; `previous_response_id` is
+  never sent, and `provider_extras` that set `store`,
+  `previous_response_id`, `conversation` or `background` are refused with
+  `ValidationError`.
+- The leading system messages become `instructions`; a later system message
+  (the structured-output reprompt) becomes a `developer` message in place.
+- `max_tokens` becomes `max_output_tokens`, which bounds reasoning AND
+  visible output. A reasoning model can spend a small budget before
+  emitting any text, so a caller should allow a generous one (OpenAI
+  recommends reserving at least 25,000 tokens).
+- `response_format` becomes `text.format`; tools become internally tagged
+  function tools with `strict: false` (an omitted `strict` would request
+  strict mode, which rejects ordinary JSON Schemas).
+- In `provider_extras`, the Chat Completions style `reasoning_effort`,
+  `verbosity` and `response_format` become `reasoning.effort`,
+  `text.verbosity` and `text.format`; a `text` object is merged into the
+  computed one (its `format` replaces a structured-output format only when
+  it sets one); an `include` list adds to the encrypted-reasoning include.
+  Every other key is set on the body as given, but LiteLLM drops a key its
+  `aresponses` does not know, so a field it lacks goes in `extra_body`.
+- A replayed assistant message carries `status: "completed"`, which the
+  output-message input shape requires (LiteLLM strips it on Azure); reasoning
+  and function-call items do not.
+- Azure routes use `AzureConfig.responses_api_version` (`v1` by default,
+  env `AZURE_OPENAI_RESPONSES_API_VERSION`), which selects Azure's
+  `/openai/v1/responses` endpoint. OpenAI routes send `OPENAI_ORG_ID` as the
+  `OpenAI-Organization` header, because LiteLLM's Responses path does not
+  forward `organization`.
+- Before a Responses call, a registered model LiteLLM's own model map lacks
+  is registered with LiteLLM from the Forge registry (its streaming flag,
+  limits and prices, no `mode`). LiteLLM fakes a stream (one blocking call,
+  replayed as deltas, so nothing shows until the whole turn is done) for any
+  model it cannot look up, and its bundled map trails OpenAI's lineup, so
+  without this whether a new model streamed would depend on LiteLLM's
+  import-time fetch of its remote map. The parser still accepts a faked
+  stream, which a model registered with `streaming: false` gets. A model
+  LiteLLM already maps keeps LiteLLM's entry.
+
+Each turn's output items come back on `LLMResponse.provider_items` (and on
+the final `ResponseChunk` of a stream): an ordered
+`ProviderItems(provider, items)` of `ReasoningItem` (the encrypted
+reasoning), `TextItem` (assistant text with its `phase`) and `CallRef` (a
+function call's item id and `call_id`). Both tool loops put them on the
+`AssistantMessage` they append, so `PendingToolCalls.messages` carries them
+to a caller that suspends and resumes. On the next request to the SAME
+provider they are replayed verbatim and in order; a turn from another
+provider, or one without items (a turn from Anthropic, or one restored
+without them), is sent as plain assistant text plus one `function_call` per
+tool call. That is valid input for any model and loses only the reasoning
+context. The items are opaque provider state: a serialized copy is as large
+as the encrypted reasoning (tens of kilobytes per tool turn is normal), and a
+`CallRef` must name one of the turn's own `tool_calls`.
+
+A `response.incomplete` turn reports `finish_reason` `length`
+(`max_output_tokens`) or `content_filter`, a refusal reports
+`content_filter`, and `response.failed` / an `error` event raise a
+`ProviderError` subclass chosen by the error code (`map_responses_error`),
+whether the event carries its `code` and `message` at the top level or in a
+nested `error` object.
+A stream that ends before its terminal event raises `ProviderServerError`
+rather than reporting a clean stop.
+
+### Sampling parameters
+
+`capabilities.sampling_params` is whether a model accepts `temperature` /
+`top_p` at its default reasoning configuration. `LLMClient` refuses them
+pre-flight with `ValidationError` where the model would reject them:
+
+- on a Responses route, unless the caller's `provider_extras` set the
+  reasoning effort to `none` (or the model's default effort is `none`, as on
+  `gpt-5.5-instant`); an explicit effort other than `none` refuses them on
+  any model;
+- on any other route, whenever the entry's `sampling_params` is `false`
+  (the Claude 5.x entries).
+
+The registry does not record which reasoning efforts a model offers, so
+effort `none` on a model without it (GPT-6.1 Sol and GPT-6 Astra start at
+`low`) passes the guard and the provider rejects the request.
+
+An `openai_compat` pin is never checked: its endpoint serves the operator's
+own model.
+
 [ADR 0004]: ../architecture/adr/0004-model-registry-scope.md
+[ADR 0018]: ../architecture/adr/0018-openai-routes-speak-the-responses-api.md
 
 ---
 
@@ -167,7 +318,9 @@ instances — `TextPart` and `ImageContent` are the built-in concrete
 parts. See [Multimodal](#multimodal) for the image case.
 
 `AssistantMessage` carries both `content: str | None` and
-`tool_calls: list[ToolCall]`. `ToolResultMessage` carries
+`tool_calls: list[ToolCall]`, plus `provider_items: ProviderItems | None`, the
+turn's replayable Responses API output (see
+[The Responses API](#the-responses-api)). `ToolResultMessage` carries
 `tool_call_id`, `content`, and `is_error: bool`. The full hierarchy
 lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
 
@@ -182,9 +335,10 @@ lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
 | `finish_reason` | `FinishReason` | `"stop"` / `"tool_use"` / `"length"` / `"content_filter"` / `"error"`. |
 | `usage` | `Usage` | `input_tokens`, `output_tokens`, plus cache read/write counters. |
 | `cost_usd` | `float` | Computed against the registry's per-million rates. `0.0` on a cache hit, and on an unpriced `openai_compat` route. |
-| `route` | `ModelRoute` | The `(model, provider, provider_model_id)` actually used. |
+| `route` | `ModelRoute` | The `(model, provider, provider_model_id, wire_api)` actually used. |
 | `cache_hit` | `bool` | `True` when served from cache. |
 | `latency_ms` | `float` | Wall-clock latency of the provider call. |
+| `provider_items` | `ProviderItems \| None` | A Responses API turn's replayable output items; `None` on every other route. |
 
 `StructuredResponse[M]` is `LLMResponse` plus `parsed: M`, where `M` is
 the Pydantic model passed to `complete_structured`.
@@ -202,12 +356,73 @@ from strata_forge.llm import resolve
 route = resolve("opus", provider="bedrock")
 # ModelRoute(model="claude-opus-4-7",
 #            provider="bedrock",
-#            provider_model_id="anthropic.claude-opus-4-7")
+#            provider_model_id="anthropic.claude-opus-4-7",
+#            wire_api="chat_completions")
 ```
 
 Aliases are resolved before lookup. Unknown models raise
 `RegistryError(reason="unknown_model")`; an unsupported `(model,
 provider)` combo raises `RegistryError(reason="unsupported_route")`.
+
+### OpenAI-compatible endpoints: `base_url` is caller-trusted
+
+The `openai_compat` provider sends its key and the whole conversation to
+`OpenAICompatConfig.base_url` and validates nothing about that URL: not the
+scheme, the host, the path, or the addresses the host resolves to. There is
+deliberately no private-address block, because loopback is the normal case:
+the batch inference runner talks to a vLLM server on `127.0.0.1` on the same
+machine.
+
+The transport (LiteLLM over the OpenAI client and `httpx`) follows every
+HTTP redirect, and the final reply comes back to the caller: as the
+response text when it parses as a completion, quoted in the raised error's
+message when it does not. What each hop carries:
+
+| Hop | `Authorization` (the `api_key`) | Caller-set headers (`extra_headers`) | Request body |
+|---|---|---|---|
+| 307 / 308 to another host or port | dropped | sent | re-sent, same method |
+| 301 / 302 / 303 to another host or port | dropped | sent | not sent (becomes a `GET`) |
+| `http` to `https`, same host, default ports | kept | sent | as the status code above says |
+| any redirect within the same origin | kept | sent | as the status code above says |
+
+Only the `Authorization` header is dropped. A credential a caller puts in
+another header (through `extra_headers`, in `provider_extras` or the call's
+keyword arguments) follows every hop. The table is verified against the
+versions in Forge's own lock: `httpx` and the OpenAI client are transitive
+dependencies (only `litellm` is declared), so a project that resolves its own
+lock and takes `base_url` from untrusted input should run its own
+cross-origin redirect test.
+
+So a caller that takes `base_url` from a party it does not trust (a web
+request, a user setting) owns that validation, and does it before building
+the provider config:
+
+- compare the **whole URL** for exact string equality with one it allows,
+  never only the host and never a prefix. The client appends
+  `/chat/completions` to whatever path it is given, so a host-only check lets
+  the requester choose any path on an allowed origin, including one that
+  redirects elsewhere. A prefix check is no better: the client resolves dot
+  segments (`https://allowed.example/api/v1/../../other` is sent to
+  `https://allowed.example/other/chat/completions`) and sends `%2e%2e`,
+  `..%2f` and empty (`//`) segments raw for the server to interpret;
+- apply the same check to an `api_base` passed at the call site (directly
+  or through `provider_extras`), which overrides `base_url`;
+- pass `api_key` explicitly, `UNAUTHENTICATED_API_KEY` when there is none.
+  Left unset, `OpenAICompatConfig` reads `FORGE_OPENAI_COMPAT_API_KEY` from
+  the environment, and failing that the client sends an ambient
+  `OPENAI_API_KEY`: either goes to the untrusted URL;
+- keep credentials out of `extra_headers`, or trust their destination as
+  fully as `base_url` itself;
+- check every address the host resolves to, if internal addresses must be
+  unreachable;
+- treat an allowed origin as trusted for its redirects too. The `api_key`
+  never leaves the configured host, but the conversation and the reply can.
+
+Forge does not refuse cross-origin redirects itself: that would mean
+replacing the HTTP client LiteLLM builds and caches for each endpoint with
+one Forge owns per provider. Once the caller pins the exact URL, a
+redirect can only come from the allowed endpoint itself, which is the same
+trust a native provider places in its vendor's API.
 
 ---
 
@@ -275,7 +490,11 @@ schemas, and any `provider_extras`. The provider serving the call is
 **not** in the key. That's intentional: a hit cached when Anthropic
 served the call is just as valid when the next call would have gone to
 Bedrock — including the provider would defeat the cache during
-provider-level failover.
+provider-level failover. A turn's `provider_items` (Responses API state) are
+likewise not in the key, and they are not stored either: the encrypted
+reasoning replays only under the organization that produced it, and the key
+holds no credentials, so a hit returns the text and tool calls with
+`provider_items=None` and the next turn replays without that reasoning.
 
 ```python
 from strata_forge.llm import InMemoryCache, LLMClient, Message
@@ -323,13 +542,18 @@ print(resp.parsed.title, resp.parsed.bullets)
 Dispatch by route:
 
 - **OpenAI / Azure / openai_compat** — sets `response_format` to OpenAI's
-  strict `json_schema` payload. The schema is tightened to the strict
-  mode subset (`additionalProperties: false`, every property required).
+  strict `json_schema` payload (sent as `text.format` on a Responses API
+  route). The schema is tightened to the strict mode subset
+  (`additionalProperties: false`, every property required).
 - **Vertex (Gemini)** — uses `response_mime_type="application/json"` and
   `response_schema` with the OpenAPI subset of JSON Schema Gemini accepts.
 - **Anthropic / Bedrock / Claude-on-Vertex** — no native channel; emits
   a forced tool call whose `input_schema` mirrors the desired shape, then
   parses the tool-call arguments back through the Pydantic model.
+
+A model registered with `structured_output: false` (the Claude 5.x entries,
+which reject the forced tool call) raises
+`RegistryError(reason="capability_missing")` before any provider call.
 
 If the model emits text that fails Pydantic validation,
 `complete_structured` reprompts with the parse error included up to
@@ -410,7 +634,10 @@ happens. No silent fallback to "the model will probably ignore it."
 
 An `openai_compat` / OpenRouter model is **not** in the curated registry
 (its ids are operator-specific — [ADR 0004]), so its tool-calling
-capability can't be confirmed. By default such a model is let through and
+capability can't be confirmed. The same holds for a chain entry pinned only
+to `openai_compat` whose id happens to equal a registered name: the
+operator's endpoint serves its own model, so the registry's flags are not
+consulted. By default such a model is let through and
 the provider decides at call time. Pass `require_tool_support=True` to the
 `LLMClient` constructor to instead raise
 `RegistryError(reason="capability_unknown")` pre-flight for any
@@ -420,11 +647,12 @@ provider rejection mid-stream.
 
 ### Provider serialization
 
-`Tool.to_openai_schema()`, `to_anthropic_schema()`, `to_gemini_schema()`
-return the three native wire shapes. `LLMClient` picks the right one for
-the resolved route automatically. `ToolDeclaration` (a declaration-only
-tool with a raw JSON-Schema `parameters` dict and no function — see
-[Streaming tool loop](#streaming-tool-loop)) exposes the same three
+`Tool.to_openai_schema()`, `to_openai_responses_schema()`,
+`to_anthropic_schema()`, `to_gemini_schema()` return the native wire shapes
+(Chat Completions, the Responses API, Anthropic, Gemini). `LLMClient` picks
+the right one for the resolved route automatically. `ToolDeclaration` (a
+declaration-only tool with a raw JSON-Schema `parameters` dict and no
+function — see [Streaming tool loop](#streaming-tool-loop)) exposes the same
 methods, so `tools=` accepts any mix of the two (`AnyTool`).
 
 [ADR 0006]: ../architecture/adr/0006-tool-calling-as-llm-primitive.md
@@ -585,7 +813,11 @@ executable calls are invoked first (in model call order, with their
 
 - `calls` — the unexecuted declaration-targeted calls, in model order.
 - `messages` — the conversation **delta** appended this run (assistant
-  turns + executed tool results), i.e. everything after the input.
+  turns + executed tool results), i.e. everything after the input. On a
+  Responses API route each assistant turn carries its `provider_items`
+  (encrypted reasoning included); a caller that serializes the delta between
+  runs must keep them, or the resumed turn loses its reasoning context. They
+  round-trip through `model_dump_json()` / `model_validate_json()`.
 - `iterations_used` — turns consumed (`iteration + 1`), for cross-run
   budgeting.
 
@@ -619,7 +851,10 @@ A suspension on the last budgeted iteration is a suspension, not an
 Every `LLMResponse` carries `cost_usd` computed against the registry's
 per-million-token rates, taking into account cache-read / cache-write
 prices when usage reports them. `cache_hit=True` responses report
-`cost_usd=0.0`.
+`cost_usd=0.0`. Providers report an input count that INCLUDES cached reads
+(and, for Anthropic through LiteLLM, cache writes); `Usage.input_tokens` is
+reported net of both, so each token is priced once at its own rate, and
+`Usage.total_tokens` is that uncached input plus the output.
 
 **`openai_compat` routes are unpriced and report `cost_usd=0.0`.** Their
 model ids are operator-specific, so the curated registry has no entry and
@@ -644,8 +879,9 @@ async with BudgetContext(max_usd=1.00) as budget:
 ```
 
 `LLMClient` consumes against the active budget after every successful
-call. If the next call would exceed the ceiling, `BudgetExceededError`
-fires *before* the spend happens. Nested budgets share the parent
+call; a token ceiling counts every bucket (uncached input, cache reads,
+cache writes and output), not `Usage.total_tokens`. If the next call would
+exceed the ceiling, `BudgetExceededError` fires *before* the spend happens. Nested budgets share the parent
 ceiling unless explicitly `isolated=True`.
 
 ### Diagnostic NDJSON dump
@@ -655,7 +891,10 @@ Set `FORGE_DIAGNOSTIC_ENABLED=true` (and optionally
 JSON line per LLM attempt — including each iteration of a tool loop.
 Fields: timestamp, correlation_id, request hash, model, provider
 route, messages, response text, tool calls, finish_reason, usage,
-cost, latency, cache_hit, error (on failure).
+cost, latency, cache_hit, error (on failure). On a Responses API route,
+`messages` holds the request's input items, led by an
+`{"type": "instructions", ...}` entry when the request has instructions, and
+every `encrypted_content` is replaced by its size (`"<N bytes>"`).
 
 The record schema (`DiagnosticRecord` in
 [`diagnostic.py`](../../src/strata_forge/llm/diagnostic.py)) is plain
@@ -718,6 +957,10 @@ API when you need incremental output.
 **`RegistryError: Unknown model: 'gpt-5'`.**
 The registry only knows the names listed above. Use the closest
 canonical name or one of its registered aliases (`gpt55`, `opus`, …).
+If the vendor has released the model and it is simply not registered yet,
+add its entry to `registry_data.yaml` from the vendor's own model page (the
+`unknown_model` log warning names the file); a native route cannot reach it
+until then.
 
 **`RegistryError: ... has no route for provider 'X'`.**
 The `(model, provider)` combo isn't a registered route. Check the
@@ -726,8 +969,18 @@ Anthropic or Bedrock route.
 
 **`RegistryError: ... does not support tool calling`.**
 You passed `tools=` to a model whose `capabilities.tool_calling = False`
-in the registry. No model in the current registry actually trips this
-gate, but tightening capabilities later will surface it here.
+in the registry. A model that calls tools only through the Responses API
+needs a route with `wire_api: responses`.
+
+**`ValidationError: Model '...' does not accept temperature or top_p`.**
+The model rejects sampling parameters at its reasoning effort (see
+[Sampling parameters](#sampling-parameters)). Omit them, or set the
+reasoning effort to `none` in `provider_extras` where the model supports it.
+
+**A Responses API turn ends with `finish_reason="length"` and no text.**
+`max_output_tokens` (from `max_tokens`) bounds reasoning as well as the
+answer, and a reasoning model can spend all of it before writing anything.
+Raise `max_tokens`.
 
 **`RegistryError: Tool support for model '...' cannot be confirmed`.**
 You constructed the client with `require_tool_support=True` and passed

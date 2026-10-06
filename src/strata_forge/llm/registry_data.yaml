@@ -7,8 +7,122 @@
 # Pricing values are in USD per million tokens. Lines with `# TBD verify`
 # are reasonable estimates pending confirmation against the vendor's
 # public pricing page.
+#
+# This file is also the allowlist for the vendor-native routes (`anthropic`,
+# `openai`, ...): `routing.resolve()` refuses any model id that is not
+# registered here unless the caller pins `openai_compat`. An entry whose
+# source comment names a vendor page copies its ids, limits, prices and
+# capability flags from that page (and the vendor guides it names), never from
+# memory or a third-party catalog. A value not yet checked against the vendor
+# carries `# TBD verify`; the placeholder entries say which current model
+# stands in for them.
+#
+# A route's `wire_api` is the API it speaks: `responses` (OpenAI's Responses
+# API, `openai` / `azure` only) or `chat_completions` (the default, and the
+# only option on every other provider). Capability flags describe the model
+# on its routes' wire API.
 
 models:
+  # =========================================================================
+  # Anthropic Claude 5.x
+  # =========================================================================
+
+  # Source: platform.claude.com/docs/en/about-claude/models/overview and
+  # platform.claude.com/docs/en/about-claude/pricing (verified 2026-10-01).
+  # cache_write is the 5-minute cache write, as for every Claude entry.
+  # Thinking is adaptive and always on for Fable 5.1 and Opus 5.5, and every
+  # Claude 5.x model below rejects forced tool use (`tool_choice` any/tool)
+  # with a 400. Structured output here is emulated through a forced tool
+  # call, so `structured_output` is false for all three; plain tool calling
+  # (`tool_choice` auto) is supported. "non-default `temperature`, `top_p`, or
+  # `top_k` values return a 400 error on every request, regardless of whether
+  # thinking is used" (platform.claude.com/docs/en/build-with-claude/thinking,
+  # verified 2026-10-01), so `sampling_params` is false and
+  # the client refuses those parameters pre-flight.
+  - name: claude-fable-5-1
+    vendor: anthropic
+    tier: reasoning
+    context_window: 1000000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: false
+      streaming: true
+      vision: true
+      prompt_caching: true
+      sampling_params: false
+    pricing_per_million_tokens:
+      input: 10.00
+      output: 50.00
+      cache_read: 0.25
+      cache_write: 12.50
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-fable-5-1
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-fable-5-1
+      - provider: vertex
+        provider_model_id: claude-fable-5-1
+    aliases: [fable-5.1]
+
+  - name: claude-opus-5-5
+    vendor: anthropic
+    tier: flagship
+    context_window: 1000000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: false
+      streaming: true
+      vision: true
+      prompt_caching: true
+      sampling_params: false
+    pricing_per_million_tokens:
+      input: 4.00
+      output: 20.00
+      cache_read: 0.20
+      cache_write: 5.00
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-opus-5-5
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-opus-5-5
+      - provider: vertex
+        provider_model_id: claude-opus-5-5
+    aliases: [opus-5.5]
+
+  - name: claude-sonnet-5-5
+    vendor: anthropic
+    tier: balanced
+    context_window: 1000000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: false
+      streaming: true
+      vision: true
+      prompt_caching: true
+      sampling_params: false
+    pricing_per_million_tokens:
+      input: 2.00
+      output: 10.00
+      cache_read: 0.20
+      cache_write: 2.50
+    routes:
+      - provider: anthropic
+        provider_model_id: claude-sonnet-5-5
+        is_default: true
+      - provider: bedrock
+        provider_model_id: anthropic.claude-sonnet-5-5
+      - provider: vertex
+        provider_model_id: claude-sonnet-5-5
+    aliases: [sonnet-5.5]
+
   # =========================================================================
   # Anthropic Claude 4.x
   # =========================================================================
@@ -99,7 +213,7 @@ models:
     vendor: anthropic
     tier: fast
     context_window: 200000
-    max_output_tokens: 32000
+    max_output_tokens: 64000  # models overview "Max output: 64K tokens" (verified 2026-10-01)
     modalities: [text, image]
     capabilities:
       tool_calling: true
@@ -123,15 +237,35 @@ models:
     aliases: [haiku, haiku-4.5]
 
   # =========================================================================
-  # OpenAI GPT-5.5 family
+  # OpenAI GPT-6 family
   # =========================================================================
 
-  # Source: openai.com/api/pricing (May 2026)
-  - name: gpt-5.5
+  # Source: developers.openai.com/api/docs/models/gpt-6-astra,
+  # developers.openai.com/api/docs/models/gpt-6.1-sol,
+  # developers.openai.com/api/docs/models/gpt-6-luna, the GPT-6 guide
+  # (developers.openai.com/api/docs/guides/latest-model) and the reasoning
+  # guide (developers.openai.com/api/docs/guides/reasoning), all verified
+  # 2026-10-01. Prices are the base rates; a prompt above 272K input tokens
+  # bills the whole request at 2x input and cache rates and 1.5x output, which
+  # the registry does not model.
+  #
+  # Every OpenAI route speaks the Responses API. "GPT-6 Astra and GPT-6.1 Sol
+  # support Chat Completions, but tool calling requires Responses. GPT-6 Sol
+  # and GPT-6 Luna support function calling in Chat Completions only with
+  # `reasoning_effort: "none"`. Use Responses for reasoning with tools." (GPT-6
+  # guide), so `tool_calling` is true for all three on that wire. "When
+  # reasoning effort is not `none`, remove `temperature`, `top_p`, and
+  # `top_logprobs`" (GPT-6 guide), and all three default to a reasoning effort
+  # other than `none`, so `sampling_params` is false.
+  #
+  # Astra: "reasoning.effort supports low, medium, high, xhigh, and max"
+  # (model page); "Chat Completions does not support function calling with
+  # GPT-6 Astra or GPT-6.1 Sol" (reasoning guide).
+  - name: gpt-6-astra
     vendor: openai
     tier: flagship
-    context_window: 400000
-    max_output_tokens: 32000
+    context_window: 1050000
+    max_output_tokens: 128000
     modalities: [text, image]
     capabilities:
       tool_calling: true
@@ -139,6 +273,100 @@ models:
       streaming: true
       vision: true
       prompt_caching: true
+      sampling_params: false
+    pricing_per_million_tokens:
+      input: 10.00
+      output: 50.00
+      cache_read: 1.00
+      cache_write: 12.50
+    routes:
+      - provider: openai
+        provider_model_id: gpt-6-astra
+        is_default: true
+        wire_api: responses
+
+  # Sol: "Use the Responses API for tool calling. Chat Completions is supported
+  # without tool calling." and "reasoning.effort supports low, medium
+  # (default), high, xhigh, and max" (model page).
+  - name: gpt-6.1-sol
+    vendor: openai
+    tier: balanced
+    context_window: 1050000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+      sampling_params: false
+    pricing_per_million_tokens:
+      input: 2.00
+      output: 10.00
+      cache_read: 0.10
+      cache_write: 2.50
+    routes:
+      - provider: openai
+        provider_model_id: gpt-6.1-sol
+        is_default: true
+        wire_api: responses
+
+  # Luna: "Use the Responses API for built-in tools and function calling. Chat
+  # Completions supports function calling only with `reasoning_effort` set to
+  # `none`." and "reasoning.effort supports none, low, medium (default), high,
+  # xhigh, and max" (model page). On the Responses API it calls tools at any
+  # effort, so the route pins no effort.
+  - name: gpt-6-luna
+    vendor: openai
+    tier: fast
+    context_window: 1050000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+      sampling_params: false
+    pricing_per_million_tokens:
+      input: 0.10
+      output: 0.50
+      cache_read: 0.01
+      cache_write: 0.125
+    routes:
+      - provider: openai
+        provider_model_id: gpt-6-luna
+        is_default: true
+        wire_api: responses
+
+  # =========================================================================
+  # OpenAI GPT-5.5 family
+  # =========================================================================
+
+  # Source: developers.openai.com/api/docs/models/gpt-5.5 (verified
+  # 2026-10-01): Chat Completions and Responses both supported,
+  # "Reasoning.effort supports: none, low, medium (default), high and xhigh",
+  # 1,050,000 context window, 128,000 max output tokens. "Starting with
+  # GPT-5.4, Chat Completions does not support tool calling with
+  # `reasoning_effort` values other than `none`" (developers.openai.com/api/
+  # docs/guides/migrate-to-responses), so tools need the Responses API at the
+  # default effort. Azure lists gpt-5.5 for the Responses API
+  # (learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/responses).
+  - name: gpt-5.5
+    vendor: openai
+    tier: flagship
+    context_window: 1050000
+    max_output_tokens: 128000
+    modalities: [text, image]
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+      vision: true
+      prompt_caching: true
+      sampling_params: false
     pricing_per_million_tokens:
       input: 5.00
       output: 30.00
@@ -147,15 +375,23 @@ models:
       - provider: openai
         provider_model_id: gpt-5.5
         is_default: true
+        wire_api: responses
       - provider: azure
         provider_model_id: gpt-5.5
+        wire_api: responses
     aliases: [gpt55]
 
+  # Source: developers.openai.com/api/docs/models/gpt-5.5-pro (verified
+  # 2026-10-01): Chat Completions "Not supported", Responses supported,
+  # "Reasoning.effort supports: medium, high (default) and xhigh", 1,050,000
+  # context window, 128,000 max output tokens. Azure's Responses API model
+  # list does not include gpt-5.5-pro and the model cannot take tools on Chat
+  # Completions, so no `azure` route is registered until Azure documents it.
   - name: gpt-5.5-pro
     vendor: openai
     tier: reasoning
-    context_window: 400000
-    max_output_tokens: 32000
+    context_window: 1050000
+    max_output_tokens: 128000
     modalities: [text, image]
     capabilities:
       tool_calling: true
@@ -163,6 +399,7 @@ models:
       streaming: true
       vision: true
       prompt_caching: true
+      sampling_params: false
     pricing_per_million_tokens:
       input: 30.00
       output: 180.00
@@ -170,10 +407,13 @@ models:
       - provider: openai
         provider_model_id: gpt-5.5-pro
         is_default: true
-      - provider: azure
-        provider_model_id: gpt-5.5-pro
+        wire_api: responses
     aliases: [gpt55-pro]
 
+  # Placeholder: served by o4-mini, which supports Chat Completions and
+  # Responses (developers.openai.com/api/docs/models/o4-mini, verified
+  # 2026-10-01; Azure lists o4-mini for the Responses API). o4-mini is a
+  # reasoning model with no `none` effort, so `sampling_params` is false.
   - name: gpt-5.5-thinking
     vendor: openai
     tier: reasoning
@@ -186,6 +426,7 @@ models:
       streaming: true
       vision: true
       prompt_caching: true
+      sampling_params: false
     # GPT-5.5 Thinking is the thinking-mode variant of standard 5.5; base
     # token pricing matches standard, thinking tokens bill at the output rate.
     pricing_per_million_tokens:
@@ -196,10 +437,17 @@ models:
       - provider: openai
         provider_model_id: o4-mini  # reasoning-class small model; 5.5-thinking not yet released
         is_default: true
+        wire_api: responses
       - provider: azure
         provider_model_id: o4-mini
+        wire_api: responses
     aliases: [gpt55-thinking]
 
+  # Placeholder: served by gpt-5.4-nano, which supports Chat Completions and
+  # Responses and whose "Reasoning.effort supports: none (default), low,
+  # medium, high and xhigh" (developers.openai.com/api/docs/models/
+  # gpt-5.4-nano, verified 2026-10-01; Azure lists it for the Responses API).
+  # Its default effort is `none`, so it takes `temperature` / `top_p`.
   - name: gpt-5.5-instant
     vendor: openai
     tier: fast
@@ -212,6 +460,7 @@ models:
       streaming: true
       vision: true
       prompt_caching: true
+      sampling_params: true
     pricing_per_million_tokens:
       input: 1.25   # TBD verify
       output: 10.00 # TBD verify
@@ -220,8 +469,10 @@ models:
       - provider: openai
         provider_model_id: gpt-5.4-nano  # cheapest current SKU; 5.5-instant not yet released
         is_default: true
+        wire_api: responses
       - provider: azure
         provider_model_id: gpt-5.4-nano
+        wire_api: responses
     aliases: [gpt55-instant]
 
   # =========================================================================

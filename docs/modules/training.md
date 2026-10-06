@@ -18,6 +18,8 @@ Integration points:
 - **Configs:** :class:`SFTConfig`, :class:`DPOConfig`,
   :class:`ORPOConfig`, :class:`KTOConfig`, :class:`GRPOConfig`,
   :class:`LoRAConfig`, :class:`QLoRAConfig`.
+- **QLoRA precondition:** :func:`require_bitsandbytes`,
+  :class:`MissingBitsAndBytesError`.
 - **Runners:** :class:`SFTRunner`, :class:`PreferenceRunner`.
 - **Result shapes:** :class:`SFTRunResult`,
   :class:`PreferenceRunResult`.
@@ -92,8 +94,9 @@ result = runner.train(train_dataset=preference_dataset)
 
 :class:`SFTConfig` mirrors the TRL ``SFTConfig`` knobs Forge
 exposes by default. The ``extra_trainer_args`` field is a
-verbatim passthrough to TRL — Forge never blocks access to the
-underlying surface.
+verbatim passthrough to TRL — Forge never blocks a Python caller's
+access to the underlying surface (a run spec is narrower; see
+[Driving training from a declaration](#driving-training-from-a-declaration)).
 
 Key fields:
 
@@ -120,12 +123,40 @@ Key fields:
 1. Lazy-imports ``transformers`` / ``trl`` / ``datasets``.
 2. Loads model + tokenizer via ``AutoModelForCausalLM`` /
    ``AutoTokenizer`` (or uses the ``model=`` / ``tokenizer=``
-   the caller provided).
+   the caller provided), on the terms in
+   [Loading from the Hub](#loading-from-the-hub).
 3. Builds ``trl.SFTTrainer`` with the rendered kwargs + optional
    PEFT config.
 4. Runs ``trainer.train()``, calls ``trainer.save_model``.
 5. Returns an :class:`SFTRunResult` with ``train_loss``,
    ``train_runtime_s``, etc.
+
+## Loading from the Hub
+
+Every model and tokenizer load the runners make states its terms
+explicitly, from :mod:`strata_forge.training.loading`
+(``model_load_kwargs`` / ``tokenizer_load_kwargs``):
+
+| Argument | Value | Why |
+|---|---|---|
+| ``trust_remote_code`` | ``False`` | A repo's own Python never runs. |
+| ``use_safetensors`` | ``True`` (models) | A pickle checkpoint (``*.bin`` / ``*.pt``) can execute code when unpickled; a repo that ships only those fails to load instead. |
+| ``token`` | the caller's | ``build_trainer(..., token=...)`` / ``train(..., token=...)``. |
+
+``token`` is a :data:`HubToken`: a token string, ``False`` to send
+no credential at all, or ``None`` (the default) for the library's
+own lookup (an ``HF_TOKEN`` variable or a cached login). It is a
+keyword argument of the load and is **never stored on a config**:
+every ``XxxConfig`` rejects a ``token`` field, and nothing in
+``to_trl_kwargs`` carries one, so it cannot reach TRL's arguments or
+the ``training_args.bin`` TRL pickles beside each checkpoint (a
+pushed output directory would carry that file to the Hub).
+
+The VM runner in :mod:`strata_forge.pipelines.finetune_runner`
+passes the run's delivered token, or ``False`` when none was
+delivered, to every load, including the merge step's base model,
+adapter and tokenizer, so a run never falls back to a credential
+the machine happens to hold.
 
 ## Preference tuning
 
@@ -170,6 +201,19 @@ Forwarding rules:
 - ``ref_model`` flows into the trainer only for ``dpo`` and
   ``kto`` (ORPO doesn't use a reference model; GRPO doesn't
   either).
+- When the runner loads the policy itself for ``dpo`` / ``kto``
+  **without** an adapter, it loads the reference model too, with
+  the same load arguments (token, no remote code, safetensors
+  only, same precision). Left to TRL, the reference is re-downloaded
+  by the policy's name with none of them, so a gated base would fail
+  there. With an adapter (TRL disables it to recover the reference)
+  or ``precompute_ref_log_probs`` no reference is loaded. A caller
+  that passes ``model=`` owns that load and should pass
+  ``ref_model=`` with it. Both models load with no device placement
+  of their own, as the policy always has, so a full-weight DPO / KTO
+  run holds two copies of the base in host memory until the trainer
+  moves them to the accelerator (TRL placed its own reference load
+  with ``device_map="auto"``): size host RAM for twice the model.
 - ``reward_funcs`` is required for ``grpo`` and rejected
   elsewhere.
 - ``peft_config`` flows into every trainer when set; QLoRA's
@@ -199,6 +243,39 @@ Both configs are Pydantic ``frozen=True`` with ``extra="forbid"``.
 QLoRA, ``to_bnb_config()`` additionally builds the
 ``transformers.BitsAndBytesConfig`` (passed via
 ``quantization_config=`` to ``from_pretrained``).
+
+QLoRA needs **bitsandbytes** on the machine that loads the model: transformers quantises the
+weights inside ``from_pretrained`` and refuses to start without it. The ``[finetuning]`` extra
+installs it (``bitsandbytes>=0.49,<1``), and it is also the one dependency whose absence would
+otherwise surface last, because ``BitsAndBytesConfig`` constructs without it. So the check is made
+up front instead:
+
+```python
+from strata_forge.training import MissingBitsAndBytesError, require_bitsandbytes
+
+require_bitsandbytes()  # MissingBitsAndBytesError when it is missing or below 0.49
+```
+
+``to_bnb_config()`` calls it before building anything, the ``finetune_runner`` calls it while
+validating the spec (before the dataset download) for ``adapter="qlora"``, and the
+``strata-forge train ... --adapter qlora`` commands call it before resolving the dataset.
+:class:`MissingBitsAndBytesError` is a ``ForgeError`` and an ``ImportError``. The check looks the
+package up without importing it, since importing it loads its native library, and reads its version
+from the distribution's metadata: a bitsandbytes below the extra's floor (one installed outside the
+extra, which pip would otherwise have upgraded) is refused the same way, naming the installed
+version. A version the metadata does not record is not refused.
+
+Why ``0.49``: the floor has to carry a CUDA 13.0 kernel (what the ``torch`` pin resolves to on
+Linux; first shipped in 0.48) and publish a wheel on each platform that ``torch>=2.9`` publishes a
+Python 3.14 wheel for (Linux x86_64 and aarch64, Windows x64, macOS arm64; the macOS wheel first
+shipped in 0.49). Because every one of those platforms has a wheel, the pin needs no platform
+marker, and QLoRA is not ruled out on any of them (bitsandbytes lists CUDA, Apple MPS and CPU among
+its devices). The cost is macOS 12 and 13: bitsandbytes' macOS wheel needs macOS 14 and it
+publishes no sdist to build from, so an Apple Silicon Mac on 12 or 13, where ``torch`` would settle
+on an older macOS 11 wheel, cannot install ``[finetuning]``. Both are past Apple's support window.
+A marker such as ``sys_platform != 'darwin' or platform_release >= '23'`` would keep them
+installable without QLoRA; it is not used, since those releases are out of support and the marker
+would be one more thing a resolver has to get right.
 
 ## Chat-template formatting
 
@@ -322,6 +399,19 @@ the progress log to any absolute path — walking past the very `validate_repo_i
 side exists to perform. `extra_trainer_args` is checked for the same three keys, since
 `to_trl_kwargs` applies it last and it reaches TRL's own `output_dir`.
 
+**A spec's `extra_trainer_args` may not set the TRL knobs that act under other terms than the
+run's.** It is TRL's and `transformers`' whole argument surface, and some of it loads, pushes or
+reports outside everything the runner sets on its own loads (see
+[Loading from the Hub](#loading-from-the-hub)): `chat_template_path` (a tokenizer load of any repo
+or local path, with the machine's own credential), `trust_remote_code` and `model_init_kwargs` /
+`ref_model_init_kwargs` (remote code, or a load configured elsewhere), `push_to_hub` and every
+`hub_*` / `trackio_*` setting (a push with the machine's own credential), `resume_from_checkpoint`,
+`deepspeed`, `fsdp_config` and `accelerator_config` (files on the machine, unpickled in the
+checkpoint case), `logging_dir` (outside the artifact directory) and `report_to` (a third-party
+service). From a spec each is refused by name
+(`hyperparams may not set extra_trainer_args.…`), all of them in one message; every other key
+passes through.
+
 This bounds only the **declaration** path. `extra_trainer_args` remains an unrestricted escape
 hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the
 operator, and Forge does not block access to the underlying TRL surface. The distinction is who
@@ -353,6 +443,27 @@ user's VM at run time with no lockfile, so an unbounded specifier means every
 run resolves against whatever shipped that morning, and a breaking upstream
 release surfaces as a crash on the user's hardware rather than a red build.
 
+The nightly clean-install job (`.github/workflows/clean-install.yml`) is the
+control for that. Every night it installs, into empty Python 3.14 venvs with no
+lockfile and no constraints, each extras string a run's machine installs
+(`[finetuning,storage]`, `[serving,storage,hf]`) plus `[all]`, and then
+`scripts/smoke_clean_install.py` builds every enabled method x dataset format x
+adapter through the runner's own spec path and its own `build_trainer`, down to
+the TRL config, the peft config, the bitsandbytes config and the trainer call,
+whose keywords are bound against the installed trainer's signature (a model and
+a tokenizer are passed in, so nothing is downloaded). A renamed kwarg fails there
+on the day the release ships. A QLoRA case first checks the machine can
+quantise: it fails when `[finetuning]` stops naming `bitsandbytes` or the install
+lacks it, before it builds anything, so the gap is reported as itself rather than
+as the runner's own refusal. It also runs on any branch push (main excepted) that
+changes `pyproject.toml`, so a pin change is resolved fresh before it merges.
+
+Because it executes upstream code no lockfile vouches for, the install never
+runs in the default branch's context, whose Actions cache every ref restores:
+the nightly schedule (which GitHub runs from `main`) dispatches the job on `dev`
+and reports that run's result. `release.yml`'s build and the `nightly.yml` jobs
+do not restore the Actions cache at all.
+
 ## Lazy-import contract
 
 Importing ``strata_forge.training`` works without the ``[finetuning]``
@@ -364,17 +475,27 @@ that need them:
   :meth:`PreferenceRunner._load_modules`.
 - ``peft`` inside :meth:`LoRAConfig.to_peft_config`.
 - ``transformers`` + ``torch`` inside
-  :meth:`QLoRAConfig.to_bnb_config`.
+  :meth:`QLoRAConfig.to_bnb_config`, after
+  :func:`require_bitsandbytes` has looked ``bitsandbytes`` up
+  (never imported: transformers does that when it quantises).
 
 When any of these is missing, the corresponding method raises
 :class:`ImportError` with the install hint
-``pip install 'ai-forge[finetuning]'``.
+``pip install 'strata-forge[finetuning]'`` (for ``bitsandbytes``,
+the :class:`MissingBitsAndBytesError` subclass).
 
 ## Troubleshooting
 
 - **`ImportError: The [finetuning] extra is required`:** install
   the extra; on CPU-only macOS, expect lengthy wheel builds for
   ``torch``.
+- **`adapter 'qlora' needs bitsandbytes`:** the machine has the
+  training stack but not ``bitsandbytes`` (an install that predates
+  it joining ``[finetuning]``, or one made without the extra).
+  Reinstall ``strata-forge[finetuning]``, or train with
+  ``adapter="lora"``. When the message names an installed version,
+  that ``bitsandbytes`` is older than the extra's floor; upgrade it
+  with the ``pip install`` line the message prints.
 - **OOM in SFT:** lower ``per_device_batch_size``, raise
   ``gradient_accumulation_steps``, enable
   ``gradient_checkpointing`` (default on), or switch to QLoRA.

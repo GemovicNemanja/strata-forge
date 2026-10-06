@@ -159,12 +159,19 @@ The SSH backend needs `--ssh-host` and `--ssh-user` (port
 defaults to 22). SkyPilot reads its credentials from the
 standard environment.
 
+`cleanup` removes the saved job only once the backend confirms
+its state is gone. A cleanup that left something behind exits 1
+and keeps `~/.forge/jobs/<id>.json`, so running it again retries.
+
 ## train
 
 Run SFT or DPO over the configured dataset store. Heavy ML
-deps (`torch`, `transformers`, `trl`, `peft`) ride behind the
-`[finetuning]` extra and lazy-import only when the runner
-actually trains.
+deps (`torch`, `transformers`, `trl`, `peft`, `bitsandbytes`)
+ride behind the `[finetuning]` extra and lazy-import only when
+the runner actually trains. `--adapter qlora` checks for
+`bitsandbytes` before the dataset is resolved, so a machine
+without it fails at once with `adapter 'qlora' needs
+bitsandbytes` rather than at the model load.
 
 ```bash
 strata-forge train sft \
@@ -232,8 +239,11 @@ without touching the rest of your environment.
   `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` to fall back to
   the in-memory store.
 - **`The [finetuning] extra is required for SFTRunner`:**
-  install with `pip install 'ai-forge[finetuning]'`. Expect a
+  install with `pip install 'strata-forge[finetuning]'`. Expect a
   lengthy `torch` wheel build on CPU-only macOS.
+- **`adapter 'qlora' needs bitsandbytes`:** reinstall
+  `strata-forge[finetuning]` (it includes `bitsandbytes`), or
+  pass `--adapter lora`.
 - **`unknown job id`:** the saved state file under
   `~/.forge/jobs` was removed (probably by `strata-forge compute
   cleanup` on a previous invocation). Re-submit.

@@ -23,6 +23,14 @@ Those files outlive ``cleanup`` and the backend object, which is the
 point: when the process that owned the buffers is gone, the file is
 the only remaining evidence. It is opt-in so that a library user who
 never asks for it never finds log files appearing beside their code.
+
+``Task.secrets`` are written to a 0600 file in a private (0700)
+temporary directory of the job's own, and the task's ``run`` step
+finds its path in ``FORGE_SECRETS_FILE`` (``setup`` does not); the
+values are never in the child's environment. The child's outer shell
+removes the file on exit, below a subshell the task's own traps
+cannot displace, and the backend removes the directory once the
+child is gone.
 """
 
 from __future__ import annotations
@@ -30,7 +38,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shlex
+import shutil
 import signal
+import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,9 +50,12 @@ from typing import TYPE_CHECKING
 from strata_forge.compute.backends.base import (
     MAX_CONSOLE_CHUNK_BYTES,
     MAX_READ_FILE_BYTES,
+    CleanupError,
     safe_workdir_relpath,
+    secrets_guarded_script,
 )
 from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
+from strata_forge.compute.task import SECRETS_FILE_ENV, SECRETS_FILE_NAME, render_secrets_payload
 
 if TYPE_CHECKING:
     from strata_forge.compute.task import Task
@@ -186,6 +200,8 @@ class _JobState:
         self.workdir: str | None = None
         # Where this job's streams were teed, when a log_dir was configured.
         self.log_paths: tuple[Path, Path] | None = None
+        # The private directory holding the job's secrets file, while there is one.
+        self.secrets_dir: Path | None = None
 
 
 class LocalBackend:
@@ -195,8 +211,12 @@ class LocalBackend:
         name: Optional override for the backend's reported name.
             Default ``"local"``.
         env_inherit: When ``True`` (default), child processes
-            inherit the parent's ``os.environ``. When ``False``,
-            the child sees only ``Task.env``.
+            inherit the parent's ``os.environ`` (minus any
+            ``FORGE_SECRETS_FILE``, which names the parent's file,
+            not the child's). When ``False``, the child sees only
+            ``Task.env``. A task with secrets also exports
+            ``FORGE_SECRETS_FILE`` to its ``run`` step, never to
+            ``setup``.
         log_dir: When set, every job also tees its stdout/stderr
             to ``serve.stdout.log`` / ``serve.stderr.log`` under
             this directory, written as the bytes arrive and left
@@ -229,15 +249,26 @@ class LocalBackend:
         if task.num_nodes != 1:
             err = f"LocalBackend can only run single-node tasks; got num_nodes={task.num_nodes}"
             raise ValueError(err)
+        # A task built with `model_copy(update=...)` skipped every validator; nothing is
+        # delivered until its secrets have been through them.
+        task = task.revalidated()
 
         job_id = uuid.uuid4().hex
         state = _JobState()
         state.workdir = task.workdir
         state.log_paths = self._prepare_log_paths(state)
-        self._jobs[job_id] = state
 
         env = self._build_env(task)
         script = self._build_script(task)
+        if task.secrets:
+            state.secrets_dir = _write_secrets_file(task)
+            # The child's outer shell removes the file however it exits, so it does not outlive
+            # a setup that failed before anything read it, and only `run` is told where it is.
+            # The directory goes with the job.
+            script = secrets_guarded_script(
+                shlex.quote(str(state.secrets_dir / SECRETS_FILE_NAME)), task.setup, task.run
+            )
+        self._jobs[job_id] = state
 
         async def _runner() -> None:
             try:
@@ -288,6 +319,7 @@ class LocalBackend:
                 state.exit_code = -1
                 state.stderr_buffer.extend(f"local backend exception: {exc!r}".encode())
             finally:
+                _remove_secrets_dir(state)
                 state.finished_at = datetime.now(UTC)
 
         # Fire-and-forget; status / logs / cancel observe state directly.
@@ -321,6 +353,9 @@ class LocalBackend:
         env: dict[str, str] = {}
         if self._env_inherit:
             env.update(os.environ)
+            # A path to the PARENT's secrets file is not the child's to read, and a child that
+            # read it would also delete it. Only this task's own file is ever named.
+            env.pop(SECRETS_FILE_ENV, None)
         env.update(task.env)
         return env
 
@@ -472,14 +507,17 @@ class LocalBackend:
             state.cancelled = True
 
     async def cleanup(self, job: Job) -> None:
-        """Drop the job's in-memory state and make sure its process is gone.
+        """Make sure the job's process is gone, remove its secrets directory, drop its state.
 
-        Any ``log_dir`` files are left on disk on purpose: they exist to be read AFTER the
-        buffers they mirror have been discarded.
+        Raises :class:`CleanupError` when the secrets directory survives the removal, and keeps
+        the job's state so a later call can retry it: dropping the state first would leave the
+        directory with nothing that names it. Any ``log_dir`` files are left on disk on purpose:
+        they exist to be read AFTER the buffers they mirror have been discarded.
         """
-        state = self._jobs.pop(job.id, None)
+        state = self._jobs.get(job.id)
         if state is None:
             return  # already cleaned up — idempotent
+        removed = _remove_secrets_dir(state)
         # Make sure any lingering process is gone before we drop the state. Once this returns,
         # the state is dropped and nothing can name the group again, so it sweeps unconditionally
         # for the same reason cancel does — a job whose own process exited may still have left
@@ -487,6 +525,59 @@ class LocalBackend:
         process = state.process
         if process is not None:
             await _reap_group(process)
+        # Once more after the reap: the tree that was just stopped may have been writing there.
+        if not removed and not _remove_secrets_dir(state):
+            err = f"LocalBackend: job {job.id!r}'s secrets directory survived cleanup"
+            raise CleanupError(err)
+        self._jobs.pop(job.id, None)
+
+
+def _write_secrets_file(task: Task) -> Path:
+    """Write ``task.secrets`` to a 0600 file in a fresh 0700 directory; return the directory.
+
+    Modes are set explicitly rather than requested through ``mkdir``/``open``: those only ever
+    narrow by the umask, so a restrictive umask would leave the file unreadable by the child and
+    the explicit ``chmod`` is what makes the mode exact. ``O_EXCL | O_NOFOLLOW`` refuses a file
+    or symlink already at the path rather than writing through it.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="forge-job-"))
+    try:
+        directory.chmod(0o700)
+        fd = os.open(
+            directory / SECRETS_FILE_NAME,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(render_secrets_payload(task.secrets))
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    return directory
+
+
+def _remove_secrets_dir(state: _JobState) -> bool:
+    """Remove the job's secrets directory, if it still has one; return whether it is gone.
+
+    Idempotent. The job forgets the directory only once nothing is left at its path, so a removal
+    that failed is retried by the next call rather than recorded as done.
+    """
+    directory = state.secrets_dir
+    if directory is None:
+        return True
+    shutil.rmtree(directory, ignore_errors=True)
+    # `lstat`, not `exists`: `exists` returns False on ANY error, so a parent that cannot be
+    # searched (EACCES) would read as "gone" while the file is still there. Only "no such
+    # entry" proves it.
+    try:
+        directory.lstat()
+    except FileNotFoundError, NotADirectoryError:
+        state.secrets_dir = None
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _slice_stream(

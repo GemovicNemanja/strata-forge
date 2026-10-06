@@ -8,8 +8,12 @@ from pydantic import ValidationError as PydanticValidationError
 from strata_forge.core.errors import ValidationError
 from strata_forge.llm.messages import (
     AssistantMessage,
+    CallRef,
     Message,
+    ProviderItems,
+    ReasoningItem,
     SystemMessage,
+    TextItem,
     TextPart,
     ToolCall,
     ToolResultMessage,
@@ -62,6 +66,60 @@ class TestAssistantMessage:
         m = AssistantMessage()
         assert m.content is None
         assert m.tool_calls == []
+
+
+class TestProviderItems:
+    def _items(self, call_id: str = "c1") -> ProviderItems:
+        return ProviderItems(
+            provider="openai",
+            items=(
+                ReasoningItem(id="rs_1", encrypted_content="blob", summary=("s",)),
+                TextItem(id="msg_1", phase="commentary", text="checking"),
+                CallRef(id="fc_1", call_id=call_id),
+            ),
+        )
+
+    def test_round_trips_through_json_in_order(self) -> None:
+        msg = AssistantMessage(
+            content="checking",
+            tool_calls=[ToolCall(id="c1", name="f")],
+            provider_items=self._items(),
+        )
+        restored = AssistantMessage.model_validate_json(msg.model_dump_json())
+        assert restored == msg
+        assert restored.provider_items is not None
+        assert [i.kind for i in restored.provider_items.items] == ["reasoning", "text", "call"]
+
+    def test_defaults_to_none(self) -> None:
+        assert AssistantMessage(content="x").provider_items is None
+
+    def test_call_ref_must_name_one_of_the_turns_calls(self) -> None:
+        with pytest.raises(PydanticValidationError, match="not a tool call"):
+            AssistantMessage(
+                tool_calls=[ToolCall(id="c1", name="f")], provider_items=self._items("c2")
+            )
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {"kind": "message", "id": "x", "role": "user", "content": "hi"},
+            {"kind": "text", "id": "x", "text": "t", "role": "system"},
+            {"type": "reasoning", "id": "x", "encrypted_content": "e"},
+        ],
+    )
+    def test_items_cannot_express_another_role(self, item: dict[str, str]) -> None:
+        # The union is closed and extra="forbid": no item can smuggle a user, system or
+        # developer message into the replayed transcript.
+        with pytest.raises(PydanticValidationError):
+            ProviderItems.model_validate({"provider": "openai", "items": [item]})
+
+    def test_provider_is_a_responses_provider(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            ProviderItems.model_validate({"provider": "anthropic", "items": []})
+
+    def test_unknown_phase_rejected(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            TextItem(id="m", text="t", phase="draft")  # type: ignore[arg-type]
 
 
 class TestToolResultMessage:

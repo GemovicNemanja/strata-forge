@@ -20,15 +20,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from strata_forge.core.errors import RegistryError
 
 __all__ = [
+    "REGISTRY_DATA_FILE",
     "Capabilities",
     "Modality",
     "Model",
     "Pricing",
     "ProviderName",
     "ProviderRoute",
+    "ReasoningEffort",
     "Registry",
     "Tier",
     "Vendor",
+    "WireApi",
     "registry",
 ]
 
@@ -44,16 +47,38 @@ ProviderName = Literal[
     "azure",
     "openai_compat",
 ]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+WireApi = Literal["chat_completions", "responses"]
+
+# The providers that serve OpenAI's Responses API (`POST /v1/responses`). Every other provider
+# is reached through LiteLLM's Chat Completions translation.
+_RESPONSES_PROVIDERS: frozenset[ProviderName] = frozenset({"openai", "azure"})
 
 
 class ProviderRoute(BaseModel):
-    """A concrete ``(provider, provider_model_id)`` dispatch target for a model."""
+    """A concrete ``(provider, provider_model_id)`` dispatch target for a model.
+
+    ``wire_api`` is the API the route speaks. ``responses`` (OpenAI's Responses API) is
+    valid only on the ``openai`` and ``azure`` providers; every other route speaks Chat
+    Completions through LiteLLM.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: ProviderName
     provider_model_id: str
     is_default: bool = False
+    wire_api: WireApi = "chat_completions"
+
+    @model_validator(mode="after")
+    def _validate_wire_api(self) -> ProviderRoute:
+        if self.wire_api == "responses" and self.provider not in _RESPONSES_PROVIDERS:
+            msg = (
+                f"wire_api 'responses' is OpenAI's Responses API; route {self.provider!r} "
+                f"cannot speak it"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class Pricing(BaseModel):
@@ -68,7 +93,12 @@ class Pricing(BaseModel):
 
 
 class Capabilities(BaseModel):
-    """Feature flags for what a model supports."""
+    """Feature flags for what a model supports.
+
+    ``sampling_params`` is whether the model accepts ``temperature`` / ``top_p`` at its
+    default reasoning configuration. A reasoning model that rejects them there sets it
+    ``false``, and the client refuses those parameters before any provider call.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -77,6 +107,7 @@ class Capabilities(BaseModel):
     streaming: bool = True
     vision: bool = False
     prompt_caching: bool = False
+    sampling_params: bool = True
 
 
 class Model(BaseModel):
@@ -194,7 +225,10 @@ class Registry:
 # Module-level singleton loaded from registry_data.yaml at import time.
 # ---------------------------------------------------------------------------
 
-_REGISTRY_DATA_PATH = Path(__file__).parent / "registry_data.yaml"
+REGISTRY_DATA_FILE = "strata_forge/llm/registry_data.yaml"
+"""The curated registry file, as the package-relative path error messages name."""
+
+_REGISTRY_DATA_PATH = Path(__file__).parent / Path(REGISTRY_DATA_FILE).name
 
 
 def _load_registry(path: Path = _REGISTRY_DATA_PATH) -> Registry:

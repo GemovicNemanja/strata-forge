@@ -25,7 +25,7 @@ Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` fo
 
 | Module | Purpose | Module rules |
 |---|---|---|
-| `strata_forge.core` | Cross-cutting utilities: errors (`ForgeError` hierarchy), retry, structlog logging with `trace_id` propagation, `BudgetContext`, reproducibility helpers, UUIDv7 ids, shared types. Strictly upstream — does not import from any other `strata_forge.*` module. | [`src/strata_forge/core/CLAUDE.md`](src/strata_forge/core/CLAUDE.md) |
+| `strata_forge.core` | Cross-cutting utilities: errors (`ForgeError` hierarchy), retry, structlog logging with `trace_id` propagation, `BudgetContext`, reproducibility helpers, UUIDv7 ids, secret redaction (`Redactor`, the one scrubber for every surfaced string and relayed console), shared types. Strictly upstream — does not import from any other `strata_forge.*` module. | [`src/strata_forge/core/CLAUDE.md`](src/strata_forge/core/CLAUDE.md) |
 | `strata_forge.config` | Pydantic Settings root with sub-models per concern; YAML profile overlays (`FORGE_PROFILE`); `.env` loading. The single configuration entry point — never read env vars directly elsewhere. | [`src/strata_forge/config/CLAUDE.md`](src/strata_forge/config/CLAUDE.md) |
 | `strata_forge.llm` | Provider-abstracted async LLM client over LiteLLM. Owns the typed layer: Pydantic messages/responses, structured output, tools (`Tool`, `@tool`, `run_tool_loop`), multimodal, streaming, two-axis fallback, provider-agnostic cache, model registry. Reference: [`docs/modules/llm.md`](docs/modules/llm.md). | [`src/strata_forge/llm/CLAUDE.md`](src/strata_forge/llm/CLAUDE.md) |
 | `strata_forge.prompts` | Jinja2 templating with safe filters + Langfuse-backed prompt registry. Templates model the stable-prefix / dynamic-suffix split so provider prompt caching just works. Reference: [`docs/modules/prompts.md`](docs/modules/prompts.md). | [`src/strata_forge/prompts/CLAUDE.md`](src/strata_forge/prompts/CLAUDE.md) |
@@ -78,6 +78,7 @@ These apply everywhere in `src/strata_forge/`. Code that violates them is wrong 
 - Every LLM call is traced (when Langfuse is configured) and dumpable to NDJSON (env-gated via `FORGE_DIAGNOSTIC=1`).
 - Use the structlog logger from `strata_forge.core.logging`; `trace_id` propagates via contextvars across `await` boundaries — never pass it manually.
 - Do not log full prompts at `INFO`; use `DEBUG`. Never log raw API keys, AWS signatures, or session tokens.
+- A credential a compute job needs travels in `Task.secrets`, delivered as a private file the job reads and deletes, never in `Task.env`, a command line, a generated script or a child process's environment ([ADR 0019](docs/architecture/adr/0019-secrets-travel-beside-the-task.md)).
 
 ### 3.7 Cost awareness
 - LLM-touching code paths must respect any active `BudgetContext`. Pre-call estimation + post-call true-up.
@@ -120,6 +121,7 @@ Most of these are enforced by `ruff` and `pyright`. Local violations without jus
 - VCR cassettes scrub secrets in `before_record_request`. Recording without scrubbing = leaking credentials; rotate them.
 - Snapshot tests (`syrupy`) for provider format mappings — a failing snapshot is an early-warning signal, not noise to suppress.
 - Marker discipline: `live`, `redis`, `slow`, `integration` (declared in `pyproject.toml`; new markers go there).
+- Dependency pins are proven by `.github/workflows/clean-install.yml`, not by the lockfile: a run's machine installs this package fresh, so the job installs the same extras strings into empty venvs with no constraints and builds every config a run builds (`scripts/smoke_clean_install.py`). Its matrix is the extras strings the orchestrator installs on a run's machine, verbatim; when those change, the matrix changes in the same step. A new extras string a runner needs, or a new thing a runner constructs before loading weights, goes into the matrix or the smoke script in the same PR. That job executes upstream code no lockfile vouches for, so it never runs in `main`'s context (the schedule dispatches it on `dev`); and a job that holds a secret, a write token or a publishing identity never restores the Actions cache (`enable-cache: false`), because every ref restores what the default branch's scope holds.
 
 ---
 
@@ -209,6 +211,15 @@ A three-tier flow — **every** change follows it; never commit directly to `dev
 
 forge is a library, not a service, so it has no deploy of its own — but its branches feed the sibling **strata-server**'s deploys: the server's **staging** (`strata-server` `dev`) bundles forge **`dev`**, and the server's **production** (`strata-server` `main`) bundles forge **`main`**. So promote a forge change to `main` only once the server staging that consumes forge `dev` looks good, and keep forge `dev` green — it gates the whole staging chain.
 
+### Native model routes — the registry ships first
+
+`src/strata_forge/llm/registry_data.yaml` is the **allowlist for every vendor-native chat route the Strata app offers**. strata-server runs chat in-process on the forge it bundles, and `routing.resolve()` refuses (`RegistryError(reason="unknown_model")`) any id on the `anthropic` / `openai` / `vertex` / `bedrock` / `azure` routes that the registry does not carry; only `openai_compat` (OpenRouter) passes ids through. An app catalog entry naming a native route for an unregistered model therefore fails with "Unknown model" for every user who holds only that vendor's key. When a vendor's lineup changes:
+
+1. **Register the models in forge.** Copy ids, context window, max output, pricing and capability flags from the vendor's own documentation, never from memory, the app's catalog, LiteLLM's model map or OpenRouter, and name the pages in the entry's source comment. For OpenAI that is the model page AND the GPT family / migration guide (`developers.openai.com/api/docs/guides/latest-model`) and the reasoning guide (`.../guides/reasoning`), which carry the endpoint and parameter caveats the model page omits; for Anthropic it is the models overview, the pricing page and the thinking page (`platform.claude.com/docs/en/build-with-claude/thinking`, its tool-use and sampling-parameter limits). A capability flag states what the model does on its route's wire API: every OpenAI `openai` route speaks the Responses API (`wire_api: responses`, [ADR 0018](docs/architecture/adr/0018-openai-routes-speak-the-responses-api.md)), where current OpenAI models call tools at any reasoning effort, and `sampling_params: false` marks a model that rejects `temperature` / `top_p` at its default effort. Update `CURRENT_LINEUP` in `tests/unit/llm/test_routing.py` in the same change.
+2. **Smoke every new native route live** with a real key and the parameters the server actually sends (tools, its `max_tokens` budget): `scripts/smoke_responses.py` for OpenAI routes (two legs: a tool call that suspends, then the resumed turn with its replayed reasoning), and strata-server's staging smoke once staging bundles the change. A registry entry that has never answered a tool call is not done.
+3. **Release in one sequence across the three repos.** forge PR into `dev`, carrying the version bump §9b assigns and renaming `CHANGELOG.md`'s **Unreleased** heading to it: a **patch** for registry entries alone (the model registry is not §9b's method or dataset-format registry), a **minor** when the change also does something §9b lists, such as raising the dependency pin a new wire API needs → strata-server re-locks against forge `dev` and redeploys staging (its CLAUDE.md §3.8; the `strata-server-dev` redeploy §9b requires after every forge merge to `dev`), and the staging smoke passes → forge `dev` → `main`, tagged `vX.Y.Z` the same day (PyPI; §9b never leaves `main` untagged) → strata-server `dev` → `main`, whose production deploy rebuilds against that forge release → only then the app catalog PR (its `native-models` check green) → app `dev` → `main`.
+4. **The app may offer a native route only for a model whose entry has `tool_calling: true`**, because the app's chat always sends tools. A model forge cannot carry natively stays on the app's OpenRouter route. `CURRENT_LINEUP` is forge-local and cannot see the app's catalog; the recurrence guard for "the app names a native id forge lacks" is the app's `native-models` CI check, which resolves every native catalog route against the forge registry.
+
 ---
 
 ## 9. How to add a new top-level module
@@ -243,11 +254,34 @@ Anything under `src/` ships to a public index, so it must not name private sibli
 internal infrastructure — write module docstrings for an outside reader.
 
 **Cutting a release:** bump `version` in `pyproject.toml` **and** `__version__` in
-`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), promote
-`dev` → `main` per §8, then tag `main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies
-the tag matches the packaged version, builds, checks the archives, and uploads via PyPI **Trusted
-Publishing** (OIDC — there is no API token in this repo). `workflow_dispatch` publishes to TestPyPI
-for a rehearsal.
+`src/strata_forge/__init__.py` (they are separate strings and will drift if you forget), re-run
+`uv lock` (the lockfile records the project's own version; `uv lock --check` catches a stale
+one), record the release under its own heading in `CHANGELOG.md` (entries accumulate under
+**Unreleased** as they merge to `dev`; the bump renames that heading), promote `dev` → `main` per
+§8, then tag `main` with `vX.Y.Z`. The tag triggers `release.yml`, which verifies the tag matches
+the packaged version, builds, checks the archives, and uploads via PyPI **Trusted Publishing**
+(OIDC — there is no API token in this repo). `workflow_dispatch` publishes to TestPyPI for a rehearsal.
+
+**When a release is required — the release rule.** The engine runs on machines the control plane
+installs it onto at launch, pinned to the exact version the control plane validated the run's spec
+against (`strata_forge.pipelines.SPEC_VERSION`, sent as the spec's `engine_version`; the runner
+refuses any other installed engine with `engine version mismatch`). A change the control plane must
+see therefore has to be a version the control plane can pin:
+
+- Every promotion of `dev` → `main` that changes a **runner spec** (`RunSpec`, `FinetuneSpec`, a
+  `Hyperparams` field), the **method or dataset-format registry**, the **`Task` shape** or a
+  **dependency pin** is a **minor** bump, tagged the same day through `release.yml`. A fix that
+  changes none of those is a **patch** release. Never promote such a change to `main` untagged:
+  production installs a released version, so an untagged `main` is a change nothing can run.
+- The server's **production** promotion always follows the forge tag — the pin makes that
+  enforceable, because the production install string names the release the server bundled, and
+  a release that is not on PyPI cannot be installed.
+- **Staging** needs no release: it installs from `forge_ref=dev`, pinned to the exact commit the
+  staging server image bundled (`engine_version` is then `"<version>+<commit>"`). But the image
+  bundles forge only when the server is deployed, so **every forge merge to `dev` (and always a
+  version bump) is followed by a `strata-server-dev` redeploy** (`workflow_dispatch` of the
+  server's staging deploy workflow); until then staging keeps running the commit the image
+  bundled, and a capability that landed on forge `dev` is not on staging yet.
 
 ---
 

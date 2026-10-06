@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from strata_forge.core.errors import RegistryError
+from strata_forge.llm.cost import compute_cost
 from strata_forge.llm.registry import (
+    REGISTRY_DATA_FILE,
     Capabilities,
     Model,
     Pricing,
+    ProviderName,
     ProviderRoute,
     Registry,
 )
+from strata_forge.llm.registry import registry as global_registry
+from strata_forge.llm.responses import Usage
 from strata_forge.llm.routing import ModelRoute, resolve
 
 
@@ -186,6 +193,85 @@ class TestResolveUnknownModel:
         with pytest.raises(RegistryError) as exc:
             resolve("never-heard-of-it", provider="anthropic", registry=reg)
         assert exc.value.reason == "unknown_model"
+        assert exc.value.provider == "anthropic"
+
+    @pytest.mark.parametrize("provider", [None, "anthropic", "openai"])
+    def test_unknown_native_id_message_states_only_the_failure(
+        self, provider: ProviderName | None
+    ) -> None:
+        # The message can reach an application's end users, so it carries no developer
+        # remediation; the log names the file to change.
+        with capture_logs() as records, pytest.raises(RegistryError) as exc:
+            resolve("claude-not-yet-registered", provider=provider)
+        assert exc.value.reason == "unknown_model"
+        message = str(exc.value)
+        assert message.startswith("Unknown model: 'claude-not-yet-registered'")
+        assert REGISTRY_DATA_FILE not in message
+        assert "openai_compat" not in message
+        warnings = [r for r in records if r["event"] == "unknown_model"]
+        assert len(warnings) == 1
+        assert REGISTRY_DATA_FILE in warnings[0]["remediation"]
+        assert "openai_compat" in warnings[0]["remediation"]
+        assert Path(REGISTRY_DATA_FILE).name == "registry_data.yaml"
+
+
+# Each vendor's own API, the route its models must resolve on without a pin.
+_NATIVE_PROVIDER: dict[str, ProviderName] = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "google": "vertex",
+}
+
+
+class TestNativeRouteAllowlist:
+    """The registry is the allowlist for vendor-native routes.
+
+    A model a caller reaches on its vendor's own API must resolve there, be priceable
+    on the way back, and say truthfully whether it takes tools; otherwise the call fails
+    with ``unknown_model`` before (or ``RegistryError`` after) the provider answers.
+    """
+
+    @pytest.mark.parametrize("model", global_registry.list_models(), ids=lambda m: m.name)
+    def test_every_entry_resolves_on_its_native_provider(self, model: Model) -> None:
+        native = _NATIVE_PROVIDER[model.vendor]
+        assert model.default_route().provider == native
+        pinned = resolve(model.name, provider=native)
+        assert pinned.model == model.name
+        assert pinned.provider == native
+        assert pinned.provider_model_id
+
+    @pytest.mark.parametrize("model", global_registry.list_models(), ids=lambda m: m.name)
+    def test_every_entry_is_priced(self, model: Model) -> None:
+        usage = Usage(input_tokens=1_000, output_tokens=1_000)
+        assert compute_cost(usage, model.name) > 0
+
+    # The vendors' current lineups (Anthropic models overview, OpenAI model pages):
+    # (logical name, native provider, provider model id, takes tools on that route).
+    CURRENT_LINEUP: tuple[tuple[str, ProviderName, str, bool], ...] = (
+        ("claude-fable-5-1", "anthropic", "claude-fable-5-1", True),
+        ("claude-opus-5-5", "anthropic", "claude-opus-5-5", True),
+        ("claude-sonnet-5-5", "anthropic", "claude-sonnet-5-5", True),
+        ("claude-haiku-4-5", "anthropic", "claude-haiku-4-5-20251001", True),
+        ("gpt-6-astra", "openai", "gpt-6-astra", True),
+        ("gpt-6.1-sol", "openai", "gpt-6.1-sol", True),
+        ("gpt-6-luna", "openai", "gpt-6-luna", True),
+    )
+
+    @pytest.mark.parametrize(
+        ("name", "provider", "provider_model_id", "tools"),
+        CURRENT_LINEUP,
+        ids=[row[0] for row in CURRENT_LINEUP],
+    )
+    def test_current_lineup_resolves_natively(
+        self,
+        name: str,
+        provider: ProviderName,
+        provider_model_id: str,
+        tools: bool,
+    ) -> None:
+        route = resolve(name, provider=provider)
+        assert route.provider_model_id == provider_model_id
+        assert global_registry.get(name).capabilities.tool_calling is tools
 
 
 class TestResolveOpenAICompatBypass:
@@ -241,3 +327,38 @@ class TestResolveAgainstGlobalRegistry:
         with pytest.raises(RegistryError) as exc:
             resolve("gemini-3.1-pro", provider="openai")
         assert exc.value.reason == "unsupported_route"
+
+
+class TestResolveWireApi:
+    """``ModelRoute.wire_api`` is copied from the registered route the call resolves to."""
+
+    def test_default_is_chat_completions(self) -> None:
+        route = ModelRoute(model="m", provider="anthropic", provider_model_id="m")
+        assert route.wire_api == "chat_completions"
+
+    @pytest.mark.parametrize(
+        ("name", "provider", "wire_api"),
+        [
+            ("gpt-6.1-sol", None, "responses"),
+            ("gpt-6-astra", "openai", "responses"),
+            ("gpt-6-luna", "openai", "responses"),
+            ("gpt-5.5", "azure", "responses"),
+            ("gpt-5.5-pro", "openai", "responses"),
+            ("claude-opus-4-7", None, "chat_completions"),
+            ("claude-opus-4-7", "bedrock", "chat_completions"),
+            ("gemini-3.1-pro", None, "chat_completions"),
+        ],
+    )
+    def test_copied_from_the_registered_route(
+        self,
+        name: str,
+        provider: ProviderName | None,
+        wire_api: str,
+    ) -> None:
+        assert resolve(name, provider=provider).wire_api == wire_api
+
+    def test_openai_compat_pin_speaks_chat_completions(self) -> None:
+        # The same id through an operator endpoint (OpenRouter, vLLM, Ollama) is not the
+        # registered route, and those endpoints speak Chat Completions.
+        route = resolve("gpt-6.1-sol", provider="openai_compat")
+        assert route.wire_api == "chat_completions"

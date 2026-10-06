@@ -135,13 +135,15 @@ def build_vllm_task(
     name: str = "vllm-serve",
     setup: str | None = None,
     python_executable: str | None = None,
+    served_model_name: str | None = None,
 ) -> Task:
     """Build a Forge :class:`Task` that launches a vLLM server.
 
     Args:
         model: HuggingFace model id or local path. Becomes
-            ``--model`` for vLLM and the logical model id callers
-            pass to :class:`LLMClient`.
+            ``--model`` for vLLM and, unless ``served_model_name``
+            is set, the logical model id callers pass to
+            :class:`LLMClient`.
         port: HTTP port to listen on.
         host: Bind address.
         tensor_parallel_size: vLLM's ``--tensor-parallel-size``.
@@ -167,6 +169,10 @@ def build_vllm_task(
             with "command not found". Naming the interpreter removes
             that dependency, and keeps the install and the server in
             the same environment.
+        served_model_name: The model id the server answers to
+            (``--served-model-name``). Set it when ``model`` is a
+            local snapshot directory, so callers keep addressing the
+            model by its Hub id rather than by a path on the server.
     """
     # Deliberately NOT defaulting to sys.executable: this function also builds specs destined for
     # another machine, where an absolute path into the local virtualenv does not exist. The caller
@@ -195,6 +201,8 @@ def build_vllm_task(
         cli_args.extend(["--max-model-len", str(max_model_len)])
     if dtype is not None:
         cli_args.extend(["--dtype", dtype])
+    if served_model_name is not None:
+        cli_args.extend(["--served-model-name", served_model_name])
     cli_args.extend(extra_args)
 
     return Task(

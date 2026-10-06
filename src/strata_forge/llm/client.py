@@ -10,6 +10,9 @@ Ties every LLM building block together:
 - Tool calling and the multi-turn loop (:mod:`strata_forge.llm.tools`).
 - Multimodal content (:mod:`strata_forge.llm.multimodal`).
 - Streaming accumulators (:mod:`strata_forge.llm.streaming`).
+- OpenAI's Responses API on routes whose ``wire_api`` is ``responses``
+  (:mod:`strata_forge.llm.responses_wire`); every other route speaks Chat
+  Completions through LiteLLM.
 - Cost / token accounting via the registry + :mod:`strata_forge.llm.cost`.
 - ``BudgetContext`` enforcement (:mod:`strata_forge.core.budget`).
 - NDJSON diagnostic dump (:mod:`strata_forge.llm.diagnostic`).
@@ -34,9 +37,15 @@ import time
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from strata_forge.core.budget import current_budget
-from strata_forge.core.errors import RegistryError, ValidationError
+from strata_forge.core.errors import (
+    ProviderError,
+    ProviderServerError,
+    RegistryError,
+    ValidationError,
+)
 from strata_forge.core.ids import get_correlation_id
 from strata_forge.llm.cache import cache_key as compute_cache_key
 from strata_forge.llm.cost import compute_cost
@@ -78,8 +87,15 @@ from strata_forge.llm.providers import (
     ProviderClient,
     VertexProvider,
 )
-from strata_forge.llm.registry import ProviderName, registry
+from strata_forge.llm.registry import Model, ProviderName, registry
 from strata_forge.llm.responses import LLMResponse, ResponseChunk, ToolCall, ToolCallDelta, Usage
+from strata_forge.llm.responses_wire import (
+    ResponsesStreamParser,
+    build_request,
+    parse_response,
+    redact_encrypted_content,
+    requested_effort,
+)
 from strata_forge.llm.routing import ModelRoute, resolve
 from strata_forge.llm.schemas import (
     StructuredOutputError,
@@ -98,7 +114,13 @@ if TYPE_CHECKING:
     from strata_forge.llm.cache import CacheBackend
     from strata_forge.llm.fallback import FallbackEntry
     from strata_forge.llm.loop_events import LoopEvent
-    from strata_forge.llm.messages import AnyMessage, ContentPart, TextPart
+    from strata_forge.llm.messages import (
+        AnyMessage,
+        ContentPart,
+        ProviderItems,
+        ResponsesProvider,
+        TextPart,
+    )
     from strata_forge.llm.responses import FinishReason
 
 __all__ = [
@@ -362,18 +384,25 @@ def _parse_tool_calls(raw: Any) -> list[ToolCall]:
 
 
 def _parse_usage(raw: Any) -> Usage:
+    """Map LiteLLM's Chat Completions usage onto :class:`Usage`.
+
+    LiteLLM's ``prompt_tokens`` INCLUDES cached reads (``prompt_tokens_details.cached_tokens``)
+    and, for Anthropic, cache writes (``cache_creation_input_tokens``). ``compute_cost`` prices
+    each bucket separately, so the input count is reported net of both.
+    """
     if raw is None:
         return Usage(input_tokens=0, output_tokens=0)
-    input_tokens = _duck_get(raw, "prompt_tokens", 0) or 0
-    output_tokens = _duck_get(raw, "completion_tokens", 0) or 0
+    prompt_tokens = int(cast("int", _duck_get(raw, "prompt_tokens", 0) or 0))
+    output_tokens = int(cast("int", _duck_get(raw, "completion_tokens", 0) or 0))
     details = _duck_get(raw, "prompt_tokens_details")
-    cache_read = 0
-    if details is not None:
-        cache_read = _duck_get(details, "cached_tokens", 0) or 0
+    cache_read = int(cast("int", _duck_get(details, "cached_tokens", 0) or 0))
+    cache_write_raw = _duck_get(raw, "cache_creation_input_tokens", 0)
+    cache_write = cache_write_raw if isinstance(cache_write_raw, int) else 0
     return Usage(
-        input_tokens=int(cast("int", input_tokens)),
-        output_tokens=int(cast("int", output_tokens)),
-        cache_read_tokens=int(cast("int", cache_read)),
+        input_tokens=max(0, prompt_tokens - cache_read - cache_write),
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
     )
 
 
@@ -529,6 +558,7 @@ class LLMClient:
         """
         validate_conversation(list(messages))
         self._check_tool_capability(tools)
+        self._check_sampling_params(temperature, top_p, provider_extras)
 
         # Cache key uses the chain's HEAD model name. The cache is
         # provider-agnostic by construction (see `cache_key`), so a hit
@@ -565,7 +595,9 @@ class LLMClient:
             )
             await self._consume_budget(response)
             if self._cache is not None:
-                await self._cache.set(cache_k, response)
+                # The key is provider- and credential-agnostic, and encrypted reasoning
+                # replays only under the organization that produced it, so it is not stored.
+                await self._cache.set(cache_k, response.model_copy(update={"provider_items": None}))
             return response
 
         return await run_with_fallback(
@@ -592,7 +624,8 @@ class LLMClient:
 
         Dispatch by route:
 
-        - OpenAI / Azure / openai_compat: native ``response_format``.
+        - OpenAI / Azure / openai_compat: native ``response_format``
+          (``text.format`` on a Responses API route).
         - Anthropic / Bedrock: forced-tool emulation.
         - Vertex: ``response_schema`` on Gemini, forced-tool for Claude.
 
@@ -600,8 +633,14 @@ class LLMClient:
         client reprompts with the parse error included, up to
         ``max_reprompt_attempts`` times before raising
         :exc:`StructuredOutputError`.
+
+        Raises:
+            RegistryError: ``reason="capability_missing"``, before any
+                provider call, when a model in the chain is registered with
+                ``structured_output: false``.
         """
         validate_conversation(list(messages))
+        self._check_structured_output()
         head_entry = self._chain[0]
         head_provider = head_entry.providers[0] if head_entry.providers else None
         head_route = resolve(head_entry.model, head_provider)
@@ -677,11 +716,25 @@ class LLMClient:
         """
         validate_conversation(list(messages))
         self._check_tool_capability(tools)
+        self._check_sampling_params(temperature, top_p, provider_extras)
 
         entry = self._chain[0]
         first_provider = entry.providers[0] if entry.providers else None
         route = resolve(entry.model, first_provider)
         provider_client = self._provider_clients[route.provider]
+        if route.wire_api == "responses":
+            request = build_request(
+                messages=messages,
+                provider=route.provider,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                extras=provider_extras.get(route.provider) if provider_extras else None,
+                stream=True,
+            )
+            return self._stream_responses(provider_client, route, request)
+
         wire = [_message_to_wire(m, route.provider) for m in messages]
         kwargs: dict[str, Any] = {}
         if temperature is not None:
@@ -716,6 +769,32 @@ class LLMClient:
         except Exception as exc:
             mapped = map_litellm_exception(exc, model=route.model, provider=route.provider)
             raise mapped from exc
+
+    async def _stream_responses(
+        self,
+        provider_client: ProviderClient,
+        route: ModelRoute,
+        request: dict[str, Any],
+    ) -> AsyncIterator[ResponseChunk]:
+        parser = ResponsesStreamParser(_responses_provider(route), model=route.model)
+        _describe_to_litellm(provider_client, route)
+        try:
+            async for event in provider_client.aresponses_stream(
+                provider_model_id=route.provider_model_id,
+                request=request,
+            ):
+                chunk = parser.feed(event)
+                if chunk is not None:
+                    yield chunk
+        except ProviderError:
+            raise
+        except Exception as exc:
+            mapped = map_litellm_exception(exc, model=route.model, provider=route.provider)
+            raise mapped from exc
+        if not parser.finished:
+            # A stream cut before its terminal event must never read as a clean stop.
+            msg = "The response stream ended before the response completed"
+            raise ProviderServerError(msg, model=route.model, provider=route.provider)
 
     async def run_tool_loop(
         self,
@@ -767,7 +846,7 @@ class LLMClient:
                 return response
 
             history.append(
-                AssistantMessage(content=response.text or None, tool_calls=response.tool_calls)
+                _assistant_turn(response.text or None, response.tool_calls, response.provider_items)
             )
             for call in response.tool_calls:
                 tool_obj = tools_by_name.get(call.name)
@@ -885,6 +964,7 @@ class LLMClient:
         validate_conversation(list(messages))
         tool_list = list(tools)
         self._check_tool_capability(tool_list)
+        self._check_sampling_params(temperature, top_p, provider_extras)
 
         # A name shared between any two entries is fatal pre-flight: with
         # declarations in the mix it would make execute-vs-suspend ambiguous
@@ -913,6 +993,7 @@ class LLMClient:
             text_parts: list[str] = []
             finish_reason: FinishReason | None = None
             usage: Usage | None = None
+            provider_items: ProviderItems | None = None
             try:
                 async for chunk in await self.stream(
                     history,
@@ -931,6 +1012,8 @@ class LLMClient:
                         finish_reason = chunk.finish_reason
                     if chunk.usage is not None:
                         usage = chunk.usage
+                    if chunk.provider_items is not None:
+                        provider_items = chunk.provider_items
             except Exception as exc:
                 # A provider/transport error mid-stream is surfaced as a
                 # terminal event so the in-flight event stream ends cleanly,
@@ -948,7 +1031,7 @@ class LLMClient:
                 yield LoopError(message=str(exc), error_type=type(exc).__name__)
                 return
 
-            history.append(AssistantMessage(content="".join(text_parts) or None, tool_calls=calls))
+            history.append(_assistant_turn("".join(text_parts) or None, calls, provider_items))
             pending_calls: list[ToolCall] = []
             for call in calls:
                 yield ToolCallStarted(
@@ -1024,20 +1107,35 @@ class LLMClient:
 
     # --- Internals --------------------------------------------------------
 
+    def _registered_entries(self) -> list[tuple[ModelFallback, Model | None]]:
+        """Each chain entry with its registry model, or ``None`` when it has none to consult.
+
+        An entry pinned only to ``openai_compat`` gets ``None`` even when its id matches a
+        registered name: the operator's endpoint serves its own model, not the registered
+        route, so the registry's flags say nothing about it.
+        """
+        out: list[tuple[ModelFallback, Model | None]] = []
+        for entry in self._chain:
+            if entry.providers and all(p == "openai_compat" for p in entry.providers):
+                out.append((entry, None))
+                continue
+            try:
+                out.append((entry, registry.get(entry.model)))
+            except RegistryError:
+                out.append((entry, None))
+        return out
+
     def _check_tool_capability(self, tools: Sequence[AnyTool] | None) -> None:
         if not tools:
             return
-        for entry in self._chain:
-            try:
-                model_entry = registry.get(entry.model)
-            except RegistryError:
-                # The model isn't in the curated registry — typically an
-                # openai_compat / OpenRouter id, whose tool-calling capability
-                # Forge intentionally doesn't track (ADR 0004). By default we
-                # let it through (the provider decides at call time, and an
-                # unknown model also surfaces during fallback). With
-                # require_tool_support the caller wants a clean pre-flight
-                # signal instead of an opaque provider rejection mid-call.
+        for entry, model_entry in self._registered_entries():
+            if model_entry is None:
+                # Not confirmable from the registry — typically an openai_compat /
+                # OpenRouter id, whose tool-calling capability Forge intentionally doesn't
+                # track (ADR 0004). By default we let it through (the provider decides at
+                # call time, and an unknown model also surfaces during fallback). With
+                # require_tool_support the caller wants a clean pre-flight signal instead
+                # of an opaque provider rejection mid-call.
                 if self._require_tool_support:
                     err = (
                         f"Tool support for model {entry.model!r} cannot be confirmed "
@@ -1045,13 +1143,58 @@ class LLMClient:
                         "model). Construct the client with require_tool_support=False "
                         "to send tools anyway."
                     )
-                    raise RegistryError(
-                        err, model=entry.model, reason="capability_unknown"
-                    ) from None
+                    raise RegistryError(err, model=entry.model, reason="capability_unknown")
                 continue
             if not model_entry.capabilities.tool_calling:
                 err = f"Model {entry.model!r} does not support tool calling per the registry"
                 raise RegistryError(err, model=entry.model, reason="capability_missing")
+
+    def _check_structured_output(self) -> None:
+        for entry, model_entry in self._registered_entries():
+            if model_entry is not None and not model_entry.capabilities.structured_output:
+                err = f"Model {entry.model!r} does not support structured output per the registry"
+                raise RegistryError(err, model=entry.model, reason="capability_missing")
+
+    def _check_sampling_params(
+        self,
+        temperature: float | None,
+        top_p: float | None,
+        provider_extras: Mapping[ProviderName, Mapping[str, Any]] | None,
+    ) -> None:
+        """Refuse ``temperature`` / ``top_p`` pre-flight where the model rejects them.
+
+        A model registered with ``sampling_params: false`` rejects them at its default
+        reasoning configuration. On a Responses API route they become legal again only when
+        the caller's ``provider_extras`` set the reasoning effort to ``none``, and an explicit
+        effort other than ``none`` makes them illegal on any model.
+        """
+        if temperature is None and top_p is None:
+            return
+        for entry, model_entry in self._registered_entries():
+            if model_entry is None:
+                continue
+            providers = entry.providers or (model_entry.default_route().provider,)
+            for provider in providers:
+                route = model_entry.route_for(provider)
+                if route is None:
+                    continue
+                if route.wire_api == "responses":
+                    extras = provider_extras.get(provider) if provider_extras else None
+                    effort = requested_effort(extras)
+                    if effort == "none" or (
+                        effort is None and model_entry.capabilities.sampling_params
+                    ):
+                        continue
+                    hint = "; set the reasoning effort to 'none' where the model supports it"
+                elif model_entry.capabilities.sampling_params:
+                    continue
+                else:
+                    hint = ""
+                err = (
+                    f"Model {entry.model!r} does not accept temperature or top_p on the "
+                    f"{provider!r} route at its reasoning effort; omit them{hint}"
+                )
+                raise ValidationError(err)
 
     async def _invoke(
         self,
@@ -1067,6 +1210,19 @@ class LLMClient:
     ) -> LLMResponse:
         """One provider attempt — actual HTTP via the provider client."""
         provider_client = self._provider_clients[route.provider]
+        if route.wire_api == "responses":
+            request = build_request(
+                messages=messages,
+                provider=route.provider,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                response_format=response_format,
+                extras=provider_extras.get(route.provider) if provider_extras else None,
+            )
+            return await self._invoke_responses(provider_client, route, request)
+
         wire = [_message_to_wire(m, route.provider) for m in messages]
         kwargs: dict[str, Any] = {}
         if temperature is not None:
@@ -1107,13 +1263,61 @@ class LLMClient:
         await self._record_success(route=route, wire=wire, response=response)
         return response
 
+    async def _invoke_responses(
+        self,
+        provider_client: ProviderClient,
+        route: ModelRoute,
+        request: dict[str, Any],
+    ) -> LLMResponse:
+        """One Responses API attempt; the twin of the Chat Completions path in ``_invoke``."""
+        wire = _responses_diagnostic_wire(request)
+        _describe_to_litellm(provider_client, route)
+        start = time.perf_counter()
+        try:
+            raw = await provider_client.aresponses(
+                provider_model_id=route.provider_model_id,
+                request=request,
+            )
+            parsed = parse_response(raw, provider=_responses_provider(route), model=route.model)
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - start) * 1000
+            mapped = (
+                exc
+                if isinstance(exc, ProviderError)
+                else map_litellm_exception(exc, model=route.model, provider=route.provider)
+            )
+            await self._record_failure(route=route, wire=wire, latency_ms=latency_ms, error=mapped)
+            raise mapped from exc
+
+        latency_ms = (time.perf_counter() - start) * 1000
+        response = LLMResponse(
+            text=parsed.text,
+            tool_calls=parsed.tool_calls,
+            finish_reason=parsed.finish_reason,
+            usage=parsed.usage,
+            cost_usd=_cost_for_route(parsed.usage, route),
+            route=route,
+            cache_hit=False,
+            latency_ms=latency_ms,
+            provider_items=parsed.provider_items,
+        )
+        await self._record_success(route=route, wire=wire, response=response)
+        return response
+
     async def _consume_budget(self, response: LLMResponse) -> None:
         budget = current_budget()
         if budget is None:
             return
+        usage = response.usage
+        # ``input_tokens`` is net of cache, so a token ceiling counts every bucket explicitly.
         await budget.consume(
             usd=response.cost_usd,
-            tokens=response.usage.total_tokens,
+            tokens=(
+                usage.input_tokens
+                + usage.cache_read_tokens
+                + usage.cache_write_tokens
+                + usage.output_tokens
+            ),
         )
 
     async def _record_success(
@@ -1168,6 +1372,56 @@ class LLMClient:
             error=make_error_field(error),
         )
         await write_diagnostic_record(record)
+
+
+# ---------------------------------------------------------------------------
+# Responses API helpers
+# ---------------------------------------------------------------------------
+
+
+def _responses_provider(route: ModelRoute) -> ResponsesProvider:
+    """The route's provider as a Responses provider; the registry allows no other."""
+    if route.provider == "azure":
+        return "azure"
+    return "openai"
+
+
+def _describe_to_litellm(provider_client: ProviderClient, route: ModelRoute) -> None:
+    """Make sure LiteLLM maps the route's model, so it streams as the registry says."""
+    try:
+        model_entry = registry.get(route.model)
+    except RegistryError:
+        return
+    provider_client.describe_to_litellm(route.provider_model_id, model_entry)
+
+
+def _responses_diagnostic_wire(request: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The request's conversation for the diagnostic dump, encrypted reasoning redacted."""
+    items = cast("list[dict[str, Any]]", request.get("input", []))
+    wire = redact_encrypted_content(items)
+    instructions = request.get("instructions")
+    if isinstance(instructions, str):
+        wire.insert(0, {"type": "instructions", "content": instructions})
+    return wire
+
+
+def _assistant_turn(
+    text: str | None,
+    calls: list[ToolCall],
+    provider_items: ProviderItems | None,
+) -> AssistantMessage:
+    """The assistant message a tool loop appends, keeping the turn's provider items.
+
+    Items whose call references do not match the turn's calls (a provider that reported a
+    call id it never streamed) are dropped rather than failing the loop: the turn is then
+    replayed from its plain text and calls, which loses only the reasoning context.
+    """
+    if provider_items is not None:
+        try:
+            return AssistantMessage(content=text, tool_calls=calls, provider_items=provider_items)
+        except PydanticValidationError:
+            pass
+    return AssistantMessage(content=text, tool_calls=calls)
 
 
 # ---------------------------------------------------------------------------

@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import SecretStr
 
-from strata_forge.compute import Backend, LocalBackend, Task
+from strata_forge.compute import Backend, CleanupError, LocalBackend, Task
 from strata_forge.compute.backends import local as local_backend
+from strata_forge.core.errors import ForgeError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from strata_forge.compute.job import Job
 
@@ -472,6 +476,214 @@ class TestEnvInherit:
             assert "MARK=MISSING" in logs
         finally:
             os.environ.pop("FORGE_TEST_MARKER", None)
+
+
+_SENTINEL = "hf_SENTINELlocalsecret0123456789"
+
+
+class TestSecretDelivery:
+    """Secrets reach the child as a private file it is pointed at, never as its environment."""
+
+    async def test_the_child_environment_never_holds_the_value(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run='env > env.txt; cat "$FORGE_SECRETS_FILE" > copy.json; '
+                'ls -l "$FORGE_SECRETS_FILE" > mode.txt',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        assert (await backend.status(job)).state == "succeeded", await backend.logs(job)
+        environ = (tmp_path / "env.txt").read_text()
+        assert _SENTINEL not in environ
+        assert "FORGE_SECRETS_FILE=" in environ
+        # The file held the value, and only its owner could read it.
+        assert json.loads((tmp_path / "copy.json").read_text()) == {"HF_TOKEN": _SENTINEL}
+        assert (tmp_path / "mode.txt").read_text().startswith("-rw-------")
+        assert _SENTINEL not in json.dumps(job.model_dump(mode="json"))
+
+    async def test_the_file_and_its_directory_are_gone_after_the_job(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run='dirname "$FORGE_SECRETS_FILE" > dir.txt; false',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        secrets_dir = Path((tmp_path / "dir.txt").read_text().strip())
+        assert not await asyncio.to_thread(secrets_dir.exists)
+
+    async def test_a_hostile_umask_does_not_lock_the_child_out(self, tmp_path: Path) -> None:
+        previous = os.umask(0o777)
+        try:
+            backend = LocalBackend()
+            job = await backend.submit(
+                Task(
+                    name="s",
+                    workdir=str(tmp_path),
+                    run='test -r "$FORGE_SECRETS_FILE" && echo READABLE',
+                    secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+                )
+            )
+        finally:
+            os.umask(previous)
+        await _wait_until_terminal(backend, job)
+        assert "READABLE" in await backend.logs(job)
+
+    async def test_a_parent_secrets_path_is_not_inherited(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A runner that starts a child has the path to ITS file in its environment. The child
+        # must not inherit it: it is not the child's to read, and reading it means deleting it.
+        monkeypatch.setenv("FORGE_SECRETS_FILE", "/parent/.secrets.json")
+        backend = LocalBackend()
+        job = await backend.submit(Task(name="s", run="echo PATH_SEEN=${FORGE_SECRETS_FILE:-NONE}"))
+        await _wait_until_terminal(backend, job)
+        assert "PATH_SEEN=NONE" in await backend.logs(job)
+
+    async def test_setup_never_sees_the_path_and_its_own_trap_cannot_keep_the_file(
+        self, tmp_path: Path
+    ) -> None:
+        # The setup installs its own EXIT trap, as an orchestrator's bootstrap does; in the
+        # child's own shell that would replace the one removing the file.
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                setup=(
+                    "trap 'echo stopped > ticker.txt' EXIT; "
+                    'echo "${FORGE_SECRETS_FILE:-UNSET}" > setup_saw.txt'
+                ),
+                run='echo "$FORGE_SECRETS_FILE" > run_saw.txt; exit 3',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        status = await backend.status(job)
+        assert status.exit_code == 3, await backend.logs(job)
+        assert (tmp_path / "setup_saw.txt").read_text().strip() == "UNSET"
+        assert (tmp_path / "run_saw.txt").read_text().strip().endswith("/.secrets.json")
+        assert (tmp_path / "ticker.txt").read_text().strip() == "stopped"
+
+    async def test_a_task_that_skipped_validation_is_revalidated_before_delivery(self) -> None:
+        backend = LocalBackend()
+        task = Task(name="s", run="true", secrets={"HF_TOKEN": SecretStr(_SENTINEL)}).model_copy(
+            update={"env": {"HF_TOKEN": "x"}}
+        )
+        with pytest.raises(ValueError, match="both env and secrets"):
+            await backend.submit(task)
+
+    async def test_without_inheritance_the_child_still_finds_its_file(self) -> None:
+        backend = LocalBackend(env_inherit=False)
+        job = await backend.submit(
+            Task(
+                name="s",
+                run='test -f "$FORGE_SECRETS_FILE" && echo FOUND',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        assert "FOUND" in await backend.logs(job)
+
+
+class TestVerifiedCleanup:
+    """`cleanup` returns only once the secrets directory is gone, and keeps a job it could not
+    clean, so the retry has something that still names the directory."""
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+    async def test_a_directory_that_survives_raises_and_a_retry_removes_it(
+        self, tmp_path: Path
+    ) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run=(
+                    'd=$(dirname "$FORGE_SECRETS_FILE"); echo "$d" > dir.txt; '
+                    'mkdir "$d/locked" && touch "$d/locked/f" && chmod 500 "$d/locked"'
+                ),
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        secrets_dir = Path((tmp_path / "dir.txt").read_text().strip())
+        locked = secrets_dir / "locked"
+        try:
+            with pytest.raises(CleanupError, match="survived cleanup") as excinfo:
+                await backend.cleanup(job)
+            assert isinstance(excinfo.value, ForgeError)
+            assert str(secrets_dir) not in str(excinfo.value)
+            assert (await backend.status(job)).state == "succeeded"
+        finally:
+            await asyncio.to_thread(locked.chmod, 0o700)
+        await backend.cleanup(job)
+        assert not await asyncio.to_thread(secrets_dir.exists)
+        with pytest.raises(ValueError, match="unknown job"):
+            await backend.status(job)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+    async def test_a_directory_that_cannot_be_looked_at_is_not_read_as_gone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `Path.exists` returns False on ANY error, so with the parent unsearchable a surviving
+        # directory read as removed and the job that named it was dropped.
+        parent = tmp_path / "tmp"
+        parent.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(parent))
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                # The parent is locked while the job runs, so the removal on exit fails too.
+                run=(
+                    'dirname "$FORGE_SECRETS_FILE" > dir.txt.tmp && mv dir.txt.tmp dir.txt; '
+                    "while [ ! -e go ]; do sleep 0.05; done"
+                ),
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        dir_file = tmp_path / "dir.txt"
+        await _wait_until(dir_file.exists)
+        secrets_dir = Path(dir_file.read_text().strip())
+        assert secrets_dir.parent == parent
+        await asyncio.to_thread(parent.chmod, 0o000)
+        try:
+            (tmp_path / "go").touch()
+            await _wait_until_terminal(backend, job)
+            with pytest.raises(CleanupError, match="survived cleanup"):
+                await backend.cleanup(job)
+        finally:
+            await asyncio.to_thread(parent.chmod, 0o700)
+        assert await asyncio.to_thread(secrets_dir.is_dir)
+        await backend.cleanup(job)
+        assert not await asyncio.to_thread(secrets_dir.exists)
+
+    async def test_a_job_whose_directory_is_already_gone_is_dropped(self, tmp_path: Path) -> None:
+        backend = LocalBackend()
+        job = await backend.submit(
+            Task(
+                name="s",
+                workdir=str(tmp_path),
+                run='dirname "$FORGE_SECRETS_FILE" > dir.txt',
+                secrets={"HF_TOKEN": SecretStr(_SENTINEL)},
+            )
+        )
+        await _wait_until_terminal(backend, job)
+        await backend.cleanup(job)
+        await backend.cleanup(job)
+        secrets_dir = Path((tmp_path / "dir.txt").read_text().strip())
+        assert not await asyncio.to_thread(secrets_dir.exists)
+        with pytest.raises(ValueError, match="unknown job"):
+            await backend.status(job)
 
 
 class TestStreamedOutput:

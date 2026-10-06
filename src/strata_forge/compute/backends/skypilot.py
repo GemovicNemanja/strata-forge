@@ -20,11 +20,18 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from strata_forge.compute.backends.base import MAX_CONSOLE_CHUNK_BYTES, safe_workdir_relpath
+from strata_forge.compute.backends.base import (
+    MAX_CONSOLE_CHUNK_BYTES,
+    CleanupError,
+    safe_workdir_relpath,
+)
 from strata_forge.compute.job import ConsoleChunk, Job, JobStatus
 from strata_forge.compute.task import Task  # noqa: TC001 — runtime use in submit
 
 __all__ = ["SkyPilotBackend"]
+
+# What SkyPilot raises when asked to tear down a cluster that is already gone.
+_CLUSTER_GONE = "ClusterDoesNotExist"
 
 
 def _get_field(record: Any, key: str) -> Any:
@@ -125,6 +132,16 @@ class SkyPilotBackend:
         return kwargs
 
     async def submit(self, task: Task) -> Job:
+        if task.secrets:
+            # Fail closed. SkyPilot's only channel for a task's values is `envs`, which lands in
+            # the job's environment and in the cluster's task records — exactly what
+            # `Task.secrets` exists to keep a credential out of. Refused before any client work,
+            # so nothing about the task has left this process.
+            err = (
+                "SkyPilotBackend cannot deliver Task.secrets: it has no private file channel, "
+                "and passing them as envs would put them in the job's environment"
+            )
+            raise ValueError(err)
         client = self._get_client()
         cluster_name = f"{self._cluster_prefix}{task.name}-{uuid.uuid4().hex[:8]}"
         sky_kwargs = self._build_sky_task(task)
@@ -251,10 +268,28 @@ class SkyPilotBackend:
         await asyncio.to_thread(_cancel)
 
     async def cleanup(self, job: Job) -> None:
+        """Tear the job's cluster down; raise :class:`CleanupError` if SkyPilot could not.
+
+        A cluster that no longer exists is a success, which keeps the method idempotent.
+        """
         cluster = self._cluster_for(job)
         client = self._get_client()
 
         def _down() -> None:
-            client.down(cluster_name=cluster)
+            request_id: Any = client.down(cluster_name=cluster)
+            # The request-based SDK returns a request id at once and reports the outcome,
+            # `ClusterDoesNotExist` included, only when that request is resolved. Returning
+            # before then would mean "teardown queued", not "cluster gone". An older SDK
+            # returned nothing and did the work in the call.
+            if request_id is not None:
+                client.get(request_id)
 
-        await asyncio.to_thread(_down)
+        try:
+            await asyncio.to_thread(_down)
+        except Exception as exc:
+            # Matched by name: `sky.exceptions` is importable only with the extra this backend
+            # loads lazily, and a client passed in by the caller need not come from it.
+            if type(exc).__name__ == _CLUSTER_GONE:
+                return
+            err = f"SkyPilotBackend: cluster {cluster!r} was not torn down ({type(exc).__name__})"
+            raise CleanupError(err) from exc

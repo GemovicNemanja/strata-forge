@@ -157,11 +157,20 @@ def dpo_cmd(
 def _build_peft(adapter: str, rank: int) -> Any:
     if adapter == "none":
         return None
-    from strata_forge.training.peft import LoRAConfig, QLoRAConfig
+    from strata_forge.training.peft import (
+        LoRAConfig,
+        MissingBitsAndBytesError,
+        QLoRAConfig,
+        require_bitsandbytes,
+    )
 
     if adapter == "lora":
         return LoRAConfig(r=rank)
     if adapter == "qlora":
+        try:
+            require_bitsandbytes()
+        except MissingBitsAndBytesError as exc:
+            error_exit(str(exc))
         return QLoRAConfig(lora=LoRAConfig(r=rank))
     error_exit(f"unknown adapter {adapter!r}")
 
@@ -205,8 +214,8 @@ async def _run_sft(
 ) -> None:
     from strata_forge.training.sft import SFTConfig, SFTRunner
 
-    dataset = await _resolve_dataset(dataset_name, dataset_version, dataset_file)
     peft_cfg = _build_peft(adapter, adapter_rank)
+    dataset = await _resolve_dataset(dataset_name, dataset_version, dataset_file)
 
     config = SFTConfig(
         model_id=model_id,
@@ -257,8 +266,8 @@ async def _run_dpo(
 ) -> None:
     from strata_forge.training.preference import DPOConfig, PreferenceRunner
 
-    dataset = await _resolve_dataset(dataset_name, dataset_version, dataset_file)
     peft_cfg = _build_peft(adapter, adapter_rank)
+    dataset = await _resolve_dataset(dataset_name, dataset_version, dataset_file)
 
     config = DPOConfig(
         model_id=model_id,

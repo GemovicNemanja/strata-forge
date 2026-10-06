@@ -9,7 +9,9 @@ ships typed task / job / status Pydantic shapes, a
 :class:`LLMClient`, and small task-builder functions for
 self-hosted inference servers (vLLM, TGI, SGLang). See
 [ADR 0013](../architecture/adr/0013-compute-task-and-backend-shapes.md)
-for the task-as-data + Protocol design rationale.
+for the task-as-data + Protocol design rationale, and
+[ADR 0019](../architecture/adr/0019-secrets-travel-beside-the-task.md)
+for how a job's credentials reach it.
 
 Integration points:
 
@@ -41,8 +43,11 @@ Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 
 - [Quickstart](#quickstart)
 - [Task and ResourceSpec](#task-and-resourcespec)
+  - [Secrets](#secrets)
 - [Job lifecycle](#job-lifecycle)
+  - [The runner contract](#the-runner-contract)
 - [Backend protocol](#backend-protocol)
+  - [Cleanup is verified](#cleanup-is-verified)
 - [LocalBackend](#localbackend)
 - [SSHBackend](#sshbackend)
 - [SkyPilotBackend](#skypilotbackend)
@@ -137,6 +142,52 @@ roundtripped = Task.from_yaml_str(yaml_text)
 ``resources`` entirely; SSH inherits whatever the host has;
 SkyPilot forwards it verbatim.
 
+### Secrets
+
+A credential the job needs goes in ``secrets``, never in ``env``:
+
+```python
+from pydantic import SecretStr
+
+task = Task(
+    name="push-results",
+    run="python -m my_pipeline",
+    env={"WANDB_PROJECT": "forge-experiments"},
+    secrets={"HF_TOKEN": SecretStr(token)},
+)
+```
+
+``Task.secrets`` travels beside the task rather than in it:
+
+- It is ``dict[str, SecretStr]``, excluded from ``model_dump`` /
+  ``model_dump_json`` / ``to_yaml`` and from ``repr``, and never
+  read from YAML. The values are masked before any validator runs,
+  so no rendering of a validation error (``str``, ``errors()``,
+  ``json()``) carries one. A pickled ``Task`` does carry them: never
+  pickle a task with secrets.
+- Keys look like environment variable names
+  (``^[A-Z][A-Z0-9_]{0,63}$``); at most 8; values non-empty; a key
+  may not also appear in ``env``. ``env`` may not set
+  ``FORGE_SECRETS_FILE``. Set secrets through ``Task(...)`` or
+  ``Task.model_validate``: ``model_copy(update=...)`` skips the
+  validators, so every backend rebuilds the task through them
+  (``Task.revalidated()``) before it delivers anything.
+- The backend writes them as one JSON object to a 0600
+  ``.secrets.json`` in a 0700 directory and exports
+  ``FORGE_SECRETS_FILE`` (``strata_forge.compute.SECRETS_FILE_ENV``),
+  its absolute path, to the task's ``run`` step only; ``setup`` does
+  not see it. That path is the only secret-related thing in the
+  job's environment. An outer shell removes the file on exit, setup
+  failure and SIGTERM included, while ``setup`` and ``run`` execute
+  in a subshell below it, so a ``trap ... EXIT`` the task sets
+  cannot displace that removal.
+- A backend with no private channel refuses a task with secrets
+  rather than falling back to the environment
+  (:class:`SkyPilotBackend` raises ``ValueError``).
+
+A job reads the file once and deletes it; the pipeline runners do
+that before anything else (see [the runner contract](#the-runner-contract)).
+
 ## Job lifecycle
 
 Backends return :class:`Job` handles from ``submit``. A
@@ -208,21 +259,187 @@ rest of the plumbing every VM-side runner shares (token scrubbing, repo-id
 re-validation, the elapsed-stamping phase ticker, and the entry point that
 reports an outcome exactly once).
 
+Scrubbing is :class:`strata_forge.core.redact.Redactor`, built once per run
+from the write token (``run_redactor``) and applied to every phase caption,
+every error event, the failure reason printed to stderr, and the per-row
+``error`` column the inference runner writes into its results and pushes to
+the Hub. A token too short to redact safely fails the run before it starts.
+See [Redacting the console](#redacting-the-console) for the half a relay owns.
+
 The package ships two runners over that plumbing:
 ``inference_runner`` (serve a model with vLLM, run a batch over a dataset)
 and ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
 adapter or merged model to the Hub). Both read an inert JSON spec from
-``STRATA_RUN_CONFIG``, take the HF write token only from its own
-``HF_WRITE_TOKEN`` env var, and append the same ``ProgressEvent`` stream to
+``STRATA_RUN_CONFIG``, take the Hugging Face token only from the private
+secrets file the backend wrote beside the job, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
+
+### The runner contract
+
+An orchestrator that launches a ``strata_forge.pipelines`` runner on a
+machine it does not own holds up its side of the contract in five places:
+
+- **The spec is inert data** in ``STRATA_RUN_CONFIG``: JSON validated into
+  a Pydantic model with ``extra="forbid"``, so a key the installed engine
+  does not know is a named failure, never an ignored instruction. Nothing
+  in a spec names code to run. A fine-tuning spec's
+  ``hyperparams.extra_trainer_args`` (TRL's own argument surface, passed
+  through verbatim) is refused by name when it sets a knob that would act
+  under terms other than the run's: ``chat_template_path``,
+  ``trust_remote_code``, ``model_init_kwargs``, ``push_to_hub`` and every
+  ``hub_*`` / ``trackio_*`` setting (Hub reads and pushes with the
+  machine's own credential, or a repo's code), ``resume_from_checkpoint``,
+  ``deepspeed``, ``fsdp_config``, ``accelerator_config`` (files on the
+  machine), ``logging_dir`` and ``report_to``. A caller driving
+  :mod:`strata_forge.training` from Python keeps all of them.
+- **The Hugging Face token travels apart from the spec**, as
+  ``Task.secrets={"HF_TOKEN": SecretStr(token)}``, which the backend writes
+  to the private file named by ``FORGE_SECRETS_FILE`` (see
+  [Secrets](#secrets)). ``runner_main`` calls
+  ``strata_forge.pipelines._common.load_secrets()`` before anything else:
+  it refuses a path that is not an absolute ``.../.secrets.json`` without
+  touching it, opens the file without following a symlink, requires a
+  regular file owned by the runner's user with no group or other bits,
+  reads at most 64 KiB, and unlinks it whatever the outcome, so the file is
+  gone before the runner makes a network call or starts a subprocess. The
+  file is a JSON object; ``HF_TOKEN`` is the only key a runner reads, and
+  any other key is refused (counted, never named). The key is exported
+  as ``strata_forge.pipelines.HF_TOKEN_SECRET`` for orchestrators. The
+  open uses ``O_NONBLOCK``, so a FIFO at the path is refused rather than
+  waited on. A missing, unreadable, misowned or
+  malformed file fails the run with a named error that never carries the
+  file's contents. The values reach the runner as ``SecretStr`` in a
+  ``RunSecrets`` (``hf_token``), the callable ``runner_main`` drives takes
+  ``(writer, secrets)``, and the runner scrubs the token (and anything
+  token-shaped) from every message it emits. The model server the
+  inference runner starts gets an allow-listed environment
+  (``model_server_environ()``: ``PATH``, ``HOME``, ``USER``, ``LOGNAME``,
+  ``LANG``, ``LC_ALL``, ``LC_CTYPE``, ``TMPDIR``, ``LD_LIBRARY_PATH``,
+  ``XDG_CACHE_HOME``, ``HF_HOME``, ``HF_HUB_CACHE``,
+  ``TRANSFORMERS_CACHE``, ``PYTHONUNBUFFERED`` and the ``CUDA_*`` /
+  ``NVIDIA_*`` / ``NCCL_*`` / ``VLLM_*`` families, minus any name that
+  says it holds a credential) and does not inherit the runner's own. That
+  also keeps an ambient ``HF_TOKEN``, ``HF_ENDPOINT`` or ``HF_HUB_*``
+  setting from reaching the server.
+  Transition: with no ``FORGE_SECRETS_FILE`` set, a 0.4 runner still reads
+  the token from ``HF_WRITE_TOKEN``, removes it from its own environment,
+  and records a ``phase`` event (and a stderr ``warning:``) saying that
+  delivery is deprecated; with a file set, the variable is never read.
+  The fallback is removed in 0.5.0.
+- **Hub reads use the delivered token, or none.** The same ``HF_TOKEN`` is
+  the run's credential for every Hub read as well as the push: the dataset
+  split, the training base model and tokenizer (and, for DPO / KTO without
+  an adapter, the reference model), the merge step's base, and the
+  inference runner's model download. Each read passes
+  ``RunSecrets.hub_credential()`` explicitly: the token, or ``False`` when
+  none was delivered, which sends no credential. Never ``None``, which every
+  Hugging Face library resolves to whatever the machine holds (an
+  ``HF_TOKEN`` variable, a cached login, forge's own settings), so a run
+  authenticates with exactly the credential the orchestrator decided on.
+  ``False`` does not reach the machine's Hub cache: ``huggingface_hub``
+  answers a refused (401 / gated) request from a snapshot it already holds,
+  and ``datasets`` from its own cache, so a gated or private repo that an
+  earlier run on the same account cached still loads without a token. That
+  is an accepted residual: the cache belongs to the account the runner
+  runs as, which can read it directly anyway. An
+  orchestrator therefore delivers the token to any run that reads a gated
+  or private model or dataset, not only to one that pushes; the push stays
+  gated on ``output_repo_id`` alone. Every model load sets
+  ``trust_remote_code=False`` and ``use_safetensors=True``, and every
+  tokenizer load ``trust_remote_code=False`` (see
+  [training: Loading from the Hub](training.md#loading-from-the-hub)).
+  The inference runner downloads the model **itself, before** the model
+  server starts: ``HFHubClient(token=...).download_snapshot(model_id,
+  allow_patterns=SNAPSHOT_PATTERNS, ignore_patterns=SNAPSHOT_IGNORED)``
+  fetches safetensors weights, JSON configs and the tokenizer and
+  chat-template files, and never a pickle checkpoint (``*.bin``, ``*.pt``,
+  ``*.pth``, ``*.pkl``, ``*.ckpt``, or an array format that can carry one),
+  a ``*.py`` file, compiled module or shell script, or an ``original/``
+  directory. A snapshot with no ``*.safetensors`` file at its root (where
+  the server reads weights) fails the run by name before the server
+  starts. The server is then started on the local snapshot
+  (``--model <snapshot> --served-model-name <model_id> --load-format
+  safetensors``) with ``HF_HUB_OFFLINE=1``, so it never holds the token
+  and fetches nothing of its own. The snapshot lands in the Hub cache
+  (``HF_HOME``), so a warm machine reuses it; the directory is the cache's
+  shared folder for that commit, which can also hold files an earlier,
+  unfiltered download left there, and ``--load-format safetensors`` is what
+  keeps the server off a pickle checkpoint among them (vLLM's default
+  falls back to one). ``LocalBackend`` starts the server through a login
+  shell (``bash -lc``), which re-sources the machine's profile after the
+  allow-listed environment is applied: a profile that exports
+  ``HF_TOKEN`` or ``HF_HUB_OFFLINE`` puts it back into the server's
+  environment. The delivered token is never affected; an operator
+  verifying the server's environment checks the profile as well.
+- **Progress is one protocol.** Both runners append the same
+  ``ProgressEvent`` stream to ``FORGE_PROGRESS_PATH``, and the exit code is
+  the run's verdict.
+- **The spec names the engine that validated it.** Every runner spec
+  carries ``engine_version: str | None``, which the orchestrator sets to
+  ``strata_forge.pipelines.SPEC_VERSION`` (the package version) — or to
+  ``f"{SPEC_VERSION}+{commit}"`` when it installs the engine from a git ref
+  rather than a release, ``commit`` being the full id of the commit its own
+  bundled engine was built from. ``load_config`` compares the version half
+  with the installed ``strata_forge.__version__`` and the commit half with
+  the installed distribution's PEP 610 ``direct_url.json`` commit, and
+  refuses either disagreement with ``engine version mismatch``. The check
+  runs on the parsed JSON before the model validates anything else, so a
+  spec that carries both a field this engine does not know and a version
+  it does not match reports the mismatch, not the unknown field: the run
+  record blames the stale machine, and the run exits 1 with that as its
+  reason. The version half is also compared with the version the
+  installed distribution's metadata records (what the pin resolved
+  against), so a shadowed import or a version-string drift between
+  ``pyproject.toml`` and ``__init__.py`` is a mismatch too. A ``+`` with
+  anything but a full lowercase commit id after it is a malformed claim
+  and is refused, never read as version-only. An engine with no recorded
+  commit (a release from PyPI, an editable checkout) cannot satisfy a
+  commit claim. The compare is string equality, never a PEP 440
+  normalisation: ``0.3``, ``v0.3.0`` and ``0.3.0.post0`` are not ``0.3.0``.
+  ``None`` makes no claim and is accepted, as the transition for an
+  orchestrator from before the handshake, but never silently: the run's
+  first ``phase`` event (and a stderr ``warning:`` line) says the spec
+  carried no ``engine_version`` and the installed engine was not checked,
+  so the record of an unchecked launch says so. An orchestrator that stamps
+  every spec ends the transition on its own machines by setting
+  ``FORGE_REQUIRE_ENGINE_VERSION=1`` in the runner's environment
+  (``strata_forge.pipelines._common.REQUIRE_ENGINE_VERSION_ENV``): a
+  missing claim is then refused like any other mismatch, which is what
+  stops a rolled-back control plane that sends ``null`` from running a
+  newer engine unchecked. Every runner spec declares the field:
+  ``load_config`` raises ``TypeError`` for a spec class that does not, so a
+  runner cannot opt out by omission.
+
+The handshake exists for a warm machine that still runs an OLDER engine
+than the one that validated the spec. ``extra="forbid"`` catches that only
+when the newer spec carries a field the old engine does not know; a
+behaviour change on the same spec shape (where the write token travels,
+what the scrubber removes, a default) reaches the old engine with no spec
+error at all, and the run fails, or silently does the old thing, long after
+launch. The mirror case, a machine whose engine is NEWER than the one that
+validated the spec (a rolled-back control plane, a spec replayed after an
+upgrade), is the same refusal: the spec names one engine and runs under no
+other. And every commit of a development branch shares one
+``__version__`` until a release bump, so the commit half is what lets a
+deployment that installs from a branch see that the machine runs an older
+commit than the one that validated the spec. The string is the
+orchestrator's, never a user's: the same value decides what the setup step
+installs, so a spec cannot pick an engine the orchestrator did not validate
+against. What the orchestrator must do with it: pin the install to exactly
+that version (an exact ``==`` also upgrades a warm machine, because the
+older copy no longer satisfies the requirement) or, for a git ref, to
+exactly that commit, and force a reinstall only when the machine's recorded
+commit differs.
 
 ## Backend protocol
 
 ```python
 class Backend(Protocol):
     name: str
-    async def submit(self, task: Task) -> Job: ...
+    async def submit(self, task: Task) -> Job: ...      # task.secrets -> a 0600 file, or raise
+    # A submit that fails and cannot remove what it created raises SubmitCleanupError,
+    # whose .job only cleanup() accepts.
     async def status(self, job: Job) -> JobStatus: ...
     async def logs(self, job: Job, *, tail: int | None = None) -> str: ...
     async def read_file(self, job: Job, path: str, *, tail: int | None = None) -> str: ...
@@ -235,7 +452,39 @@ class Backend(Protocol):
         max_bytes: int = MAX_CONSOLE_CHUNK_BYTES,
     ) -> ConsoleChunk: ...
     async def cancel(self, job: Job) -> None: ...
+    # Returns once the job's state is gone; raises CleanupError if it survived.
     async def cleanup(self, job: Job) -> None: ...
+```
+
+### Cleanup is verified
+
+``cleanup`` returning means the job's backend-side state is gone, not
+that a removal was attempted. That state may still hold the job's
+secrets file (a SIGKILL skips the wrapper's trap, and a failed submit
+may never have launched the wrapper), so an orchestrator retries
+cleanup until it succeeds, and it can only do that if a failed one
+says so. The contract every backend keeps:
+
+- **State that survived raises** :class:`CleanupError` (a
+  :class:`ForgeError`, and an ``OSError`` so that a caller already
+  treating an ``OSError`` from ``cleanup`` as "not cleaned" catches
+  it). Its message names the job and how the removal failed (an exit
+  status, an exception type), never what the remote printed or what
+  the state contains, so it is safe to store and show.
+- **State that is already absent is a success**, so the method is
+  idempotent: a retry after a removal that did, in the end, happen
+  returns normally.
+- **A transport failure propagates as itself** (the host is
+  unreachable, the command timed out). It says nothing about whether
+  the state survived, so it is not reported as a cleanup that ran.
+
+```python
+from strata_forge.compute import CleanupError
+
+try:
+    await backend.cleanup(job)
+except CleanupError:
+    ...  # still there: keep the handle and try again later
 ```
 
 ### Reading the console
@@ -252,7 +501,7 @@ itself emits the same line over and over.
 since:
 
 ```python
-chunk = await backend.console(job)
+chunk = ConsoleChunk()  # offsets 0, so the first read is rendered like every other
 while not done:
     chunk = await backend.console(
         job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
@@ -284,6 +533,80 @@ loses them for good.
 SkyPilot raises ``NotImplementedError``: ``sky logs`` has no way to ask for a
 suffix, and re-fetching the whole log per poll is linear in memory as well as in
 time inside a process shared by every account.
+
+### Redacting the console
+
+``console``, ``logs`` and ``read_file`` return what the job wrote, unredacted:
+a backend cannot know which secrets its caller injected. Whoever relays that
+text redacts it, with one :class:`~strata_forge.core.redact.Redactor` built
+from every secret the job was given plus the default credential shapes, and
+with the stream API rather than per-chunk calls, because a secret can straddle
+two incremental reads:
+
+```python
+from strata_forge.compute import ConsoleChunk
+from strata_forge.core import Redactor
+
+# Drop absent optional secrets; a ValidationError (a value too short to match
+# safely) means do not relay this console at all, never relay it raw.
+redactor = Redactor(v for v in (hf_token, private_key, known_hosts) if v)
+out, err = redactor.stream(), redactor.stream()  # one per stream, kept across polls
+chunk = ConsoleChunk()  # offsets 0: the first read goes through the streams too
+while not done:
+    chunk = await backend.console(
+        job, stdout_offset=chunk.stdout_offset, stderr_offset=chunk.stderr_offset
+    )
+    if chunk.dropped_bytes:
+        render(out.gap(), err.gap())  # a hole: neither side of a cut secret survives
+    render(out.feed(chunk.stdout), err.feed(chunk.stderr))
+render(out.flush(), err.flush())  # once the job is terminal, and only then
+```
+
+The contract a relay relies on:
+
+- **A stream holds back ``max_len - 1`` characters** (a few hundred), plus up
+  to 8 characters of whitespace right after a redacted run, and releases them
+  on ``flush``. Its concatenated output equals redacting the whole transcript
+  at once, so piece boundaries never decide what is released.
+- **One stream per console stream for the life of the job, in memory.** A
+  stream is process state: it cannot be persisted, pickled or copied (it refuses,
+  because what it holds back is raw text). A relay whose polls are otherwise
+  stateless (the read offsets stored on the run's row, any worker taking the
+  next poll) keeps the streams in a per-run registry in the process that polls.
+  A fresh stream per poll is a per-chunk redactor again: the tail of one poll
+  can end inside a token, and a fresh stream cannot know it.
+- **A fresh stream in the middle of a transcript calls ``gap()`` before its
+  first ``feed``.** That covers a relay restart, a lease taken over by another
+  worker, and any resume from stored offsets. The new stream cannot see what
+  the old one held back or which match was still open, so it treats the resume
+  point as a hole and masks the first ``max_len - 1`` characters after it. A
+  private-key block opened before the resume point is unknown to it; a key the
+  relay itself injected is still matched by its own lines, because every value
+  is matched line by line.
+- **``flush`` only when the job is terminal.** Never per poll and never on an
+  idle timeout: a flush releases the held tail as final, so a secret that
+  continues in the next read is released half raw.
+- **The held tail of a stream that dies is lost, not leaked.** A relay that
+  stores the read offsets has already advanced past text its stream never
+  released, so those characters (at most the hold-back) are never shown. This
+  is the safe direction; a relay that wants them has to persist and re-read
+  from an earlier offset, and still call ``gap()`` on its fresh stream.
+- **A hole needs ``gap()``.** ``dropped_bytes`` counts bytes from either stream,
+  so call it on both. It masks the held tail and the first ``max_len - 1``
+  characters after the hole, and keeps a private-key block that was open across
+  it open.
+- **Redact before clipping**, and before parsing a structured line: a clip can
+  cut a token below the length a pattern recognises, and a JSON string escapes a
+  multi-line secret (the redactor matches the escaped form too).
+- **Decoding.** A slice boundary can split a multi-byte character, which decodes
+  to a replacement character on each side. Every credential shape the redactor
+  knows is ASCII, so this cannot split one of those; a non-ASCII secret value
+  split that way is not matched.
+- **The relay is the only redaction of everything else the job prints.** A
+  runner redacts what it emits itself (phase captions, error events, its
+  failure line on stderr, the ``error`` column), but library logging, warnings
+  and tracebacks from other threads reach the console file as they were
+  written. The console relay is the layer that catches those.
 
 Methods that don't apply to a particular backend raise
 :class:`NotImplementedError` rather than silently passing — that
@@ -323,6 +646,21 @@ caller who never asks for it never finds log files appearing. The
 names are fixed (an orchestrator finds them without knowing the
 job id), so give concurrent jobs their own directories.
 
+A task's ``secrets`` are written to ``.secrets.json`` (0600, created
+``O_EXCL | O_NOFOLLOW``) in a fresh 0700 temporary directory, and the
+task's ``run`` step finds it through ``FORGE_SECRETS_FILE`` (``setup``
+does not). Modes are set explicitly, so a restrictive umask cannot
+lock the child out. The child's outer shell removes the file on exit,
+below the subshell that runs the task; the backend removes the
+directory once the child is gone, and again in ``cleanup``, which
+forgets the job only once ``lstat`` reports nothing at the directory's
+path: a directory that survives, or one that cannot be looked at (its
+parent is not searchable), raises ``CleanupError`` and the job stays
+known, so a retry still has something that names it. With
+``env_inherit=True`` an inherited ``FORGE_SECRETS_FILE`` is dropped:
+it names the parent's file, which the child must not read (and, by
+reading, delete).
+
 A job ends when the child is reaped, not when its pipes close: a
 process the child backgrounded inherits those descriptors and can
 hold them open indefinitely, and gating the lifecycle on EOF
@@ -338,11 +676,74 @@ backend = SSHBackend(host="gpu-host.example.com", username="ml-team")
 job = await backend.submit(Task(name="t", run="python train.py"))
 ```
 
-Submission scripts a wrapper on the remote host (under
-``~/.forge-compute/<job_id>/``) and launches it under ``nohup``,
-capturing the PID and exit code in files. ``status`` probes
-``kill -0`` for liveness, then falls back to the exit-code file.
-``cancel`` sends SIGTERM, waits 2 s, then SIGKILL.
+Submission creates a private workdir on the remote host
+(``~/.forge-compute/<job_id>/``), writes a wrapper into it and
+launches it under ``nohup``, capturing the PID and exit code in
+files. ``status`` probes ``kill -0`` for liveness, then falls back
+to the exit-code file. ``cancel`` sends SIGTERM to the job's process
+group, gives it up to 10 s, then SIGKILL.
+
+The workdir is made by one ``bash -c`` step under ``umask 077``: the
+remote root must be a directory owned by the login user and is
+narrowed to 0700, and the job's directory is created with
+``mkdir -m 700`` and no ``-p``, so a directory or symlink already at
+that path fails the submit. File contents never travel in a command
+string, which every user on the host can read in
+``/proc/<pid>/cmdline``: the wrapper and then, when the task has
+secrets, ``.secrets.json`` are written with their bytes on the
+channel's stdin. Each write runs under ``umask 077``, ``cd -P`` into
+the workdir and checks ``test -O .`` (so the path is resolved once and
+a swapped component cannot redirect it), refuses anything already at
+the name, and creates the file under ``set -C``. The explicit refusal
+matters: bash's noclobber still opens an existing FIFO or device for
+writing. The secrets file is written last, immediately before the
+launch.
+
+With secrets, the wrapper holds the file's absolute path in an
+unexported variable, installs ``trap 'rm -f "$_forge_secrets_file"'
+EXIT`` in its own shell, and runs ``set -e``, the task's ``env``,
+``setup`` and ``run`` in a subshell below that trap, exporting
+``FORGE_SECRETS_FILE`` (the path, never the contents) only between
+``setup`` and ``run``. The subshell keeps a ``trap ... EXIT`` that the
+task sets (an orchestrator's bootstrap sets one) from replacing the
+removal, so the file goes when setup fails, when the job ends and when
+``cancel``'s SIGTERM arrives. Only a SIGKILL skips the trap; ``cancel``
+removes the file itself after its final SIGKILL, and ``cleanup``
+removes the whole workdir.
+
+``cleanup`` enters ``remote_root`` with ``cd -P`` and runs ``rm -rf``
+on the job's directory and ``test ! -e`` / ``test ! -L`` on its name
+from there, so its exit status means "nothing is there now" rather
+than "``rm`` did not complain". The checks run inside the root because
+``test`` reads a lookup it is not allowed to make as "absent": run
+from outside a root at mode 000, BSD ``rm -rf`` exits 0 and both tests
+pass while the workdir and its secrets file stay. A root that cannot
+be entered counts as clean only when the root itself is provably
+absent, proved the same way one directory up; ``CDPATH`` is unset so a
+relative root cannot resolve to a directory of the same name
+elsewhere. A nonzero status, or a channel that closed with none,
+raises ``CleanupError`` ("not confirmed removed") without echoing the
+remote's stderr (which would name the files ``rm`` could not remove).
+An absent workdir is a success. Every method that composes a remote
+path from a job's ``remote_workdir`` first checks it is exactly one
+directory directly in ``remote_root``, which is all ``submit`` creates:
+an absolute path elsewhere, a ``..`` component, a path that names the
+root itself (``<root>/``, ``<root>/.``, ``<root>//``), or a nested one
+(``<root>/a/b``) is a ``ValueError``. ``rm -rf`` of the root would
+remove every job's workdir, and a check run in the root proves nothing
+about a directory deeper down.
+
+A submit that fails after creating the workdir removes it, within a
+10 s bound. If that removal fails too (the connection is gone), an
+ordinary failure is re-raised as ``SubmitCleanupError`` (a
+``RuntimeError``, from the original failure) whose ``job`` is a handle
+``cleanup`` accepts; a cancellation stays a cancellation. As a backstop
+that needs no handle, every submit's workdir step removes
+``.secrets.json`` files older than 10 minutes from job directories
+that have no pid file, i.e. submits that never launched. That sweep and
+the ``chmod 700`` mean ``remote_root`` must be a directory dedicated to
+Forge. A remote command that ends without an exit status counts as a
+failure.
 
 Pass a pre-built ``asyncssh.SSHClientConnection`` via
 ``connection=`` to share a connection across multiple submits.
@@ -367,7 +768,17 @@ job states to the canonical five; unknown states fall back to
 ``running`` so callers don't crash on new SkyPilot versions.
 
 ``cleanup`` calls ``sky.down`` on the cluster — be aware that
-this tears down the entire cluster, not just the job.
+this tears down the entire cluster, not just the job. The
+request-based SDK's ``down`` returns a request id and reports the
+outcome only when that request is resolved, so ``cleanup`` resolves it
+with ``get`` before returning. A failed teardown raises
+``CleanupError`` (chained to the SDK's error, naming only its type);
+SkyPilot's ``ClusterDoesNotExist`` counts as success.
+
+``submit`` raises ``ValueError`` for a task with ``secrets``, before
+any SkyPilot call: the SDK's only channel for a value is ``envs``,
+which is the job's environment, so there is no delivery that keeps
+the credential out of it.
 
 ## Batch inference
 
@@ -404,6 +815,12 @@ vllm_task = build_vllm_task(
 tgi_task = build_tgi_task("mistralai/Mistral-7B-v0.1", port=8080)
 sglang_task = build_sglang_task("Qwen/Qwen2-7B-Instruct", port=30000, tp_size=4)
 ```
+
+``build_vllm_task`` also takes ``served_model_name``
+(``--served-model-name``). Set it when ``model`` is a local snapshot
+directory, so clients keep addressing the model by its Hub id rather
+than by a path on the server; the batch-inference runner serves its
+pre-fetched snapshot this way (see [the runner contract](#the-runner-contract)).
 
 :func:`serving_endpoint` is an async context manager that
 submits the task, waits for the HTTP endpoint to respond,

@@ -1,0 +1,154 @@
+name: Clean install
+
+# A run's machine installs strata-forge FRESH, with no lockfile and no constraints, so it resolves
+# against whatever the index published that morning. This job performs that same install every
+# night and builds every config a run builds (scripts/smoke_clean_install.py), so a breaking
+# upstream release fails here instead of on a user's GPU after provisioning has been paid for.
+#
+# Kept out of nightly.yml on purpose: a manual run of this job (the override drill below, or a
+# re-check after a pin change) must not also re-record cassettes against live providers or open a
+# bot pull request, which a dispatch of nightly.yml does.
+#
+# It holds no secret and installs only from the public index: read-only token, credentials not
+# persisted into the checkout, no repository or user uv config, the default index named
+# explicitly, override requirements limited to plain version pins, and nothing reaches the Hugging
+# Face Hub (the smoke runs with HF_HUB_OFFLINE=1).
+#
+# It is also the one job in this repository that executes upstream code no lockfile vouches for,
+# so it never runs in the default branch's context. A run there can write Actions-cache entries
+# that every ref restores, release.yml's build and the secret-bearing nightly.yml jobs included,
+# and a hostile release could lift the runner's cache token to do so whatever `permissions`
+# says. The schedule (which GitHub always runs from the default branch) and a dispatch on main
+# therefore only start a dispatch of this workflow on dev and wait for its result; the install
+# itself runs in dev's scope, which main and tags never restore. Those consumers also keep their
+# own cache off, which closes the chain whatever writes the default branch's cache.
+
+on:
+  schedule:
+    - cron: "30 6 * * *"  # 06:30 UTC daily, after nightly.yml
+  workflow_dispatch:
+    inputs:
+      override:
+        description: >-
+          Requirements forced over the resolution, space-separated plain pins (uv --override).
+          A drill: `transformers==4.57.6 huggingface-hub==0.36.0` must turn the finetuning legs
+          red. On main this runs against dev.
+        required: false
+        default: ""
+  # A pin change is verified on the branch that makes it, before it reaches dev. Tag pushes are
+  # excluded by naming branches (path filters are not evaluated for tags), and main is excluded
+  # because nothing unlocked runs in its scope (see above); dev checked what main receives.
+  push:
+    branches: ["**", "!main"]
+    paths:
+      - pyproject.toml
+      - scripts/smoke_clean_install.py
+      - .github/workflows/clean-install.yml
+
+permissions:
+  contents: read
+
+# Keyed on the event as well, so a push or a dispatch never cancels the nightly; only a newer push
+# to the same branch replaces an older one.
+concurrency:
+  group: clean-install-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  PYTHON_VERSION: "3.14"
+  INDEX_URL: https://pypi.org/simple
+
+jobs:
+  # Runs where the smoke may not: on main (the schedule, or a dispatch there) and on a tag. It
+  # executes nothing but the runner's preinstalled gh, and its result is the dispatched run's, so
+  # a red night is red where the schedule's notifications look.
+  redirect:
+    name: run on dev
+    if: ${{ !(startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OVERRIDE: ${{ inputs.override }}
+      TARGET_REF: dev
+      WORKFLOW: clean-install.yml
+    steps:
+      - name: Dispatch the clean install on dev and wait for its result
+        run: |
+          since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          reply="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/dispatches" \
+            -f ref="${TARGET_REF}" -f "inputs[override]=${OVERRIDE}" -F return_run_details=true)"
+          run_id="$(printf '%s' "${reply}" | jq -r '.workflow_run_id // empty' 2>/dev/null || true)"
+          # Older API behaviour answers 204 with no body: find the run this dispatch created.
+          for _ in $(seq 30); do
+            [[ -n "${run_id}" ]] && break
+            sleep 10
+            run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${WORKFLOW}" \
+              --branch "${TARGET_REF}" --event workflow_dispatch --created ">=${since}" \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          done
+          if [[ -z "${run_id}" ]]; then
+            echo "::error title=Clean install::no run of ${WORKFLOW} on ${TARGET_REF} appeared"
+            exit 1
+          fi
+          echo "clean install on ${TARGET_REF}: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          gh run watch "${run_id}" --repo "${GITHUB_REPOSITORY}" --exit-status --interval 60
+
+  smoke:
+    name: clean install [${{ matrix.extras }}]
+    if: ${{ startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The extras strings strata-server installs on a run's machine, verbatim
+        # (`_INFERENCE_EXTRAS` / `_FINETUNE_EXTRAS` in its run_tasks.py), plus `all`. This list IS
+        # what a VM installs: when the server's strings change, this matrix changes with them.
+        extras:
+          - "serving,storage,hf"  # batch-inference machine
+          - "finetuning,storage"  # fine-tuning machine
+          - "all"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: false
+
+      - run: uv python install "$PYTHON_VERSION"
+
+      - name: Create an empty venv
+        run: uv venv --no-config --python "$PYTHON_VERSION" "$RUNNER_TEMP/smoke-venv"
+
+      # uv rather than the VM's pip, for speed. Both take the newest versions the specifiers allow
+      # from the same index, which is the property under test, but they can settle a tight
+      # backtrack (vLLM's exact torch pin) on different versions, so a break that only pip's
+      # resolution reaches can still pass here.
+      - name: Install strata-forge[${{ matrix.extras }}] with no lockfile and no constraints
+        env:
+          EXTRAS: ${{ matrix.extras }}
+          OVERRIDE: ${{ inputs.override }}
+        run: |
+          override=()
+          if [[ -n "${OVERRIDE//[[:space:]]/}" ]]; then
+            # Refuses anything but plain version pins: a URL or an index option would let a
+            # dispatch install code from outside the public index.
+            "$RUNNER_TEMP/smoke-venv/bin/python" scripts/smoke_clean_install.py \
+              --write-override "$RUNNER_TEMP/override.txt" "${OVERRIDE}"
+            override=(--override "$RUNNER_TEMP/override.txt")
+          fi
+          uv pip install --no-config --default-index "$INDEX_URL" \
+            --python "$RUNNER_TEMP/smoke-venv/bin/python" "${override[@]}" ".[${EXTRAS}]"
+          # vLLM, torch and the CUDA wheels take about 8 GB; the headroom is logged so a runner
+          # image with less disk shows up here before it shows up as a failed install.
+          df -h /
+
+      - name: Build every config a run builds
+        env:
+          EXTRAS: ${{ matrix.extras }}
+        run: '"$RUNNER_TEMP/smoke-venv/bin/python" scripts/smoke_clean_install.py "$EXTRAS"'

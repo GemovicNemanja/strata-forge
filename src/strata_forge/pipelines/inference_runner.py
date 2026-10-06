@@ -19,13 +19,27 @@ credentials + the network):
   - Template rendering is a bounded, NON-executing ``{name}`` substitution (a regex, NOT
     ``str.format`` and NOT a template engine) — only placeholders that map to a real
     column are replaced; anything else stays literal.
-  - The HF write token arrives in its OWN env var (``HF_WRITE_TOKEN``), never in
-    ``STRATA_RUN_CONFIG``, is passed EXPLICITLY to the Hub/dataset clients (never the
-    VM's ambient ``HF_TOKEN``), and is scrubbed from any surfaced error.
+  - The Hugging Face token arrives in a private secrets file the backend wrote beside the job
+    (named by ``FORGE_SECRETS_FILE``, read and deleted before anything else runs — see
+    :func:`~strata_forge.pipelines._common.load_secrets`), never in ``STRATA_RUN_CONFIG`` or
+    the environment. It is passed EXPLICITLY to every Hub read and write — the split, the model
+    download, the push — and a run that received none sends no credential rather than the
+    VM's ambient ``HF_TOKEN`` or cached login (a repo the VM's Hub cache already holds still
+    loads from that cache). It is scrubbed from any surfaced error.
+  - The runner downloads the model ITSELF, before the model server starts, and only its
+    servable files (:data:`SNAPSHOT_PATTERNS`: safetensors weights, configs, tokenizer and
+    chat-template files — never a pickle checkpoint or a ``*.py`` file). The server then loads
+    that local directory with ``HF_HUB_OFFLINE=1``, so it never holds the token and never
+    fetches anything of its own, and with ``--load-format safetensors``, so a pickle checkpoint
+    an earlier download left in the shared cache directory is never what it loads.
+  - The model server gets an allow-listed environment
+    (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
+    third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only). Phase
-    messages go through the same scrub as errors, because ``serving_endpoint``'s phase hook
-    is public API and a caller's phrase is not under this module's control.
+    repo id; result rows are ``{custom_id, output, error}`` (model text only). The ``error``
+    column, phase messages and the run's own error all go through the one run redactor: the
+    column is pushed to the Hub with the results, an exception's text is not under this
+    module's control, and neither is a phrase from ``serving_endpoint``'s public phase hook.
 
 The exit code is the run's VERDICT, and the control plane reads it as such. Individual row
 failures are collected rather than fatal (a few filtered rows must not discard thousands of good
@@ -50,7 +64,7 @@ import time
 from collections import deque
 from pathlib import Path
 from statistics import median
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -65,10 +79,13 @@ from strata_forge.llm.providers.openai_compat import (
 )
 from strata_forge.pipelines._common import (
     RunError,
+    RunSecrets,
     emit,
     load_config,
+    model_server_environ,
     phase_sink,
     results_dir,
+    run_redactor,
     runner_main,
     ticking_phase,
     validate_repo_id,
@@ -80,7 +97,9 @@ from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-__all__ = ["RunSpec", "main", "render_template"]
+    from strata_forge.core.redact import Redactor
+
+__all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
 
 # vLLM serves on loopback only — the runner talks to it via localhost, and a multi-tenant
 # / network-reachable VM must not expose the model server.
@@ -98,6 +117,49 @@ _RESULTS_DIR_NAME = "strata-inference-results"
 _MAX_SAMPLE_ERROR_CHARS = 500
 # How many recent row latencies the p50 is taken over. Bounds both the memory and the sort.
 _LATENCY_WINDOW = 1000
+#: The files the runner downloads for the model server: safetensors weights, every JSON (configs,
+#: a sharded checkpoint's index, tokenizer and generation settings), and the tokenizer and
+#: chat-template formats that are not JSON.
+#: ``tokenizer.model*`` rather than ``tokenizer*``: the versioned SentencePiece files some repos
+#: ship (``tokenizer.model.v3``) need a prefix match, and every other tokenizer format is named by
+#: its extension above, so the prefix need not admit whatever else a repo calls ``tokenizer.*``.
+SNAPSHOT_PATTERNS = (
+    "*.safetensors",
+    "*.json",
+    "tokenizer.model*",
+    "*.model",
+    "*.tiktoken",
+    "*.jinja",
+    "*.txt",
+)
+#: Refused even when a pattern above admits the name: pickle checkpoints and the array formats
+#: that can carry one, which can run code when loaded; a repo's own Python, compiled modules and
+#: shell scripts; and the ``original/`` checkpoints some repos carry beside the converted ones.
+SNAPSHOT_IGNORED = (
+    "*.py",
+    "*.pyc",
+    "*.so",
+    "*.sh",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.pkl",
+    "*.pickle",
+    "*.ckpt",
+    "*.joblib",
+    "*.npy",
+    "*.npz",
+    "*.msgpack",
+    "*.h5",
+    "*.onnx",
+    "original/*",
+)
+#: How the model server is told to read the weights. vLLM's default (``auto``) falls back to a
+#: pickle checkpoint when the directory root holds no safetensors file, and the directory a
+#: snapshot download returns is the SHARED cache folder for that commit: it also holds whatever an
+#: earlier, unfiltered download of the same commit left there. Naming the format means the
+#: download's filter is not the only thing standing between a ``*.bin`` and the server.
+_SERVE_LOAD_FORMAT = ("--load-format", "safetensors")
 
 
 class Hyperparams(BaseModel):
@@ -122,6 +184,11 @@ class RunSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
+    # The engine the control plane validated this spec against: ``"<version>"`` or
+    # ``"<version>+<commit>"``. ``load_config`` refuses any other installed engine (``None`` makes
+    # no claim). The control plane sets it, never a user: the same string decides what the setup
+    # step installs, so a spec cannot pick an engine the control plane did not validate against.
+    engine_version: str | None = None
     model_id: str
     dataset_id: str
     dataset_commit_sha: str | None = None
@@ -138,8 +205,8 @@ class RunSpec(BaseModel):
     run_id: str | None = None
 
 
-def load_spec() -> RunSpec:
-    spec = load_config(RunSpec)
+def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
+    spec = load_config(RunSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
@@ -203,7 +270,7 @@ def render_template(template: str, row: dict[str, Any], column_mapping: dict[str
     return rendered[:_MAX_RENDERED_CHARS]
 
 
-def _load_rows(spec: RunSpec, hf_token: str | None) -> list[dict[str, Any]]:
+def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any]]:
     try:
         # Lazy optional-extra import (forge convention: `Any` so pyright skips the unresolved
         # module); the [hf] extra ships `datasets`.
@@ -216,7 +283,7 @@ def _load_rows(spec: RunSpec, hf_token: str | None) -> list[dict[str, Any]]:
         name=spec.dataset_config,
         split=spec.split,
         revision=spec.dataset_commit_sha,
-        token=hf_token or None,
+        token=token,
         streaming=False,
     )
     columns = set(dataset.column_names or [])
@@ -251,6 +318,8 @@ async def _run_batches(
     writer: JsonlProgressWriter | None,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
     gpu: GpuSampler | None = None,
+    *,
+    redactor: Redactor,
 ) -> list[dict[str, Any]]:
     """Run the prompts in progress-chunked batches; reconcile results positionally.
 
@@ -260,6 +329,11 @@ async def _run_batches(
     client RETRIES each one, so a dead server turns into a long expensive silence instead of an
     error: the rest of the run is spent timing out one row at a time, and the failure that
     eventually surfaces describes a connection, not the crash that caused it.
+
+    A failed row's ``error`` is redacted before it is stored: the column is written into the
+    results and pushed to the Hub, and an exception's text can quote whatever the failing call
+    held. ``redactor`` is required so a caller cannot forget the run's token: a shapes-only
+    ``Redactor()`` misses its encoded forms.
     """
     hp = spec.hyperparams
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
@@ -301,7 +375,8 @@ async def _run_batches(
                 latencies_ms.append(result.response.latency_ms)
                 output_tokens += result.response.usage.output_tokens
             else:
-                out.append({"custom_id": cid, "output": None, "error": repr(result.error)})
+                error = redactor.redact(repr(result.error))
+                out.append({"custom_id": cid, "output": None, "error": error})
                 failed += 1
         emit(
             writer,
@@ -382,6 +457,42 @@ def _write_results(rows: list[dict[str, Any]], outdir: Path) -> Path:
     return path
 
 
+def _require_safetensors(snapshot: Path, model_id: str) -> None:
+    # The directory ROOT, as the model server reads it: weights in a subfolder are not what it
+    # would load, so a repo whose only safetensors sit in one has none that this run can serve.
+    if not any(snapshot.glob("*.safetensors")):
+        msg = (
+            f"the model {model_id} has no safetensors weights; only safetensors checkpoints are "
+            "served, because a pickle checkpoint (*.bin, *.pt) can run code when it is loaded"
+        )
+        raise RunError(msg)
+
+
+async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
+    """Download the model's servable files with the run's credential; return the local snapshot.
+
+    The model server is pointed at this directory with the Hub switched off, so what it can load
+    is exactly what this download admitted, and the token stays in this process.
+    """
+    hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
+    try:
+        snapshot = await hub.download_snapshot(
+            spec.model_id,
+            allow_patterns=SNAPSHOT_PATTERNS,
+            ignore_patterns=SNAPSHOT_IGNORED,
+        )
+    except Exception as exc:
+        msg = f"could not download the model {spec.model_id}: {exc}"
+        if token is False:
+            msg += (
+                " (the run carries no Hugging Face token, so a gated or private model is"
+                " unreadable)"
+            )
+        raise RunError(msg) from exc
+    await asyncio.to_thread(_require_safetensors, snapshot, spec.model_id)
+    return snapshot
+
+
 async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push results"
@@ -399,7 +510,9 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     return out_repo
 
 
-async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWriter | None) -> str:
+async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
+    hf_token = secrets.hf_token_value()
+    hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, and the
     # step events below reuse the same cached reading rather than shelling out twice.
     gpu = GpuSampler()
@@ -410,15 +523,21 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
     # blocked event loop cannot tick the caption that says it is still going.
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
-        rows = await asyncio.to_thread(_load_rows, spec, hf_token)
+        rows = await asyncio.to_thread(_load_rows, spec, hub_token)
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
     emit(writer, ProgressEvent(kind="start", stage="run", total_steps=len(prompts)))
 
+    # Before the server starts, and in this process: the download is the one step that needs the
+    # token, and the server that follows is third-party code that must not hold it.
+    async with ticking_phase(phase, "Downloading the model", stage="load_model"):
+        snapshot = await _fetch_model(spec, hub_token)
+
     hp = spec.hyperparams
     task = build_vllm_task(
-        spec.model_id,
+        str(snapshot),
+        served_model_name=spec.model_id,  # the client below keeps addressing it by its Hub id
         port=_SERVE_PORT,
         host=_SERVE_HOST,
         tensor_parallel_size=hp.tensor_parallel_size,
@@ -429,6 +548,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         # through a login shell, which re-sources the profile and drops this virtualenv from PATH:
         # a bare `vllm` is then "command not found" even though vLLM is installed right here.
         python_executable=sys.executable,
+        extra_args=_SERVE_LOAD_FORMAT,
     )
     # Unbuffered: the served process writes through a pipe, so CPython would otherwise hold
     # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves
@@ -443,12 +563,19 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     task = task.model_copy(
         update={
             "env": {
+                # The server's whole environment: an allow-listed slice of this one, then the
+                # task's own settings. The backend below does not inherit, so nothing else
+                # reaches it.
+                **model_server_environ(),
                 **task.env,
                 # Unbuffered: the served process writes through a pipe, so CPython would otherwise
                 # hold its output in an 8 KiB block buffer — and a server that hangs before filling
                 # it leaves the log file empty, which is precisely the case the file exists for.
                 "PYTHONUNBUFFERED": "1",
                 "VLLM_USE_FLASHINFER_SAMPLER": "0",
+                # The weights are already local. Offline, the server cannot fetch a file the
+                # download above refused, and has no reason to look for a credential.
+                "HF_HUB_OFFLINE": "1",
             }
         }
     )
@@ -457,7 +584,7 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
     async with serving_endpoint(
         # Tee the served process's streams into the run workdir. When the runner dies, the
         # buffers die with it; the files are what is left to explain why the server never came up.
-        LocalBackend(log_dir=Path.cwd()),
+        LocalBackend(log_dir=Path.cwd(), env_inherit=False),
         task,
         base_url=f"http://{_SERVE_HOST}:{_SERVE_PORT}/v1",
         wait_timeout_s=hp.wait_timeout_s,
@@ -483,7 +610,14 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
         # chunk absorbs the client's cold start on top of its generations.
         async with ticking_phase(phase, "Generating responses", stage="run"):
             out = await _run_batches(
-                spec, client, prompts, custom_ids, writer, endpoint.is_alive, gpu
+                spec,
+                client,
+                prompts,
+                custom_ids,
+                writer,
+                endpoint.is_alive,
+                gpu,
+                redactor=run_redactor(hf_token),
             )
 
     # Results are ALWAYS written outside the per-run workdir, whether or not they are then pushed.
@@ -531,7 +665,9 @@ async def _execute(spec: RunSpec, hf_token: str | None, writer: JsonlProgressWri
 
 async def main() -> int:
     """Entry point: returns a process exit code (0 ok, 1 failure). Never leaks the token."""
-    return await runner_main(lambda writer, token: _execute(load_spec(), token, writer))
+    return await runner_main(
+        lambda writer, secrets: _execute(load_spec(writer=writer), secrets, writer)
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

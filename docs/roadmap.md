@@ -48,7 +48,8 @@ type, test, docs, agent rules, and the cross-cutting `strata_forge.core` +
   `vcr-replay`, `vcr-record`, `doctor`, `stack-up`, `stack-down`.
 - GitHub Actions: `ci.yml` runs ruff + pyright + pytest + cassette
   replay on every PR; `nightly.yml` is scaffolded for live integration,
-  the eval gate, cassette refresh, and a security audit.
+  the eval gate, cassette refresh, and a security audit;
+  `clean-install.yml` resolves the shipped extras fresh every night.
 - Docker Compose stack (`docker/compose.yaml`): Langfuse + Postgres +
   Qdrant + Redis. `make stack-up` boots it locally.
 - The entire module tree exists as empty packages from day one (`agents/`,
@@ -319,6 +320,15 @@ Detailed reference: [`docs/modules/llm.md`](modules/llm.md).
   + budgets + diagnostic, full error taxonomy, sync wrappers,
   troubleshooting.
 
+**OpenAI's Responses API (ADR 0018)**
+
+- A registry route's `wire_api` picks Chat Completions or the Responses
+  API; every OpenAI `openai` route speaks the Responses API through
+  `litellm.aresponses`, statelessly, with each turn's encrypted reasoning
+  carried on `AssistantMessage.provider_items` and replayed on the next
+  request (`responses_wire.py`). `openai_compat`, Anthropic, Vertex and
+  Bedrock stay on Chat Completions.
+
 ### Why these decisions
 
 - **LiteLLM at the seam** (ADR 0001) lets Forge get provider breadth
@@ -532,12 +542,13 @@ builders have no extra requirements. Reference doc:
 `SFTRunner` over TRL `SFTTrainer`; `DPOConfig` / `ORPOConfig` /
 `KTOConfig` / `GRPOConfig` dispatched through `PreferenceRunner`;
 `LoRAConfig` / `QLoRAConfig` PEFT wrappers with QLoRA's
-bitsandbytes config builder; chat-template formatting
+bitsandbytes config builder and an up-front
+`require_bitsandbytes` check; chat-template formatting
 (`apply_chat_template`, `conversation_to_dicts`) and greedy
 first-fit sequence packing (`pack_sequences`). All heavy deps
 (`torch`, `transformers`, `trl`, `peft`, `datasets`,
-`accelerate`) sit behind the `[finetuning]` extra and are
-lazy-imported inside the runners' `train` methods. Reference
+`accelerate`, `bitsandbytes`) sit behind the `[finetuning]`
+extra and are lazy-imported inside the runners' `train` methods. Reference
 doc: [`docs/modules/training.md`](modules/training.md).
 
 ## Phase 6 — Storage (`strata_forge.storage`) ✅
@@ -648,6 +659,20 @@ The test infrastructure itself:
   `CIGateThresholds(min_pass_rate=0.80, max_cost_usd=0.10,
   use_wilson_ci=True)`. Exits non-zero on regression. Gated on
   `ANTHROPIC_API_KEY`.
+- **Clean-install smoke** (`.github/workflows/clean-install.yml` +
+  `scripts/smoke_clean_install.py`): installs each extras string a
+  run's machine installs (`[finetuning,storage]`,
+  `[serving,storage,hf]`) plus `[all]` into empty 3.14 venvs with no
+  lockfile or constraints, then builds every fine-tuning config down
+  to the TRL/peft/bitsandbytes objects and binds the runner's trainer
+  keywords against the installed trainer, the batch-inference spec,
+  requests and results parquet, and the vLLM command line through the
+  installed vLLM's own entrypoint parser. Offline and GPU-free; runs
+  nightly against `dev` (the schedule dispatches it there, so it never
+  runs in `main`'s cache scope) and on any branch push touching
+  `pyproject.toml`. A `workflow_dispatch` `override` input forces
+  plain version pins over the resolution as a drill that must turn the
+  job red.
 - **Security audit**: `pip-audit --strict` runs in the nightly
   with the `|| true` swallow removed, so new CVEs surface as a
   job failure. (A CodeQL workflow is deliberately absent: code

@@ -9,6 +9,7 @@ import yaml
 from typer.testing import CliRunner
 
 from strata_forge.cli.main import app
+from strata_forge.compute import CleanupError
 from strata_forge.compute.job import Job, JobStatus
 
 if TYPE_CHECKING:
@@ -159,6 +160,23 @@ class TestCleanup:
         assert "cleaned up" in result.output
         assert not (isolated_state / "job-123.json").exists()
         assert len(fake_local.cleaned) == 1
+
+    def test_a_failed_cleanup_keeps_the_saved_job(
+        self,
+        isolated_state: Path,
+        task_yaml: Path,
+        fake_local: _FakeBackend,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _fail(job: Job) -> None:
+            raise CleanupError(f"job {job.id!r}'s workdir is still on the host (exit 1)")
+
+        runner.invoke(app, ["compute", "submit", str(task_yaml)])
+        monkeypatch.setattr(fake_local, "cleanup", _fail)
+        result = runner.invoke(app, ["compute", "cleanup", "job-123"])
+        assert result.exit_code == 1
+        assert "cleanup failed" in result.output
+        assert (isolated_state / "job-123.json").exists()
 
 
 class TestList:

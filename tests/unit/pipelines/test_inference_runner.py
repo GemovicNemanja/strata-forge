@@ -19,7 +19,15 @@ import pytest
 
 from strata_forge.compute.batch import BatchInferenceResult
 from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
+from strata_forge.core.redact import Redactor
+from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
+from strata_forge.pipelines._common import (
+    LEGACY_TOKEN_ENV,
+    LEGACY_TOKEN_MESSAGE,
+    REQUIRE_ENGINE_VERSION_ENV,
+    UNCHECKED_ENGINE_MESSAGE,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -28,6 +36,43 @@ if TYPE_CHECKING:
     from strata_forge.llm import LLMClient, LLMResponse
 
 _TOKEN = "hf_secretwritetoken1234567890"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_secrets(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    # Neither delivery channel may leak in from the shell running the tests.
+    monkeypatch.delenv("FORGE_SECRETS_FILE", raising=False)
+    monkeypatch.delenv(LEGACY_TOKEN_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def hub_snapshots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[str, Any]]:
+    """Stand in for the Hub download the runner makes before serving; record each call.
+
+    Patched on the real ``huggingface_hub`` module, so the runner's own ``HFHubClient`` call path
+    (token resolution included) is what is exercised. The snapshot holds one safetensors file.
+    """
+    calls: list[dict[str, Any]] = []
+    snapshot = tmp_path / "hub-snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"")
+
+    def _snapshot_download(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return str(snapshot)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _snapshot_download)
+    return calls
+
+
+def _deliver_token(monkeypatch: pytest.MonkeyPatch, directory: Path) -> Path:
+    """Hand the runner the write token the way a backend does: a 0600 file it is pointed at."""
+    path = directory / ".secrets.json"
+    path.write_text(json.dumps({"HF_TOKEN": _TOKEN}))
+    path.chmod(0o600)
+    monkeypatch.setenv("FORGE_SECRETS_FILE", str(path))
+    return path
 
 
 def _ok(text: str, *, latency_ms: float = 100.0, output_tokens: int = 10) -> BatchInferenceResult:
@@ -53,7 +98,10 @@ def _fail(exc: Exception) -> BatchInferenceResult:
 
 
 def _spec_json(**overrides: Any) -> str:
+    # Stamped the way a real launch is: a spec with no claim is accepted but recorded as an
+    # unchecked launch, and that record is its own test, not noise in every other one.
     base: dict[str, Any] = {
+        "engine_version": SPEC_VERSION,
         "model_id": "org/model",
         "dataset_id": "org/ds",
         "split": "train",
@@ -110,6 +158,22 @@ def test_load_spec_rejects_extra_fields(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(surprise="x"))
     with pytest.raises(ir.RunError, match="invalid STRATA_RUN_CONFIG"):
         ir.load_spec()
+
+
+def test_load_spec_refuses_a_spec_validated_by_another_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The handshake is applied to the real spec, not only to the shared loader.
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version="0.0.1"))
+    with pytest.raises(ir.RunError, match="engine version mismatch"):
+        ir.load_spec()
+
+
+def test_load_spec_accepts_a_spec_validated_by_this_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(engine_version=SPEC_VERSION))
+    assert ir.load_spec().engine_version == SPEC_VERSION
 
 
 @pytest.mark.parametrize(
@@ -182,9 +246,26 @@ def test_load_rows_caps_materialization(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
     spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"row_limit": 3}))
-    rows = ir._load_rows(spec, None)  # pyright: ignore[reportPrivateUsage]
+    rows = ir._load_rows(spec, False)  # pyright: ignore[reportPrivateUsage]
     assert len(rows) == 3
     assert counter["consumed"] == 3  # islice stopped at the cap; the split was NOT materialized
+
+
+@pytest.mark.parametrize("token", [_TOKEN, False])
+def test_load_rows_passes_the_credential_explicitly(
+    monkeypatch: pytest.MonkeyPatch, token: str | bool
+) -> None:
+    # `None` would let `datasets` reach for the VM's own login; the runner never passes it.
+    seen: dict[str, Any] = {}
+
+    def _load_dataset(*_a: Any, **kwargs: Any) -> _NeverEndingDataset:
+        seen.update(kwargs)
+        return _NeverEndingDataset({"consumed": 0})
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
+    spec = ir.RunSpec.model_validate_json(_spec_json(hyperparams={"row_limit": 1}))
+    ir._load_rows(spec, token)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    assert seen["token"] is token
 
 
 def test_build_requests_index_aligned() -> None:
@@ -222,7 +303,12 @@ async def test_run_batches_reconciles_and_emits(
     progress = tmp_path / "progress.jsonl"
     with ir.JsonlProgressWriter(str(progress)) as writer:
         out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            redactor=Redactor(),
         )
 
     assert out == [
@@ -264,7 +350,7 @@ async def test_main_happy_path_pushes_and_never_leaks_token(
 ) -> None:
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
         del spec, token
@@ -372,7 +458,7 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     # entire timeout, leaving the user staring at a spinner.
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
 
     assert await ir.main() == 0
@@ -380,6 +466,7 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     kinds = [e["kind"] for e in events]
     assert [e["message"] for e in events if e["kind"] == "phase"] == [
         "Loading the dataset",
+        "Downloading the model",
         "Generating responses",
         "Writing results",
         "Uploading results to the Hub",
@@ -390,6 +477,48 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     assert all(e["step"] is None and e["total_steps"] is None for e in phase_events)
 
 
+async def test_main_records_an_unchecked_engine_when_the_spec_makes_no_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A spec from before the handshake still runs, but the run's own record says the engine was
+    # never checked: the first event, before any work, and the stderr line the control plane
+    # reads. Without it a run that misbehaved on a stale machine is indistinguishable from one
+    # that was checked.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), engine_version=None)
+    )
+    _deliver_token(monkeypatch, tmp_path)
+    monkeypatch.delenv(REQUIRE_ENGINE_VERSION_ENV, raising=False)
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+
+    assert await ir.main() == 0
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert events[0]["kind"] == "phase"
+    assert events[0]["message"] == UNCHECKED_ENGINE_MESSAGE
+    assert f"warning: {UNCHECKED_ENGINE_MESSAGE}" in capsys.readouterr().err
+
+
+async def test_main_refuses_a_spec_with_no_claim_when_the_machine_requires_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The orchestrator that stamps every spec sets the switch on its machines, and the
+    # transition ends there: a null from a rolled-back control plane is a mismatch, not a launch.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), engine_version=None)
+    )
+    _deliver_token(monkeypatch, tmp_path)
+    monkeypatch.setenv(REQUIRE_ENGINE_VERSION_ENV, "1")
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+
+    assert await ir.main() == 1
+    events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    assert [e["kind"] for e in events] == ["error"]
+    assert "engine version mismatch" in events[0]["message"]
+    assert REQUIRE_ENGINE_VERSION_ENV in events[0]["message"]
+
+
 async def test_serving_hook_phrases_are_scrubbed_and_capped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -397,7 +526,7 @@ async def test_serving_hook_phrases_are_scrubbed_and_capped(
     # not necessarily one this module wrote. It gets the same treatment as an error message.
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     def _drive(rec: dict[str, Any]) -> None:
         rec["on_phase"](f"pulling weights with {_TOKEN} " + "x" * 500)
@@ -420,7 +549,7 @@ async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
 ) -> None:
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     record: dict[str, Any] = {}
     _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
     monkeypatch.chdir(tmp_path)  # on the VM this is the per-run job workdir
@@ -444,12 +573,254 @@ async def test_serving_gets_the_phase_hook_a_log_dir_and_unbuffered_output(
     assert record["task"].env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
 
 
+@pytest.mark.parametrize("delivery", ["file", "environment"])
+async def test_the_model_server_environment_holds_no_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delivery: str
+) -> None:
+    # vLLM is third-party code serving a model a user chose. It gets an allow-listed environment
+    # and does not inherit the runner's, so neither the token (however it was delivered), nor
+    # the secrets file's path, nor the spec, nor whatever credentials the VM carries reach it.
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    if delivery == "file":
+        _deliver_token(monkeypatch, tmp_path)
+    else:
+        monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+    monkeypatch.setenv("HF_TOKEN", "hf_ambientvmtoken0123456789")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient0123456789")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+    monkeypatch.chdir(tmp_path)
+
+    assert await ir.main() == 0
+    backend = record["backend"]
+    assert backend._env_inherit is False  # pyright: ignore[reportPrivateUsage]
+    env = record["task"].env
+    assert not record["task"].secrets
+    rendered = json.dumps(env)
+    for leaked in (_TOKEN, "hf_ambientvmtoken0123456789", "sk-ambient0123456789"):
+        assert leaked not in rendered
+    for name in ("HF_TOKEN", LEGACY_TOKEN_ENV, "FORGE_SECRETS_FILE", "STRATA_RUN_CONFIG"):
+        assert name not in env
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert "PATH" in env
+
+
+# --------------------------- main: the model download ------------------------
+
+
+async def test_the_model_is_fetched_with_the_delivered_token_before_serving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # The runner downloads the model itself, with the token it was handed, and only the servable
+    # files. Forge settings and the VM's own HF_TOKEN hold a different credential that must not be
+    # the one used: the constructor argument is the whole of the run's authority.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _deliver_token(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_ambientvmtoken0123456789")
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert len(hub_snapshots) == 1
+    call = hub_snapshots[0]
+    assert call["repo_id"] == "org/model"
+    assert call["token"] == _TOKEN
+    assert call["allow_patterns"] == list(ir.SNAPSHOT_PATTERNS)
+    assert call["ignore_patterns"] == list(ir.SNAPSHOT_IGNORED)
+
+
+def test_the_snapshot_never_admits_pickle_checkpoints_or_code() -> None:
+    # Through the Hub client's own filter, not a re-implementation of it: what matters is what
+    # `snapshot_download` admits, case sensitivity and path handling included.
+    # The function `snapshot_download` itself calls; re-exported by `utils` without an `__all__`.
+    from huggingface_hub.utils import (
+        filter_repo_objects,  # pyright: ignore[reportPrivateImportUsage]
+    )
+
+    kept = (
+        "model.safetensors",
+        "model-00001-of-00002.safetensors",
+        "model.safetensors.index.json",
+        "config.json",
+        "generation_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "tokenizer.model",
+        "tokenizer.model.v3",
+        "spiece.model",
+        "qwen.tiktoken",
+        "chat_template.jinja",
+        "merges.txt",
+        "vocab.txt",
+    )
+    refused = (
+        "pytorch_model.bin",
+        "pytorch_model-00001-of-00002.bin",
+        "model.pt",
+        "consolidated.00.pth",
+        "modeling_custom.py",
+        "tokenizer.py",
+        "tokenization_custom.py",
+        "original/consolidated.00.pth",
+        "original/params.json",
+        # What a bare `tokenizer*` prefix would have let in beside the weights.
+        "tokenizer.so",
+        "tokenizer.pyc",
+        "tokenizer.sh",
+        "tokenizer.joblib",
+        "tokenizer.npz",
+        "tokenizer.msgpack",
+        "tokenizer.pkl.gz",
+        "tokenizer.PY",
+        "tokenizer.BIN",
+        "tokenizer.model.pkl",
+        "tokenizer.model.so",
+    )
+    admitted = set(
+        filter_repo_objects(
+            [*kept, *refused],
+            allow_patterns=list(ir.SNAPSHOT_PATTERNS),
+            ignore_patterns=list(ir.SNAPSHOT_IGNORED),
+        )
+    )
+    assert admitted == set(kept)
+
+
+async def test_a_run_with_no_token_downloads_anonymously(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # No token delivered means no token used — not the VM's ambient one, not forge's settings.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(output_repo_id=None))
+    monkeypatch.setenv("HF_TOKEN", "hf_ambientvmtoken0123456789")
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 0
+    assert hub_snapshots[0]["token"] is False
+
+
+async def test_the_model_server_loads_the_local_snapshot_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # vLLM is pointed at the directory the runner downloaded, answers to the Hub id the client
+    # uses, and runs with the Hub switched off: it never holds the token and fetches nothing.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    del hub_snapshots
+    task = record["task"]
+    snapshot = str(tmp_path / "hub-snapshot")
+    assert f"--model {snapshot}" in task.run
+    assert "--served-model-name org/model" in task.run
+    # Safetensors by name, not vLLM's `auto`, which falls back to a pickle checkpoint that an
+    # earlier unfiltered download may have left in the shared cache directory.
+    assert "--load-format safetensors" in task.run
+    assert task.env["HF_HUB_OFFLINE"] == "1"
+    assert not task.secrets
+    assert _TOKEN not in json.dumps(task.env)
+    assert _TOKEN not in task.run
+
+
+async def test_a_model_without_safetensors_weights_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # A repo that ships only pickle weights downloads nothing loadable. Say so by name, before
+    # the server starts, rather than as a model-server failure minutes later.
+    del hub_snapshots
+    (tmp_path / "hub-snapshot" / "model.safetensors").unlink()
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert "task" not in record  # the server never started
+    assert "no safetensors weights" in progress.read_text()
+
+
+async def test_safetensors_only_in_a_subfolder_are_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # The model server reads the directory root. Safetensors in a subfolder beside a root pickle
+    # checkpoint (one an earlier unfiltered download left in the shared cache folder) would pass a
+    # recursive check while the server loaded the pickle.
+    del hub_snapshots
+    snapshot = tmp_path / "hub-snapshot"
+    (snapshot / "model.safetensors").unlink()
+    (snapshot / "pytorch_model.bin").write_bytes(b"pickle")
+    (snapshot / "sub").mkdir()
+    (snapshot / "sub" / "model.safetensors").write_bytes(b"weights")
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert "task" not in record  # the server never started
+    assert "no safetensors weights" in progress.read_text()
+
+
+async def test_a_failed_model_download_names_the_model_and_scrubs_the_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    _deliver_token(monkeypatch, tmp_path)
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    def _gated(**kwargs: Any) -> str:
+        msg = f"403 Forbidden: access to this repo is restricted (token {kwargs['token']})"
+        raise OSError(msg)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _gated)
+
+    assert await ir.main() == 1
+    text = progress.read_text()
+    assert "could not download the model org/model" in text
+    assert _TOKEN not in text
+    assert "task" not in record
+
+
+async def test_main_accepts_the_deprecated_env_token_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
+    monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
+    pushed: list[str] = []
+
+    async def _push(spec: Any, results_path: Any, token: str) -> str:
+        del results_path
+        pushed.append(token)
+        return cast("str", spec.output_repo_id)
+
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+    monkeypatch.setattr(ir, "_push_results", _push)
+
+    assert await ir.main() == 0
+    assert pushed == [_TOKEN]
+    text = progress.read_text()
+    events = [json.loads(line) for line in text.splitlines() if line.strip()]
+    assert events[0]["message"] == LEGACY_TOKEN_MESSAGE
+    assert _TOKEN not in text
+
+
 async def test_main_error_path_scrubs_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     def _boom(spec: Any, token: Any) -> list[dict[str, Any]]:
         del spec, token
@@ -535,7 +906,7 @@ async def _run_main(
     """Drive `main` over a scripted split; return its exit code and the progress events."""
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     _mock_main_deps(
         monkeypatch, tmp_path, _fake_serving, rows=rows, scripted=scripted, written=written
     )
@@ -649,6 +1020,55 @@ async def test_the_stderr_failure_reason_is_scrubbed(
     assert "***" in err
 
 
+async def test_the_error_column_pushed_with_the_results_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The per-row `error` column is written into the results file and pushed to the Hub with
+    # it, so an exception quoting the write token must not carry it there. Encoded forms too:
+    # an HTTP error usually quotes the request URL.
+    quoted = _TOKEN.replace("_", "%5F")
+    written: list[list[dict[str, Any]]] = []
+    code, _ = await _run_main(
+        monkeypatch,
+        tmp_path,
+        rows=[{"question": "a"}, {"question": "b"}, {"question": "c"}],
+        scripted=[
+            _ok("A"),
+            _fail(RuntimeError(f"upstream rejected {_TOKEN} for org")),
+            _fail(RuntimeError(f"401 for https://host/x?token={quoted}")),
+        ],
+        written=written,
+    )
+
+    assert code == 0
+    rows = written[-1]
+    assert rows[1]["error"] == "RuntimeError('upstream rejected *** for org')"
+    assert rows[2]["error"] == "RuntimeError('401 for https://host/x?token=***')"
+    assert not any(_TOKEN in str(row) or quoted in str(row) for row in rows)
+
+
+async def test_an_error_row_loses_credential_shapes_no_token_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A redactor holding no value still removes the credential shapes: a key this process was
+    # never given is caught in the column too.
+    foreign = "sk-ant-api03-AbCdEfGhIjKlMnOpQrSt"
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    prompts, ids = ir._build_requests(spec, [{"question": "a"}])  # pyright: ignore[reportPrivateUsage]
+    _FakeRunner.scripted = [_fail(RuntimeError(f"bad key {foreign}"))]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+
+    out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+        spec,
+        client=cast("LLMClient", object()),
+        prompts=prompts,
+        custom_ids=ids,
+        writer=None,
+        redactor=Redactor(),
+    )
+    assert out[0]["error"] == "RuntimeError('bad key ***')"
+
+
 async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -670,7 +1090,7 @@ async def test_the_local_endpoint_is_called_with_an_explicit_placeholder_key(
     monkeypatch.setattr("litellm.acompletion", _fake_acompletion)
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress)))
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     # The REAL BatchInferenceRunner + LLMClient, so the provider wiring is exercised end to end.
     # Restored from its own import: by this point `ir.BatchInferenceRunner` is the stub.
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
@@ -780,7 +1200,7 @@ async def test_results_are_written_outside_the_workdir_even_when_pushing(
     monkeypatch.setenv(
         "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), run_id="run123")
     )
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
     outdirs: list[Path] = []
 
     def _write(rows: Any, outdir: Path) -> Path:
@@ -813,7 +1233,7 @@ async def test_a_failed_push_says_where_the_results_are(
     monkeypatch.setenv(
         "STRATA_RUN_CONFIG", _spec_json(progress_path=str(progress), run_id="run123")
     )
-    monkeypatch.setenv("HF_WRITE_TOKEN", _TOKEN)
+    _deliver_token(monkeypatch, tmp_path)
 
     async def _push_boom(spec: Any, results_path: Any, token: str) -> str:
         del spec, results_path, token
@@ -872,6 +1292,7 @@ async def test_a_dead_server_stops_the_batch_instead_of_timing_out_every_row(
             custom_ids=ids,
             writer=writer,
             is_alive=_dies_after_the_first_chunk,
+            redactor=Redactor(),
         )
 
     # Stopped at the SECOND chunk: the first one ran before anything could be known about it.
@@ -899,6 +1320,7 @@ async def test_a_live_server_runs_every_chunk(
             custom_ids=ids,
             writer=writer,
             is_alive=_always_alive,
+            redactor=Redactor(),
         )
     assert len(out) == 4
 
@@ -917,6 +1339,11 @@ async def test_the_batch_runs_without_a_liveness_probe(
     progress = tmp_path / "progress.jsonl"
     with ir.JsonlProgressWriter(str(progress)) as writer:
         out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
-            spec, client=cast("LLMClient", object()), prompts=prompts, custom_ids=ids, writer=writer
+            spec,
+            client=cast("LLMClient", object()),
+            prompts=prompts,
+            custom_ids=ids,
+            writer=writer,
+            redactor=Redactor(),
         )
     assert len(out) == 4
