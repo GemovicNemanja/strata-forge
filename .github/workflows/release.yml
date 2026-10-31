@@ -52,8 +52,8 @@ jobs:
             exit 1
           fi
 
-      # Downstream deploys assume a release is cut from main (the promoted, staging-verified
-      # line); a tag pushed on a topic or dev commit would publish code main never received.
+      # Downstream deploys assume a release is cut from main (the promoted line production
+      # installs); a tag pushed on a topic or dev commit would publish code main never received.
       - name: Verify the tagged commit is on main
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
