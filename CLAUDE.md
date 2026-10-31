@@ -278,9 +278,11 @@ see therefore has to be a version the control plane can pin:
   a release that is not on PyPI cannot be installed.
 - **forge `dev`** needs no release, and no deployed server runs it: production is the only
   strata-server deployment and installs a release. A forge `dev` change is exercised by a
-  strata-server run locally against forge `dev`, which installs the engine from git, pinned to the
-  commit it bundled (`engine_version` is then `"<version>+<commit>"`). A capability that landed on
-  forge `dev` reaches a deployed server only through a tagged release.
+  strata-server run locally against forge `dev` with `STRATA_SERVER_FORGE_REF` set to the commit
+  it bundled, so a run's VM installs the engine from git at that commit (`engine_version` is then
+  `"<version>+<commit>"`); left unset, the VM installs the PyPI release of the bundled version,
+  which an unreleased bump does not have yet. A capability that landed on forge `dev` reaches a
+  deployed server only through a tagged release.
 
 ---
 
