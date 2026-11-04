@@ -108,3 +108,11 @@ Helpers exposed for tests / cross-command reuse:
 - Adding a new shared helper to ``helpers.py``.
 - Changing the on-disk state layout under ``~/.forge``.
 - Adding a new heavy external dep used by a command.
+
+## Classification evaluation commands
+
+`eval schema` and `eval validate-spec` consume the authoritative installed EvalSpec.
+`eval classify` and `eval score-predictions` delegate to the same pipeline worker through
+normal secret/progress handling; they never invent a grant or accept a policy import/flag.
+The standalone worker denies when no trusted installed policy is available. Keep legacy
+experiment commands unchanged and test schema validation separately from execution authority.

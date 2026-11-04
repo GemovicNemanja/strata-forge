@@ -55,6 +55,7 @@ _SHAPES = st.lists(
     st.sampled_from(
         [
             "hf_",
+            "strata_worker_",
             "sk-",
             "ant-",
             "ghp_",
@@ -543,3 +544,19 @@ class TestHygiene:
         # off. A regression to quadratic time shows here as a test that does not finish.
         out = Redactor([_HF]).redact(hostile)
         assert isinstance(out, str)
+
+
+def test_run_worker_credential_shape_is_scrubbed_at_every_stream_split() -> None:
+    token = "strata_worker_" + ("Ab_-0" * 9)[:43]
+    text = f"before {token} after"
+    redactor = Redactor()
+    assert redactor.redact(text) == "before *** after"
+    for split in range(len(text) + 1):
+        stream = redactor.stream()
+        actual = stream.feed(text[:split]) + stream.feed(text[split:]) + stream.flush()
+        assert actual == "before *** after"
+
+
+def test_worker_prefix_without_complete_credential_stays_readable() -> None:
+    text = "strata_worker_" + "x" * 42
+    assert Redactor().redact(text) == text

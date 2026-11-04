@@ -1260,3 +1260,73 @@ class TestModelServerEnviron:
         kept = model_server_environ()
         assert kept["CUDA_VISIBLE_DEVICES"] == "3"
         assert "HF_WRITE_TOKEN" not in kept
+
+
+class TestEvaluationAuthoritySecret:
+    """Authority travels only through the same private read-and-unlink Task channel."""
+
+    def test_private_file_masks_frame_and_registers_nested_encoded_credential(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import base64
+
+        from strata_forge.pipelines import EVAL_AUTHORITY_SECRET
+
+        credential = "strata_worker_" + "x" * 43
+        raw = json.dumps(
+            {
+                "version": 1,
+                "run_id": "a" * 32,
+                "spec_sha256": "b" * 64,
+                "policy_origin": "https://policy.example",
+                "worker_credential": credential,
+            }
+        )
+        path = _deliver(monkeypatch, tmp_path, {"HF_TOKEN": _TOKEN, EVAL_AUTHORITY_SECRET: raw})
+        secrets = load_secrets()
+        assert not path.exists()
+        assert secrets.eval_authority is not None
+        assert secrets.eval_authority.get_secret_value() == raw
+        assert secrets.hf_token_value() == _TOKEN
+        assert credential not in repr(secrets)
+        assert raw not in str(secrets.model_dump())
+        redactor = _common.Redactor(secrets.sensitive_values())
+        encoded = base64.b64encode(credential.encode()).decode()
+        assert credential not in redactor.redact(credential)
+        assert encoded not in redactor.redact(encoded)
+
+    def test_environment_is_discarded_and_never_authorizes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from strata_forge.pipelines import EVAL_AUTHORITY_SECRET
+
+        monkeypatch.setenv(EVAL_AUTHORITY_SECRET, "strata_worker_" + "x" * 43)
+        assert load_secrets().eval_authority is None
+        assert EVAL_AUTHORITY_SECRET not in os.environ
+
+    @pytest.mark.asyncio
+    async def test_runner_failure_redacts_nested_credential_before_any_diagnostic(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import base64
+
+        from strata_forge.pipelines import EVAL_AUTHORITY_SECRET
+
+        credential = "strata_worker_" + "x" * 43
+        encoded = base64.b64encode(credential.encode()).decode()
+        _deliver(
+            monkeypatch,
+            tmp_path,
+            {EVAL_AUTHORITY_SECRET: json.dumps({"worker_credential": credential})},
+        )
+        progress = tmp_path / "progress.jsonl"
+        monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
+
+        async def execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+            raise RuntimeError("nested " + encoded)
+
+        assert await runner_main(execute) == 1
+        output = capsys.readouterr().err + progress.read_text()
+        assert credential not in output
+        assert encoded not in output
+        assert "***" in output

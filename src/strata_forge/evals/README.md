@@ -1,15 +1,15 @@
 # strata_forge.evals
 
-Experiment runner composing model × prompt × dataset × graders.
-Graders (exact match, regex, JSON-shape, JSON-field, LLM-judge,
-pairwise, semantic), standard metrics (accuracy, F1, BLEU, ROUGE),
-Markdown/HTML reports, parameter sweeps, trace replay against the
-current code/model, and a CI eval-regression gate with absolute and
-relative thresholds.
+Experiment runner composing model × prompt × dataset × graders. Typed experiments, trials,
+and outcomes support deterministic and model-based graders, outcome aggregates, BLEU/ROUGE,
+Markdown/HTML reports, parameter sweeps, trace replay, and an eval-regression gate.
 
-The foundation pieces — typed `Experiment` / `Trial` / `Outcome`
-shapes, the `Grader` Protocol, and the deterministic graders
-(`ExactMatch`, `Regex`, `JSONStructure`, `JSONField`) — ship in
-2.4.1. The async runner, metrics, sweeps, LLM-driven graders, trace
-replay, reports, and the CI gate land in 2.4.2 through 2.4.4. See
-`docs/roadmap.md` for current status.
+`evals.classification` re-exports explicit-label point metrics from the independent
+`strata_forge.metrics` leaf. Its classification reports retain invalid predictions in gold
+support and the denominator; probability metrics record missing-vector coverage and raw or
+restricted provenance. Training can use the same definitions without importing this runner.
+The same aliases include Wilson proportion intervals, exact paired McNemar tests, and
+explicit-family Holm corrections, without choosing thresholds or resampling populations.
+
+Reference: [evaluations](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/evals.md)
+and [classification metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).

@@ -64,15 +64,25 @@ inspect = ["inspect-ai>=0.3,<0.4"]
 # The tracing/prompt/dataset stores use the module-level `propagate_attributes` the v4 SDK
 # introduced; v2 and v3 are a different API surface, so the floor is the real constraint here.
 langfuse = ["langfuse>=4.0,<5"]
-hf = ["datasets>=4.0,<6"]
+hf = ["datasets>=4.0,<6", "pyarrow>=24,<25"]
 evals = ["nltk>=3.9,<4", "rouge-score>=0.1.2,<0.2"]
+# NumPy 2.4 supports Python 3.14; it is loaded only for numeric calibration operations.
+scoring = ["numpy>=2.4,<3"]
 rag = ["qdrant-client>=1.13,<2", "rank-bm25>=0.2.2,<0.3", "cohere>=5.13,<8"]
 compute = ["skypilot>=0.7,<1", "asyncssh>=2.18,<3"]
 # vLLM is driven as a CLI (`vllm serve`), so the floor is about what it DRAGS IN rather than an API
 # this package calls: 0.24 is the first release on the transformers>=5.5.3 line that `finetuning`
 # also targets, and every vLLM minor pins torch exactly. Keep in lockstep with compute/serving.py's
 # default setup string, which installs vLLM without consulting this file.
-serving = ["vllm>=0.24,<1"]
+serving = [
+    "vllm>=0.24,<1",
+    # HF scoring calls these directly rather than relying on vLLM's transitive dependencies.
+    # Keep compatible with the fine-tuning stack so [all] has a common supported range.
+    "torch>=2.9,<3",
+    "transformers>=5.5.3,<6",
+    "sentencepiece>=0.2,<0.3",
+    "protobuf>=5,<7",
+]
 bedrock = ["boto3>=1.35,<2"]
 storage = [
     # Do NOT raise the s3fs/gcsfs floors: `datasets` caps fsspec, and the 2026.7+ line of these two
@@ -84,6 +94,8 @@ storage = [
     "huggingface_hub>=1.0,<2",
 ]
 finetuning = [
+    # Native evaluation artifacts use Arrow directly in this fixed worker profile.
+    "pyarrow>=24,<25",
     # torch below 2.9 publishes no cp314 wheel, and this package requires 3.14.
     "torch>=2.9,<3",
     # transformers 5 REMOVED `TrainingArguments.warmup_ratio` (folded into `warmup_steps`, which now
@@ -110,7 +122,7 @@ finetuning = [
     "bitsandbytes>=0.49,<1",
 ]
 all = [
-    "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag,bedrock]",
+    "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,scoring,rag,bedrock]",
 ]
 
 [project.scripts]
@@ -158,6 +170,8 @@ dev = [
     # multimodal helpers, the Redis cache backend, etc. without forcing
     # users to install them in production.
     "pillow>=11.0",
+    "numpy>=2.4,<3",
+    "pyarrow>=24,<25",
 ]
 
 # ----------------------------- ruff -----------------------------
