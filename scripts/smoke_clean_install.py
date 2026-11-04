@@ -305,6 +305,53 @@ def check_cli() -> None:
         raise SmokeError(msg)
 
 
+def check_modular_prompts() -> None:
+    """Construct exact-pin composition with base dependencies, without models or tokenizers."""
+    from strata_forge.prompts import CompositionRegistry, compile_surface, render_build
+
+    async def exercise() -> None:
+        registry = CompositionRegistry()
+        await registry.put(
+            {
+                "kind": "module",
+                "name": "smoke/core",
+                "revision": 1,
+                "parts": [{"kind": "text", "text": "A😀"}],
+            }
+        )
+        await registry.put(
+            {
+                "kind": "surface",
+                "name": "smoke/surface",
+                "revision": 1,
+                "variables": [{"name": "value", "type": "string"}],
+                "target": {
+                    "kind": "chat",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "separator": "\r\n",
+                            "parts": [
+                                {"kind": "module", "revision": "smoke/core@1"},
+                                {"kind": "variable", "name": "value"},
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+        build = await compile_surface(registry, "smoke/surface@1")
+        rendered = await render_build(build, {"value": "{{literal}}"})
+        expected = {
+            "kind": "chat",
+            "messages": [{"role": "system", "content": "A😀\r\n{{literal}}"}],
+        }
+        if rendered.wire_payload()["output"] != expected or len(build.build_id) != 64:
+            raise SmokeError("modular prompt composition changed its exact output")
+
+    asyncio.run(exercise())
+
+
 @contextlib.contextmanager
 def bf16_as_on_a_gpu() -> Generator[None]:
     """Let ``TrainingArguments`` accept ``bf16=True`` on a machine with no GPU.
@@ -1042,6 +1089,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
         ("installed distribution", check_install),
         ("top-level module imports", check_module_imports),
         ("cli --help", check_cli),
+        ("modular prompt compiler", check_modular_prompts),
     ]
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))

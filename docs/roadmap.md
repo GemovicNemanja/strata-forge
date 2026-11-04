@@ -391,6 +391,12 @@ explicit stable-prefix / dynamic-suffix split so provider prompt caching
 works without per-call hand-tuning; rendering to `strata_forge.llm.Message`
 instances.
 
+The independent [modular compiler](modules/prompt-composition.md) provides exact-version
+composition, immutable build/render identities, declared constraint checks and UTF-8 source
+maps. Its Python/Node fixtures cover portable bytes and an unchanged archived operational
+Strata import. Server persistence, review/publication, product UI and request capture remain
+separate integration work; compiler identity alone proves none of them.
+
 | Sub-phase | Deliverable |
 |---|---|
 | 2.1.1 | Module skeleton + ADR: stable-prefix / dynamic-suffix design |
