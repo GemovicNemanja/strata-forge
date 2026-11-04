@@ -1,4 +1,4 @@
-"""Private exact-scoring primitives; pipeline launchers do not expose these engines.
+"""Private exact-scoring primitives used by inert pipeline dispatch.
 
 Inputs are already-rendered text, never executable templates. Heavy dependencies are lazy,
 and model loading accepts only explicit Hub credentials, safetensors and built-in model code.
@@ -11,6 +11,7 @@ import asyncio
 import math
 import re
 from importlib import import_module
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -93,6 +94,7 @@ class _Tokenizer(Protocol):
 
 class _ModelConfig(Protocol):
     id2label: Mapping[int | str, str]
+    pad_token_id: int | None
 
 
 class _ModelOutput(Protocol):
@@ -437,6 +439,10 @@ def _load_scorer(
     device: str,
     dtype: str | None,
 ) -> Scorer:
+    # Transformers prefers an existing relative directory over the requested Hub revision.
+    # Refuse that ambiguity rather than label local bytes with a resolved Hub commit.
+    if Path(model_id).exists():
+        raise ValidationError("model_id collides with a local path; Hub-only scoring is required")
     try:
         transformers = cast("_Transformers", import_module("transformers"))
         torch = cast("_Torch", import_module("torch"))
@@ -458,6 +464,9 @@ def _load_scorer(
         if tokenizer.eos_token_id is None:
             raise ValidationError("batched scoring requires a pad token or an EOS token")
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    pad_id = cast("object", tokenizer.pad_token_id)
+    if isinstance(pad_id, bool) or not isinstance(pad_id, int) or pad_id < 0:
+        raise ValidationError("batched scoring requires a nonnegative integer pad token id")
     ids = _verbalizer_ids(tokenizer, label_tokens) if label_tokens is not None else []
     factory = (
         transformers.AutoModelForSequenceClassification
@@ -479,6 +488,14 @@ def _load_scorer(
             **kwargs,
         ),
     )
+    # Decoder classifier heads pool using config.pad_token_id independently of the
+    # tokenizer's attention mask. Both must describe the padding actually supplied.
+    try:
+        model.config.pad_token_id = pad_id
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValidationError("model config cannot use the tokenizer pad token id") from exc
+    if model.config.pad_token_id != pad_id:
+        raise ValidationError("model config must preserve the tokenizer pad token id")
     labels = (
         _label_names(model.config.id2label, label_alias)
         if engine == "hf_classify"

@@ -46,6 +46,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import math
 import pkgutil
 import re
 import shlex
@@ -491,8 +492,11 @@ def check_scoring_specs() -> None:
 
 def check_scoring_models() -> None:
     """Reload locally initialized safetensors models and score without Hub access."""
+    from unittest.mock import patch
+
+    from strata_forge.core.errors import ValidationError
     from strata_forge.core.repro import set_seed
-    from strata_forge.pipelines._scoring import Scorer, ScoringInput
+    from strata_forge.pipelines._scoring import Scorer, ScoringInput, load_scorer
 
     # These extras are deliberately inspected at runtime: this is the upstream API probe,
     # not a dependency of importing this script or of its pure-spec unit tests.
@@ -600,6 +604,85 @@ def check_scoring_models() -> None:
                     row.mass_outside is not None and 0 <= row.mass_outside <= 1
                 ):
                     raise SmokeError("tiny decoder did not report full-vocabulary outside mass")
+
+        # Unlike encoder classifiers, decoder heads use config.pad_token_id for pooling.
+        # Factories return actual local models here so the Hub-only loader is exercised
+        # without making a network request or weakening its public local-path refusal.
+        classifier_path = root / "decoder-classifier"
+        classifier = transformers.AutoModelForSequenceClassification.from_config(
+            transformers.GPT2Config(
+                vocab_size=len(vocab),
+                n_embd=16,
+                n_layer=1,
+                n_head=2,
+                n_positions=32,
+                num_labels=2,
+                pad_token_id=None,
+                eos_token_id=2,
+                id2label={0: "yes", 1: "no"},
+            )
+        )
+        classifier.save_pretrained(classifier_path, safe_serialization=True)
+        classifier = transformers.AutoModelForSequenceClassification.from_pretrained(
+            classifier_path, token=False, use_safetensors=True, trust_remote_code=False
+        )
+        pairs = [
+            ScoringInput(text="one", text_pair="two"),
+            ScoringInput(text="one two two", text_pair="one"),
+        ]
+        for tokenizer_pad, model_pad in ((None, None), (0, None), (0, 8)):
+            tokenizer.pad_token_id = tokenizer_pad
+            classifier.config.pad_token_id = model_pad
+            with (
+                patch.object(transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+                patch.object(
+                    transformers.AutoModelForSequenceClassification,
+                    "from_pretrained",
+                    return_value=classifier,
+                ),
+            ):
+                scorer = asyncio.run(
+                    load_scorer(
+                        "smoke-org/decoder-classifier",
+                        engine="hf_classify",
+                        token=False,
+                        max_length=32,
+                        revision="a" * 40,
+                    )
+                )
+            batched = asyncio.run(scorer.score(pairs, batch_size=2))
+            separate = asyncio.run(scorer.score(pairs, batch_size=1))
+            expected_pad = 2 if tokenizer_pad is None else tokenizer_pad
+            if classifier.config.pad_token_id != expected_pad:
+                raise SmokeError("decoder classifier config does not use the actual tokenizer pad")
+            if batched.failed_rows or len(batched.rows) != 2:
+                raise SmokeError("decoder classifier did not score the unequal-length batch")
+            for batch_row, single_row in zip(batched.rows, separate.rows, strict=True):
+                if any(
+                    not math.isclose(value, single_row.probabilities[label], abs_tol=1e-6)
+                    for label, value in batch_row.probabilities.items()
+                ):
+                    raise SmokeError("decoder classifier padding changed a row's probabilities")
+
+        # The directory contains a complete synthetic model and tokenizer, so an unsafe
+        # loader could really use it while claiming an unrelated pinned Hub revision.
+        tokenizer.save_pretrained(classifier_path)
+        with contextlib.chdir(root):
+            try:
+                asyncio.run(
+                    load_scorer(
+                        "decoder-classifier",
+                        engine="hf_classify",
+                        token=False,
+                        max_length=32,
+                        revision="a" * 40,
+                    )
+                )
+            except ValidationError as exc:
+                if "collides with a local path" not in str(exc):
+                    raise SmokeError("local-shadow refusal did not identify the ambiguity") from exc
+            else:
+                raise SmokeError("a local model shadowed the requested Hub revision")
 
 
 def vllm_command() -> list[str]:

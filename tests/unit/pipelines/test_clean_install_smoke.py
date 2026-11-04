@@ -148,6 +148,14 @@ def test_install_check_refuses_a_source_tree_import() -> None:
         smoke.check_install()
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None or importlib.util.find_spec("transformers") is None,
+    reason="actual tiny-model CPU regression requires optional torch and transformers",
+)
+def test_actual_tiny_models_cover_decoder_classifier_padding_and_local_shadow() -> None:
+    smoke.check_scoring_models()
+
+
 class TestOverride:
     @pytest.mark.parametrize(
         "text",

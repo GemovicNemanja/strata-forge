@@ -15,6 +15,7 @@ from strata_forge.pipelines import _scoring as scoring
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from strata_forge.training.progress import ProgressEvent
 
@@ -109,7 +110,7 @@ class Tokenizer:
 
 class Model:
     def __init__(self, labels: dict[int | str, str], *, causal: bool) -> None:
-        self.config = types.SimpleNamespace(id2label=labels)
+        self.config = types.SimpleNamespace(id2label=labels, pad_token_id=None)
         self.causal = causal
         self.evaluating = False
         self.forward_calls = 0
@@ -389,6 +390,90 @@ async def test_decoder_can_pad_with_eos(fake_hf: types.SimpleNamespace) -> None:
         "org/model", engine="hf_label_logits", token=False, max_length=12, label_tokens={"yes": "A"}
     )
     assert fake_hf.tokenizer.pad_token_id == 98
+    assert fake_hf.models[0].config.pad_token_id == 98
+
+
+async def test_classifier_model_config_follows_tokenizer_padding(
+    fake_hf: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = Model(fake_hf.labels, causal=False)
+    model.config.pad_token_id = 77
+
+    def load_model(model_id: str, **kwargs: object) -> Model:
+        return model
+
+    monkeypatch.setattr(
+        sys.modules["transformers"].AutoModelForSequenceClassification,
+        "from_pretrained",
+        load_model,
+    )
+    await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
+    assert model.config.pad_token_id == fake_hf.tokenizer.pad_token_id == 0
+
+
+@pytest.mark.parametrize("reject_assignment", [False, True])
+async def test_model_config_must_accept_and_preserve_the_actual_pad_id(
+    fake_hf: types.SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    reject_assignment: bool,
+) -> None:
+    class Config:
+        @property
+        def pad_token_id(self) -> None:
+            return None
+
+        @pad_token_id.setter
+        def pad_token_id(self, value: int) -> None:
+            if reject_assignment:
+                raise AttributeError("read-only config")
+
+    model = Model(fake_hf.labels, causal=False)
+    monkeypatch.setattr(model, "config", Config())
+
+    def load_model(model_id: str, **kwargs: object) -> Model:
+        return model
+
+    monkeypatch.setattr(
+        sys.modules["transformers"].AutoModelForSequenceClassification,
+        "from_pretrained",
+        load_model,
+    )
+    with pytest.raises(ValidationError, match="model config"):
+        await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
+    assert not model.evaluating
+
+
+@pytest.mark.parametrize("pad_id", [-1, True, "0"])
+async def test_invalid_tokenizer_padding_is_refused_before_loading_weights(
+    fake_hf: types.SimpleNamespace, pad_id: object
+) -> None:
+    fake_hf.tokenizer.pad_token_id = pad_id
+    with pytest.raises(ValidationError, match="integer pad token"):
+        await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
+    assert fake_hf.models == []
+
+
+@pytest.mark.parametrize("model_id", ["model", "org/model"])
+@pytest.mark.parametrize("local_kind", ["directory", "file"])
+async def test_hub_id_cannot_silently_load_a_matching_local_path(
+    fake_hf: types.SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_id: str,
+    local_kind: str,
+) -> None:
+    path = tmp_path / model_id
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if local_kind == "directory":
+        path.mkdir()
+    else:
+        path.touch()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValidationError, match="collides with a local path"):
+        await scoring.load_scorer(
+            model_id, engine="hf_classify", token=False, revision="a" * 40, max_length=12
+        )
+    assert fake_hf.calls == []
 
 
 async def test_no_padding_token_is_refused(fake_hf: types.SimpleNamespace) -> None:

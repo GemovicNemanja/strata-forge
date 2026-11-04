@@ -20,6 +20,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - Clean-install checks construct both scoring specs and reload tiny locally initialized
   safetensors models offline. Serving declares bounded direct scoring dependencies.
 
+### Fixed
+
+- HF scoring aligns model config padding to the actual tokenizer pad/EOS id so decoder
+  classifier heads can score unequal-length batches. Existing local paths that shadow a
+  requested Hub id are refused before loading rather than silently ignoring its revision.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added

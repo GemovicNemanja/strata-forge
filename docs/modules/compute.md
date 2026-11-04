@@ -294,6 +294,14 @@ accepted, not a local model path. Dependencies are lazy; `[serving]` declares to
 transformers, sentencepiece and protobuf directly. The scorer neither reads secrets
 from the environment nor logs input text, credentials or model exceptions.
 
+A Hub id that collides with an existing relative local path is refused before loading:
+Transformers otherwise prefers that path and can ignore the requested Hub revision. This
+guard assumes a trusted worker filesystem; it does not isolate the loader from concurrent
+filesystem changes. Tokenizer padding is right-sided, using its existing pad token or its
+EOS token when needed. The model config is aligned to that exact token id, including decoder
+classification heads whose pooling independently reads `config.pad_token_id`. Invalid pad
+ids or a config that cannot retain the alignment are refused before scoring.
+
 Call `await scorer.score([ScoringInput(text=..., text_pair=...)], batch_size=...)` with
 already-rendered text. No Jinja, Python or template interpretation occurs here. Forward
 passes run in a worker thread, in evaluation/inference mode, sorted into length batches;
