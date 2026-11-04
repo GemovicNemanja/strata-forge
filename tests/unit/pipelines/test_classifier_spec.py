@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+# Malformed JSON fixtures and installed native ML/mock objects are intentionally dynamic.
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -17,7 +19,7 @@ from strata_forge.pipelines.classifier_spec import (
 )
 
 
-def payload():
+def payload() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "engine_version": "0.3.0",
@@ -46,7 +48,7 @@ def payload():
     }
 
 
-def test_roundtrip_and_explicit_objective():
+def test_roundtrip_and_explicit_objective() -> None:
     spec = ClassifierTrainSpec.model_validate(payload())
     assert load_classifier_spec(spec.canonical()) == spec
     assert spec.training.sdk_config().brier_weight == 0
@@ -69,7 +71,7 @@ def test_roundtrip_and_explicit_objective():
         "label_smoothing",
     ],
 )
-def test_unavailable_top_fields_refuse_even_null(key):
+def test_unavailable_top_fields_refuse_even_null(key: Any) -> None:
     p = payload()
     p[key] = None
     with pytest.raises(ValidationError):
@@ -89,7 +91,7 @@ def test_unavailable_top_fields_refuse_even_null(key):
         "resume",
     ],
 )
-def test_unavailable_training_fields_refuse_even_null(key):
+def test_unavailable_training_fields_refuse_even_null(key: Any) -> None:
     p = payload()
     p["training"][key] = None
     with pytest.raises(ValidationError):
@@ -106,14 +108,14 @@ def test_unavailable_training_fields_refuse_even_null(key):
         b'"private-canary"',
     ],
 )
-def test_raw_parser_refuses_without_retaining_input(raw):
+def test_raw_parser_refuses_without_retaining_input(raw: Any) -> None:
     with pytest.raises(ClassifierWorkerError) as error:
         load_classifier_spec(raw)
     assert error.value.__context__ is None
     assert "private" not in str(error.value)
 
 
-def test_index_map_and_selection_are_explicit():
+def test_index_map_and_selection_are_explicit() -> None:
     p = payload()
     p["training"]["label_index_map"] = {"0": "E", "1": "C"}
     assert ClassifierTrainSpec.model_validate(p).training.sdk_config().label_index_map == {
@@ -126,14 +128,14 @@ def test_index_map_and_selection_are_explicit():
 
 
 @pytest.mark.parametrize("version", [True, False, 1.0, "1"])
-def test_schema_version_is_exact_integer(version):
+def test_schema_version_is_exact_integer(version: Any) -> None:
     p = payload()
     p["schema_version"] = version
     with pytest.raises(ValidationError):
         ClassifierTrainSpec.model_validate(p)
 
 
-def test_existing_evaluation_wire_digests_are_unchanged():
+def test_existing_evaluation_wire_digests_are_unchanged() -> None:
     from strata_forge.pipelines.evaluation_spec import EvalSpec
 
     fixture = json.loads(
@@ -146,7 +148,7 @@ def test_existing_evaluation_wire_digests_are_unchanged():
     ]
 
 
-def test_new_worker_modules_import_without_heavy_optional_dependencies():
+def test_new_worker_modules_import_without_heavy_optional_dependencies() -> None:
     script = """
 import builtins
 native = builtins.__import__
@@ -172,7 +174,7 @@ import strata_forge.pipelines._scoring
     assert result.returncode == 0, result.stderr
 
 
-def test_noncanonical_integer_index_key_refuses():
+def test_noncanonical_integer_index_key_refuses() -> None:
     p = payload()
     p["training"]["label_index_map"] = {"01": "E"}
     with pytest.raises(ValidationError):

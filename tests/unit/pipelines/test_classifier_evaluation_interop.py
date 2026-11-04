@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import types
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -21,13 +22,18 @@ from tests.unit.pipelines.test_classifier_runner import (
 )
 from tests.unit.pipelines.test_eval_runner import Policy, Reader, spec_data
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def install_hub_transport(monkeypatch, artifact):
+# Malformed JSON fixtures and installed native ML/mock objects are intentionally dynamic.
+
+
+def install_hub_transport(monkeypatch: pytest.MonkeyPatch, artifact: Path) -> list[str]:
     import huggingface_hub as hub
 
-    calls = []
+    calls: list[str] = []
 
-    def download(repo_id, filename, *, revision, token):
+    def download(repo_id: Any, filename: str, *, revision: Any, token: Any) -> Any:
         assert repo_id == "example/synthetic-model"
         assert revision == "b" * 40
         assert token is False
@@ -35,21 +41,22 @@ def install_hub_transport(monkeypatch, artifact):
         return str(artifact / filename)
 
     monkeypatch.setattr(hub, "hf_hub_download", download)
-    monkeypatch.setattr(
-        hub,
-        "HfApi",
-        lambda *, token: types.SimpleNamespace(
-            list_repo_files=lambda *args, **kwargs: sorted(p.name for p in artifact.iterdir())
-        ),
-    )
+
+    def list_files(*args: object, **kwargs: object) -> list[str]:
+        return sorted(p.name for p in artifact.iterdir())
+
+    def api(*, token: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(list_repo_files=list_files)
+
+    monkeypatch.setattr(hub, "HfApi", api)
     return calls
 
 
 @pytest.mark.parametrize("family", ["bert", "gpt2", "modernbert_decoder"])
 async def test_default_pinned_export_scores_and_evaluates_without_model_download(
-    tmp_path, monkeypatch, family
-):
-    import torch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str
+) -> None:
+    torch: Any = __import__("torch")
 
     base = tmp_path / "base"
     save_base(base, family)
@@ -183,7 +190,7 @@ async def test_default_pinned_export_scores_and_evaluates_without_model_download
         (result.artifact_dir / "strata_classifier.json").write_text(json.dumps(value))
         import strata_forge.pipelines._classifier_checkpoint as checkpoints
 
-        def no_weights(*args, **kwargs):
+        def no_weights(*args: Any, **kwargs: Any) -> Any:
             raise AssertionError("token receipt mismatch must precede model loading")
 
         monkeypatch.setattr(checkpoints, "_load_complete_classifier", no_weights)
@@ -197,10 +204,12 @@ async def test_default_pinned_export_scores_and_evaluates_without_model_download
             )
 
 
-async def test_no_eval_authority_never_probes_sidecar(tmp_path, monkeypatch):
+async def test_no_eval_authority_never_probes_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import huggingface_hub as hub
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("no model probe before policy")
 
     monkeypatch.setattr(hub, "hf_hub_download", forbidden)
@@ -213,7 +222,9 @@ async def test_no_eval_authority_never_probes_sidecar(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ["malformed", "missing_head", "labels", "counter"])
-async def test_recognized_pinned_damage_never_falls_back_to_native(tmp_path, monkeypatch, failure):
+async def test_recognized_pinned_damage_never_falls_back_to_native(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Any
+) -> None:
     import transformers
     from safetensors.torch import load_file, save_file
 
@@ -242,7 +253,7 @@ async def test_recognized_pinned_damage_never_falls_back_to_native(tmp_path, mon
         metadata.write_text(json.dumps(value))
     install_hub_transport(monkeypatch, result.artifact_dir)
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("native fallback is forbidden")
 
     monkeypatch.setattr(

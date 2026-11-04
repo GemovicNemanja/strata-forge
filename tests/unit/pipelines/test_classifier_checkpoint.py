@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import httpx
 import pytest
 
@@ -11,12 +13,17 @@ from strata_forge.pipelines._classifier_checkpoint import (
 )
 from strata_forge.pipelines.classifier_spec import ClassifierWorkerError
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def test_only_definite_remote_file_404_is_native_fallback(monkeypatch):
+# Malformed JSON fixtures and installed native ML/mock objects are intentionally dynamic.
+
+
+def test_only_definite_remote_file_404_is_native_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     import huggingface_hub as hub
     from huggingface_hub.errors import RemoteEntryNotFoundError
 
-    def absent(*args, **kwargs):
+    def absent(*args: Any, **kwargs: Any) -> Any:
         raise RemoteEntryNotFoundError(
             "fictional-private-message",
             response=httpx.Response(
@@ -27,7 +34,7 @@ def test_only_definite_remote_file_404_is_native_fallback(monkeypatch):
     monkeypatch.setattr(hub, "hf_hub_download", absent)
     assert probe_forge_classifier("fixture/model", revision="1" * 40, token=False) is None
 
-    def unavailable(*args, **kwargs):
+    def unavailable(*args: Any, **kwargs: Any) -> Any:
         raise TimeoutError("fictional-private-message")
 
     monkeypatch.setattr(hub, "hf_hub_download", unavailable)
@@ -37,10 +44,10 @@ def test_only_definite_remote_file_404_is_native_fallback(monkeypatch):
     assert "private-message" not in str(error.value)
 
 
-def test_probe_refuses_unpinned_before_transport(monkeypatch):
+def test_probe_refuses_unpinned_before_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     import huggingface_hub as hub
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("no probe before exact pin")
 
     monkeypatch.setattr(hub, "hf_hub_download", forbidden)
@@ -48,19 +55,21 @@ def test_probe_refuses_unpinned_before_transport(monkeypatch):
         probe_forge_classifier("fixture/model", revision="main", token=False)
 
 
-def test_malformed_sidecar_refuses_before_weight_inventory_or_download(tmp_path, monkeypatch):
+def test_malformed_sidecar_refuses_before_weight_inventory_or_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import huggingface_hub as hub
 
     sidecar = tmp_path / "strata_classifier.json"
     sidecar.write_text("{}")
     calls = []
 
-    def download(model_id, filename, **kwargs):
+    def download(model_id: Any, filename: str, **kwargs: Any) -> Any:
         calls.append(filename)
         assert filename == "strata_classifier.json"
         return str(sidecar)
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("malformed metadata must refuse before inventory")
 
     monkeypatch.setattr(hub, "hf_hub_download", download)
@@ -78,7 +87,9 @@ def test_malformed_sidecar_refuses_before_weight_inventory_or_download(tmp_path,
         ("tokenizer_config.json", '{"tokenizer_file":"../outside.json"}'),
     ],
 )
-async def test_checkpoint_asset_paths_cannot_escape_prepared_inventory(tmp_path, file, body):
+async def test_checkpoint_asset_paths_cannot_escape_prepared_inventory(
+    tmp_path: Path, file: str, body: str
+) -> None:
     (tmp_path / "config.json").write_text("{}")
     (tmp_path / "model.safetensors").write_bytes(b"fictional not actual weights")
     (tmp_path / file).write_text(body)

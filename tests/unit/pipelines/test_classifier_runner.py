@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -13,13 +14,19 @@ from tests.unit.pipelines.test_classifier_spec import payload
 from tests.unit.training.test_classifier import source as tiny_source
 from tests.unit.training.test_classifier import tokenizer as tiny_tokenizer
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+# Malformed JSON fixtures and installed native ML/mock objects are intentionally dynamic.
+
 
 class Authority:
-    def __init__(self, custody="unsealed", change=None):
-        self.calls = []
+    def __init__(self, custody: str = "unsealed", change: dict[str, Any] | None = None) -> None:
+        self.calls: list[worker.TrainingReadRequest] = []
         self.custody, self.change = custody, change
 
-    async def decide(self, request):
+    async def decide(self, request: worker.TrainingReadRequest) -> worker.TrainingReadDecision:
         self.calls.append(request)
         values = {
             **request.model_dump(),
@@ -33,7 +40,7 @@ class Authority:
 
 
 class Source:
-    def __init__(self, path=None, rows=None):
+    def __init__(self, path: Path | None = None, rows: list[bytes] | None = None) -> None:
         self.path = path
         self.values = (
             [
@@ -44,10 +51,10 @@ class Source:
             else rows
         )
         self.yielded = 0
-        self.resolved = []
+        self.resolved: list[str] = []
         self.closed = False
 
-    async def rows(self, source):
+    async def rows(self, source: Any) -> AsyncIterator[bytes]:
         try:
             for raw in self.values:
                 self.yielded += 1
@@ -55,18 +62,18 @@ class Source:
         finally:
             self.closed = True
 
-    async def resolve_model(self, ref):
+    async def resolve_model(self, ref: str) -> worker.ResolvedClassifierCheckpoint:
         self.resolved.append(ref)
         assert self.path is not None
         return worker.ResolvedClassifierCheckpoint(ref, self.path)
 
 
 class ParquetSource(Source):
-    def __init__(self, path, file):
+    def __init__(self, path: Path, file: Path) -> None:
         super().__init__(path)
         self.file = file
 
-    async def rows(self, source):
+    async def rows(self, source: Any) -> AsyncIterator[bytes]:
         import pyarrow.parquet as pq
 
         try:
@@ -80,7 +87,7 @@ class ParquetSource(Source):
             self.closed = True
 
 
-def spec(family="bert"):
+def spec(family: str = "bert") -> ClassifierTrainSpec:
     p = payload()
     if family != "bert":
         p["base"]["initialization"] = {
@@ -90,8 +97,8 @@ def spec(family="bert"):
     return ClassifierTrainSpec.model_validate(p)
 
 
-def save_base(path, family="bert"):
-    import torch
+def save_base(path: Path, family: str = "bert") -> Any:
+    torch: Any = __import__("torch")
     import transformers
 
     torch.set_num_threads(1)
@@ -117,7 +124,7 @@ def save_base(path, family="bert"):
         {"purpose": "evaluation"},
     ],
 )
-async def test_wrong_authority_never_reads_source(tmp_path, change):
+async def test_wrong_authority_never_reads_source(tmp_path: Path, change: Any) -> None:
     source = Source()
     with pytest.raises(ClassifierWorkerError, match="read_denied"):
         await worker.run_classifier_training(
@@ -127,16 +134,18 @@ async def test_wrong_authority_never_reads_source(tmp_path, change):
     assert not source.resolved
 
 
-async def test_model_resolution_revocation_refuses_before_local_weight_read(tmp_path, monkeypatch):
+async def test_model_resolution_revocation_refuses_before_local_weight_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     policy = Authority()
 
     class RevokingSource(Source):
-        async def resolve_model(self, ref):
+        async def resolve_model(self, ref: Any) -> worker.ResolvedClassifierCheckpoint:
             resolved = await super().resolve_model(ref)
             policy.custody = "unknown"
             return resolved
 
-    async def forbidden(path):
+    async def forbidden(path: Any) -> Any:
         raise AssertionError("revocation must refuse before native model loading")
 
     monkeypatch.setattr(worker, "load_classifier_base", forbidden)
@@ -149,7 +158,9 @@ async def test_model_resolution_revocation_refuses_before_local_weight_read(tmp_
     assert not (tmp_path / "run").exists()
 
 
-async def test_byte_limit_and_count_cap_refuse_before_parsing_later_rows(tmp_path, monkeypatch):
+async def test_byte_limit_and_count_cap_refuse_before_parsing_later_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     p = payload()
     p["dataset"]["selection"] = {"mode": "all", "row_limit": 1}
     source = Source(rows=[b'{"id":"a","text":"a","label":"E"}', b"not json", b"not fetched"])
@@ -174,7 +185,9 @@ async def test_byte_limit_and_count_cap_refuse_before_parsing_later_rows(tmp_pat
     assert not source.resolved
 
 
-async def test_skips_count_toward_budget_and_range_is_not_silent_prefix(tmp_path, monkeypatch):
+async def test_skips_count_toward_budget_and_range_is_not_silent_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     p = payload()
     p["dataset"]["selection"] = {"mode": "range", "row_start": 1, "row_end": 3, "row_limit": 2}
     source = Source(
@@ -185,7 +198,9 @@ async def test_skips_count_toward_budget_and_range_is_not_silent_prefix(tmp_path
             b"not fetched",
         ]
     )
-    prepared, used, _ = await worker._rows(ClassifierTrainSpec.model_validate(p), source)
+    prepared, used, _ = await worker._rows(  # pyright: ignore[reportPrivateUsage] — assert preparse byte/count boundaries
+        ClassifierTrainSpec.model_validate(p), source
+    )
     assert len(prepared) == 2
     assert used == sum(map(len, source.values[:3]))
     assert source.yielded == 3
@@ -193,15 +208,17 @@ async def test_skips_count_toward_budget_and_range_is_not_silent_prefix(tmp_path
     source = Source(rows=[b"x" * 20, b'{"id":"a","text":"a","label":"E"}'])
     monkeypatch.setattr(worker, "MAX_INPUT_BYTES", 10)
     with pytest.raises(ClassifierWorkerError, match="input_limit"):
-        await worker._rows(ClassifierTrainSpec.model_validate(p), source)
+        await worker._rows(  # pyright: ignore[reportPrivateUsage] — assert preparse byte/count boundaries
+            ClassifierTrainSpec.model_validate(p), source
+        )
     assert source.yielded == 1
 
 
 @pytest.mark.parametrize("family", ["bert", "gpt2", "modernbert_decoder"])
-async def test_actual_cpu_training_and_safe_receipt(tmp_path, family):
+async def test_actual_cpu_training_and_safe_receipt(tmp_path: Path, family: str) -> None:
     path = tmp_path / "base"
     original = save_base(path, family)
-    import torch
+    torch: Any = __import__("torch")
 
     from strata_forge.pipelines._classifier_checkpoint import reload_classifier
     from strata_forge.training.classifier import initialize_classifier
@@ -233,7 +250,9 @@ async def test_actual_cpu_training_and_safe_receipt(tmp_path, family):
     assert not list(result.artifact_dir.rglob("*.bin"))
 
 
-async def test_cancelled_native_work_cannot_emit_late_success(tmp_path, monkeypatch):
+async def test_cancelled_native_work_cannot_emit_late_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import threading
 
     from strata_forge.training.progress import JsonlProgressWriter
@@ -242,12 +261,12 @@ async def test_cancelled_native_work_cannot_emit_late_success(tmp_path, monkeypa
     save_base(path)
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 
-    def native():
+    def native() -> Any:
         entered.set()
         release.wait(3)
         finished.set()
 
-    async def held(*args, **kwargs):
+    async def held(*args: Any, **kwargs: Any) -> Any:
         await asyncio.to_thread(native)
         raise AssertionError("cancelled native result must not resume the worker")
 
