@@ -81,6 +81,27 @@ def fake_hf(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 class TestConstruction:
+    @pytest.mark.parametrize("private", [True, False])
+    async def test_explicit_privacy_metadata(self, private: bool) -> None:
+        class Api:
+            def repo_info(self, **kwargs: object) -> types.SimpleNamespace:
+                assert kwargs == {"repo_id": "example/results", "repo_type": "dataset"}
+                return types.SimpleNamespace(private=private)
+
+        assert (
+            await HFHubClient(api=Api()).repo_private("example/results", repo_type="dataset")
+            is private
+        )
+
+    @pytest.mark.parametrize("private", [None, "true", 1])
+    async def test_missing_or_ambiguous_privacy_refuses(self, private: object) -> None:
+        class Api:
+            def repo_info(self, **kwargs: object) -> types.SimpleNamespace:
+                return types.SimpleNamespace(private=private)
+
+        with pytest.raises(TypeError, match="privacy metadata is unavailable"):
+            await HFHubClient(api=Api()).repo_private("example/results", repo_type="dataset")
+
     async def test_lazy_api_construction(self, fake_hf: dict[str, Any]) -> None:
         client = HFHubClient(token="hf_xyz", endpoint="https://hub.example.com")
         # No HfApi until first use.

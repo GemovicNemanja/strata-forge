@@ -1,0 +1,2192 @@
+{
+  "notice": "All names, refs and rows are synthetic; schema validation never contacts a Hub or runs a model.",
+  "valid_specs": [
+    {
+      "schema_version": 1,
+      "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+      "run_id": "synthetic-eval-001",
+      "progress_path": "progress.jsonl",
+      "dataset_id": "example/synthetic-gold",
+      "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "output_repo_id": "example/synthetic-output",
+      "sealed": false,
+      "echo_columns": [],
+      "apply_calibration": "none",
+      "bootstrap": null,
+      "holm_families": [],
+      "mode": "classify",
+      "model_id": "example/synthetic-model",
+      "model_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "engine": "hf_classify",
+      "model_labels": [
+        "E",
+        "C",
+        "U"
+      ],
+      "label_aliases": {},
+      "label_tokens": null,
+      "rendering": {
+        "source": "override",
+        "template": "{premises}",
+        "pair_template": "{hypothesis}",
+        "premise_format": "numbered_lines",
+        "max_length": 128,
+        "max_premises": 20
+      },
+      "scoring_batch_size": 2,
+      "dtype": "float32",
+      "evaluation_sets": [
+        {
+          "evaluation_id": "threeway",
+          "dataset_config": "threeway",
+          "split": "test",
+          "id_column": "item_id",
+          "gold_column": "gold",
+          "gold_index_map": {},
+          "label_space": "3way",
+          "labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "projection": null,
+          "selection": {
+            "row_start": 0,
+            "row_end": null,
+            "row_limit": 4
+          },
+          "slice_columns": [
+            "tags",
+            "headline",
+            "depth"
+          ],
+          "cluster_column": "base_problem_id",
+          "sampling_unit": "independent_items",
+          "declared_diagnostic": false,
+          "truncation_policy": "count_as_invalid",
+          "compare_to": [],
+          "column_mapping": {
+            "premises": "premises",
+            "hypothesis": "hypothesis"
+          }
+        },
+        {
+          "evaluation_id": "binary",
+          "dataset_config": "binary",
+          "split": "test",
+          "id_column": "item_id",
+          "gold_column": "gold",
+          "gold_index_map": {},
+          "label_space": "2way_entail_vs_not",
+          "labels": [
+            "E",
+            "not_E"
+          ],
+          "projection": {
+            "E": "E",
+            "C": "not_E",
+            "U": "not_E"
+          },
+          "selection": {
+            "row_start": 0,
+            "row_end": null,
+            "row_limit": 4
+          },
+          "slice_columns": [
+            "tags",
+            "headline",
+            "depth"
+          ],
+          "cluster_column": "base_problem_id",
+          "sampling_unit": "independent_items",
+          "declared_diagnostic": false,
+          "truncation_policy": "count_as_invalid",
+          "compare_to": [],
+          "column_mapping": {
+            "premises": "premises",
+            "hypothesis": "hypothesis"
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+      "run_id": "synthetic-eval-001",
+      "progress_path": "progress.jsonl",
+      "dataset_id": "example/synthetic-gold",
+      "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "output_repo_id": "example/synthetic-output",
+      "sealed": false,
+      "echo_columns": [],
+      "apply_calibration": "none",
+      "bootstrap": null,
+      "holm_families": [],
+      "mode": "score_predictions",
+      "evaluation_sets": [
+        {
+          "evaluation_id": "threeway",
+          "dataset_config": "threeway",
+          "split": "test",
+          "id_column": "item_id",
+          "gold_column": "gold",
+          "gold_index_map": {},
+          "label_space": "3way",
+          "labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "projection": null,
+          "selection": {
+            "row_start": 0,
+            "row_end": null,
+            "row_limit": 4
+          },
+          "slice_columns": [
+            "tags",
+            "headline",
+            "depth"
+          ],
+          "cluster_column": "base_problem_id",
+          "sampling_unit": "independent_items",
+          "declared_diagnostic": false,
+          "truncation_policy": "count_as_invalid",
+          "compare_to": [],
+          "source_labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+          "predictions_config": "threeway",
+          "predictions_split": "train",
+          "prediction_id_column": "item_id",
+          "prediction_manifest_path": null,
+          "parse": "probability_columns",
+          "parse_config": {
+            "probability_columns": {
+              "E": "p_E",
+              "C": "p_C",
+              "U": "p_U"
+            },
+            "probability_kind": "class_probabilities",
+            "prediction_rule": "column",
+            "prediction_column": "pred",
+            "label_aliases": {},
+            "index_map": {},
+            "mass_outside_column": null
+          }
+        },
+        {
+          "evaluation_id": "binary",
+          "dataset_config": "binary",
+          "split": "test",
+          "id_column": "item_id",
+          "gold_column": "gold",
+          "gold_index_map": {},
+          "label_space": "2way_entail_vs_not",
+          "labels": [
+            "E",
+            "not_E"
+          ],
+          "projection": {
+            "E": "E",
+            "C": "not_E",
+            "U": "not_E"
+          },
+          "selection": {
+            "row_start": 0,
+            "row_end": null,
+            "row_limit": 4
+          },
+          "slice_columns": [
+            "tags",
+            "headline",
+            "depth"
+          ],
+          "cluster_column": "base_problem_id",
+          "sampling_unit": "independent_items",
+          "declared_diagnostic": false,
+          "truncation_policy": "count_as_invalid",
+          "compare_to": [],
+          "source_labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+          "predictions_config": "binary",
+          "predictions_split": "train",
+          "prediction_id_column": "item_id",
+          "prediction_manifest_path": null,
+          "parse": "probability_columns",
+          "parse_config": {
+            "probability_columns": {
+              "E": "p_E",
+              "C": "p_C",
+              "U": "p_U"
+            },
+            "probability_kind": "restricted_softmax",
+            "prediction_rule": "argmax",
+            "prediction_column": null,
+            "label_aliases": {},
+            "index_map": {},
+            "mass_outside_column": "mass_outside"
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+      "run_id": "synthetic-eval-001",
+      "progress_path": "progress.jsonl",
+      "dataset_id": "example/synthetic-gold",
+      "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "output_repo_id": "example/synthetic-output",
+      "sealed": false,
+      "echo_columns": [],
+      "apply_calibration": "none",
+      "bootstrap": null,
+      "holm_families": [],
+      "mode": "score_predictions",
+      "evaluation_sets": [
+        {
+          "evaluation_id": "threeway",
+          "dataset_config": "threeway",
+          "split": "test",
+          "id_column": "item_id",
+          "gold_column": "gold",
+          "gold_index_map": {},
+          "label_space": "3way",
+          "labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "projection": null,
+          "selection": {
+            "row_start": 0,
+            "row_end": null,
+            "row_limit": 4
+          },
+          "slice_columns": [
+            "tags",
+            "headline",
+            "depth"
+          ],
+          "cluster_column": "base_problem_id",
+          "sampling_unit": "independent_items",
+          "declared_diagnostic": false,
+          "truncation_policy": "count_as_invalid",
+          "compare_to": [],
+          "source_labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+          "predictions_config": "threeway",
+          "predictions_split": "train",
+          "prediction_id_column": "item_id",
+          "prediction_manifest_path": null,
+          "parse": "json_field",
+          "parse_config": {
+            "column": "response",
+            "input_kind": "json_text",
+            "path": [
+              "label"
+            ],
+            "label_aliases": {},
+            "index_map": {}
+          }
+        },
+        {
+          "evaluation_id": "binary",
+          "dataset_config": "binary",
+          "split": "test",
+          "id_column": "item_id",
+          "gold_column": "gold",
+          "gold_index_map": {},
+          "label_space": "2way_entail_vs_not",
+          "labels": [
+            "E",
+            "not_E"
+          ],
+          "projection": {
+            "E": "E",
+            "C": "not_E",
+            "U": "not_E"
+          },
+          "selection": {
+            "row_start": 0,
+            "row_end": null,
+            "row_limit": 4
+          },
+          "slice_columns": [
+            "tags",
+            "headline",
+            "depth"
+          ],
+          "cluster_column": "base_problem_id",
+          "sampling_unit": "independent_items",
+          "declared_diagnostic": false,
+          "truncation_policy": "count_as_invalid",
+          "compare_to": [],
+          "source_labels": [
+            "E",
+            "C",
+            "U"
+          ],
+          "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+          "predictions_config": "binary",
+          "predictions_split": "train",
+          "prediction_id_column": "item_id",
+          "prediction_manifest_path": null,
+          "parse": "json_field",
+          "parse_config": {
+            "column": "response",
+            "input_kind": "json_text",
+            "path": [
+              "label"
+            ],
+            "label_aliases": {},
+            "index_map": {}
+          }
+        }
+      ]
+    }
+  ],
+  "invalid_specs": [
+    {
+      "case": "model_on_prediction_mode",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ],
+        "model_id": "example/model"
+      }
+    },
+    {
+      "case": "moving_input_revision",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "main",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "calibration_not_available",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "auto",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "bootstrap_not_available",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": {
+          "n": 1000,
+          "seed": 1
+        },
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "sealed_not_enabled",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": true,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "raw_echo_not_enabled",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [
+          "premises"
+        ],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "callable_not_inert",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ],
+        "callback": "module.function"
+      }
+    },
+    {
+      "case": "parser_not_available",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "vote_fraction",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "invalid_semantics": [
+    {
+      "case": "duplicate_evaluation_ids",
+      "code": "evaluation_id_duplicate",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "incomplete_projection",
+      "code": "projection_incomplete",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "argmax_with_prediction_column",
+      "code": "prediction_rule_conflict",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": "reversed_selection",
+      "code": "selection_invalid",
+      "spec": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-eval-001",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": "example/synthetic-output",
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "threeway",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 2,
+              "row_end": 1,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          },
+          {
+            "evaluation_id": "binary",
+            "dataset_config": "binary",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "2way_entail_vs_not",
+            "labels": [
+              "E",
+              "not_E"
+            ],
+            "projection": {
+              "E": "E",
+              "C": "not_E",
+              "U": "not_E"
+            },
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 4
+            },
+            "slice_columns": [
+              "tags",
+              "headline",
+              "depth"
+            ],
+            "cluster_column": "base_problem_id",
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "binary",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "restricted_softmax",
+              "prediction_rule": "argmax",
+              "prediction_column": null,
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": "mass_outside"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "populations": [
+    {
+      "evaluation_id": "threeway",
+      "gold": [
+        {
+          "item_id": "a",
+          "gold": "E",
+          "base_problem_id": "base-a",
+          "tags": [
+            "base",
+            "alpha"
+          ],
+          "headline": true,
+          "depth": 1
+        },
+        {
+          "item_id": "b",
+          "gold": "C",
+          "base_problem_id": "base-b",
+          "tags": [
+            "base"
+          ],
+          "headline": true,
+          "depth": 2
+        },
+        {
+          "item_id": "c",
+          "gold": "U",
+          "base_problem_id": "base-c",
+          "tags": [
+            "stress",
+            "stress"
+          ],
+          "headline": false,
+          "depth": 2
+        },
+        {
+          "item_id": "d",
+          "gold": "E",
+          "base_problem_id": "base-d",
+          "tags": [
+            "stress"
+          ],
+          "headline": false,
+          "depth": 3
+        }
+      ],
+      "predictions": [
+        {
+          "item_id": "a",
+          "pred": "E",
+          "p_E": 0.8,
+          "p_C": 0.1,
+          "p_U": 0.1
+        },
+        {
+          "item_id": "b",
+          "pred": "E",
+          "p_E": 0.6,
+          "p_C": 0.3,
+          "p_U": 0.1
+        },
+        {
+          "item_id": "d",
+          "pred": "U",
+          "p_E": 0.2,
+          "p_C": 0.3,
+          "p_U": 0.5
+        }
+      ],
+      "expected": {
+        "n": 4,
+        "accuracy": 0.25,
+        "macro_f1": 0.16666666666666666,
+        "invalid_rate": 0.25,
+        "probability_n": 3,
+        "probability_excluded": 1,
+        "coverage": 0.75,
+        "brier": 0.6333333333333333,
+        "nll_gold_product": 0.048,
+        "tag_counts": {
+          "base": 2,
+          "alpha": 1,
+          "stress": 2
+        }
+      }
+    },
+    {
+      "evaluation_id": "binary",
+      "gold": [
+        {
+          "item_id": "a",
+          "gold": "E",
+          "base_problem_id": "base-a",
+          "tags": [
+            "base",
+            "alpha"
+          ],
+          "headline": true,
+          "depth": 1
+        },
+        {
+          "item_id": "b",
+          "gold": "not_E",
+          "base_problem_id": "base-b",
+          "tags": [
+            "base"
+          ],
+          "headline": true,
+          "depth": 2
+        },
+        {
+          "item_id": "c",
+          "gold": "not_E",
+          "base_problem_id": "base-c",
+          "tags": [
+            "stress",
+            "stress"
+          ],
+          "headline": false,
+          "depth": 2
+        },
+        {
+          "item_id": "d",
+          "gold": "E",
+          "base_problem_id": "base-d",
+          "tags": [
+            "stress"
+          ],
+          "headline": false,
+          "depth": 3
+        }
+      ],
+      "predictions": [
+        {
+          "item_id": "a",
+          "p_E": 0.6,
+          "p_C": 0.2,
+          "p_U": 0.2,
+          "mass_outside": 0.4
+        },
+        {
+          "item_id": "b",
+          "p_E": 0.4,
+          "p_C": 0.35,
+          "p_U": 0.25,
+          "mass_outside": 0.5
+        },
+        {
+          "item_id": "c",
+          "p_E": 0.7,
+          "p_C": 0.1,
+          "p_U": 0.2,
+          "mass_outside": 0.2
+        }
+      ],
+      "expected": {
+        "n": 4,
+        "accuracy": 0.5,
+        "macro_f1": 0.5833333333333334,
+        "invalid_rate": 0.25,
+        "probability_n": 3,
+        "probability_excluded": 1,
+        "coverage": 0.75,
+        "brier": 0.54,
+        "nll_gold_product": 0.108,
+        "probability_kind": "restricted_softmax"
+      }
+    }
+  ],
+  "join_refusals": [
+    {
+      "case": "duplicate_prediction",
+      "rows": [
+        {
+          "item_id": "a",
+          "pred": "E",
+          "p_E": 0.8,
+          "p_C": 0.1,
+          "p_U": 0.1
+        },
+        {
+          "item_id": "b",
+          "pred": "E",
+          "p_E": 0.6,
+          "p_C": 0.3,
+          "p_U": 0.1
+        },
+        {
+          "item_id": "d",
+          "pred": "U",
+          "p_E": 0.2,
+          "p_C": 0.3,
+          "p_U": 0.5
+        },
+        {
+          "item_id": "a",
+          "pred": "E",
+          "p_E": 0.8,
+          "p_C": 0.1,
+          "p_U": 0.1
+        }
+      ],
+      "code": "prediction_id_duplicate"
+    },
+    {
+      "case": "extra_prediction",
+      "rows": [
+        {
+          "item_id": "a",
+          "pred": "E",
+          "p_E": 0.8,
+          "p_C": 0.1,
+          "p_U": 0.1
+        },
+        {
+          "item_id": "b",
+          "pred": "E",
+          "p_E": 0.6,
+          "p_C": 0.3,
+          "p_U": 0.1
+        },
+        {
+          "item_id": "d",
+          "pred": "U",
+          "p_E": 0.2,
+          "p_C": 0.3,
+          "p_U": 0.5
+        },
+        {
+          "item_id": "extra"
+        }
+      ],
+      "code": "prediction_extra"
+    },
+    {
+      "case": "ordinal_source_is_not_stable_id",
+      "rows": [
+        {
+          "custom_id": "row-0"
+        }
+      ],
+      "code": "prediction_id_missing"
+    }
+  ]
+}

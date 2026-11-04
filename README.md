@@ -7,6 +7,11 @@ Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing.
 async for execution and I/O, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Pure classification metrics are synchronous. Heavy optional
 dependencies (training, serving, remote compute) live behind extras, so the base install stays light.
 
+Pinned classification evaluation uses explicit stable-ID joins and separate per-config reports,
+with native classifier or imported-probability inputs. The installed `eval schema` and
+`eval validate-spec` commands expose its inert contract. Execution requires a trusted read
+policy; standalone launch denies access without one. See [pipeline workers](docs/modules/pipelines.md).
+
 ## Install
 
 ```bash

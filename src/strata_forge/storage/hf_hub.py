@@ -188,6 +188,16 @@ class HFHubClient:
         api = self._api()
         await asyncio.to_thread(api.delete_repo, repo_id=repo_id, repo_type=repo_type)
 
+    async def repo_private(self, repo_id: str, *, repo_type: RepoType = "model") -> bool:
+        """Return explicit repository privacy, refusing missing/ambiguous metadata."""
+        info: object = await asyncio.to_thread(
+            self._api().repo_info, repo_id=repo_id, repo_type=repo_type
+        )
+        private: object = getattr(info, "private", None)
+        if type(private) is not bool:
+            raise TypeError("repository privacy metadata is unavailable")
+        return private
+
     async def list_repo_files(
         self,
         repo_id: str,

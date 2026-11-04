@@ -122,3 +122,11 @@ a shape we can't make sense of), or :class:`NotImplementedError`
 - Changing the cross-protocol copy semantics.
 - Changing the lazy-import boundary.
 - Adding a new heavy dep to the ``[storage]`` extra.
+
+## Explicit destination privacy
+
+`HFHubClient.repo_private(repo_id, repo_type=...)` returns only an explicit boolean from
+repository metadata; missing/ambiguous metadata raises TypeError. Evaluation uses it after
+create/exist and before upload. Never infer an existing destination became private merely
+because create_repo received private=True with exist_ok=True. Other existing push helpers
+retain their own contracts; this helper does not silently change their behavior.

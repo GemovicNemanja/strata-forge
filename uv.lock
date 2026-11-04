@@ -4429,6 +4429,7 @@ all = [
     { name = "peft" },
     { name = "pillow" },
     { name = "protobuf" },
+    { name = "pyarrow" },
     { name = "qdrant-client" },
     { name = "rank-bm25" },
     { name = "redis" },
@@ -4457,12 +4458,14 @@ finetuning = [
     { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "peft" },
+    { name = "pyarrow" },
     { name = "torch" },
     { name = "transformers" },
     { name = "trl" },
 ]
 hf = [
     { name = "datasets" },
+    { name = "pyarrow" },
 ]
 inspect = [
     { name = "inspect-ai" },
@@ -4506,6 +4509,7 @@ dev = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "pre-commit" },
+    { name = "pyarrow" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -4539,6 +4543,8 @@ requires-dist = [
     { name = "peft", marker = "extra == 'finetuning'", specifier = ">=0.18,<1" },
     { name = "pillow", marker = "extra == 'multimodal'", specifier = ">=11.0,<13" },
     { name = "protobuf", marker = "extra == 'serving'", specifier = ">=5,<7" },
+    { name = "pyarrow", marker = "extra == 'finetuning'", specifier = ">=24,<25" },
+    { name = "pyarrow", marker = "extra == 'hf'", specifier = ">=24,<25" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pydantic-settings", specifier = ">=2.6,<3" },
     { name = "python-dotenv", specifier = ">=1.0,<2" },
@@ -4571,6 +4577,7 @@ dev = [
     { name = "numpy", specifier = ">=2.4,<3" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pyarrow", specifier = ">=24,<25" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },

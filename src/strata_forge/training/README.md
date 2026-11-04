@@ -7,3 +7,7 @@ Fine-tuning primitives: SFT via TRL `SFTTrainer`; preference tuning (DPO, ORPO, 
 The private `_load_guard` checks bounded checkpoint-completeness reports for trained-artifact
 consumers. HF scoring consumes that guard; training initialization and merge integration have
 their own contracts. An exact head-key decision never authorizes fresh inference weights.
+
+`VerifierConfig` and `render_verifier_input` share versioned inert premise/hypothesis metadata
+with evaluation workers. The renderer has explicit task-shape limits and never slices a
+hypothesis; it performs no model or dataset I/O.

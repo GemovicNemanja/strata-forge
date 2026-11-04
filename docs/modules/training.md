@@ -616,3 +616,12 @@ Non-finite numbers never reach the channel. `loss=nan` and `grad_norm=inf` are r
 pydantic serializes them to JSON `null` — which `metrics: dict[str, float]` then refuses to parse
 back, so an ordinary gradient explosion would emit a line the orchestrator could not read.
 `coerce_float` drops them, and metric keys are capped in length and count.
+
+## Pure verifier rendering metadata
+
+`VerifierConfig`, `RenderedVerifierInput` and `render_verifier_input` are exported from
+`strata_forge.training`. They share versioned, inert metadata with the bounded
+premise/hypothesis evaluation renderer, with no model/dataset I/O. Templates replace only
+`{premises}` and `{hypothesis}`; numbered LF text or compact UTF-8 JSON is deterministic.
+Declared premise/token/character limits describe this renderer's supported shape; refusal
+never slices a hypothesis. See [pipeline workers](pipelines.md) for overrides and artifacts.

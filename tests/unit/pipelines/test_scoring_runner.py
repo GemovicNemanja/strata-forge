@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import types
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -170,7 +170,7 @@ async def test_classifier_dispatch_pins_inputs_and_retains_probability_columns_a
     tmp_path: Path,
     run_fakes: types.SimpleNamespace,
 ) -> None:
-    # Real Parquet serialization matters: Dataset.from_list infers columns from row zero.
+    # Real Arrow serialization must preserve float columns after a refused first row.
     parquet = pytest.importorskip("pyarrow.parquet")
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec(progress_path=str(progress))))
@@ -226,7 +226,6 @@ async def test_decoder_upload_uses_actual_commit_and_no_credential_in_artifacts(
     tmp_path: Path,
     run_fakes: types.SimpleNamespace,
 ) -> None:
-    pytest.importorskip("datasets")
     secret = tmp_path / ".secrets.json"
     secret.write_text(json.dumps({"HF_TOKEN": _TOKEN}))
     secret.chmod(0o600)
@@ -258,7 +257,6 @@ async def test_all_failed_scores_keep_artifacts_and_exit_failed(
     tmp_path: Path,
     run_fakes: types.SimpleNamespace,
 ) -> None:
-    pytest.importorskip("datasets")
     run_fakes.all_failed = True
     progress = tmp_path / "progress.jsonl"
     monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec(progress_path=str(progress))))
@@ -273,7 +271,6 @@ async def test_push_failure_preserves_local_scores_and_scrubs_credential(
     tmp_path: Path,
     run_fakes: types.SimpleNamespace,
 ) -> None:
-    pytest.importorskip("datasets")
     run_fakes.push_error = True
     secret = tmp_path / ".secrets.json"
     secret.write_text(json.dumps({"HF_TOKEN": _TOKEN}))
@@ -357,3 +354,45 @@ def test_incompatible_engine_knobs_fail_spec_validation(overrides: dict[str, Any
 
     with pytest.raises(ValidationError):
         ir.Hyperparams(**overrides)
+
+
+async def test_stable_ids_preserve_legacy_custom_ids_and_declared_source_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    run_fakes: types.SimpleNamespace,
+) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    run_fakes.rows[0]["record_id"] = "alpha"
+    run_fakes.rows[1]["record_id"] = "beta"
+    monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec(id_column="record_id")))
+    assert await ir.main() == 0
+    path = run_fakes.results_dir / "results.parquet"
+    table = cast("pa.Table", pq.read_table(path))  # pyright: ignore[reportUnknownMemberType] — Arrow reader lacks complete stubs
+    rows = cast("list[dict[str, object]]", table.to_pylist())
+    assert [row["item_id"] for row in rows] == ["alpha", "beta"]
+    assert [row["custom_id"] for row in rows] == ["row-0", "row-1"]
+    manifest = json.loads((path.parent / "scoring.json").read_text())
+    assert manifest["id_semantics"] == {
+        "kind": "stable_string",
+        "source_column": "record_id",
+        "artifact_column": "item_id",
+        "unique": True,
+    }
+    assert rows[0]["p_yes"] is None
+    assert table.schema.field("p_yes").type == pa.float64()
+
+
+@pytest.mark.parametrize("ids", [["duplicate", "duplicate"], ["valid", 1], ["valid", ""]])
+async def test_bad_stable_ids_refuse_before_forward(
+    ids: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    run_fakes: types.SimpleNamespace,
+) -> None:
+    for row, value in zip(run_fakes.rows, ids, strict=True):
+        row["record_id"] = value
+    monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec(id_column="record_id")))
+    assert await ir.main() == 1
+    assert run_fakes.inputs == []
+    assert not (run_fakes.results_dir / "results.parquet").exists()

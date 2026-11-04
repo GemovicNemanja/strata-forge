@@ -180,3 +180,12 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
 - Adding a new heavy dep to the ``[finetuning]`` extra.
 - Adding a vision-aware training path (it would need its own
   module, not a chat-template extension).
+
+## Shared verifier metadata
+
+`verifier_config.py` owns pure `VerifierConfig`, `RenderedVerifierInput` and
+`render_verifier_input`, exported by this module. It has no I/O/heavy imports or execution
+imports. Its bounded premise/hypothesis renderer is an explicit supported task shape, not a
+universal training constraint. Explicit eval overrides are validated and digested before use.
+Training checkpoint selection, head initialization and calibration writers have separate
+contracts; adding metadata does not silently enable those consumers.

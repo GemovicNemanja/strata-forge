@@ -64,7 +64,7 @@ inspect = ["inspect-ai>=0.3,<0.4"]
 # The tracing/prompt/dataset stores use the module-level `propagate_attributes` the v4 SDK
 # introduced; v2 and v3 are a different API surface, so the floor is the real constraint here.
 langfuse = ["langfuse>=4.0,<5"]
-hf = ["datasets>=4.0,<6"]
+hf = ["datasets>=4.0,<6", "pyarrow>=24,<25"]
 evals = ["nltk>=3.9,<4", "rouge-score>=0.1.2,<0.2"]
 # NumPy 2.4 supports Python 3.14; it is loaded only for numeric calibration operations.
 scoring = ["numpy>=2.4,<3"]
@@ -94,6 +94,8 @@ storage = [
     "huggingface_hub>=1.0,<2",
 ]
 finetuning = [
+    # Native evaluation artifacts use Arrow directly in this fixed worker profile.
+    "pyarrow>=24,<25",
     # torch below 2.9 publishes no cp314 wheel, and this package requires 3.14.
     "torch>=2.9,<3",
     # transformers 5 REMOVED `TrainingArguments.warmup_ratio` (folded into `warmup_steps`, which now
@@ -169,6 +171,7 @@ dev = [
     # users to install them in production.
     "pillow>=11.0",
     "numpy>=2.4,<3",
+    "pyarrow>=24,<25",
 ]
 
 # ----------------------------- ruff -----------------------------

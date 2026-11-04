@@ -513,6 +513,100 @@ def check_scoring_specs() -> None:
             raise SmokeError("scoring spec did not render its input")
 
 
+def evaluation_spec(mode: str) -> dict[str, Any]:
+    """A synthetic pinned worker spec with one explicit classification population."""
+    case: dict[str, Any] = {
+        "evaluation_id": "synthetic",
+        "dataset_config": "default",
+        "split": "test",
+        "id_column": "item_id",
+        "gold_column": "gold",
+        "gold_index_map": {},
+        "label_space": "3way",
+        "labels": ["E", "C", "U"],
+        "projection": None,
+        "selection": {"row_start": 0, "row_end": None, "row_limit": 4},
+        "slice_columns": [],
+        "cluster_column": None,
+        "sampling_unit": "independent_items",
+        "declared_diagnostic": False,
+        "truncation_policy": "count_as_invalid",
+        "compare_to": [],
+    }
+    from strata_forge.pipelines import SPEC_VERSION
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "engine_version": SPEC_VERSION,
+        "run_id": "synthetic-eval",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "a" * 40,
+        "output_repo_id": None,
+        "sealed": False,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": None,
+        "holm_families": [],
+        "mode": mode,
+        "evaluation_sets": [case],
+    }
+    if mode == "classify":
+        case["column_mapping"] = {"premises": "premises", "hypothesis": "hypothesis"}
+        result.update(
+            model_id="example/synthetic-model",
+            model_revision="b" * 40,
+            engine="hf_classify",
+            model_labels=["E", "C", "U"],
+            label_aliases={},
+            label_tokens=None,
+            rendering={
+                "source": "override",
+                "template": "{premises}",
+                "pair_template": "{hypothesis}",
+                "premise_format": "numbered_lines",
+                "max_length": 32,
+                "max_premises": 20,
+            },
+            scoring_batch_size=2,
+            dtype="float32",
+        )
+    else:
+        case.update(
+            source_labels=["E", "C", "U"],
+            predictions_ref="example/synthetic-predictions@" + "c" * 40,
+            predictions_config="default",
+            predictions_split="train",
+            prediction_id_column="item_id",
+            prediction_manifest_path=None,
+            parse="probability_columns",
+            parse_config={
+                "probability_columns": {"E": "p_E", "C": "p_C", "U": "p_U"},
+                "probability_kind": "class_probabilities",
+                "prediction_rule": "argmax",
+                "prediction_column": None,
+                "label_aliases": {},
+                "index_map": {},
+                "mass_outside_column": None,
+            },
+        )
+    return result
+
+
+def check_evaluation_specs() -> None:
+    """Construct both installed evaluation modes without reading inputs or granting access."""
+    from strata_forge.pipelines._common import load_config
+    from strata_forge.pipelines.evaluation_spec import EvalSpec
+
+    for mode in ("classify", "score_predictions"):
+        with run_config(evaluation_spec(mode)):
+            spec = load_config(EvalSpec)
+        if spec.mode != mode or len(spec.evaluation_sets) != 1:
+            raise SmokeError("evaluation spec did not preserve its explicit population")
+        if EvalSpec.model_validate(spec.wire_payload()) != spec:
+            raise SmokeError("evaluation spec JSON roundtrip changed its semantics")
+
+
 def check_scoring_models() -> None:
     """Reload locally initialized safetensors models and score without Hub access."""
     from unittest.mock import patch
@@ -952,6 +1046,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))
     if "finetuning" in extras:
+        checks.append(("pinned classify and prediction-evaluation specs", check_evaluation_specs))
         for method, fmt, adapter in finetune_cases():
 
             def case(method: str = method, fmt: str = fmt, adapter: str = adapter) -> None:

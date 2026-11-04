@@ -10,6 +10,20 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Pinned classification evaluation workers validate separate multi-config populations, stable
+  ID joins, declared label projections and probability provenance, and write explicitly typed
+  per-population Parquet plus versioned reports. Trusted pin-bound read policy is mandatory;
+  unknown/protected inputs deny before model/row access, and standalone execution denies
+  without an installed adapter. Exact paired comparison/family contexts preserve invalid
+  outputs and withhold independent inference for repeated groups.
+- `VerifierConfig` and `render_verifier_input` provide inert, bounded premise/hypothesis
+  rendering metadata without I/O. HF scoring's optional `id_column` adds stable `item_id`
+  alongside unchanged `custom_id`, recording source ID semantics. Evaluation CLI commands
+  export/validate the installed schema and delegate to the same worker.
+- `HFHubClient.repo_private` requires explicit boolean privacy metadata. Evaluation keeps
+  complete local attempt artifacts and refuses every non-null output repository without
+  separate trusted publication authority; read approval never grants write permission.
+
 - `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
   conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,
   and explicit named-family Holm correction that retains caller order. Frozen results and

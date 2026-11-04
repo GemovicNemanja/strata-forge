@@ -8,3 +8,7 @@ their string return values.
 
 See [the storage reference](../../../docs/modules/storage.md) for credentials, backend options
 and public API details.
+
+`HFHubClient.repo_private` returns explicit boolean repository privacy and refuses unknown
+metadata. Evaluation checks it before publication because creating with `exist_ok=True` does
+not change an existing public repository's visibility.

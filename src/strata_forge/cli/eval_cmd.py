@@ -16,7 +16,9 @@ covers the day-to-day path, not the full surface.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +35,9 @@ from strata_forge.cli.helpers import (
 if TYPE_CHECKING:
     from strata_forge.evals.experiment import Outcome
     from strata_forge.evals.graders import Grader
+    from strata_forge.pipelines._common import RunSecrets
+    from strata_forge.pipelines.evaluation_spec import EvalSpec
+    from strata_forge.training.progress import JsonlProgressWriter
 
 __all__ = ["app"]
 
@@ -138,6 +143,73 @@ def show_cmd(
     if not path.exists():
         error_exit(f"report not found: {path}")
     Console().print(path.read_text())
+
+
+@app.command("schema")
+def schema_cmd() -> None:
+    """Print the installed strict classification-evaluation specification schema."""
+    from strata_forge.pipelines.evaluation_spec import EvalSpec
+
+    typer.echo(json.dumps(EvalSpec.model_json_schema(), indent=2))
+
+
+async def _read_eval_spec(path: Path) -> EvalSpec:
+    from strata_forge.pipelines.evaluation_spec import EvalSpec
+
+    def read() -> str:
+        if path.stat().st_size > 1_048_576:
+            raise ValueError("evaluation_spec_too_large")
+        return path.read_text(encoding="utf-8")
+
+    return EvalSpec.model_validate_json(await asyncio.to_thread(read))
+
+
+@app.command("validate-spec")
+def validate_spec_cmd(
+    spec: Path = typer.Argument(..., help="Inert evaluation JSON specification."),
+) -> None:
+    """Validate a classification spec without resolving inputs or authorizing a run."""
+
+    async def validate() -> None:
+        try:
+            parsed = await _read_eval_spec(spec)
+        except Exception:
+            error_exit("evaluation_spec_invalid")
+        typer.echo(json.dumps(parsed.wire_payload(), ensure_ascii=False, allow_nan=False))
+
+    run_async(validate())
+
+
+async def _execute_eval_spec(path: Path, mode: str) -> None:
+    from strata_forge.pipelines._common import check_engine_version, runner_main
+    from strata_forge.pipelines.eval_runner import run_evaluation
+
+    async def execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
+        parsed = await _read_eval_spec(path)
+        if parsed.mode != mode:
+            raise ValueError("evaluation_mode_mismatch")
+        check_engine_version(parsed.engine_version)
+        await run_evaluation(parsed, token=secrets.hub_credential(), writer=writer)
+
+    code = await runner_main(execute)
+    if code:
+        raise typer.Exit(code)
+
+
+@app.command("classify")
+def classify_cmd(
+    spec: Path = typer.Argument(..., help="Pinned inert classify specification."),
+) -> None:
+    """Run classification through the installed worker's trusted access boundary."""
+    run_async(_execute_eval_spec(spec, "classify"))
+
+
+@app.command("score-predictions")
+def score_predictions_cmd(
+    spec: Path = typer.Argument(..., help="Pinned inert prediction-scoring specification."),
+) -> None:
+    """Score predictions through the same installed evaluation worker."""
+    run_async(_execute_eval_spec(spec, "score_predictions"))
 
 
 async def _run(

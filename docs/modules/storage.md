@@ -267,3 +267,10 @@ full HF Hub surface.
   accounts, configure two gateways with different `options=`
   and let the cross-protocol path stream bytes (small files) or
   use `aws s3 cp` for large transfers.
+
+## Repository privacy metadata
+
+`await client.repo_private(repo_id, repo_type="dataset")` returns the Hub's explicit boolean
+privacy field. Missing/ambiguous metadata raises TypeError. A `create_repo(private=True,
+exist_ok=True)` call alone does not change an existing public repository's visibility;
+evaluation verifies it before publication. Actual output refs come from CommitRef.

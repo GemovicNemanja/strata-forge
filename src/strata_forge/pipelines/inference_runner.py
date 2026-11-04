@@ -259,6 +259,7 @@ class RunSpec(BaseModel):
     dataset_id: str
     dataset_commit_sha: str | None = None
     dataset_config: str | None = None
+    id_column: str | None = Field(default=None, min_length=1, max_length=255)
     split: str
     column_mapping: dict[str, str] = Field(default_factory=dict)
     template: str
@@ -269,6 +270,12 @@ class RunSpec(BaseModel):
     progress_path: str | None = None
     # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
     run_id: str | None = None
+
+    @model_validator(mode="after")
+    def _stable_id_engine(self) -> RunSpec:
+        if self.id_column is not None and self.hyperparams.engine == "vllm_chat":
+            raise ValueError("id_column requires an HF scoring engine")
+        return self
 
 
 def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
@@ -362,7 +369,10 @@ def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any
         streaming=False,
     )
     columns = set(dataset.column_names or [])
-    missing = {c for c in spec.column_mapping.values() if c not in columns}
+    required = set(spec.column_mapping.values())
+    if spec.id_column is not None:
+        required.add(spec.id_column)
+    missing = required - columns
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
@@ -602,7 +612,12 @@ def _build_scoring_inputs(spec: RunSpec, rows: list[dict[str, Any]]) -> list[Sco
 
 
 def _scoring_rows(
-    result: ScoringResult, labels: tuple[str, ...], *, decoder: bool, redactor: Redactor
+    result: ScoringResult,
+    labels: tuple[str, ...],
+    *,
+    decoder: bool,
+    redactor: Redactor,
+    item_ids: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in result.rows:
@@ -619,14 +634,44 @@ def _scoring_rows(
         )
         if decoder:
             item["mass_outside"] = row.mass_outside
+        if item_ids is not None:
+            item["item_id"] = item_ids[row.index]
         out.append(item)
     return out
+
+
+def _stable_item_ids(spec: RunSpec, rows: list[dict[str, Any]]) -> tuple[str, ...] | None:
+    if spec.id_column is None:
+        return None
+    ids: list[str] = []
+    for row in rows:
+        value = row.get(spec.id_column)
+        if not isinstance(value, str) or not value or len(value) > 1024:
+            raise RunError("stable_item_id_invalid")
+        ids.append(value)
+    if len(set(ids)) != len(ids):
+        raise RunError("stable_item_id_duplicate")
+    return tuple(ids)
 
 
 def _write_scoring_results(
     rows: list[dict[str, Any]], summary: dict[str, Any], outdir: Path
 ) -> Path:
-    path = _write_results(rows, outdir)
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ImportError("install 'strata-forge[hf]' for scoring Parquet artifacts") from exc
+    fields = [pa.field(name, pa.string()) for name in ("custom_id", "output", "error", "pred")]
+    fields.extend(pa.field(name, pa.bool_(), nullable=False) for name in ("overflow", "truncated"))
+    fields.extend(pa.field(f"p_{label}", pa.float64()) for label in summary["labels"])
+    if any("item_id" in row for row in rows):
+        fields.append(pa.field("item_id", pa.string(), nullable=False))
+    if any("mass_outside" in row for row in rows):
+        fields.append(pa.field("mass_outside", pa.float64()))
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / _RESULTS_FILENAME
+    pq.write_table(pa.Table.from_pylist(rows, schema=pa.schema(fields)), path)  # pyright: ignore[reportUnknownMemberType] — Arrow writer lacks complete stubs
     (outdir / "scoring.json").write_text(
         json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
@@ -699,6 +744,7 @@ async def _execute_scoring(
         raise RunError(f"{exc}; bounded loading audit: {evidence}") from None
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         rows = await asyncio.to_thread(_load_rows, pinned, token)
+    item_ids = _stable_item_ids(pinned, rows)
     inputs = _build_scoring_inputs(pinned, rows)
     if not inputs:
         raise RunError("the run produced no rows: the dataset split was empty")
@@ -717,6 +763,7 @@ async def _execute_scoring(
         scorer.labels,
         decoder=hp.engine == "hf_label_logits",
         redactor=run_redactor(hf_token),
+        item_ids=item_ids,
     )
     counts = {
         "succeeded": float(len(out) - result.failed_rows),
@@ -736,6 +783,14 @@ async def _execute_scoring(
         "dataset_config": spec.dataset_config,
         "split": spec.split,
         "row_limit": hp.row_limit,
+        "id_semantics": {
+            "kind": "stable_string",
+            "source_column": spec.id_column,
+            "artifact_column": "item_id",
+            "unique": True,
+        }
+        if item_ids is not None
+        else {"kind": "ordinal", "artifact_column": "custom_id"},
         "rows": len(out),
         "labels": scorer.labels,
         "max_model_len": hp.max_model_len,

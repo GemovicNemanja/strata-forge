@@ -113,6 +113,12 @@ class TestRunConfig:
 
 
 class TestPlan:
+    def test_finetuning_profile_constructs_both_evaluation_modes(self) -> None:
+        assert "pinned classify and prediction-evaluation specs" in self._names(
+            "finetuning,storage"
+        )
+        smoke.check_evaluation_specs()
+
     @staticmethod
     def _names(extras: str) -> list[str]:
         return [name for name, _ in smoke.plan(smoke.selected_extras(extras))]
