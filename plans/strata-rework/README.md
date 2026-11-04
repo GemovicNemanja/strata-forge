@@ -589,3 +589,5 @@ files, contract decisions, offline command results, remaining warnings/failures,
 manifests and spend (if authorized), integration state, docs, and next owner. Mark each
 acceptance item as passed, failed or not run. A fake model passing math tests, a job returning
 exit zero, an uploaded file and a usable cross-repo feature are different pieces of evidence.
+
+The [primary classifier worker review](drafts/classifier-worker-review.md) and [inert task contract](drafts/classifier-worker-contract.md) narrow the SDK-to-worker increment, including mandatory safe decoder export→installed scoring→evaluation interoperability. The [example](drafts/classifier-worker-example.json) is fictional design metadata, not an available worker. Training-purpose read authority, guarded model publication and exact app/agent wire are separate reviewed delivery units; no Eval credential or research exception may be reused.
