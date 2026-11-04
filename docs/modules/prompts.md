@@ -359,4 +359,10 @@ the canonical comparison.
 
 ## Modular composition contract
 
-[ADR 0023](../architecture/adr/0023-portable-modular-prompt-composition.md) freezes the Python-authoritative [portable modular contract](../contracts/modular-prompts-v1.md). This is an implementation contract; it does not replace the existing Jinja2 API or claim an installed modular compiler. Persistence and publication belong to the server.
+The independent modular API provides `CompositionRegistry`, `compile_surface`, `render_build`,
+`PromptBuild` and `PromptRender`. It uses explicit text/variable/module nodes, exact version
+pins and UTF-8 byte attribution. It preserves the Jinja2 API above. See the
+[modular API reference](prompt-composition.md),
+[portable contract](../contracts/modular-prompts-v1.md) and
+[ADR 0023](../architecture/adr/0023-portable-modular-prompt-composition.md).
+Persistence, permission checks, publication and provider dispatch evidence belong to consumers.

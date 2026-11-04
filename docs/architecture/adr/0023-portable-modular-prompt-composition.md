@@ -10,6 +10,11 @@ Reusable instructions need immutable composition, exact output attribution and p
 
 Forge's pure Python compiler is authoritative. Persisted resources, permissions, publication and moving channels belong to the server; the browser consumes builds. A TypeScript consumer or renderer must pass the same fixtures. It cannot publish an alternative compiler identity.
 
+Registry, compile and render operations are async. Deterministic portable canonicalization,
+validation and immutable-value inspection are synchronous pure helpers, a narrow exception to
+the async public-API rule. It permits no synchronous I/O or runtime wrapper and preserves the
+existing Jinja2 API signatures.
+
 Use an explicit ordered AST of literal text, declared variable references and pinned module versions. Literal text never becomes a template implicitly: braces, Jinja, f-string fragments and Markdown remain literal. Existing template dialects require separately named import adapters with before/after equality checks. No arbitrary expressions, filesystem includes, remote imports or callable resolution are admitted.
 
 The [portable contract](../../contracts/modular-prompts-v1.md) defines canonical JSON bytes, immutable dependency locks, target boundaries, UTF-8 source offsets and rendering identity. Builds and renders are separate immutable values. Fetch, local render, caller-reported dispatch, instrumented request and provider response remain distinct evidence. Composition alone makes no claim about what reached a model.

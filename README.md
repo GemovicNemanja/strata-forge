@@ -55,7 +55,7 @@ installed as `strata-forge`.
 | `strata_forge.llm` | Provider abstraction, structured output, tool calling, two-axis fallback |
 | `strata_forge.core` | Cross-cutting errors, retry, logging, budget ceilings, reproducibility |
 | `strata_forge.config` | Pydantic Settings root with YAML overlays and `.env` support |
-| `strata_forge.prompts` | Jinja2 and Langfuse-backed prompt registry |
+| `strata_forge.prompts` | Jinja2 templates and immutable modular prompt builds with exact pins and UTF-8 attribution |
 | `strata_forge.tracing` | Langfuse observability |
 | `strata_forge.datasets` | Dataset CRUD with a Hugging Face bridge |
 | `strata_forge.evals` | Experiment runner, graders, metrics |

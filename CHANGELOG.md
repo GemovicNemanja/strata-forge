@@ -8,6 +8,16 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- Immutable modular prompt composition provides an explicit literal/variable/pinned-module
+  AST, exact-version snapshot registry, deterministic domain-separated build/render identities,
+  typed chat/artifact targets and UTF-8 byte source maps. Declared constraint conflicts refuse;
+  duplicate literal passages remain advisory without rewriting output. Portable Python/Node
+  byte/render fixtures and an authorized archived Strata operational import preserve exact
+  content. Existing Jinja2 APIs remain compatible; persistence, permissions, publication and
+  provider dispatch evidence are separate responsibilities.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
