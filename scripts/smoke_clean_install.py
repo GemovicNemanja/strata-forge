@@ -65,6 +65,7 @@ _REPORTED = (
     "strata-forge",
     "pydantic",
     "litellm",
+    "numpy",
     "torch",
     "transformers",
     "trl",
@@ -269,6 +270,28 @@ def check_module_imports() -> None:
             failed.append(f"{name}: {type(exc).__name__}: {exc}")
     if failed:
         raise SmokeError("; ".join(failed))
+
+
+def check_scoring() -> None:
+    """Exercise the optional numerical API without a model, dataset, or artifact store."""
+    import math
+
+    from strata_forge.metrics import brier, classification_report, temperature_scale
+
+    report = classification_report(["yes", "no"], ["yes", None], labels=("yes", "no"))
+    if report.accuracy.value != 0.5 or report.confusion.invalid_by_gold != (0, 1):
+        raise SmokeError("classification accounting changed")
+    score = brier(
+        ["yes"], [[0.75, 0.25]], labels=("yes", "no"), probability_kind="class_probabilities"
+    )
+    if score.value != 0.125:
+        raise SmokeError("multiclass Brier sum changed")
+    output = temperature_scale([[0.0, math.log(3)]], temperature=1.0)
+    if len(output) != 1 or any(
+        not math.isclose(actual, expected)
+        for actual, expected in zip(output[0], (0.25, 0.75), strict=True)
+    ):
+        raise SmokeError("temperature application changed")
 
 
 def check_cli() -> None:
@@ -620,6 +643,8 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
         ("top-level module imports", check_module_imports),
         ("cli --help", check_cli),
     ]
+    if "scoring" in extras:
+        checks.append(("classification point metrics and temperature", check_scoring))
     if "finetuning" in extras:
         for method, fmt, adapter in finetune_cases():
 

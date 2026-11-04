@@ -31,6 +31,7 @@ Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` fo
 | `strata_forge.prompts` | Jinja2 templating with safe filters + Langfuse-backed prompt registry. Templates model the stable-prefix / dynamic-suffix split so provider prompt caching just works. Reference: [`docs/modules/prompts.md`](docs/modules/prompts.md). | [`src/strata_forge/prompts/CLAUDE.md`](src/strata_forge/prompts/CLAUDE.md) |
 | `strata_forge.tracing` | Langfuse observability. Auto-tracing via LiteLLM callback, `@traced` decorator, span context managers, score/metric helpers. Reference: [`docs/modules/tracing.md`](docs/modules/tracing.md). | [`src/strata_forge/tracing/CLAUDE.md`](src/strata_forge/tracing/CLAUDE.md) |
 | `strata_forge.datasets` | Dataset CRUD + versioning; Langfuse ↔ Hugging Face Datasets bridge; synthetic-data primitives. | [`src/strata_forge/datasets/CLAUDE.md`](src/strata_forge/datasets/CLAUDE.md) |
+| `strata_forge.metrics` | Pure classification point metrics and temperature application; shared by training and evaluation without importing either. Reference: [`docs/modules/metrics.md`](docs/modules/metrics.md). | [`src/strata_forge/metrics/CLAUDE.md`](src/strata_forge/metrics/CLAUDE.md) |
 | `strata_forge.evals` | Experiment runner (model × prompt × dataset × graders); graders, metrics, reports, parameter sweeps; trace replay; CI eval-regression gate. | [`src/strata_forge/evals/CLAUDE.md`](src/strata_forge/evals/CLAUDE.md) |
 | `strata_forge.agents` | PydanticAI agent builder + built-in tools + memory + multi-agent patterns. **Reuses** `Tool`, `@tool`, message types, `run_tool_loop` from `strata_forge.llm` — does NOT re-implement tool plumbing. | [`src/strata_forge/agents/CLAUDE.md`](src/strata_forge/agents/CLAUDE.md) |
 | `strata_forge.rag` | Embedders (via `strata_forge.llm`), Qdrant store, chunkers, retrieval (dense / BM25 / hybrid RRF), rerankers, composable pipeline. | [`src/strata_forge/rag/CLAUDE.md`](src/strata_forge/rag/CLAUDE.md) |
@@ -48,7 +49,7 @@ Per-module reference docs live under `docs/modules/<name>.md`. The phase roadmap
 These apply everywhere in `src/strata_forge/`. Code that violates them is wrong by default; if a violation is genuinely necessary, write an ADR before merging.
 
 ### 3.1 Async-first public API
-- Every public function on every module is `async`.
+- Public execution and I/O functions are `async`. Pure deterministic functions in `strata_forge.metrics` and their `evals.classification` re-exports are synchronous under [ADR 0020](docs/architecture/adr/0020-pure-metric-functions.md); callers run expensive numerical work off the event loop.
 - Sync wrappers live **only** in `strata_forge.sync` and exist for CLI / notebook ergonomics. They wrap async functions via `asyncio.run`.
 - Internal calls are async end-to-end. Do not mix `requests` / sync `httpx` with async code paths.
 - HTTP I/O uses `httpx.AsyncClient` (often indirectly through LiteLLM).
@@ -67,7 +68,7 @@ These apply everywhere in `src/strata_forge/`. Code that violates them is wrong 
 
 ### 3.4 Module independence + lazy heavy imports
 - `import strata_forge.<module>` MUST NOT crash when an optional extra is uninstalled.
-- Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`) live behind PyPI extras — `[compute]`, `[finetuning]`, `[serving]`, `[multimodal]`, `[redis]`, `[inspect]`.
+- Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`, `numpy`) live behind PyPI extras — `[compute]`, `[finetuning]`, `[serving]`, `[multimodal]`, `[redis]`, `[inspect]`, `[scoring]`.
 - Heavy deps are imported **inside the function that uses them**, never at module load. The function raises `ImportError` with an installation hint if the extra is missing.
 
 ### 3.5 Composability + escape hatches

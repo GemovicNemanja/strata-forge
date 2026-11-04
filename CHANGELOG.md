@@ -8,6 +8,17 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.metrics` provides explicit-label classification reports, accuracy, macro-F1,
+  confusion matrices with invalid-output counts, multiclass sum-form Brier score, and NLL.
+  Undefined values, denominators, probability coverage, clipping, and raw/restricted probability
+  provenance are preserved in serializable frozen models. `evals.classification` re-exports
+  the same functions. Pure metric functions are synchronous under ADR 0020.
+- Temperature application is stable and loads NumPy lazily through `[scoring]`. A draft
+  `TemperatureCalibration` component records its label order, fit provenance, and optional
+  before/after scores; it does not fit temperatures or write a training calibration file.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
