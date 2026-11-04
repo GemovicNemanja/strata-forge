@@ -1,0 +1,2 @@
+# Stored unified diffs require a context prefix on otherwise blank lines.
+plans/strata-rework/drafts/*.patch -whitespace
