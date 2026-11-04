@@ -6,6 +6,15 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
 
 - Specs reject extra fields. Fixed installed commands consume data, never executable imports,
   callbacks, shell strings or repo-supplied code. Preserve the engine-version handshake.
+- Primary classifier specs are separate from registry activation. Require an installed
+  training-purpose authority and streamed row bytes; enforce count/byte/range bounds BEFORE
+  parsing later rows. No Eval credential or environment policy fallback. Keep prototype bounds
+  distinct from scientific populations and preserve final-only/no-adapter/no-publication scope.
+- Recognized pinned Forge classifiers reload complete SDK state. Stored single-sequence render
+  metadata must match original/effective/SDK digests, labels, family and length; stored tokens
+  are initialization provenance, never label-logit evaluation parameters. Do not loosen native
+  paired behavior or accept malformed sidecars through fallback. Cancellation cannot let a
+  later native thread emit final worker success; transport termination/fences remain separate.
 - `evaluation_spec.EvalSpec` is the sole classification-evaluation schema, including semantic
   validators beyond JSON Schema. Consumers import it; they do not independently guess a mirror.
 - Evaluation authorizes every exact ref through a trusted `ReadPolicy` before preparing models

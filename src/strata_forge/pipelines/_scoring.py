@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.core.errors import ValidationError
+from strata_forge.pipelines._classifier_checkpoint import probe_forge_classifier
 from strata_forge.pipelines._common import REPO_ID_RE
 from strata_forge.training._load_guard import (
     LoadingAudit,
@@ -235,6 +236,8 @@ class Scorer:
         device: str,
         loading_audit: LoadingAudit,
         padding_policy: PaddingPolicy,
+        classifier_single_sequence: bool = False,
+        classifier_pair_allowed: bool = True,
     ) -> None:
         self._engine = engine
         self._model = model
@@ -243,6 +246,8 @@ class Scorer:
         self._labels = labels
         self._token_ids = token_ids
         self._max_length = max_length
+        self._classifier_single_sequence = classifier_single_sequence
+        self._classifier_pair_allowed = classifier_pair_allowed
         self._device = device
         self.loading_audit = loading_audit
         self.padding_policy = padding_policy
@@ -276,6 +281,8 @@ class Scorer:
         overflow_count = 0
         truncated_count = 0
         failed_count = 0
+        if self._engine == "hf_classify" and len({row.text_pair is None for row in rows}) > 1:
+            raise ValidationError("mixed classifier input shapes are unsupported")
         for index, row in enumerate(rows):
             first_length = len(tokenizer.encode(row.text, add_special_tokens=False))
             pair_length = (
@@ -283,15 +290,30 @@ class Scorer:
                 if row.text_pair is not None
                 else 0
             )
-            if self._engine == "hf_classify" and row.text_pair is None:
+            if (
+                self._engine == "hf_classify"
+                and row.text_pair is None
+                and not self._classifier_single_sequence
+            ):
                 raise ValidationError("hf_classify requires text_pair for every row")
+            if (
+                self._engine == "hf_classify"
+                and row.text_pair is not None
+                and not self._classifier_pair_allowed
+            ):
+                raise ValidationError("Forge decoder classifiers require a single rendered input")
             if self._engine == "hf_label_logits" and row.text_pair is not None:
                 raise ValidationError("hf_label_logits accepts a single rendered prompt")
             specials = tokenizer.num_special_tokens_to_add(pair=row.text_pair is not None)
             length = first_length + pair_length + specials
             overflow = length > self._max_length
             error: str | None = None
-            if self._engine == "hf_classify":
+            if self._engine == "hf_classify" and row.text_pair is None:
+                if overflow:
+                    error = "prompt_too_long: rendered classifier input cannot be truncated"
+                elif length == 0:
+                    error = "empty_prompt: classifier needs an attended position"
+            elif self._engine == "hf_classify":
                 # only_first cannot remove the entire first sequence in every HF tokenizer.
                 if pair_length + specials > self._max_length or (
                     first_length > 0 and pair_length + specials >= self._max_length
@@ -317,7 +339,7 @@ class Scorer:
             inputs = [rows[index].text for _, index, _ in batch]
             pairs = (
                 [cast("str", rows[index].text_pair) for _, index, _ in batch]
-                if self._engine == "hf_classify"
+                if self._engine == "hf_classify" and rows[batch[0][1]].text_pair is not None
                 else None
             )
             tokenize_kwargs: dict[str, object] = {
@@ -333,14 +355,16 @@ class Scorer:
                 output = self._model(
                     **{key: value.to(self._device) for key, value in features.items()}
                 )
-            expected_rank = 2 if pairs is not None else 3
+            expected_rank = 2 if self._engine == "hf_classify" else 3
             if len(output.logits.shape) != expected_rank or output.logits.shape[0] != len(batch):
                 raise ValidationError("model logits have an unexpected shape")
-            if pairs is None and output.logits.shape[1] < max(length for length, _, _ in batch):
+            if self._engine == "hf_label_logits" and output.logits.shape[1] < max(
+                length for length, _, _ in batch
+            ):
                 raise ValidationError("model logits omit a prompt's label position")
             for batch_index, (length, index, overflow) in enumerate(batch):
                 mass_outside: float | None = None
-                if pairs is not None:
+                if self._engine == "hf_classify":
                     values = _vector(output.logits[batch_index])
                     if len(values) != len(self._labels):
                         raise ValidationError("model logits do not match id2label")
@@ -467,9 +491,18 @@ def _load_scorer(
         raise ImportError(
             "HF scoring requires torch and transformers; install 'strata-forge[finetuning]'."
         ) from exc
+    forge_checkpoint = (
+        probe_forge_classifier(model_id, revision=revision, token=token)
+        if engine == "hf_classify"
+        and revision is not None
+        and re.fullmatch(r"[a-f0-9]{40}", revision)
+        else None
+    )
     tokenizer = cast(
         "_Tokenizer",
-        transformers.AutoTokenizer.from_pretrained(
+        forge_checkpoint.tokenizer
+        if forge_checkpoint is not None
+        else transformers.AutoTokenizer.from_pretrained(
             model_id,
             revision=revision,
             token=token,
@@ -501,14 +534,19 @@ def _load_scorer(
     }
     if dtype is not None:
         kwargs["dtype"] = dtype
-    try:
-        loaded = factory.from_pretrained(
-            model_id,
-            **kwargs,
-        )
-    except OSError, RuntimeError, ValueError:
-        raise ModelLoadingError(LoadingAudit.refusal("pretrained_load_failed")) from None
-    checked_model, loading_audit = _guard_loading_result(loaded)
+    if forge_checkpoint is None:
+        try:
+            loaded = factory.from_pretrained(model_id, **kwargs)
+        except OSError, RuntimeError, ValueError:
+            raise ModelLoadingError(LoadingAudit.refusal("pretrained_load_failed")) from None
+        checked_model, loading_audit = _guard_loading_result(loaded)
+    else:
+        checked_model = forge_checkpoint.model
+        if dtype not in (None, "auto"):
+            forge_checkpoint.model.to(dtype=getattr(torch, dtype))
+        # The fixed SDK loader already refused every structural diagnostic. This is a
+        # successful complete-load audit, never an exemption for initialized training heads.
+        loading_audit = LoadingAudit(status="accepted")
     model = cast("_Model", checked_model)
     original_model_pad = model.config.pad_token_id
     # Decoder classifier heads pool using config.pad_token_id independently of the
@@ -539,6 +577,9 @@ def _load_scorer(
         max_length=max_length,
         device=resolved_device,
         loading_audit=loading_audit,
+        classifier_single_sequence=forge_checkpoint is not None,
+        classifier_pair_allowed=forge_checkpoint is None
+        or forge_checkpoint.model.config.model_type == "bert",
         padding_policy=PaddingPolicy(
             source=pad_source,
             pad_token_id=pad_id,

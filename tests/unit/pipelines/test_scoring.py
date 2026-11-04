@@ -146,6 +146,8 @@ class Model:
 
 @pytest.fixture
 def fake_hf(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+    # This fixture represents a native HF model with a definitely absent Forge sidecar.
+    monkeypatch.setattr(scoring, "probe_forge_classifier", lambda *args, **kwargs: None)
     tokenizer = Tokenizer()
     labels: dict[int | str, str] = {2: "neutral", 0: "contradiction", 1: "entailment"}
     calls: list[tuple[str, str, dict[str, object]]] = []
