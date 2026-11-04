@@ -95,6 +95,14 @@ def test_invalid_confidence_refused(confidence: float) -> None:
         wilson_interval(1, 10, confidence_level=confidence)
 
 
+def test_out_of_domain_big_reals_raise_forge_validation_errors() -> None:
+    for huge in (10**1000, Fraction(10**1000, 3)):
+        with pytest.raises(ValidationError, match="probabilities"):
+            wilson_interval(1, 10, confidence_level=cast("float", huge))
+        with pytest.raises(ValidationError, match="probabilities"):
+            holm_correction({"huge": cast("float", huge)}, family_id="family")
+
+
 def test_counts_cannot_exceed_the_declared_population() -> None:
     with pytest.raises(ValidationError, match="eligible population"):
         wilson_interval(2, 1)

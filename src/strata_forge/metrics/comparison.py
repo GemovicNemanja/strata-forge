@@ -176,7 +176,12 @@ def _count(value: int) -> int:
 def _probability(value: float, *, confidence: bool = False) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValidationError("probabilities must be finite real numbers in the declared domain")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError, TypeError, ValueError:
+        raise ValidationError(
+            "probabilities must be finite real numbers in the declared domain"
+        ) from None
     if not math.isfinite(number) or (not 0 < number < 1 if confidence else not 0 <= number <= 1):
         raise ValidationError("probabilities must be finite real numbers in the declared domain")
     return number
