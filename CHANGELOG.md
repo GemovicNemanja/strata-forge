@@ -10,6 +10,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
+  conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,
+  and explicit named-family Holm correction that retains caller order. Frozen results and
+  evaluation aliases require no numerical extra and choose no rejection threshold. Large
+  binomial tails avoid cancellation from subtracting log-gamma values. Bootstrap execution
+  remains outside these helpers' contract.
+
 - `strata_forge.metrics` provides explicit-label classification reports, accuracy, macro-F1,
   confusion matrices with invalid-output counts, multiclass sum-form Brier score, and NLL.
   Undefined values, denominators, probability coverage, clipping, and raw/restricted probability
