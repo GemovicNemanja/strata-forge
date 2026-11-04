@@ -1,5 +1,9 @@
 # CLAUDE.md — agent rules for AI Forge
 
+## GitHub identity
+
+All Strata GitHub operations must authenticate as **GemovicNemanja**. Before a GitHub write, verify `gh api user --jq .login` returns `GemovicNemanja`; if it does not, select the already configured personal account and verify again. Never use `GemovicWonder` as a fallback, and do not restore it after Strata work. Do not read or print credential values. This identity requirement applies to every agent and to GitHub PR, issue and repository operations.
+
 This file is the single source of truth for cross-cutting conventions that every contributor (human or agent — Claude Code, Cursor, Codex, Copilot, …) follows in this codebase. Tools that read `AGENTS.md` get the same content via the symlink at the repo root.
 
 Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`. If a module rule conflicts with this file, **fix the conflict** before merging — the module file is authoritative for itself, this file is authoritative for cross-cutting concerns.
