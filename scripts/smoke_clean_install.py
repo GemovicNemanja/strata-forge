@@ -467,6 +467,141 @@ def check_inference_spec() -> None:
             raise SmokeError(msg)
 
 
+def check_scoring_specs() -> None:
+    """Build both scoring specs and render their pairs without loading a model."""
+    from strata_forge.pipelines import inference_runner
+
+    for engine in ("hf_classify", "hf_label_logits"):
+        payload = inference_spec()
+        payload["hyperparams"] = {
+            "engine": engine,
+            "max_model_len": 32,
+            **(
+                {"pair_template": "{question}"}
+                if engine == "hf_classify"
+                else {"label_tokens": {"yes": "A", "no": "B"}}
+            ),
+        }
+        with run_config(payload):
+            spec = inference_runner.load_spec()
+        inputs = inference_runner._build_scoring_inputs(spec, [{"col_question": "one two"}])  # pyright: ignore[reportPrivateUsage]
+        if len(inputs) != 1 or "{question}" in inputs[0].text:
+            raise SmokeError("scoring spec did not render its input")
+
+
+def check_scoring_models() -> None:
+    """Reload locally initialized safetensors models and score without Hub access."""
+    from strata_forge.core.repro import set_seed
+    from strata_forge.pipelines._scoring import Scorer, ScoringInput
+
+    # These extras are deliberately inspected at runtime: this is the upstream API probe,
+    # not a dependency of importing this script or of its pure-spec unit tests.
+    torch: Any = importlib.import_module("torch")
+    transformers: Any = importlib.import_module("transformers")
+    tokenizers: Any = importlib.import_module("tokenizers")
+    set_seed(0)
+    vocab = {
+        "[PAD]": 0,
+        "[BOS]": 1,
+        "[EOS]": 2,
+        "[UNK]": 3,
+        "A": 4,
+        "B": 5,
+        "one": 6,
+        "two": 7,
+        "[SEP]": 8,
+    }
+    unknown_symbol = "[UNK]"
+    backend = tokenizers.Tokenizer(tokenizers.models.WordLevel(vocab, unk_token=unknown_symbol))
+    backend.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    backend.post_processor = tokenizers.processors.TemplateProcessing(
+        single="[BOS] $A",
+        pair="[BOS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[BOS]", 1), ("[SEP]", 8)],
+    )
+    special_symbols = {
+        "pad_token": "[PAD]",
+        "bos_token": "[BOS]",
+        "eos_token": "[EOS]",
+        "unk_token": unknown_symbol,
+    }
+    tokenizer = transformers.PreTrainedTokenizerFast(tokenizer_object=backend, **special_symbols)
+    tokenizer.padding_side = "right"
+    encoder = transformers.AutoModelForSequenceClassification.from_config(
+        transformers.BertConfig(
+            vocab_size=len(vocab),
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            max_position_embeddings=32,
+            num_labels=2,
+            id2label={0: "yes", 1: "no"},
+            label2id={"yes": 0, "no": 1},
+        )
+    )
+    decoder = transformers.AutoModelForCausalLM.from_config(
+        transformers.GPT2Config(
+            vocab_size=len(vocab),
+            n_embd=16,
+            n_layer=1,
+            n_head=2,
+            n_positions=32,
+            pad_token_id=0,
+        )
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        encoder.save_pretrained(root / "encoder", safe_serialization=True)
+        decoder.save_pretrained(root / "decoder", safe_serialization=True)
+        for engine, factory, path, labels, ids in (
+            (
+                "hf_classify",
+                transformers.AutoModelForSequenceClassification,
+                root / "encoder",
+                ["yes", "no"],
+                [],
+            ),
+            (
+                "hf_label_logits",
+                transformers.AutoModelForCausalLM,
+                root / "decoder",
+                ["yes", "no"],
+                [4, 5],
+            ),
+        ):
+            model = factory.from_pretrained(
+                path, token=False, use_safetensors=True, trust_remote_code=False
+            )
+            model.eval()
+            scorer = Scorer(
+                engine="hf_classify" if engine == "hf_classify" else "hf_label_logits",
+                model=model,
+                tokenizer=tokenizer,
+                torch=torch,
+                labels=labels,
+                token_ids=ids,
+                max_length=32,
+                device="cpu",
+            )
+            inputs = [
+                ScoringInput(text="one", text_pair="two" if engine == "hf_classify" else None),
+                ScoringInput(
+                    text="one two two", text_pair="one" if engine == "hf_classify" else None
+                ),
+            ]
+            result = asyncio.run(scorer.score(inputs, batch_size=2))
+            if result.failed_rows or len(result.rows) != 2:
+                raise SmokeError("tiny model scoring produced no usable result")
+            for row in result.rows:
+                if abs(sum(row.probabilities.values()) - 1) > 1e-6:
+                    raise SmokeError("tiny model label probabilities do not sum to one")
+                if engine == "hf_label_logits" and not (
+                    row.mass_outside is not None and 0 <= row.mass_outside <= 1
+                ):
+                    raise SmokeError("tiny decoder did not report full-vocabulary outside mass")
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -629,6 +764,10 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
             checks.append((f"finetune {method} / {fmt} / {adapter}", case))
     if {"serving", "hf"} <= extras:
         checks.append(("inference spec, requests and results", check_inference_spec))
+        checks.append(("HF scoring specs and rendered pairs", check_scoring_specs))
+        checks.append(
+            ("tiny safetensors classifiers and label logits (offline)", check_scoring_models)
+        )
     if "serving" in extras:
         checks.append(("vllm accepts the serving command line", check_vllm_command_line))
     return checks

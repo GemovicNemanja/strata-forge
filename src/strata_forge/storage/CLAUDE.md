@@ -14,6 +14,7 @@ push-pull semantics on the HuggingFace Hub.
   caching, same-protocol native copy/move plus cross-protocol
   byte streaming.
 - :data:`FileInfo` — per-entry metadata type alias.
+- :class:`CommitRef` — frozen actual commit SHA/URL from `commit_file` / `commit_folder`.
 - :class:`HFHubClient` — async wrapper over
   ``huggingface_hub.HfApi``. Repo lifecycle (create / delete /
   list), single-file ops, whole-repo snapshots, convenience
@@ -40,7 +41,11 @@ The module's ``__init__.py`` re-exports:
 
 - Generic file storage: :class:`StorageGateway`,
   :data:`FileInfo`.
-- HuggingFace Hub: :class:`HFHubClient`, :data:`RepoType`.
+- HuggingFace Hub: :class:`HFHubClient`, :data:`RepoType`, :class:`CommitRef`.
+
+`resolve_revision` retains the full SHA returned by `repo_info`; a supplied full pin must
+match it. Commit references come from the SDK's `oid` and `commit_url`, never a parsed moving
+URL or a fabricated placeholder. Existing upload methods keep their string return type.
 
 Errors raised from this module are :class:`ImportError` (when
 the extra is missing), :class:`TypeError` (when fsspec returns

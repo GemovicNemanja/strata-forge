@@ -125,8 +125,13 @@ class TestPlan:
     def test_inference_leg_checks_serving_and_no_training(self) -> None:
         names = self._names("serving,storage,hf")
         assert "inference spec, requests and results" in names
+        assert "HF scoring specs and rendered pairs" in names
+        assert "tiny safetensors classifiers and label logits (offline)" in names
         assert "vllm accepts the serving command line" in names
         assert not any(name.startswith("finetune ") for name in names)
+
+    def test_scoring_specs_are_built_without_model_downloads(self) -> None:
+        smoke.check_scoring_specs()
 
     def test_all_expands_to_every_declared_extra(self) -> None:
         extras = smoke.selected_extras("all")

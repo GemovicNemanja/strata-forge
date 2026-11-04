@@ -518,6 +518,14 @@ JSONL line, read via `Backend.read_file` — see
 things a run *watcher* needs, decided in
 [ADR 0017](../architecture/adr/0017-run-telemetry-on-the-progress-channel.md).
 
+`ProgressEvent` also accepts optional `output_ref` and `input_refs` for immutable artifact
+provenance. Values are bounded canonical `repo@<full lowercase 40-character SHA>` strings;
+input keys are `model` and `dataset`. They remain separate from numeric metrics and from
+`message`, which existing consumers use as a result destination. Scoring fills them with
+resolved input revisions and the actual returned output commit. Older events omit them or
+read as `None` / `{}`; consumers must use the engine version they validated before accepting
+an event-schema extension.
+
 **`stage` — where the run is, as an id.** One of `RUN_STAGES`:
 
 ```

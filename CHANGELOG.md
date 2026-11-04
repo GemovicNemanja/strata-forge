@@ -8,6 +8,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- Inference specs can select `hf_classify` for paired classifier probabilities or
+  `hf_label_logits` for exact single-token label probabilities and full-vocabulary outside
+  mass. Scoring validates inert pair templates, preserves hypotheses, counts overflows and
+  refusals, and writes Parquet plus a pinned-input manifest without starting vLLM.
+- `HFHubClient.resolve_revision`, `commit_file` and `commit_folder` preserve actual input
+  and output commit SHAs. Progress events carry bounded immutable input/output refs apart
+  from float metrics, retaining the existing result-destination message.
+- Clean-install checks construct both scoring specs and reload tiny locally initialized
+  safetensors models offline. Serving declares bounded direct scoring dependencies.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added

@@ -1,5 +1,10 @@
 # strata_forge.storage
 
-`fsspec` gateway over local, S3, GCS, Azure Blob, and Hugging Face Hub backends. Hugging Face Hub model push/pull for base and fine-tuned weights. Dataset handling on Hub + S3.
+`StorageGateway` provides async file operations over local, S3, GCS, Azure Blob and other
+fsspec backends. `HFHubClient` handles repo lifecycle, snapshots and individual files with
+lazy optional dependencies. Revision resolution returns full input commit SHAs; `commit_file`
+and `commit_folder` return immutable `CommitRef` values while existing upload methods retain
+their string return values.
 
-> Implementation pending. See `docs/roadmap.md` for current status.
+See [the storage reference](../../../docs/modules/storage.md) for credentials, backend options
+and public API details.
