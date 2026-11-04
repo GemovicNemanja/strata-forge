@@ -146,10 +146,9 @@ uv run python scripts/import_operational_prompts.py --output /tmp/strata-operati
 node scripts/prompt_reference.mts /tmp/strata-operational-prompts.json
 ```
 
-The CI conformance job explicitly installs Node 24, checks the same frozen corpus and runs the
-operational import bridge. It uses pinned actions, read-only permissions, no credential checkout
-and no dependency cache. Base clean-install smoke constructs and renders the compiler without
-extras or tokenizer assets. With TypeScript and Node types installed as development tools, the
+The conformance commands require an explicit Node 24 runtime and check the frozen corpus and
+operational import bridge independently of the Python test jobs. Base clean-install smoke
+constructs and renders the compiler without extras or tokenizer assets. With TypeScript and Node types installed as development tools, the
 strict reference check is:
 
 ```bash
