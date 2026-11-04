@@ -117,6 +117,11 @@ class TestPlan:
     def _names(extras: str) -> list[str]:
         return [name for name, _ in smoke.plan(smoke.selected_extras(extras))]
 
+    def test_modular_prompt_constructor_runs_in_base_and_every_worker_profile(self) -> None:
+        for extras in ("", "finetuning,storage", "serving,storage,hf", "all"):
+            assert "modular prompt compiler" in self._names(extras)
+        smoke.check_modular_prompts()
+
     def test_finetune_leg_checks_every_case_and_no_serving(self) -> None:
         names = self._names("finetuning,storage")
         assert sum(name.startswith("finetune ") for name in names) == len(smoke.finetune_cases())

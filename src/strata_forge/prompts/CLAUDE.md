@@ -8,8 +8,9 @@ backs in-process and Langfuse-hosted catalogs.
 
 ## Purpose
 
-Authoring + storage layer for prompts that compile to
-`list[strata_forge.llm.AnyMessage]`. The module owns:
+The Jinja2 authoring/storage API renders to `list[strata_forge.llm.AnyMessage]`.
+The independent modular API returns immutable chat/artifact snapshots with byte attribution.
+The module owns:
 
 - Jinja2 templating with no I/O extensions and an allowlist of safe
   filters.
@@ -35,6 +36,31 @@ Authoring + storage layer for prompts that compile to
   Rendering a prompt is a pure transformation from
   `(PromptTemplate, variables)` to `list[AnyMessage]`.
 
+## Modular composition boundary
+
+`composition.py`, `composition_types.py`, `composition_errors.py` and `portable.py` own the
+independent explicit modular dialect under [ADR 0023](../../../docs/architecture/adr/0023-portable-modular-prompt-composition.md).
+The Jinja2 API retains its behavior and signatures. `CompositionRegistry`, `compile_surface`
+and `render_build` are async. Canonicalization, schema validation and immutable snapshot
+inspection are synchronous pure helpers; no synchronous I/O or runtime wrapper is admitted.
+
+- Text is literal; only explicit variable nodes insert scalar data once. Never reinterpret
+  braces or run expressions, filters, imports or callable resolution in this dialect.
+- Pin exact coordinates. Registry snapshots never replace a coordinate with different content,
+  and builds never consult moving channels or mutate when registry entries are added.
+- Preserve ordered empty/repeated leaves, declared chat roles and artifact purpose/descriptor
+  boundaries. Constraints are explicit facts; duplicate prose is advisory and is never removed.
+- Hash only the portable profile and versioned domain-bearing values. Reject duplicate JSON
+  keys, nonportable numbers/objects, surrogates and exceeded bounds; no normalization or truncation.
+- Source offsets are half-open UTF-8 bytes. Validate exact target shape, full ordered byte
+  coverage, scalar boundaries and compiler-owned separators when accepting render snapshots.
+- Imported hashes and validated schemas are not compiler attestations, access grants or proof
+  of provider use. Server consumers must verify expected immutable IDs and permissions.
+- Keep Python/Node fixtures synchronized, including adverse metadata and Unicode. Operational
+  import fixtures require explicit source authorization; research/verifier prompts are excluded.
+
+Reference: [`docs/modules/prompt-composition.md`](../../../docs/modules/prompt-composition.md).
+
 ## Public API
 
 The module's `__init__.py` re-exports the supported surface.
@@ -50,6 +76,15 @@ Treat anything not in `__init__.py` as internal.
   cache hints `strata_forge.llm` consumes.
 - `PromptError`, `PromptValidationError` — errors raised from this
   module, both `ForgeError` subclasses.
+- `ModuleRevision`, `SurfaceRevision`, `TextPart`, `VariablePart`, `ModulePart`, `VariableDecl`,
+  `PromptConstraint`, `SourceProvenance` and `PortableDocument` — immutable modular authoring data.
+- `ChatTarget`, `ChatMessageParts`, `ArtifactTarget` — distinct declared output boundaries.
+- `CompositionRegistry`, `compile_surface`, `render_build` — exact snapshot/compile/render APIs.
+- `PromptBuild`, `PromptRender`, `DependencyLock`, `SourceSpan`, `PromptOrigin`,
+  `CompositionDiagnostic`, `PromptCompositionError` — immutable content, attribution and diagnostics.
+- `CompositionCapabilities`, `composition_capabilities` — fixed versioned bounds.
+- `definition_from_wire`, `definition_identity`, `canonical_bytes`, `parse_portable_json`,
+  `portable_sha256` — pure closed-schema and portable-byte helpers.
 
 ## Internal patterns
 

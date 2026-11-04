@@ -34,7 +34,7 @@ For the user-requested platform rework, start at [`plans/strata-rework/README.md
 | `strata_forge.core` | Cross-cutting utilities: errors (`ForgeError` hierarchy), retry, structlog logging with `trace_id` propagation, `BudgetContext`, reproducibility helpers, UUIDv7 ids, secret redaction (`Redactor`, the one scrubber for every surfaced string and relayed console), shared types. Strictly upstream — does not import from any other `strata_forge.*` module. | [`src/strata_forge/core/CLAUDE.md`](src/strata_forge/core/CLAUDE.md) |
 | `strata_forge.config` | Pydantic Settings root with sub-models per concern; YAML profile overlays (`FORGE_PROFILE`); `.env` loading. The single configuration entry point — never read env vars directly elsewhere. | [`src/strata_forge/config/CLAUDE.md`](src/strata_forge/config/CLAUDE.md) |
 | `strata_forge.llm` | Provider-abstracted async LLM client over LiteLLM. Owns the typed layer: Pydantic messages/responses, structured output, tools (`Tool`, `@tool`, `run_tool_loop`), multimodal, streaming, two-axis fallback, provider-agnostic cache, model registry. Reference: [`docs/modules/llm.md`](docs/modules/llm.md). | [`src/strata_forge/llm/CLAUDE.md`](src/strata_forge/llm/CLAUDE.md) |
-| `strata_forge.prompts` | Jinja2 templating with safe filters + Langfuse-backed prompt registry. Templates model the stable-prefix / dynamic-suffix split so provider prompt caching just works. Reference: [`docs/modules/prompts.md`](docs/modules/prompts.md). | [`src/strata_forge/prompts/CLAUDE.md`](src/strata_forge/prompts/CLAUDE.md) |
+| `strata_forge.prompts` | Sandboxed Jinja2/cache-aware templates and an independent immutable modular compiler with exact pins, portable identities and UTF-8 attribution. Reference: [`docs/modules/prompts.md`](docs/modules/prompts.md), [`docs/modules/prompt-composition.md`](docs/modules/prompt-composition.md). | [`src/strata_forge/prompts/CLAUDE.md`](src/strata_forge/prompts/CLAUDE.md) |
 | `strata_forge.tracing` | Langfuse observability. Auto-tracing via LiteLLM callback, `@traced` decorator, span context managers, score/metric helpers. Reference: [`docs/modules/tracing.md`](docs/modules/tracing.md). | [`src/strata_forge/tracing/CLAUDE.md`](src/strata_forge/tracing/CLAUDE.md) |
 | `strata_forge.datasets` | Dataset CRUD + versioning; Langfuse ↔ Hugging Face Datasets bridge; synthetic-data primitives. | [`src/strata_forge/datasets/CLAUDE.md`](src/strata_forge/datasets/CLAUDE.md) |
 | `strata_forge.evals` | Experiment runner (model × prompt × dataset × graders); graders, metrics, reports, parameter sweeps; trace replay; CI eval-regression gate. | [`src/strata_forge/evals/CLAUDE.md`](src/strata_forge/evals/CLAUDE.md) |
@@ -54,7 +54,8 @@ Per-module reference docs live under `docs/modules/<name>.md`. The phase roadmap
 These apply everywhere in `src/strata_forge/`. Code that violates them is wrong by default; if a violation is genuinely necessary, write an ADR before merging.
 
 ### 3.1 Async-first public API
-- Every public function on every module is `async`.
+- Public I/O and orchestration APIs are `async`. Existing Jinja2 template signatures remain compatible.
+- Under [ADR 0023](docs/architecture/adr/0023-portable-modular-prompt-composition.md), modular prompt canonicalization, validation and immutable-value inspection are synchronous pure helpers. Registry, compiler and renderer operations remain async; this exception permits no sync I/O or runtime wrapper.
 - Sync wrappers live **only** in `strata_forge.sync` and exist for CLI / notebook ergonomics. They wrap async functions via `asyncio.run`.
 - Internal calls are async end-to-end. Do not mix `requests` / sync `httpx` with async code paths.
 - HTTP I/O uses `httpx.AsyncClient` (often indirectly through LiteLLM).

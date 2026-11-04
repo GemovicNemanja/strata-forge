@@ -589,3 +589,7 @@ files, contract decisions, offline command results, remaining warnings/failures,
 manifests and spend (if authorized), integration state, docs, and next owner. Mark each
 acceptance item as passed, failed or not run. A fake model passing math tests, a job returning
 exit zero, an uploaded file and a usable cross-repo feature are different pieces of evidence.
+
+## Prompt compiler CI publication
+
+The modular compiler runtime and local cross-language conformance are reviewable. The exact Node24 hosted-CI addition is retained as [a reviewed patch](drafts/prompt-conformance-workflow.patch). GitHub rejected updating `.github/workflows/ci.yml` because the authenticated personal OAuth token lacks `workflow` scope; no alternate account or automatic workflow modification is used. Apply/publish that CI change after the personal credential has the required scope. Local tests do not substitute for this remaining hosted-conformance gate.
