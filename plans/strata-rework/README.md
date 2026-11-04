@@ -79,8 +79,8 @@ replacement is explicitly provisioned. A successful unit test is not a staging/V
 This is ordering, not a calendar estimate. Pure metrics can proceed while inference integration
 is reviewed. `TRAIN-001` can split the format, eval-default fix, classifier, calibration and
 artifact changes into sequential reviews; four touch the same runner, so they are not four
-independent agents. Research's logged E0/E0+ exceptions remain available until actual SCORE
-acceptance closes them. A negative research gate changes experiments and claims; it does not
+independent agents. G1 requires accepted INFER-002, EVAL-001 and EVAL-002: every baseline/scoring/evaluation
+run uses Strata. The former E0/E0+ execution alternative is withdrawn. A negative research gate changes experiments and claims; it does not
 cancel useful pre-signal platform work already accepted by the user.
 
 ## INFER-001 — review and retain the exact scoring foundation

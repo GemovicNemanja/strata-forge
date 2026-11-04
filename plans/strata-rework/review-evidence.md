@@ -110,7 +110,7 @@ substitute for a complete green suite under a correctly installed isolated curre
 7. Verify cancellation through supervised process termination: a cancelled to-thread await
    does not terminate an in-flight model forward. Evaluate memory use of full decoder logits
    and equivalent last-position optimizations before larger batches/contexts.
-8. Do approved real-model/reference and cross-repo acceptance; close E0+ only on that evidence.
+8. Do approved real-model/reference and cross-repo acceptance. G1 waits for the Strata scoring/metrics/durable-evaluation path; there is no E0/E0+ execution alternative.
 
 The public source patch carries generic primitives and synthetic test strings only. Internal
 plan paths and research decisions stay here under `plans/`, outside the package's source-only

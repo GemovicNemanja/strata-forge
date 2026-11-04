@@ -179,3 +179,9 @@ Release/spec/dependency changes follow the repository's minor-version rule, exac
 handshake and Forge→server→app sequence. The older signed version numbers are planned release
 train labels; reconcile them with actual intervening releases before shipping. Agent wire
 changes retain the exact per-PR sign-off requirement even if an earlier design packet exists.
+
+## Safe model initialization and reload
+
+Every classification or causal scoring load requests `output_loading_info=True`. Refuse missing non-head weights before processing rows; inference and reload cannot silently initialize a head. Training init may permit only exact keys declared by a trusted new-head initializer, with decoder heads requiring the explicit decoder-logit-head path. Merge/reload must re-apply the guard. Bounded loading metadata records key names/codes only, without weight values or arbitrary warning/error text. Verification uses synthetic checkpoints missing body/head keys and complete checkpoints.
+
+Record the explicit tokenizer/model pad policy. Full immutable commit SHAs resolved from Hub pull-request refs are valid pins; mutable refs are not frozen research inputs. Apertus generation support does not imply classification support: a classifier requires an implemented Forge-owned head, never remote code or pickle fallback. These are accepted platform requirements, not evidence that every training/merge consumer is implemented.
