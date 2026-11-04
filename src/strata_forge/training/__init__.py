@@ -2,6 +2,11 @@
 
 The public surface is:
 
+- :class:`ClassifierConfig`, :class:`ClassifierExample`, :class:`ClassifierRunner`,
+  :class:`ClassifierRunResult`, :class:`InitializedClassifier`, :func:`initialize_classifier`
+  and :func:`load_classifier` — primary classification over resolved objects, separate from
+  worker registration.
+
 - :class:`SFTConfig` / :class:`SFTRunner` / :class:`SFTRunResult`
 - :class:`DPOConfig` / :class:`ORPOConfig` / :class:`KTOConfig` /
   :class:`GRPOConfig` / :class:`PreferenceRunner` /
@@ -32,6 +37,15 @@ from strata_forge.training.chat_template import (
     apply_chat_template,
     conversation_to_dicts,
     conversation_to_text,
+)
+from strata_forge.training.classifier import (
+    ClassifierConfig,
+    ClassifierExample,
+    ClassifierRunner,
+    ClassifierRunResult,
+    InitializedClassifier,
+    initialize_classifier,
+    load_classifier,
 )
 from strata_forge.training.dataset_format import (
     FORMATS,
@@ -85,12 +99,17 @@ __all__ = [
     "FORMATS",
     "METHODS",
     "AnyPreferenceConfig",
+    "ClassifierConfig",
+    "ClassifierExample",
+    "ClassifierRunResult",
+    "ClassifierRunner",
     "DPOConfig",
     "DatasetFormat",
     "DatasetFormatError",
     "FormatSpec",
     "GRPOConfig",
     "HubToken",
+    "InitializedClassifier",
     "JsonlProgressWriter",
     "KTOConfig",
     "LoRAConfig",
@@ -115,6 +134,8 @@ __all__ = [
     "conversation_to_dicts",
     "conversation_to_text",
     "enabled_methods",
+    "initialize_classifier",
+    "load_classifier",
     "model_load_kwargs",
     "pack_sequences",
     "pick_format",

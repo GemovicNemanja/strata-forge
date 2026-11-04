@@ -10,6 +10,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Async primary-classifier SDK over resolved native models/tokenizer/rows, with ordinary CE
+  default and explicit Brier objectives. Trusted encoder/decoder initialization records exact
+  transforms and step-zero parity, including nonzero LM bias and pad=EOS pooling. Final-only
+  safe export reloads complete local safetensors through fixed installed classes; missing
+  weights never receive a training-head exemption. Worker dispatch remains separate.
+
 - Pinned classification evaluation workers validate separate multi-config populations, stable
   ID joins, declared label projections and probability provenance, and write explicitly typed
   per-population Parquet plus versioned reports. Trusted pin-bound read policy is mandatory;

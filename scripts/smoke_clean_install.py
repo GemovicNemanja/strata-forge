@@ -593,6 +593,58 @@ def evaluation_spec(mode: str) -> dict[str, Any]:
     return result
 
 
+def check_classifier_sdk() -> None:
+    """Exercise actual Trainer and complete safe reload with a tiny local random encoder."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import BertConfig, BertModel, PreTrainedTokenizerFast
+
+    from strata_forge.training import (
+        ClassifierConfig,
+        ClassifierExample,
+        ClassifierRunner,
+        initialize_classifier,
+        load_classifier,
+    )
+
+    async def run() -> None:
+        backend = Tokenizer(WordLevel({"[PAD]": 0, "[UNK]": 1, "a": 2}, unk_token="[UNK]"))  # noqa: S106 — tokenizer markers, not credentials
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            pad_token="[PAD]",  # noqa: S106 — tokenizer marker
+            unk_token="[UNK]",  # noqa: S106 — tokenizer marker
+            model_input_names=["input_ids", "attention_mask"],
+        )
+        source = BertModel(
+            BertConfig(
+                vocab_size=3,
+                hidden_size=8,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=16,
+                max_position_embeddings=16,
+            )
+        )
+        initialized = await initialize_classifier(
+            source, labels=("yes", "no"), initializer_id="encoder_random_head"
+        )
+        config = ClassifierConfig(labels=("yes", "no"), max_steps=1, use_cpu=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = await ClassifierRunner(config).train(
+                initialized=initialized,
+                tokenizer=tokenizer,
+                rows=(ClassifierExample(item_id="synthetic", text="a", label="yes"),),
+                output_dir=Path(temporary),
+            )
+            loaded = await load_classifier(Path(result.artifact_dir))
+            if result.steps != 1 or loaded.receipt.labels != config.labels:
+                raise SmokeError(
+                    "classifier SDK did not train and reload its declared primary head"
+                )
+
+    asyncio.run(run())
+
+
 def check_evaluation_specs() -> None:
     """Construct both installed evaluation modes without reading inputs or granting access."""
     from strata_forge.pipelines._common import load_config
@@ -1046,6 +1098,9 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))
     if "finetuning" in extras:
+        checks.append(
+            ("tiny primary classifier SDK train and reload (offline)", check_classifier_sdk)
+        )
         checks.append(("pinned classify and prediction-evaluation specs", check_evaluation_specs))
         for method, fmt, adapter in finetune_cases():
 
