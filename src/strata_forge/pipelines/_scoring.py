@@ -18,6 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.core.errors import ValidationError
 from strata_forge.pipelines._common import REPO_ID_RE
+from strata_forge.training._load_guard import (
+    LoadingAudit,
+    ModelLoadingError,
+    PaddingPolicy,
+    _guard_loading_result,
+)
 from strata_forge.training.progress import ProgressEvent
 
 if TYPE_CHECKING:
@@ -157,6 +163,8 @@ def _label_names(
 
 
 def _validate_labels(names: list[str]) -> list[str]:
+    if any(not isinstance(cast("object", name), str) for name in names):
+        raise ValidationError("labels must be strings")
     if any(not name.strip() or len(name) > 64 for name in names):
         raise ValidationError("labels must contain 1 to 64 characters")
     if not names or len(set(names)) != len(names):
@@ -225,6 +233,8 @@ class Scorer:
         token_ids: list[int],
         max_length: int,
         device: str,
+        loading_audit: LoadingAudit,
+        padding_policy: PaddingPolicy,
     ) -> None:
         self._engine = engine
         self._model = model
@@ -234,6 +244,8 @@ class Scorer:
         self._token_ids = token_ids
         self._max_length = max_length
         self._device = device
+        self.loading_audit = loading_audit
+        self.padding_policy = padding_policy
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -414,6 +426,11 @@ async def load_scorer(
         raise ValidationError("hf_classify uses id2label, not label_tokens")
     if engine == "hf_label_logits" and (not label_tokens or label_alias is not None):
         raise ValidationError("hf_label_logits requires label_tokens and does not use label_alias")
+    if label_alias:
+        _validate_labels(list(label_alias))
+        _validate_labels(list(label_alias.values()))
+    if label_tokens:
+        _validate_labels(list(label_tokens))
     return await asyncio.to_thread(
         _load_scorer,
         model_id,
@@ -460,10 +477,12 @@ def _load_scorer(
         ),
     )
     tokenizer.padding_side = "right"
+    pad_source: Literal["tokenizer_pad", "eos_fallback"] = "tokenizer_pad"
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
             raise ValidationError("batched scoring requires a pad token or an EOS token")
         tokenizer.pad_token_id = tokenizer.eos_token_id
+        pad_source = "eos_fallback"
     pad_id = cast("object", tokenizer.pad_token_id)
     if isinstance(pad_id, bool) or not isinstance(pad_id, int) or pad_id < 0:
         raise ValidationError("batched scoring requires a nonnegative integer pad token id")
@@ -478,16 +497,20 @@ def _load_scorer(
         "token": token,
         "use_safetensors": True,
         "trust_remote_code": False,
+        "output_loading_info": True,
     }
     if dtype is not None:
         kwargs["dtype"] = dtype
-    model = cast(
-        "_Model",
-        factory.from_pretrained(
+    try:
+        loaded = factory.from_pretrained(
             model_id,
             **kwargs,
-        ),
-    )
+        )
+    except OSError, RuntimeError, ValueError:
+        raise ModelLoadingError(LoadingAudit.refusal("pretrained_load_failed")) from None
+    checked_model, loading_audit = _guard_loading_result(loaded)
+    model = cast("_Model", checked_model)
+    original_model_pad = model.config.pad_token_id
     # Decoder classifier heads pool using config.pad_token_id independently of the
     # tokenizer's attention mask. Both must describe the padding actually supplied.
     try:
@@ -515,4 +538,10 @@ def _load_scorer(
         token_ids=ids,
         max_length=max_length,
         device=resolved_device,
+        loading_audit=loading_audit,
+        padding_policy=PaddingPolicy(
+            source=pad_source,
+            pad_token_id=pad_id,
+            original_model_pad_token_id=original_model_pad,
+        ),
     )

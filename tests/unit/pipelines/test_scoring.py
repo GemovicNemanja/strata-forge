@@ -150,22 +150,28 @@ def fake_hf(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     labels: dict[int | str, str] = {2: "neutral", 0: "contradiction", 1: "entailment"}
     calls: list[tuple[str, str, dict[str, object]]] = []
     models: list[Model] = []
+    loading_info: dict[str, object] = {
+        "missing_keys": [],
+        "unexpected_keys": [],
+        "mismatched_keys": [],
+        "error_msgs": [],
+    }
 
     def tokenizer_load(model_id: str, **kwargs: object) -> Tokenizer:
         calls.append(("tokenizer", model_id, kwargs))
         return tokenizer
 
-    def model_load(model_id: str, **kwargs: object) -> Model:
+    def model_load(model_id: str, **kwargs: object) -> tuple[Model, dict[str, object]]:
         calls.append(("classifier", model_id, kwargs))
         model = Model(labels, causal=False)
         models.append(model)
-        return model
+        return model, loading_info
 
-    def causal_load(model_id: str, **kwargs: object) -> Model:
+    def causal_load(model_id: str, **kwargs: object) -> tuple[Model, dict[str, object]]:
         calls.append(("causal", model_id, kwargs))
         model = Model(labels, causal=True)
         models.append(model)
-        return model
+        return model, loading_info
 
     transformers = types.ModuleType("transformers")
     monkeypatch.setattr(
@@ -190,7 +196,9 @@ def fake_hf(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     monkeypatch.setattr(torch, "inference_mode", contextlib.nullcontext, raising=False)
     monkeypatch.setitem(sys.modules, "transformers", transformers)
     monkeypatch.setitem(sys.modules, "torch", torch)
-    return types.SimpleNamespace(tokenizer=tokenizer, labels=labels, calls=calls, models=models)
+    return types.SimpleNamespace(
+        tokenizer=tokenizer, labels=labels, calls=calls, models=models, loading_info=loading_info
+    )
 
 
 async def test_classifier_uses_class_ids_not_dictionary_order(
@@ -208,6 +216,56 @@ async def test_classifier_uses_class_ids_not_dictionary_order(
     assert result.rows[0].mass_outside is None
     assert result.overflow_rows == result.failed_rows == 0
     assert fake_hf.models[0].evaluating
+
+
+@pytest.mark.parametrize("engine", ["hf_classify", "hf_label_logits"])
+@pytest.mark.parametrize(
+    "missing_key", ["backbone.embeddings.weight", "classifier.weight", "lm_head.weight"]
+)
+async def test_scoring_never_accepts_an_implicitly_initialized_body_or_head(
+    fake_hf: types.SimpleNamespace, engine: scoring.ScoringEngine, missing_key: str
+) -> None:
+    fake_hf.loading_info["missing_keys"] = {missing_key}
+    with pytest.raises(scoring.ModelLoadingError, match="missing_weights"):
+        await scoring.load_scorer(
+            "org/model",
+            engine=engine,
+            token=False,
+            max_length=12,
+            label_tokens={"yes": "A", "no": "B"} if engine == "hf_label_logits" else None,
+        )
+    assert not fake_hf.models[0].evaluating
+    assert fake_hf.models[0].forward_calls == 0
+
+
+@pytest.mark.parametrize("failure_kind", [OSError, RuntimeError, ValueError])
+async def test_factory_structural_failures_do_not_preserve_raw_error_text(
+    fake_hf: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, failure_kind: type[Exception]
+) -> None:
+    def fail(model_id: str, **kwargs: object) -> object:
+        raise failure_kind("private raw warning hf_synthetic_fixture_do_not_persist")
+
+    monkeypatch.setattr(
+        sys.modules["transformers"].AutoModelForSequenceClassification, "from_pretrained", fail
+    )
+    with pytest.raises(scoring.ModelLoadingError) as failure:
+        await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
+    assert failure.value.audit.codes == ("pretrained_load_failed",)
+    assert "private" not in str(failure.value)
+    assert "synthetic_fixture" not in failure.value.audit.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "aliases", [{"LABEL_0": ""}, {"": "yes"}, {"LABEL_0": "yes", "LABEL_1": "yes"}]
+)
+async def test_cheap_invalid_aliases_are_refused_before_tokenizer_or_weight_load(
+    fake_hf: types.SimpleNamespace, aliases: dict[str, str]
+) -> None:
+    with pytest.raises(ValidationError):
+        await scoring.load_scorer(
+            "org/model", engine="hf_classify", token=False, max_length=12, label_alias=aliases
+        )
+    assert fake_hf.calls == []
 
 
 async def test_generic_labels_require_explicit_aliases(fake_hf: types.SimpleNamespace) -> None:
@@ -382,15 +440,19 @@ async def test_loader_boundary_is_safe_and_explicit(
         assert kwargs["trust_remote_code"] is False
         if kind != "tokenizer":
             assert kwargs["use_safetensors"] is True
+            assert kwargs["output_loading_info"] is True
 
 
 async def test_decoder_can_pad_with_eos(fake_hf: types.SimpleNamespace) -> None:
     fake_hf.tokenizer.pad_token_id = None
-    await scoring.load_scorer(
+    scorer = await scoring.load_scorer(
         "org/model", engine="hf_label_logits", token=False, max_length=12, label_tokens={"yes": "A"}
     )
     assert fake_hf.tokenizer.pad_token_id == 98
     assert fake_hf.models[0].config.pad_token_id == 98
+    assert scorer.loading_audit.status == "accepted"
+    assert scorer.padding_policy.source == "eos_fallback"
+    assert scorer.padding_policy.original_model_pad_token_id is None
 
 
 async def test_classifier_model_config_follows_tokenizer_padding(
@@ -399,8 +461,8 @@ async def test_classifier_model_config_follows_tokenizer_padding(
     model = Model(fake_hf.labels, causal=False)
     model.config.pad_token_id = 77
 
-    def load_model(model_id: str, **kwargs: object) -> Model:
-        return model
+    def load_model(model_id: str, **kwargs: object) -> tuple[Model, dict[str, object]]:
+        return model, fake_hf.loading_info
 
     monkeypatch.setattr(
         sys.modules["transformers"].AutoModelForSequenceClassification,
@@ -430,8 +492,8 @@ async def test_model_config_must_accept_and_preserve_the_actual_pad_id(
     model = Model(fake_hf.labels, causal=False)
     monkeypatch.setattr(model, "config", Config())
 
-    def load_model(model_id: str, **kwargs: object) -> Model:
-        return model
+    def load_model(model_id: str, **kwargs: object) -> tuple[Model, dict[str, object]]:
+        return model, fake_hf.loading_info
 
     monkeypatch.setattr(
         sys.modules["transformers"].AutoModelForSequenceClassification,

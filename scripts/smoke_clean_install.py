@@ -56,7 +56,7 @@ import tempfile
 import traceback
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -497,6 +497,12 @@ def check_scoring_models() -> None:
     from strata_forge.core.errors import ValidationError
     from strata_forge.core.repro import set_seed
     from strata_forge.pipelines._scoring import Scorer, ScoringInput, load_scorer
+    from strata_forge.training._load_guard import (
+        HeadKeyDecision,
+        ModelLoadingError,
+        PaddingPolicy,
+        _guard_loading_result,
+    )
 
     # These extras are deliberately inspected at runtime: this is the upstream API probe,
     # not a dependency of importing this script or of its pure-spec unit tests.
@@ -574,9 +580,17 @@ def check_scoring_models() -> None:
                 [4, 5],
             ),
         ):
-            model = factory.from_pretrained(
-                path, token=False, use_safetensors=True, trust_remote_code=False
+            checked_model, audit = _guard_loading_result(
+                factory.from_pretrained(
+                    path,
+                    token=False,
+                    use_safetensors=True,
+                    trust_remote_code=False,
+                    output_loading_info=True,
+                )
             )
+            # The optional upstream model API is intentionally dynamic in this compatibility probe.
+            model = cast("Any", checked_model)
             model.eval()
             scorer = Scorer(
                 engine="hf_classify" if engine == "hf_classify" else "hf_label_logits",
@@ -587,6 +601,12 @@ def check_scoring_models() -> None:
                 token_ids=ids,
                 max_length=32,
                 device="cpu",
+                loading_audit=audit,
+                padding_policy=PaddingPolicy(
+                    source="tokenizer_pad",
+                    pad_token_id=0,
+                    original_model_pad_token_id=model.config.pad_token_id,
+                ),
             )
             inputs = [
                 ScoringInput(text="one", text_pair="two" if engine == "hf_classify" else None),
@@ -604,6 +624,62 @@ def check_scoring_models() -> None:
                     row.mass_outside is not None and 0 <= row.mass_outside <= 1
                 ):
                     raise SmokeError("tiny decoder did not report full-vocabulary outside mass")
+
+        # Checkpoint completeness is checked against the actual installed loader contract,
+        # including a fresh head that only an explicit trusted training initializer may own.
+        for fixture_name, removed_keys in (
+            ("missing-body", ("bert.embeddings.word_embeddings.weight",)),
+            ("missing-head", ("classifier.weight", "classifier.bias")),
+        ):
+            damaged_path = root / fixture_name
+            state = {
+                key: value for key, value in encoder.state_dict().items() if key not in removed_keys
+            }
+            encoder.save_pretrained(damaged_path, safe_serialization=True, state_dict=state)
+            loaded = transformers.AutoModelForSequenceClassification.from_pretrained(
+                damaged_path,
+                token=False,
+                use_safetensors=True,
+                trust_remote_code=False,
+                output_loading_info=True,
+                local_files_only=True,
+            )
+            try:
+                _guard_loading_result(loaded)
+            except ModelLoadingError as exc:
+                if set(exc.audit.missing_keys) != set(removed_keys):
+                    raise SmokeError(
+                        "installed loader reported different synthetic missing keys"
+                    ) from exc
+                decision = HeadKeyDecision(
+                    initializer_id="bert_classification_head",
+                    head_kind="encoder",
+                    created_keys=("classifier.weight", "classifier.bias"),
+                )
+                if decision.accepts(exc.audit) != (fixture_name == "missing-head"):
+                    raise SmokeError(
+                        "exact head decision accepted body damage or rejected its head"
+                    ) from exc
+            else:
+                raise SmokeError("an incomplete checkpoint passed the trained-artifact guard")
+            if fixture_name == "missing-head":
+                initialized = loaded[0]
+                # This is explicit synthetic initialization, not a production training receipt API.
+                with torch.no_grad():
+                    initialized.classifier.weight.zero_()
+                    initialized.classifier.bias.zero_()
+                initialized_path = root / "explicitly-initialized-head"
+                initialized.save_pretrained(initialized_path, safe_serialization=True)
+                _guard_loading_result(
+                    transformers.AutoModelForSequenceClassification.from_pretrained(
+                        initialized_path,
+                        token=False,
+                        use_safetensors=True,
+                        trust_remote_code=False,
+                        output_loading_info=True,
+                        local_files_only=True,
+                    )
+                )
 
         # Unlike encoder classifiers, decoder heads use config.pad_token_id for pooling.
         # Factories return actual local models here so the Hub-only loader is exercised
@@ -623,8 +699,14 @@ def check_scoring_models() -> None:
             )
         )
         classifier.save_pretrained(classifier_path, safe_serialization=True)
-        classifier = transformers.AutoModelForSequenceClassification.from_pretrained(
-            classifier_path, token=False, use_safetensors=True, trust_remote_code=False
+        classifier, classifier_info = (
+            transformers.AutoModelForSequenceClassification.from_pretrained(
+                classifier_path,
+                token=False,
+                use_safetensors=True,
+                trust_remote_code=False,
+                output_loading_info=True,
+            )
         )
         pairs = [
             ScoringInput(text="one", text_pair="two"),
@@ -638,7 +720,7 @@ def check_scoring_models() -> None:
                 patch.object(
                     transformers.AutoModelForSequenceClassification,
                     "from_pretrained",
-                    return_value=classifier,
+                    return_value=(classifier, classifier_info),
                 ),
             ):
                 scorer = asyncio.run(

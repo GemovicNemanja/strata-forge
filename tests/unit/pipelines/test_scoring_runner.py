@@ -12,6 +12,7 @@ from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import inference_runner as ir
 from strata_forge.pipelines._scoring import ScoredRow, ScoringInput, ScoringResult
 from strata_forge.storage import CommitRef
+from strata_forge.training._load_guard import LoadingAudit, ModelLoadingError, PaddingPolicy
 from strata_forge.training.progress import ProgressEvent
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ def run_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.SimpleNa
         rows=[{"premise": "one", "hypothesis": "two"}, {"premise": "three", "hypothesis": "four"}],
         push_error=False,
         all_failed=False,
+        loading_refusal=False,
         results_dir=tmp_path / "persisted",
     )
 
@@ -99,6 +101,10 @@ def run_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.SimpleNa
 
     class Scorer:
         labels = ("yes", "no")
+        loading_audit = LoadingAudit(status="accepted")
+        padding_policy = PaddingPolicy(
+            source="tokenizer_pad", pad_token_id=0, original_model_pad_token_id=None
+        )
 
         async def score(
             self,
@@ -129,6 +135,15 @@ def run_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.SimpleNa
 
     async def load(model_id: str, **kwargs: Any) -> Scorer:
         state.loads.append((model_id, kwargs))
+        if state.loading_refusal:
+            raise ModelLoadingError(
+                LoadingAudit(
+                    status="refused",
+                    missing_keys=("encoder.embeddings.weight",),
+                    missing_count=1,
+                    codes=("missing_weights",),
+                )
+            )
         return Scorer()
 
     def rows(spec: ir.RunSpec, token: str | bool) -> list[dict[str, str]]:
@@ -181,12 +196,29 @@ async def test_classifier_dispatch_pins_inputs_and_retains_probability_columns_a
     }
     assert "Premise:" not in json.dumps(summary)
     assert "Hypothesis:" not in json.dumps(summary)
+    assert summary["loading_info"]["status"] == "accepted"
+    assert summary["padding_policy"]["pad_token_id"] == 0
     assert "results.parquet" in (path.parent / "README.md").read_text()
     end = json.loads(progress.read_text().splitlines()[-1])
     assert end["input_refs"] == summary["input_refs"]
     assert end["output_ref"] is None
     assert end["metrics"]["failed"] == 1
     assert end["metrics"]["overflow_rows"] == 1
+
+
+async def test_incomplete_model_is_refused_before_dataset_materialization(
+    monkeypatch: pytest.MonkeyPatch, run_fakes: types.SimpleNamespace
+) -> None:
+    run_fakes.loading_refusal = True
+    monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec()))
+    assert await ir.main() != 0
+    assert run_fakes.loaded_specs == []
+    assert run_fakes.inputs == []
+    summary = json.loads((run_fakes.results_dir / "scoring.json").read_text())
+    assert summary["status"] == "loading_refused"
+    assert summary["loading_info"]["missing_keys"] == ["encoder.embeddings.weight"]
+    assert summary["input_refs"]["model"] == f"org/model@{_MODEL_SHA}"
+    assert not (run_fakes.results_dir / "results.parquet").exists()
 
 
 async def test_decoder_upload_uses_actual_commit_and_no_credential_in_artifacts(
@@ -258,7 +290,7 @@ async def test_push_failure_preserves_local_scores_and_scrubs_credential(
     assert _TOKEN not in progress.read_text()
 
 
-async def test_oversized_hypothesis_refuses_before_loading_model(
+async def test_oversized_hypothesis_refuses_before_scoring(
     monkeypatch: pytest.MonkeyPatch,
     run_fakes: types.SimpleNamespace,
 ) -> None:
@@ -266,10 +298,11 @@ async def test_oversized_hypothesis_refuses_before_loading_model(
     monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec()))
     with pytest.raises(ir.RunError, match="no text was truncated"):
         await ir._execute(ir.load_spec(), ir.RunSecrets(), None)  # pyright: ignore[reportPrivateUsage]
-    assert run_fakes.loads == []
+    assert len(run_fakes.loads) == 1
+    assert run_fakes.inputs == []
 
 
-async def test_empty_split_refuses_before_loading_model(
+async def test_empty_split_refuses_before_scoring(
     monkeypatch: pytest.MonkeyPatch,
     run_fakes: types.SimpleNamespace,
 ) -> None:
@@ -277,7 +310,8 @@ async def test_empty_split_refuses_before_loading_model(
     monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(_spec()))
     with pytest.raises(ir.RunError, match="split was empty"):
         await ir._execute(ir.load_spec(), ir.RunSecrets(), None)  # pyright: ignore[reportPrivateUsage]
-    assert run_fakes.loads == []
+    assert len(run_fakes.loads) == 1
+    assert run_fakes.inputs == []
 
 
 def test_pair_template_placeholders_are_validated(monkeypatch: pytest.MonkeyPatch) -> None:

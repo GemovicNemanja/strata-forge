@@ -102,6 +102,7 @@ from strata_forge.pipelines._common import (
 )
 from strata_forge.pipelines._scoring import ScoringInput, ScoringResult, load_scorer
 from strata_forge.storage import HFHubClient
+from strata_forge.training._load_guard import ModelLoadingError
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
@@ -637,6 +638,13 @@ def _write_scoring_results(
     return path
 
 
+def _write_loading_refusal(summary: dict[str, Any], outdir: Path) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / "scoring.json"
+    path.write_text(json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 async def _execute_scoring(
     spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
@@ -660,6 +668,35 @@ async def _execute_scoring(
         "model": f"{spec.model_id}@{model_sha}",
         "dataset": f"{spec.dataset_id}@{dataset_sha}",
     }
+    try:
+        async with ticking_phase(phase, "Loading the scoring model", stage="load_model"):
+            scorer = await load_scorer(
+                spec.model_id,
+                engine=hp.engine,  # pyright: ignore[reportArgumentType] — this branch excludes vllm_chat
+                token=token,
+                revision=model_sha,
+                max_length=hp.max_model_len or 0,
+                label_alias=hp.label_alias,
+                label_tokens=hp.label_tokens,
+                device="auto",
+                dtype=hp.dtype,
+            )
+    except ModelLoadingError as exc:
+        evidence = await asyncio.to_thread(
+            _write_loading_refusal,
+            {
+                "schema_version": 1,
+                "status": "loading_refused",
+                "engine": hp.engine,
+                "engine_version": installed_engine_version(),
+                "environment": env_snapshot(),
+                "input_refs": input_refs,
+                "loading_info": exc.audit.model_dump(mode="json"),
+                "padding_policy": None,
+            },
+            _local_results_dir(spec.run_id),
+        )
+        raise RunError(f"{exc}; bounded loading audit: {evidence}") from None
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         rows = await asyncio.to_thread(_load_rows, pinned, token)
     inputs = _build_scoring_inputs(pinned, rows)
@@ -669,18 +706,6 @@ async def _execute_scoring(
         writer,
         ProgressEvent(kind="start", stage="run", total_steps=len(inputs), input_refs=input_refs),
     )
-    async with ticking_phase(phase, "Loading the scoring model", stage="load_model"):
-        scorer = await load_scorer(
-            spec.model_id,
-            engine=hp.engine,  # pyright: ignore[reportArgumentType] — this branch excludes vllm_chat
-            token=token,
-            revision=model_sha,
-            max_length=hp.max_model_len or 0,
-            label_alias=hp.label_alias,
-            label_tokens=hp.label_tokens,
-            device="auto",
-            dtype=hp.dtype,
-        )
     async with ticking_phase(phase, "Scoring rows", stage="run"):
         result = await scorer.score(
             inputs,
@@ -706,6 +731,8 @@ async def _execute_scoring(
         "spec_engine_version": spec.engine_version,
         "environment": env_snapshot(),
         "input_refs": input_refs,
+        "loading_info": scorer.loading_audit.model_dump(mode="json"),
+        "padding_policy": scorer.padding_policy.model_dump(mode="json"),
         "dataset_config": spec.dataset_config,
         "split": spec.split,
         "row_limit": hp.row_limit,

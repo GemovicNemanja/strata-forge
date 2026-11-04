@@ -22,6 +22,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Fixed
 
+- HF classifier and label-logit loads request and validate loading information, refusing any
+  missing body/head weights or structural diagnostics before dataset materialization. A
+  reusable private guard produces bounded name/count/code audits; scoring manifests preserve
+  those audits and the explicit pad policy without upstream warning text. Training head-key
+  decisions cannot grant an inference exemption.
+
 - HF scoring aligns model config padding to the actual tokenizer pad/EOS id so decoder
   classifier heads can score unequal-length batches. Existing local paths that shadow a
   requested Hub id are refused before loading rather than silently ignoring its revision.

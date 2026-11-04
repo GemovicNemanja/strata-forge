@@ -288,7 +288,8 @@ back to CPU when CUDA is unavailable, and `dtype` accepts `auto`, `float32`, `fl
 `await load_scorer(model_id, engine=..., token=..., max_length=..., revision=...)` loads a
 tokenizer and either `AutoModelForSequenceClassification` (`hf_classify`) or
 `AutoModelForCausalLM` (`hf_label_logits`). Both loads explicitly receive `token` and
-`trust_remote_code=False`; the model load also requires `use_safetensors=True`. `token=False`
+`trust_remote_code=False`; the model load also requires `use_safetensors=True` and
+`output_loading_info=True`. `token=False`
 means anonymous access, without the machine's cached credential. Only a Hub repo id is
 accepted, not a local model path. Dependencies are lazy; `[serving]` declares torch,
 transformers, sentencepiece and protobuf directly. The scorer neither reads secrets
@@ -301,6 +302,26 @@ filesystem changes. Tokenizer padding is right-sided, using its existing pad tok
 EOS token when needed. The model config is aligned to that exact token id, including decoder
 classification heads whose pooling independently reads `config.pad_token_id`. Invalid pad
 ids or a config that cannot retain the alignment are refused before scoring.
+
+Both engines load trained artifacts: every reported missing weight, including any head,
+unexpected weight, shape mismatch, structural error, or supplied conversion error is fatal.
+There is no implicit fresh-head initialization and no inference exemption for a training
+initializer. The private [checkpoint guard](training.md#checkpoint-completeness-guard) checks
+the installed Transformers `(model, loading_info)` contract before the dataset is materialized.
+It relies on upstream resolved tied-key reporting and never guesses parameter aliases.
+
+`scoring.json` records bounded `loading_info` (fixed codes, counts, at most 32 names per
+category, at most 192 characters per name) and `padding_policy` (source, actual token id,
+original model pad id, and alignment). Upstream warning/error text is not copied. A structural
+refusal writes a local `scoring.json` with `status="loading_refused"` and immutable input refs;
+it produces no result rows and does not upload a failed model's outputs. The progress protocol
+does not gain diagnostic fields. `conversion_diagnostics="not_returned"` explicitly records
+when the installed library omits those diagnostics rather than claiming they were checked.
+
+A full SHA resolved from a Hub pull-request ref is an ordinary immutable revision. The runner
+resolves model/dataset revisions to SHAs before loading. Unsupported sequence-classification
+architectures are refused by the built-in factory; there is no remote-code or generic-head
+fallback. Apertus remains a generation policy without a built-in sequence-classification path.
 
 Call `await scorer.score([ScoringInput(text=..., text_pair=...)], batch_size=...)` with
 already-rendered text. No Jinja, Python or template interpretation occurs here. Forward
