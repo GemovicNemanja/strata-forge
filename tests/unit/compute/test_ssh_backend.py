@@ -1838,7 +1838,9 @@ class TestConsole:
         assert chunk.stdout_offset == len(printed)
         assert chunk.dropped_bytes == 0
         # Several reads, each bounded: the loop is the fix, the cap is what makes it safe.
-        reader = fake_connection.last_process.stdout
+        process = fake_connection.last_process
+        assert process is not None
+        reader = process.stdout
         assert len(reader.requested) > 1
         assert all(n > 0 for n in reader.requested)
 
