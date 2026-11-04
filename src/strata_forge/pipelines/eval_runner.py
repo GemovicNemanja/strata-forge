@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import BaseModel, ConfigDict
 
 from strata_forge.metrics import holm_correction, mcnemar_exact
+from strata_forge.pipelines._classifier_checkpoint import validate_single_sequence_rendering
 from strata_forge.pipelines._common import (
     RunSecrets,
     check_engine_version,
@@ -48,6 +49,7 @@ from strata_forge.pipelines._evaluation_report import (
     write_artifacts,
 )
 from strata_forge.pipelines._scoring import Scorer, ScoringInput, load_scorer
+from strata_forge.pipelines.classifier_spec import ClassifierWorkerError
 from strata_forge.pipelines.evaluation_spec import (
     EvalSpec,
     EvaluationSet,
@@ -93,6 +95,8 @@ async def _rendering(
     if declaration is None or spec.model_labels is None:
         raise EvaluationError("rendering_missing")
     original_digest: str | None = None
+    original: VerifierConfig | None = None
+    forge_single_sequence = False
     if declaration.source == "override":
         config = declaration.explicit_config(spec.model_labels)
     else:
@@ -109,11 +113,33 @@ async def _rendering(
         config = VerifierConfig.model_validate({**original.model_dump(), **overrides})
         if original.labels != spec.model_labels:
             raise EvaluationError("model_label_order_mismatch")
-    if config.labels != spec.model_labels or (config.pair_template is not None) != (
-        spec.engine == "hf_classify"
-    ):
+    if config.labels != spec.model_labels:
         raise EvaluationError("rendering_engine_mismatch")
-    if config.label_tokens is not None and config.label_tokens != spec.label_tokens:
+    if (config.pair_template is not None) != (spec.engine == "hf_classify"):
+        if (
+            spec.engine != "hf_classify"
+            or declaration.source != "model_artifact"
+            or original is None
+        ):
+            raise EvaluationError("rendering_engine_mismatch")
+        ref = f"{spec.model_id}@{spec.model_revision}"
+        metadata = await reader.json(ref, "strata_classifier.json", repo_type="model")
+        native = await reader.json(ref, "config.json", repo_type="model")
+        refused = False
+        try:
+            validate_single_sequence_rendering(
+                metadata, native, original=original, effective=config
+            )
+        except ClassifierWorkerError:
+            refused = True
+        if refused:
+            raise EvaluationError("rendering_engine_mismatch")
+        forge_single_sequence = True
+    if (
+        not forge_single_sequence
+        and config.label_tokens is not None
+        and config.label_tokens != spec.label_tokens
+    ):
         raise EvaluationError("verbalizer_labels_mismatch")
     return config, {
         "source": declaration.source,
@@ -122,6 +148,15 @@ async def _rendering(
         "max_length": config.max_length,
         "max_premises": config.max_premises,
         "premise_format": config.premise_format,
+        **(
+            {
+                "classifier_input_kind": "forge_single_sequence",
+                "probability_mode": "learned_head_full_class",
+                "label_tokens_role": "initialization_provenance",
+            }
+            if forge_single_sequence
+            else {}
+        ),
     }
 
 

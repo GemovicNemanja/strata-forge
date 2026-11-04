@@ -7,6 +7,84 @@ file, checks the exact engine version, emits JSONL progress, redacts surfaced fa
 handles cancellation. Models and datasets use the explicitly delivered credential or `False`,
 which prevents ambient-token fallback.
 
+## Primary classifier execution
+
+`classifier_spec.ClassifierTrainSpec` is a strict, frozen inert primary-training specification.
+`classifier_runner.run_classifier_training(spec, *, authority, source, attempt_dir, writer=None)`
+requires installed trusted Python objects; it has no registry/CLI/server/Task-secret activation.
+It does not accept an Eval authority frame, discover a policy from the environment, publish a
+model, or authorize reads from a caller flag. The method name inside this schema does not make
+`seq_cls` a registered causal fine-tuning method.
+
+`TrainingReadAuthority.decide(TrainingReadRequest)` returns a typed decision bound to
+`purpose=classifier_training`, run ID, complete spec digest, exact model/dataset ref and domain.
+Only matching authorized/unsealed decisions permit reads. Unknown, positive, expired/revoked
+adapter decisions and mismatches refuse; the eventual installed adapter owns actual expiry,
+registry/marker/lineage freshness and live fences. The worker repeats decisions at strict
+boundaries; synthetic test adapters are not production authentication infrastructure.
+
+`ClassifierInputSource.rows(dataset)` yields UTF-8 JSON bytes as an AsyncIterator, not a tuple of
+preloaded rows. `resolve_model(ref)` returns a trusted exact-ref local checkpoint directory,
+never a JSON path or import. The worker selects the declared half-open range, enforces stable
+unique string item IDs, checks mapped roles/labels/rendering and uses fixed native safetensor
+loaders with no remote code, adapter discovery or fresh body/head loading exemption.
+
+The prototype limits are exported from `classifier_spec`: 32 KiB spec, 100,000 selected rows,
+2 MiB per raw JSON row and 64 MiB cumulative row UTF-8 bytes, including skipped range rows.
+All-mode examines cap+1 before parsing that later row; range start is at most 100,000 and its
+finite span cannot exceed its declared row cap. Exceeded bounds refuse with fixed codes; no
+silent prefix, omitted malformed selected rows or inferred total count is reported. These are
+execution bounds, separate from scientific dataset scope and the verifier renderer's limits.
+
+`classification_text` maps item_id/text/label and optional text_pair/label_dist. `nli_pair` maps
+item_id/premises/hypothesis/label and optional label_dist, requiring explicit VerifierConfig
+and list-of-string premises. No PID conversion or rendering is guessed. Ordered labels,
+explicit aliases/index map and distributions use the SDK's validation. The worker exposes only
+generic CE or the named CE+0.1 Brier preset; no free coefficient, weights, smoothing, grouped NLI
+binary objective, auxiliary head, calibration, adapter, publication or resume field exists.
+Selection is final-only. Unsupported knobs refuse even when supplied as null.
+
+The trusted caller provides an owned private empty attempt directory. It is exclusively
+reserved; SDK work lives under `training/artifact`. `training-receipt.json` records actual
+steps, counts, input population digest, complete config/render/initialization and file hashes,
+including prototype byte limits. SDK metadata retains dependency/environment details. This
+is private local evidence, not a downloadable browser result, rights proof or publication
+receipt. Attempts/artifacts remain after failure; no worker purge or recovery command exists.
+Only the coroutine writes final receipt/progress after complete reload and final policy check;
+a cancelled native thread cannot later emit a success event. Supervised termination and lease
+release remain required transport responsibilities. No periodic checkpoint or exact resume is
+supported, and a restart is not mislabeled a continuation.
+
+Full-pin `hf_classify` probes a bounded `strata_classifier.json`. A definite file 404 permits the
+unchanged native factory; other failures refuse. Recognized Forge artifacts load their safe
+fixed file inventory and complete SDK classes. Metadata/config/receipt, exact class order,
+token IDs when stored, and rendered metadata agree; missing or extra learned weights refuse.
+Unpinned legacy native paths do not perform this probe and make no recognition guarantee.
+
+Before materialization, the installed Hub `dry_run` metadata must bind the exact requested
+filename/full commit and a known integer size: at most 64 KiB per Strata sidecar and 32 MiB per
+other non-weight asset. Unknown sizes, unsupported preflight and mismatched pins refuse without
+an unbounded download fallback. All selected metadata is preflighted before remaining assets
+or weights. Downloaded metadata must then be a regular file with the exact advertised size;
+its local copy/read is bounded. These are trusted Hub-advertised size checks plus postchecks,
+not a hard wire-byte guarantee against a dishonest HTTP response. Weight sizes have no added
+prototype threshold. Repository discovery uses lazy expanded tree pages (50 entries per page
+in the supported Hub API), counts files and folders, and refuses at entry 129 before requesting
+later pages or assets. One SDK page is decoded before its entries are yielded; this is not a
+custom bounded HTTP/JSON transport. Fixed permitted asset names and safe local loading still
+apply. The integration requires the installed Hub's typed dry-run and lazy-tree APIs.
+
+Recognized pinned Forge classifiers accept a single rendered sequence with rank-two logits and
+full-class softmax. Combined inputs exceeding the declared length refuse rather than cutting a
+hypothesis. Forge decoder classifiers refuse tokenizer-pair input. Native HF classifiers retain
+their paired-input/first-sequence truncation contract and label-logit scoring is unchanged.
+Each batch has one input shape. Evaluation's existing model_artifact source supports the single
+sequence only when original, effective and typed SDK rendering digests are identical and typed
+native config matches family/labels/length. No override drift is accepted on that path. Stored
+label_tokens remain initialization provenance; report rendering audit distinguishes them from
+the actual `learned_head_full_class` inference mode. EvalSpec, its wire digests and retry behavior
+remain unchanged. See [ADR0024](../architecture/adr/0024-primary-classifier-worker.md).
+
 ## Classification evaluation
 
 `EvalSpec` lives in `strata_forge.pipelines.evaluation_spec`; its `model_json_schema()` exports

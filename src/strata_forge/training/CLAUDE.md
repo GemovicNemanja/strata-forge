@@ -31,6 +31,17 @@ until ``train()`` is called.
   JSON job spec (an orchestrator, a CLI, a launch form) drive
   training without writing Python.
 
+## Primary classifier SDK
+
+`classifier.py` and `_classifier_heads.py` own async primary training over caller-resolved
+objects. Heavy objects cross a documented dynamic native-library seam; imports remain lazy.
+Default CE, explicit Brier, strict labels/soft targets, exact head initialization, safe local
+export and complete reload are the supported boundary. The SDK imports core reproducibility
+helpers as well as core errors; no training-to-evals/pipelines dependency is permitted.
+Never treat a receipt as a fresh-head inference exemption or a caller-supplied provenance grant.
+Preserve decoder dense/norm/output bias and last-attended pooling, including pad=EOS. Keep
+unsupported registry/worker/adapter/calibration capabilities unavailable rather than enums-only.
+
 ## Boundaries
 
 - `_load_guard.py` is a private pure checkpoint-report leaf, importing only core errors and
@@ -47,8 +58,8 @@ until ``train()`` is called.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
   for the conversation shapes consumed by
   :mod:`strata_forge.training.chat_template`, and
-  :mod:`strata_forge.core.errors` for the ``ForgeError`` base of
-  :class:`MissingBitsAndBytesError`. Nothing else.
+  :mod:`strata_forge.core.errors` for shared errors and
+  :mod:`strata_forge.core.repro` for classifier seed/environment records. Nothing else.
 - **Does NOT import** :mod:`strata_forge.tracing`, :mod:`strata_forge.agents`,
   :mod:`strata_forge.evals`, :mod:`strata_forge.rag`, :mod:`strata_forge.datasets`,
   :mod:`strata_forge.compute`. Trainer scripts that ride on
