@@ -7,6 +7,13 @@ Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing.
 async for execution and I/O, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Pure classification metrics are synchronous. Heavy optional
 dependencies (training, serving, remote compute) live behind extras, so the base install stays light.
 
+Pinned classification evaluation uses explicit stable-ID joins and separate per-config reports,
+with native classifier or imported-probability inputs. The installed `eval schema` and
+`eval validate-spec` commands expose its inert contract. Execution requires a trusted read
+policy; the installed adapter consumes a run/spec-bound private Task authority frame. Publishing
+additionally requires a separate destination fence and accepted actual-commit receipt. Standalone
+launch denies access without installed authority. See [pipeline workers](docs/modules/pipelines.md).
+
 ## Install
 
 ```bash
@@ -20,7 +27,7 @@ Optional extras pull in the heavy dependencies only when you need them:
 ```bash
 pip install "strata-forge[rag]"        # embeddings, vector store, reranking
 pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
-pip install "strata-forge[serving]"    # vLLM
+pip install "strata-forge[serving]"    # vLLM and exact HF scoring dependencies
 pip install "strata-forge[finetuning]" # torch, transformers, trl, peft, bitsandbytes
 pip install "strata-forge[scoring]"    # NumPy for temperature application
 pip install "strata-forge[all]"        # everything
@@ -67,6 +74,12 @@ installed as `strata-forge`.
 | `strata_forge.compute` | SkyPilot and SSH backends, serving, batch inference |
 | `strata_forge.training` | SFT / DPO / ORPO / KTO / GRPO with PEFT |
 | `strata_forge.pipelines` | Runnable entrypoints executed on a compute target |
+
+The inference pipeline accepts the default `vllm_chat` engine and HF forward-pass engines:
+`hf_classify` scores premise/hypothesis pairs; `hf_label_logits` reads exact single-token label
+probabilities and full-vocabulary outside mass. Both preserve explicit overflow failures and
+write Parquet plus input-commit provenance. See the [scoring contract](docs/modules/compute.md#exact-hugging-face-scoring)
+for required knobs, safe loading, length policy and result artifacts.
 
 ## Documentation
 

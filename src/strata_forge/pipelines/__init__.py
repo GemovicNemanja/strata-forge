@@ -15,7 +15,7 @@ them changed.
 
 from strata_forge import __version__
 
-__all__ = ["HF_TOKEN_SECRET", "SPEC_VERSION"]
+__all__ = ["EVAL_AUTHORITY_SECRET", "HF_TOKEN_SECRET", "SPEC_VERSION"]
 
 # The engine version a spec is validated against, and the version an orchestrator writes into
 # ``engine_version`` (alone, or as ``f"{SPEC_VERSION}+{commit}"``). It is the package version
@@ -24,6 +24,8 @@ __all__ = ["HF_TOKEN_SECRET", "SPEC_VERSION"]
 SPEC_VERSION = __version__
 
 # The key an orchestrator gives the Hugging Face token under in ``Task.secrets``, and so in the
-# job's secrets file: the one key a runner reads. Any other key is refused by name, so this is
+# job's secrets file. Only declared keys are read; unknown keys refuse, so these names are
 # part of the orchestrator contract, like the version above.
 HF_TOKEN_SECRET = "HF_TOKEN"  # noqa: S105 — a key name, not a credential
+# Evaluation authority is a masked JSON frame, never an environment/argv fallback.
+EVAL_AUTHORITY_SECRET = "STRATA_EVAL_AUTHORITY"  # noqa: S105 — a private-file key name

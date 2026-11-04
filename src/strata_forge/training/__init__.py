@@ -75,6 +75,11 @@ from strata_forge.training.progress import (
     trainer_callback,
 )
 from strata_forge.training.sft import SFTConfig, SFTRunner, SFTRunResult
+from strata_forge.training.verifier_config import (
+    RenderedVerifierInput,
+    VerifierConfig,
+    render_verifier_input,
+)
 
 __all__ = [
     "FORMATS",
@@ -98,10 +103,12 @@ __all__ = [
     "PreferenceRunner",
     "ProgressEvent",
     "QLoRAConfig",
+    "RenderedVerifierInput",
     "SFTConfig",
     "SFTRunResult",
     "SFTRunner",
     "UnsupportedMethodError",
+    "VerifierConfig",
     "apply_chat_template",
     "build_training_rows",
     "check_format",
@@ -112,6 +119,7 @@ __all__ = [
     "pack_sequences",
     "pick_format",
     "pick_method",
+    "render_verifier_input",
     "require_bitsandbytes",
     "sft_text_field",
     "tokenizer_load_kwargs",

@@ -20,6 +20,7 @@ Authoritative rules for what each `strata_forge.*` module owns, what it imports,
 | `strata_forge.compute` | `core`, `config`, `llm`, `storage`, `tracing` | `evals`, `agents`, `training` (other way around) |
 | `strata_forge.training` | `core`, `metrics`, `config`, `llm` (typing only), `datasets`, `storage`, `tracing`, `compute` | `evals`, `agents`, `rag` |
 | `strata_forge.cli` | any module | (no inverse rule — cli is a sink) |
+| `strata_forge.pipelines` | core, config, metrics, llm, compute, training, datasets, storage | server/application packages, spec-controlled executable imports |
 | `strata_forge.sync` | any async public surface | provider SDKs directly |
 
 Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`, `numpy`) are imported **inside** functions that use them, never at module load.

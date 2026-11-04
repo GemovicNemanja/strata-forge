@@ -10,7 +10,7 @@ push/pull on the HuggingFace Hub.
 Integration points:
 
 - **Gateway:** :class:`StorageGateway`, :data:`FileInfo`.
-- **Hub:** :class:`HFHubClient`, :data:`RepoType`.
+- **Hub:** :class:`HFHubClient`, :data:`RepoType`, :class:`CommitRef`.
 
 Both clients defer their heavy imports — ``fsspec``,
 ``s3fs`` / ``gcsfs`` / ``adlfs``, ``huggingface_hub`` — until
@@ -127,6 +127,17 @@ in a private cache. Per-protocol options apply once at first
 use. To rotate credentials, construct a new gateway.
 
 ## HFHubClient
+
+`resolve_revision(repo_id, repo_type=..., revision=...)` resolves a branch/tag or verifies a
+pin against the Hub's actual full commit SHA. Pass that SHA to subsequent reads; recording a
+moving alias is not an immutable input reference. A response without a full SHA, or disagreeing
+with a requested full pin, is refused.
+
+`commit_file` and `commit_folder` return frozen `CommitRef{sha,url}` values taken from the
+SDK's `CommitInfo.oid` and `commit_url`. A string URL alone is insufficient to invent a SHA.
+The existing `upload_file`/`upload_folder` string-returning API remains unchanged. Folder
+commits can restrict included paths so a result manifest and Parquet share the same commit.
+
 
 `HFHubClient` covers the high-level operations Forge needs:
 repo lifecycle, single-file transfers, whole-repo snapshots, and
@@ -256,3 +267,10 @@ full HF Hub surface.
   accounts, configure two gateways with different `options=`
   and let the cross-protocol path stream bytes (small files) or
   use `aws s3 cp` for large transfers.
+
+## Repository privacy metadata
+
+`await client.repo_private(repo_id, repo_type="dataset")` returns the Hub's explicit boolean
+privacy field. Missing/ambiguous metadata raises TypeError. A `create_repo(private=True,
+exist_ok=True)` call alone does not change an existing public repository's visibility;
+evaluation verifies it before publication. Actual output refs come from CommitRef.

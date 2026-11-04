@@ -10,6 +10,23 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Pinned classification evaluation workers validate separate multi-config populations, stable
+  ID joins, declared label projections and probability provenance, and write explicitly typed
+  per-population Parquet plus versioned reports. Trusted pin-bound read policy is mandatory;
+  unknown/protected inputs deny before model/row access, and standalone execution denies
+  without an installed adapter. Exact paired comparison/family contexts preserve invalid
+  outputs and withhold independent inference for repeated groups.
+- `VerifierConfig` and `render_verifier_input` provide inert, bounded premise/hypothesis
+  rendering metadata without I/O. HF scoring's optional `id_column` adds stable `item_id`
+  alongside unchanged `custom_id`, recording source ID semantics. Evaluation CLI commands
+  export/validate the installed schema and delegate to the same worker.
+- `HFHubClient.repo_private` requires explicit boolean privacy metadata. Evaluation keeps
+  local attempt evidence and requires separate destination authority for publication. The fixed
+  private Task authority adapter binds policy RPCs to the Run/spec, performs create-only or
+  expected-parent writes, and accepts actual-commit receipts before success. Interrupted commits
+  retain known/unknown status; read approval never grants writes. Shared redaction covers the
+  bounded run-worker credential and delivered nested values.
+
 - `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
   conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,
   and explicit named-family Holm correction that retains caller order. Frozen results and
@@ -25,6 +42,27 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - Temperature application is stable and loads NumPy lazily through `[scoring]`. A draft
   `TemperatureCalibration` component records its label order, fit provenance, and optional
   before/after scores; it does not fit temperatures or write a training calibration file.
+- Inference specs can select `hf_classify` for paired classifier probabilities or
+  `hf_label_logits` for exact single-token label probabilities and full-vocabulary outside
+  mass. Scoring validates inert pair templates, preserves hypotheses, counts overflows and
+  refusals, and writes Parquet plus a pinned-input manifest without starting vLLM.
+- `HFHubClient.resolve_revision`, `commit_file` and `commit_folder` preserve actual input
+  and output commit SHAs. Progress events carry bounded immutable input/output refs apart
+  from float metrics, retaining the existing result-destination message.
+- Clean-install checks construct both scoring specs and reload tiny locally initialized
+  safetensors models offline. Serving declares bounded direct scoring dependencies.
+
+### Fixed
+
+- HF classifier and label-logit loads request and validate loading information, refusing any
+  missing body/head weights or structural diagnostics before dataset materialization. A
+  reusable private guard produces bounded name/count/code audits; scoring manifests preserve
+  those audits and the explicit pad policy without upstream warning text. Training head-key
+  decisions cannot grant an inference exemption.
+
+- HF scoring aligns model config padding to the actual tokenizer pad/EOS id so decoder
+  classifier heads can score unequal-length batches. Existing local paths that shadow a
+  requested Hub id are refused before loading rather than silently ignoring its revision.
 
 ## [0.3.0] - 2026-10-06
 

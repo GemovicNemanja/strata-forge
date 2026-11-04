@@ -30,6 +30,10 @@ class _FakeApi:
         self.calls.append(("list_repo_files", kwargs))
         return ["config.json", "model.safetensors", "tokenizer.json"]
 
+    def repo_info(self, **kwargs: Any) -> types.SimpleNamespace:
+        self.calls.append(("repo_info", kwargs))
+        return types.SimpleNamespace(sha="a" * 40)
+
     def upload_file(self, **kwargs: Any) -> str:
         self.calls.append(("upload_file", kwargs))
         return f"https://huggingface.co/{kwargs['repo_id']}/commit/abc"
@@ -77,6 +81,27 @@ def fake_hf(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 class TestConstruction:
+    @pytest.mark.parametrize("private", [True, False])
+    async def test_explicit_privacy_metadata(self, private: bool) -> None:
+        class Api:
+            def repo_info(self, **kwargs: object) -> types.SimpleNamespace:
+                assert kwargs == {"repo_id": "example/results", "repo_type": "dataset"}
+                return types.SimpleNamespace(private=private)
+
+        assert (
+            await HFHubClient(api=Api()).repo_private("example/results", repo_type="dataset")
+            is private
+        )
+
+    @pytest.mark.parametrize("private", [None, "true", 1])
+    async def test_missing_or_ambiguous_privacy_refuses(self, private: object) -> None:
+        class Api:
+            def repo_info(self, **kwargs: object) -> types.SimpleNamespace:
+                return types.SimpleNamespace(private=private)
+
+        with pytest.raises(TypeError, match="privacy metadata is unavailable"):
+            await HFHubClient(api=Api()).repo_private("example/results", repo_type="dataset")
+
     async def test_lazy_api_construction(self, fake_hf: dict[str, Any]) -> None:
         client = HFHubClient(token="hf_xyz", endpoint="https://hub.example.com")
         # No HfApi until first use.
@@ -154,6 +179,89 @@ class TestRepoLifecycle:
         assert files == ("config.json", "model.safetensors", "tokenizer.json")
         kwargs = fake_hf["last_api"].calls[0][1]
         assert kwargs["revision"] == "v1"
+
+    async def test_resolve_revision_returns_actual_full_sha(self, fake_hf: dict[str, Any]) -> None:
+        client = HFHubClient(token=False)
+        assert (
+            await client.resolve_revision("me/data", repo_type="dataset", revision="release")
+            == "a" * 40
+        )
+        assert fake_hf["HfApi_kwargs"]["token"] is False
+        assert fake_hf["last_api"].calls == [
+            ("repo_info", {"repo_id": "me/data", "repo_type": "dataset", "revision": "release"})
+        ]
+
+    async def test_resolved_revision_must_equal_a_requested_pin(
+        self, fake_hf: dict[str, Any]
+    ) -> None:
+        with pytest.raises(TypeError, match="different commit"):
+            await HFHubClient(token=False).resolve_revision("me/data", revision="b" * 40)
+
+
+class TestCommitReferences:
+    async def test_commit_file_retains_sdk_oid_and_url(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def upload(**kwargs: Any) -> types.SimpleNamespace:
+            calls.append(kwargs)
+            return types.SimpleNamespace(oid="c" * 40, commit_url="https://hub.example/commit/real")
+
+        client = HFHubClient(api=types.SimpleNamespace(upload_file=upload))
+        ref = await client.commit_file(
+            "local.parquet",
+            "results.parquet",
+            "me/out",
+            repo_type="dataset",
+            extras={"revision": "dev"},
+        )
+        assert ref.sha == "c" * 40
+        assert ref.url == "https://hub.example/commit/real"
+        assert calls[0]["revision"] == "dev"
+        assert calls[0]["path_or_fileobj"] == "local.parquet"
+
+    async def test_commit_folder_filters_and_returns_atomic_commit(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def upload(**kwargs: Any) -> types.SimpleNamespace:
+            calls.append(kwargs)
+            return types.SimpleNamespace(
+                oid="d" * 40, commit_url="https://hub.example/commit/folder"
+            )
+
+        client = HFHubClient(api=types.SimpleNamespace(upload_folder=upload))
+        ref = await client.commit_folder(
+            "results",
+            "me/out",
+            repo_type="dataset",
+            path_in_repo="run",
+            allow_patterns=("*.parquet",),
+            ignore_patterns=("private-*",),
+            commit_message="scores",
+            extras={"revision": "dev", "parent_commit": "c" * 40},
+        )
+        assert ref.sha == "d" * 40
+        assert calls[0]["allow_patterns"] == ["*.parquet"]
+        assert calls[0]["ignore_patterns"] == ["private-*"]
+        assert calls[0]["path_in_repo"] == "run"
+        assert calls[0]["commit_message"] == "scores"
+        assert calls[0]["revision"] == "dev"
+        assert calls[0]["parent_commit"] == "c" * 40
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://hub.example/commit/fake",
+            types.SimpleNamespace(oid="short", commit_url="url"),
+            types.SimpleNamespace(oid="a" * 40),
+        ],
+    )
+    async def test_commit_does_not_invent_a_sha_from_strings(self, value: object) -> None:
+        def upload(**kwargs: Any) -> object:
+            return value
+
+        client = HFHubClient(api=types.SimpleNamespace(upload_file=upload))
+        with pytest.raises(TypeError):
+            await client.commit_file("local", "remote", "me/out")
 
 
 # ---------------------------------------------------------------------------

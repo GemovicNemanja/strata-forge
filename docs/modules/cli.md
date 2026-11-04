@@ -251,3 +251,12 @@ without touching the rest of your environment.
   endpoint:** the `LocalBackend` spawns the server in the
   background; use `strata-forge compute status` and check the
   `base_url` printed at submit time once the server is ready.
+
+## Pinned classification worker commands
+
+`strata-forge eval schema` exports the installed EvalSpec JSON schema; cross-field semantic
+validation remains in the imported model. `eval validate-spec FILE` validates without input
+reads or authorization. `eval classify FILE` and `eval score-predictions FILE` delegate to the
+same worker and deny access without an installed trusted policy. They accept no policy import,
+callback or authorization flag. Existing `eval run/list/show` commands retain their behavior.
+See [pipeline workers](pipelines.md) for the exact boundary and fixed execution profile.

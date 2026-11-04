@@ -22,17 +22,42 @@ full HfApi surface.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["HFHubClient", "RepoType"]
+__all__ = ["CommitRef", "HFHubClient", "RepoType"]
 
 
 type RepoType = Literal["model", "dataset", "space"]
 """HuggingFace Hub repo categories. ``model`` is the default."""
+
+
+class CommitRef(BaseModel):
+    """The actual immutable commit returned by a Hub write."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    sha: str = Field(pattern=r"^[a-f0-9]{40}$")
+    url: str = Field(min_length=1, max_length=2048)
+
+
+def _full_commit(value: object) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{40}", value) is None:
+        raise TypeError("the Hub returned no full commit SHA")
+    return value
+
+
+def _commit_ref(result: object) -> CommitRef:
+    sha = _full_commit(getattr(result, "oid", None))
+    url: object = getattr(result, "commit_url", None)
+    if not isinstance(url, str) or not url:
+        raise TypeError("the Hub returned no commit URL")
+    return CommitRef(sha=sha, url=url)
 
 
 class HFHubClient:
@@ -163,6 +188,16 @@ class HFHubClient:
         api = self._api()
         await asyncio.to_thread(api.delete_repo, repo_id=repo_id, repo_type=repo_type)
 
+    async def repo_private(self, repo_id: str, *, repo_type: RepoType = "model") -> bool:
+        """Return explicit repository privacy, refusing missing/ambiguous metadata."""
+        info: object = await asyncio.to_thread(
+            self._api().repo_info, repo_id=repo_id, repo_type=repo_type
+        )
+        private: object = getattr(info, "private", None)
+        if type(private) is not bool:
+            raise TypeError("repository privacy metadata is unavailable")
+        return private
+
     async def list_repo_files(
         self,
         repo_id: str,
@@ -177,6 +212,25 @@ class HFHubClient:
             kwargs["revision"] = revision
         raw: Any = await asyncio.to_thread(api.list_repo_files, **kwargs)
         return tuple(str(p) for p in raw)
+
+    async def resolve_revision(
+        self,
+        repo_id: str,
+        *,
+        repo_type: RepoType = "model",
+        revision: str | None = None,
+    ) -> str:
+        """Resolve a revision once to the full commit that subsequent reads must use."""
+        api = self._api()
+        info: object = await asyncio.to_thread(
+            api.repo_info, repo_id=repo_id, repo_type=repo_type, revision=revision
+        )
+        sha = _full_commit(getattr(info, "sha", None))
+        if revision is not None and re.fullmatch(r"[a-f0-9]{40}", revision) and revision != sha:
+            raise TypeError(
+                "the Hub returned a different commit from the requested immutable revision"
+            )
+        return sha
 
     # -----------------------------------------------------------------
     # Single-file operations
@@ -237,6 +291,31 @@ class HFHubClient:
             kwargs.update(extras)
         result: Any = await asyncio.to_thread(api.upload_file, **kwargs)
         return str(result)
+
+    async def commit_file(
+        self,
+        local_path: str | Path,
+        path_in_repo: str,
+        repo_id: str,
+        *,
+        repo_type: RepoType = "model",
+        commit_message: str | None = None,
+        extras: Mapping[str, Any] | None = None,
+    ) -> CommitRef:
+        """Upload one file and retain its actual commit SHA instead of stringifying it."""
+        api = self._api()
+        kwargs: dict[str, Any] = {
+            "path_or_fileobj": str(local_path),
+            "path_in_repo": path_in_repo,
+            "repo_id": repo_id,
+            "repo_type": repo_type,
+        }
+        if commit_message is not None:
+            kwargs["commit_message"] = commit_message
+        if extras:
+            kwargs.update(extras)
+        result: object = await asyncio.to_thread(api.upload_file, **kwargs)
+        return _commit_ref(result)
 
     # -----------------------------------------------------------------
     # Snapshot operations (whole models, whole datasets)
@@ -308,6 +387,38 @@ class HFHubClient:
             kwargs.update(extras)
         result: Any = await asyncio.to_thread(api.upload_folder, **kwargs)
         return str(result)
+
+    async def commit_folder(
+        self,
+        local_dir: str | Path,
+        repo_id: str,
+        *,
+        repo_type: RepoType = "model",
+        path_in_repo: str | None = None,
+        allow_patterns: tuple[str, ...] | None = None,
+        ignore_patterns: tuple[str, ...] | None = None,
+        commit_message: str | None = None,
+        extras: Mapping[str, Any] | None = None,
+    ) -> CommitRef:
+        """Upload a folder atomically and retain the resulting immutable commit."""
+        api = self._api()
+        kwargs: dict[str, Any] = {
+            "folder_path": str(local_dir),
+            "repo_id": repo_id,
+            "repo_type": repo_type,
+        }
+        if allow_patterns is not None:
+            kwargs["allow_patterns"] = list(allow_patterns)
+        if ignore_patterns is not None:
+            kwargs["ignore_patterns"] = list(ignore_patterns)
+        if path_in_repo is not None:
+            kwargs["path_in_repo"] = path_in_repo
+        if commit_message is not None:
+            kwargs["commit_message"] = commit_message
+        if extras:
+            kwargs.update(extras)
+        result: object = await asyncio.to_thread(api.upload_folder, **kwargs)
+        return _commit_ref(result)
 
     # -----------------------------------------------------------------
     # Convenience wrappers

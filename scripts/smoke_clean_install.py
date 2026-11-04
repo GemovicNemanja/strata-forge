@@ -46,6 +46,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import math
 import pkgutil
 import re
 import shlex
@@ -55,7 +56,7 @@ import tempfile
 import traceback
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -490,6 +491,405 @@ def check_inference_spec() -> None:
             raise SmokeError(msg)
 
 
+def check_scoring_specs() -> None:
+    """Build both scoring specs and render their pairs without loading a model."""
+    from strata_forge.pipelines import inference_runner
+
+    for engine in ("hf_classify", "hf_label_logits"):
+        payload = inference_spec()
+        payload["hyperparams"] = {
+            "engine": engine,
+            "max_model_len": 32,
+            **(
+                {"pair_template": "{question}"}
+                if engine == "hf_classify"
+                else {"label_tokens": {"yes": "A", "no": "B"}}
+            ),
+        }
+        with run_config(payload):
+            spec = inference_runner.load_spec()
+        inputs = inference_runner._build_scoring_inputs(spec, [{"col_question": "one two"}])  # pyright: ignore[reportPrivateUsage]
+        if len(inputs) != 1 or "{question}" in inputs[0].text:
+            raise SmokeError("scoring spec did not render its input")
+
+
+def evaluation_spec(mode: str) -> dict[str, Any]:
+    """A synthetic pinned worker spec with one explicit classification population."""
+    case: dict[str, Any] = {
+        "evaluation_id": "synthetic",
+        "dataset_config": "default",
+        "split": "test",
+        "id_column": "item_id",
+        "gold_column": "gold",
+        "gold_index_map": {},
+        "label_space": "3way",
+        "labels": ["E", "C", "U"],
+        "projection": None,
+        "selection": {"row_start": 0, "row_end": None, "row_limit": 4},
+        "slice_columns": [],
+        "cluster_column": None,
+        "sampling_unit": "independent_items",
+        "declared_diagnostic": False,
+        "truncation_policy": "count_as_invalid",
+        "compare_to": [],
+    }
+    from strata_forge.pipelines import SPEC_VERSION
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "engine_version": SPEC_VERSION,
+        "run_id": "synthetic-eval",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "a" * 40,
+        "output_repo_id": None,
+        "sealed": False,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": None,
+        "holm_families": [],
+        "mode": mode,
+        "evaluation_sets": [case],
+    }
+    if mode == "classify":
+        case["column_mapping"] = {"premises": "premises", "hypothesis": "hypothesis"}
+        result.update(
+            model_id="example/synthetic-model",
+            model_revision="b" * 40,
+            engine="hf_classify",
+            model_labels=["E", "C", "U"],
+            label_aliases={},
+            label_tokens=None,
+            rendering={
+                "source": "override",
+                "template": "{premises}",
+                "pair_template": "{hypothesis}",
+                "premise_format": "numbered_lines",
+                "max_length": 32,
+                "max_premises": 20,
+            },
+            scoring_batch_size=2,
+            dtype="float32",
+        )
+    else:
+        case.update(
+            source_labels=["E", "C", "U"],
+            predictions_ref="example/synthetic-predictions@" + "c" * 40,
+            predictions_config="default",
+            predictions_split="train",
+            prediction_id_column="item_id",
+            prediction_manifest_path=None,
+            parse="probability_columns",
+            parse_config={
+                "probability_columns": {"E": "p_E", "C": "p_C", "U": "p_U"},
+                "probability_kind": "class_probabilities",
+                "prediction_rule": "argmax",
+                "prediction_column": None,
+                "label_aliases": {},
+                "index_map": {},
+                "mass_outside_column": None,
+            },
+        )
+    return result
+
+
+def check_evaluation_specs() -> None:
+    """Construct both installed evaluation modes without reading inputs or granting access."""
+    from strata_forge.pipelines._common import load_config
+    from strata_forge.pipelines.evaluation_spec import EvalSpec
+
+    for mode in ("classify", "score_predictions"):
+        with run_config(evaluation_spec(mode)):
+            spec = load_config(EvalSpec)
+        if spec.mode != mode or len(spec.evaluation_sets) != 1:
+            raise SmokeError("evaluation spec did not preserve its explicit population")
+        if EvalSpec.model_validate(spec.wire_payload()) != spec:
+            raise SmokeError("evaluation spec JSON roundtrip changed its semantics")
+
+
+def check_scoring_models() -> None:
+    """Reload locally initialized safetensors models and score without Hub access."""
+    from unittest.mock import patch
+
+    from strata_forge.core.errors import ValidationError
+    from strata_forge.core.repro import set_seed
+    from strata_forge.pipelines._scoring import Scorer, ScoringInput, load_scorer
+    from strata_forge.training._load_guard import (
+        HeadKeyDecision,
+        ModelLoadingError,
+        PaddingPolicy,
+        _guard_loading_result,
+    )
+
+    # These extras are deliberately inspected at runtime: this is the upstream API probe,
+    # not a dependency of importing this script or of its pure-spec unit tests.
+    try:
+        torch: Any = importlib.import_module("torch")
+        transformers: Any = importlib.import_module("transformers")
+        tokenizers: Any = importlib.import_module("tokenizers")
+    except ImportError as exc:
+        raise ImportError(
+            "HF scoring model smoke requires torch, transformers and tokenizers; "
+            "install 'strata-forge[serving]'."
+        ) from exc
+    set_seed(0)
+    vocab = {
+        "[PAD]": 0,
+        "[BOS]": 1,
+        "[EOS]": 2,
+        "[UNK]": 3,
+        "A": 4,
+        "B": 5,
+        "one": 6,
+        "two": 7,
+        "[SEP]": 8,
+    }
+    unknown_symbol = "[UNK]"
+    backend = tokenizers.Tokenizer(tokenizers.models.WordLevel(vocab, unk_token=unknown_symbol))
+    backend.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    backend.post_processor = tokenizers.processors.TemplateProcessing(
+        single="[BOS] $A",
+        pair="[BOS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[BOS]", 1), ("[SEP]", 8)],
+    )
+    special_symbols = {
+        "pad_token": "[PAD]",
+        "bos_token": "[BOS]",
+        "eos_token": "[EOS]",
+        "unk_token": unknown_symbol,
+    }
+    tokenizer = transformers.PreTrainedTokenizerFast(tokenizer_object=backend, **special_symbols)
+    tokenizer.padding_side = "right"
+    encoder = transformers.AutoModelForSequenceClassification.from_config(
+        transformers.BertConfig(
+            vocab_size=len(vocab),
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            max_position_embeddings=32,
+            num_labels=2,
+            id2label={0: "yes", 1: "no"},
+            label2id={"yes": 0, "no": 1},
+        )
+    )
+    decoder = transformers.AutoModelForCausalLM.from_config(
+        transformers.GPT2Config(
+            vocab_size=len(vocab),
+            n_embd=16,
+            n_layer=1,
+            n_head=2,
+            n_positions=32,
+            pad_token_id=0,
+        )
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        encoder.save_pretrained(root / "encoder", safe_serialization=True)
+        decoder.save_pretrained(root / "decoder", safe_serialization=True)
+        for engine, factory, path, labels, ids in (
+            (
+                "hf_classify",
+                transformers.AutoModelForSequenceClassification,
+                root / "encoder",
+                ["yes", "no"],
+                [],
+            ),
+            (
+                "hf_label_logits",
+                transformers.AutoModelForCausalLM,
+                root / "decoder",
+                ["yes", "no"],
+                [4, 5],
+            ),
+        ):
+            checked_model, audit = _guard_loading_result(
+                factory.from_pretrained(
+                    path,
+                    token=False,
+                    use_safetensors=True,
+                    trust_remote_code=False,
+                    output_loading_info=True,
+                )
+            )
+            # The optional upstream model API is intentionally dynamic in this compatibility probe.
+            model = cast("Any", checked_model)
+            model.eval()
+            scorer = Scorer(
+                engine="hf_classify" if engine == "hf_classify" else "hf_label_logits",
+                model=model,
+                tokenizer=tokenizer,
+                torch=torch,
+                labels=labels,
+                token_ids=ids,
+                max_length=32,
+                device="cpu",
+                loading_audit=audit,
+                padding_policy=PaddingPolicy(
+                    source="tokenizer_pad",
+                    pad_token_id=0,
+                    original_model_pad_token_id=model.config.pad_token_id,
+                ),
+            )
+            inputs = [
+                ScoringInput(text="one", text_pair="two" if engine == "hf_classify" else None),
+                ScoringInput(
+                    text="one two two", text_pair="one" if engine == "hf_classify" else None
+                ),
+            ]
+            result = asyncio.run(scorer.score(inputs, batch_size=2))
+            if result.failed_rows or len(result.rows) != 2:
+                raise SmokeError("tiny model scoring produced no usable result")
+            for row in result.rows:
+                if abs(sum(row.probabilities.values()) - 1) > 1e-6:
+                    raise SmokeError("tiny model label probabilities do not sum to one")
+                if engine == "hf_label_logits" and not (
+                    row.mass_outside is not None and 0 <= row.mass_outside <= 1
+                ):
+                    raise SmokeError("tiny decoder did not report full-vocabulary outside mass")
+
+        # Checkpoint completeness is checked against the actual installed loader contract,
+        # including a fresh head that only an explicit trusted training initializer may own.
+        for fixture_name, removed_keys in (
+            ("missing-body", ("bert.embeddings.word_embeddings.weight",)),
+            ("missing-head", ("classifier.weight", "classifier.bias")),
+        ):
+            damaged_path = root / fixture_name
+            state = {
+                key: value for key, value in encoder.state_dict().items() if key not in removed_keys
+            }
+            encoder.save_pretrained(damaged_path, safe_serialization=True, state_dict=state)
+            loaded = transformers.AutoModelForSequenceClassification.from_pretrained(
+                damaged_path,
+                token=False,
+                use_safetensors=True,
+                trust_remote_code=False,
+                output_loading_info=True,
+                local_files_only=True,
+            )
+            try:
+                _guard_loading_result(loaded)
+            except ModelLoadingError as exc:
+                if set(exc.audit.missing_keys) != set(removed_keys):
+                    raise SmokeError(
+                        "installed loader reported different synthetic missing keys"
+                    ) from exc
+                decision = HeadKeyDecision(
+                    initializer_id="bert_classification_head",
+                    head_kind="encoder",
+                    created_keys=("classifier.weight", "classifier.bias"),
+                )
+                if decision.accepts(exc.audit) != (fixture_name == "missing-head"):
+                    raise SmokeError(
+                        "exact head decision accepted body damage or rejected its head"
+                    ) from exc
+            else:
+                raise SmokeError("an incomplete checkpoint passed the trained-artifact guard")
+            if fixture_name == "missing-head":
+                initialized = loaded[0]
+                # This is explicit synthetic initialization, not a production training receipt API.
+                with torch.no_grad():
+                    initialized.classifier.weight.zero_()
+                    initialized.classifier.bias.zero_()
+                initialized_path = root / "explicitly-initialized-head"
+                initialized.save_pretrained(initialized_path, safe_serialization=True)
+                _guard_loading_result(
+                    transformers.AutoModelForSequenceClassification.from_pretrained(
+                        initialized_path,
+                        token=False,
+                        use_safetensors=True,
+                        trust_remote_code=False,
+                        output_loading_info=True,
+                        local_files_only=True,
+                    )
+                )
+
+        # Unlike encoder classifiers, decoder heads use config.pad_token_id for pooling.
+        # Factories return actual local models here so the Hub-only loader is exercised
+        # without making a network request or weakening its public local-path refusal.
+        classifier_path = root / "decoder-classifier"
+        classifier = transformers.AutoModelForSequenceClassification.from_config(
+            transformers.GPT2Config(
+                vocab_size=len(vocab),
+                n_embd=16,
+                n_layer=1,
+                n_head=2,
+                n_positions=32,
+                num_labels=2,
+                pad_token_id=None,
+                eos_token_id=2,
+                id2label={0: "yes", 1: "no"},
+            )
+        )
+        classifier.save_pretrained(classifier_path, safe_serialization=True)
+        classifier, classifier_info = (
+            transformers.AutoModelForSequenceClassification.from_pretrained(
+                classifier_path,
+                token=False,
+                use_safetensors=True,
+                trust_remote_code=False,
+                output_loading_info=True,
+            )
+        )
+        pairs = [
+            ScoringInput(text="one", text_pair="two"),
+            ScoringInput(text="one two two", text_pair="one"),
+        ]
+        for tokenizer_pad, model_pad in ((None, None), (0, None), (0, 8)):
+            tokenizer.pad_token_id = tokenizer_pad
+            classifier.config.pad_token_id = model_pad
+            with (
+                patch.object(transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+                patch.object(
+                    transformers.AutoModelForSequenceClassification,
+                    "from_pretrained",
+                    return_value=(classifier, classifier_info),
+                ),
+            ):
+                scorer = asyncio.run(
+                    load_scorer(
+                        "smoke-org/decoder-classifier",
+                        engine="hf_classify",
+                        token=False,
+                        max_length=32,
+                        revision="a" * 40,
+                    )
+                )
+            batched = asyncio.run(scorer.score(pairs, batch_size=2))
+            separate = asyncio.run(scorer.score(pairs, batch_size=1))
+            expected_pad = 2 if tokenizer_pad is None else tokenizer_pad
+            if classifier.config.pad_token_id != expected_pad:
+                raise SmokeError("decoder classifier config does not use the actual tokenizer pad")
+            if batched.failed_rows or len(batched.rows) != 2:
+                raise SmokeError("decoder classifier did not score the unequal-length batch")
+            for batch_row, single_row in zip(batched.rows, separate.rows, strict=True):
+                if any(
+                    not math.isclose(value, single_row.probabilities[label], abs_tol=1e-6)
+                    for label, value in batch_row.probabilities.items()
+                ):
+                    raise SmokeError("decoder classifier padding changed a row's probabilities")
+
+        # The directory contains a complete synthetic model and tokenizer, so an unsafe
+        # loader could really use it while claiming an unrelated pinned Hub revision.
+        tokenizer.save_pretrained(classifier_path)
+        with contextlib.chdir(root):
+            try:
+                asyncio.run(
+                    load_scorer(
+                        "decoder-classifier",
+                        engine="hf_classify",
+                        token=False,
+                        max_length=32,
+                        revision="a" * 40,
+                    )
+                )
+            except ValidationError as exc:
+                if "collides with a local path" not in str(exc):
+                    raise SmokeError("local-shadow refusal did not identify the ambiguity") from exc
+            else:
+                raise SmokeError("a local model shadowed the requested Hub revision")
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -646,6 +1046,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))
     if "finetuning" in extras:
+        checks.append(("pinned classify and prediction-evaluation specs", check_evaluation_specs))
         for method, fmt, adapter in finetune_cases():
 
             def case(method: str = method, fmt: str = fmt, adapter: str = adapter) -> None:
@@ -654,6 +1055,10 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
             checks.append((f"finetune {method} / {fmt} / {adapter}", case))
     if {"serving", "hf"} <= extras:
         checks.append(("inference spec, requests and results", check_inference_spec))
+        checks.append(("HF scoring specs and rendered pairs", check_scoring_specs))
+        checks.append(
+            ("tiny safetensors classifiers and label logits (offline)", check_scoring_models)
+        )
     if "serving" in extras:
         checks.append(("vllm accepts the serving command line", check_vllm_command_line))
     return checks
