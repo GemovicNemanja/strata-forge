@@ -33,20 +33,34 @@ def install_hub_transport(monkeypatch: pytest.MonkeyPatch, artifact: Path) -> li
 
     calls: list[str] = []
 
-    def download(repo_id: Any, filename: str, *, revision: Any, token: Any) -> Any:
+    def download(
+        repo_id: Any, filename: str, *, revision: Any, token: Any, dry_run: bool = False
+    ) -> Any:
         assert repo_id == "example/synthetic-model"
         assert revision == "b" * 40
         assert token is False
+        if dry_run:
+            return hub.DryRunFileInfo(
+                commit_hash=revision,
+                file_size=(artifact / filename).stat().st_size,
+                filename=filename,
+                local_path=str(artifact / filename),
+                is_cached=True,
+                will_download=False,
+            )
         calls.append(filename)
         return str(artifact / filename)
 
     monkeypatch.setattr(hub, "hf_hub_download", download)
 
-    def list_files(*args: object, **kwargs: object) -> list[str]:
-        return sorted(p.name for p in artifact.iterdir())
+    def list_files(*args: object, **kwargs: object) -> Any:
+        return iter(
+            hub.RepoFile(path=p.name, size=p.stat().st_size, oid="1" * 40)
+            for p in sorted(artifact.iterdir())
+        )
 
     def api(*, token: object) -> types.SimpleNamespace:
-        return types.SimpleNamespace(list_repo_files=list_files)
+        return types.SimpleNamespace(list_repo_tree=list_files)
 
     monkeypatch.setattr(hub, "HfApi", api)
     return calls
@@ -89,7 +103,8 @@ async def test_default_pinned_export_scores_and_evaluates_without_model_download
             ],
         )
         import pyarrow as pa
-        import pyarrow.parquet as pq
+
+        pq: Any = __import__("pyarrow.parquet", fromlist=["write_table"])
 
         parquet = tmp_path / "synthetic-train.parquet"
         pq.write_table(pa.Table.from_pylist([json.loads(raw) for raw in source.values]), parquet)
@@ -226,7 +241,8 @@ async def test_recognized_pinned_damage_never_falls_back_to_native(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Any
 ) -> None:
     import transformers
-    from safetensors.torch import load_file, save_file
+
+    safe: Any = __import__("safetensors.torch", fromlist=["load_file", "save_file"])
 
     base = tmp_path / "base"
     save_base(base, "modernbert_decoder")
@@ -241,9 +257,9 @@ async def test_recognized_pinned_damage_never_falls_back_to_native(
         metadata.write_text('{"private-canary":NaN}')
     elif failure == "missing_head":
         file = result.artifact_dir / "model.safetensors"
-        weights = load_file(file)
+        weights = safe.load_file(file)
         del weights["classifier.weight"]
-        save_file(weights, file, metadata={"format": "pt"})
+        safe.save_file(weights, file, metadata={"format": "pt"})
     else:
         value = json.loads(metadata.read_text())
         if failure == "labels":

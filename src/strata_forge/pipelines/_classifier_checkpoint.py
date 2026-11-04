@@ -31,6 +31,9 @@ from strata_forge.training.verifier_config import VerifierConfig
 # Native ML/Hub modules expose version-dependent dynamic objects at this lazy installed seam.
 type _ML = Any
 _SHA = re.compile(r"[a-f0-9]{40}")
+_SIDECAR_BYTES = 65_536
+_METADATA_BYTES = 32 * 1024 * 1024
+_INVENTORY_ENTRIES = 128
 _SAFE_NAMES = frozenset(
     {
         "config.json",
@@ -288,6 +291,69 @@ async def reload_classifier(path: Path) -> NativeClassifierBase:
     return await asyncio.to_thread(_saved, path)
 
 
+def _preflight(hub: _ML, model_id: str, name: str, revision: str, token: _ML) -> int:
+    info = hub.hf_hub_download(model_id, name, revision=revision, token=token, dry_run=True)
+    maximum = _SIDECAR_BYTES if name.startswith("strata_") else _METADATA_BYTES
+    if (
+        not isinstance(info, hub.DryRunFileInfo)
+        or info.commit_hash != revision
+        or info.filename != name
+        or type(info.file_size) is not int
+        or not 0 <= info.file_size <= maximum
+    ):
+        raise ValueError()
+    return info.file_size
+
+
+def _copy_metadata(source: Path, target: Path, expected: int, maximum: int) -> None:
+    descriptor = os.open(source.resolve(strict=True), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size != expected:
+            raise ValueError()
+        raw = stream.read(maximum + 1)
+    if len(raw) != expected or len(raw) > maximum:
+        raise ValueError()
+    with target.open("xb") as stream:
+        stream.write(raw)
+
+
+def _inventory(hub: _ML, model_id: str, revision: str, token: _ML) -> list[str]:
+    entries = iter(
+        hub.HfApi(token=token).list_repo_tree(
+            model_id, revision=revision, repo_type="model", recursive=True, expand=True
+        )
+    )
+    selected: list[str] = []
+    seen: set[str] = set()
+    try:
+        for count, entry in enumerate(entries, 1):
+            if count > _INVENTORY_ENTRIES or not isinstance(entry, (hub.RepoFile, hub.RepoFolder)):
+                raise ValueError()
+            name = entry.path
+            if (
+                type(name) is not str
+                or not name
+                or len(name) > 512
+                or name.startswith("/")
+                or "\\" in name
+                or "\x00" in name
+                or any(part in ("", ".", "..") for part in name.split("/"))
+                or name in seen
+            ):
+                raise ValueError()
+            seen.add(name)
+            if isinstance(entry, hub.RepoFile) and (
+                name in _SAFE_NAMES or re.fullmatch(r"[A-Za-z0-9_.-]+\.safetensors", name)
+            ):
+                selected.append(name)
+    finally:
+        close = getattr(entries, "close", None)
+        if close is not None:
+            close()
+    return selected
+
+
 def probe_forge_classifier(
     model_id: str, *, revision: str, token: str | Literal[False]
 ) -> NativeClassifierBase | None:
@@ -300,36 +366,39 @@ def probe_forge_classifier(
         hub: _ML = __import__("huggingface_hub")
         errors: _ML = __import__("huggingface_hub.errors", fromlist=["RemoteEntryNotFoundError"])
         try:
-            sidecar = hub.hf_hub_download(
-                model_id, "strata_classifier.json", revision=revision, token=token
-            )
+            sidecar_size = _preflight(hub, model_id, "strata_classifier.json", revision, token)
         except errors.RemoteEntryNotFoundError as error:
             if error.response is not None and error.response.status_code == 404:
                 return None
             raise ValueError() from None
-        _artifact_metadata(_metadata(Path(sidecar), 65_536))
-        raw_files: object = hub.HfApi(token=token).list_repo_files(
-            model_id, revision=revision, repo_type="model"
-        )
-        if type(raw_files) is not list or len(cast("list[object]", raw_files)) > 128:
-            raise ValueError()
-        if any(type(name) is not str for name in cast("list[object]", raw_files)):
-            raise ValueError()
-        files = cast("list[str]", raw_files)
-        selected = [
-            name
-            for name in files
-            if name in _SAFE_NAMES or re.fullmatch(r"[A-Za-z0-9_.-]+\.safetensors", name)
-        ]
-        if "strata_classifier.json" not in selected:
-            raise ValueError()
-        # local_dir materializes ordinary files rather than passing mutable cache symlinks to
-        # native code. The complete model is loaded before this private scratch directory exits.
         with TemporaryDirectory(prefix="strata-classifier-") as directory:
+            root = Path(directory)
+            sidecar = hub.hf_hub_download(
+                model_id, "strata_classifier.json", revision=revision, token=token
+            )
+            _copy_metadata(
+                Path(sidecar), root / "strata_classifier.json", sidecar_size, _SIDECAR_BYTES
+            )
+            _artifact_metadata(_metadata(root / "strata_classifier.json", _SIDECAR_BYTES))
+            selected = _inventory(hub, model_id, revision, token)
+            if "strata_classifier.json" not in selected:
+                raise ValueError()
+            # Preflight every metadata asset before downloading any remaining assets/weights.
+            sizes = {
+                name: _preflight(hub, model_id, name, revision, token)
+                for name in selected
+                if name != "strata_classifier.json" and not name.endswith(".safetensors")
+            }
             for name in selected:
+                if name == "strata_classifier.json":
+                    continue
                 downloaded = hub.hf_hub_download(model_id, name, revision=revision, token=token)
-                shutil.copyfile(downloaded, Path(directory) / name)
-            result = _saved(Path(directory))
+                if name.endswith(".safetensors"):
+                    shutil.copyfile(downloaded, root / name)
+                else:
+                    maximum = _SIDECAR_BYTES if name.startswith("strata_") else _METADATA_BYTES
+                    _copy_metadata(Path(downloaded), root / name, sizes[name], maximum)
+            result = _saved(root)
     except Exception:
         failed = True
     if failed:

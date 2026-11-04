@@ -74,7 +74,7 @@ class ParquetSource(Source):
         self.file = file
 
     async def rows(self, source: Any) -> AsyncIterator[bytes]:
-        import pyarrow.parquet as pq
+        pq: Any = __import__("pyarrow.parquet", fromlist=["ParquetFile"])
 
         try:
             for batch in pq.ParquetFile(self.file).iter_batches(

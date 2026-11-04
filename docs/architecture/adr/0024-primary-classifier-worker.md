@@ -23,6 +23,13 @@ state guard. Only a definite missing sidecar chooses native HF loading; unavaila
 recognized artifacts refuse. Legacy unpinned native loading remains compatible and does not
 claim Forge-sidecar recognition. No head is exempted at inference.
 
+Preflight typed Hub metadata binds exact full pins/filenames and advertised non-weight sizes
+before materialization; unsupported or unknown metadata refuses without fallback. Verify exact
+regular-file size and bounded local copy afterward. Enumerate repository files and folders
+incrementally through expanded SDK pages and refuse at entry 129, before later pages or assets.
+The supported Hub API returns 50 expanded entries per page. This does not claim a hard HTTP
+wire-byte cap against a dishonest response, or introduce a weight-size threshold.
+
 Stored single-sequence rendering can be consumed by the existing `hf_classify` evaluation mode
 only after typed classifier metadata/native config agree, original/effective/SDK render digests
 are identical and labels/family/length match. Stored label tokens describe initialization, not

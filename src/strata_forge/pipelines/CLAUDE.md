@@ -15,6 +15,10 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   are initialization provenance, never label-logit evaluation parameters. Do not loosen native
   paired behavior or accept malformed sidecars through fallback. Cancellation cannot let a
   later native thread emit final worker success; transport termination/fences remain separate.
+- Preflight exact-pin metadata sizes before download and check actual regular-file sizes before
+  bounded local copies. Unsupported/unknown preflight refuses without unbounded fallback. Count
+  every lazy-tree file/folder and stop at cap+1 before later pages/assets; do not eagerly exhaust
+  a repository listing. Distinguish advertised metadata limits from hard HTTP wire-byte limits.
 - `evaluation_spec.EvalSpec` is the sole classification-evaluation schema, including semantic
   validators beyond JSON Schema. Consumers import it; they do not independently guess a mirror.
 - Evaluation authorizes every exact ref through a trusted `ReadPolicy` before preparing models

@@ -61,6 +61,19 @@ fixed file inventory and complete SDK classes. Metadata/config/receipt, exact cl
 token IDs when stored, and rendered metadata agree; missing or extra learned weights refuse.
 Unpinned legacy native paths do not perform this probe and make no recognition guarantee.
 
+Before materialization, the installed Hub `dry_run` metadata must bind the exact requested
+filename/full commit and a known integer size: at most 64 KiB per Strata sidecar and 32 MiB per
+other non-weight asset. Unknown sizes, unsupported preflight and mismatched pins refuse without
+an unbounded download fallback. All selected metadata is preflighted before remaining assets
+or weights. Downloaded metadata must then be a regular file with the exact advertised size;
+its local copy/read is bounded. These are trusted Hub-advertised size checks plus postchecks,
+not a hard wire-byte guarantee against a dishonest HTTP response. Weight sizes have no added
+prototype threshold. Repository discovery uses lazy expanded tree pages (50 entries per page
+in the supported Hub API), counts files and folders, and refuses at entry 129 before requesting
+later pages or assets. One SDK page is decoded before its entries are yielded; this is not a
+custom bounded HTTP/JSON transport. Fixed permitted asset names and safe local loading still
+apply. The integration requires the installed Hub's typed dry-run and lazy-tree APIs.
+
 Recognized pinned Forge classifiers accept a single rendered sequence with rank-two logits and
 full-class softmax. Combined inputs exceeding the declared length refuse rather than cutting a
 hypothesis. Forge decoder classifiers refuse tokenizer-pair input. Native HF classifiers retain

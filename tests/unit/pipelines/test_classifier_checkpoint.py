@@ -62,11 +62,21 @@ def test_malformed_sidecar_refuses_before_weight_inventory_or_download(
 
     sidecar = tmp_path / "strata_classifier.json"
     sidecar.write_text("{}")
-    calls = []
+    calls: list[bool] = []
 
     def download(model_id: Any, filename: str, **kwargs: Any) -> Any:
-        calls.append(filename)
+        dry_run = kwargs.get("dry_run", False)
+        calls.append(dry_run)
         assert filename == "strata_classifier.json"
+        if dry_run:
+            return hub.DryRunFileInfo(
+                commit_hash="1" * 40,
+                file_size=sidecar.stat().st_size,
+                filename=filename,
+                local_path=str(sidecar),
+                is_cached=True,
+                will_download=False,
+            )
         return str(sidecar)
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
@@ -76,7 +86,7 @@ def test_malformed_sidecar_refuses_before_weight_inventory_or_download(
     monkeypatch.setattr(hub, "HfApi", forbidden)
     with pytest.raises(ClassifierWorkerError, match="classifier_artifact_unavailable") as error:
         probe_forge_classifier("fixture/model", revision="1" * 40, token=False)
-    assert calls == ["strata_classifier.json"]
+    assert calls == [True, False]
     assert error.value.__context__ is None
 
 
