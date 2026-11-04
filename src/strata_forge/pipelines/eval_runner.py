@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from strata_forge.metrics import holm_correction, mcnemar_exact
 from strata_forge.pipelines._common import (
+    RunSecrets,
     check_engine_version,
     emit,
     installed_engine_version,
@@ -24,6 +25,12 @@ from strata_forge.pipelines._evaluation_access import (
     ReadDecision,
     ReadPolicy,
     authorize_reads,
+)
+from strata_forge.pipelines._evaluation_authority import (
+    EvaluationPolicyRPC,
+    PublicationFence,
+    PublicationPolicy,
+    parse_authority,
 )
 from strata_forge.pipelines._evaluation_items import (
     EvaluationItem,
@@ -47,6 +54,7 @@ from strata_forge.pipelines.evaluation_spec import (
     PredictionSet,
     ProbabilityColumns,
 )
+from strata_forge.storage import HFHubClient
 from strata_forge.training._load_guard import ModelLoadingError
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 from strata_forge.training.verifier_config import VerifierConfig, render_verifier_input
@@ -59,8 +67,11 @@ __all__ = [
     "EvaluationError",
     "EvaluationReader",
     "EvaluationResult",
+    "PublicationFence",
+    "PublicationPolicy",
     "ReadDecision",
     "ReadPolicy",
+    "execute_evaluation",
     "main",
     "run_evaluation",
 ]
@@ -448,6 +459,7 @@ async def run_evaluation(
     *,
     token: str | Literal[False] = False,
     policy: ReadPolicy | None = None,
+    publication_policy: PublicationPolicy | None = None,
     reader: EvaluationReader | None = None,
     writer: JsonlProgressWriter | None = None,
     output_dir: Path | None = None,
@@ -456,10 +468,16 @@ async def run_evaluation(
     """Execute one declared job with a trusted policy; absent/unknown custody fails closed."""
     spec = EvalSpec.model_validate(spec.wire_payload())
     check_engine_version(spec.engine_version)
-    if spec.output_repo_id is not None:
+    if spec.output_repo_id is not None and publication_policy is None:
         raise EvaluationError("publication_policy_unavailable")
+    if spec.output_repo_id is not None and token is False:
+        raise EvaluationError("output_credential_required")
     decisions = await authorize_reads(spec.input_reads(), policy, spec_sha256=spec.digest())
     try:
+        if spec.output_repo_id is not None and publication_policy is not None:
+            await publication_policy.plan(
+                requested_repo_id=spec.output_repo_id, spec_sha256=spec.digest()
+            )
         if token is not False and (type(token) is not str or not token.strip()):
             raise EvaluationError("credential_invalid")
         directory = output_dir or results_dir(spec.run_id, name="strata-evaluation-results")
@@ -664,6 +682,9 @@ async def run_evaluation(
         path = await asyncio.to_thread(write_artifacts, directory, spec, report, populations)
         await asyncio.sleep(0)
         destination, output_ref = str(path), None
+        if spec.output_repo_id is not None and publication_policy is not None:
+            output_ref = await _publish(spec, directory, token, publication_policy)
+            destination = output_ref.rsplit("@", 1)[0]
         totals = cast("dict[str, int]", report["counts"])
         emit(
             writer,
@@ -702,11 +723,138 @@ def _reserve_output(directory: Path, run_id: str) -> None:
         raise EvaluationError("artifact_directory_not_empty") from None
 
 
+async def _publish(
+    spec: EvalSpec, directory: Path, token: str | Literal[False], policy: PublicationPolicy
+) -> str:
+    if spec.output_repo_id is None or token is False:
+        raise EvaluationError("output_credential_required")
+    digest = spec.digest()
+    await asyncio.to_thread(
+        _write_evidence,
+        directory,
+        "publication-attempt.json",
+        {"status": "planning", "requested_id": spec.output_repo_id, "spec_sha256": digest},
+    )
+    async with policy.publication(
+        requested_repo_id=spec.output_repo_id, spec_sha256=digest
+    ) as granted:
+        fence = PublicationFence.model_validate(granted.model_dump())
+        if (
+            fence.run_id != spec.run_id
+            or fence.spec_sha256 != digest
+            or fence.requested_id != spec.output_repo_id
+            or fence.canonical_id.casefold()
+            in {
+                ref.rsplit("@", 1)[0].casefold()
+                for ref, kind in spec.input_reads()
+                if kind == "dataset"
+            }
+        ):
+            raise EvaluationError("publication_identity_mismatch")
+        hub = HFHubClient(token=token)
+        if (
+            not await hub.repo_private(fence.canonical_id, repo_type="dataset")
+            or await hub.resolve_revision(fence.canonical_id, repo_type="dataset")
+            != fence.expected_parent
+        ):
+            raise EvaluationError("publication_destination_changed")
+        evidence: dict[str, object] = {
+            "status": "ready",
+            "requested_id": fence.requested_id,
+            "canonical_id": fence.canonical_id,
+            "expected_parent": fence.expected_parent,
+            "spec_sha256": digest,
+            "policy_version": fence.policy_version,
+        }
+        await asyncio.to_thread(_write_evidence, directory, "publication-attempt.json", evidence)
+        await asyncio.sleep(0)
+        upload = asyncio.create_task(
+            hub.commit_folder(
+                directory,
+                fence.canonical_id,
+                repo_type="dataset",
+                allow_patterns=(
+                    "README.md",
+                    "metrics.json",
+                    *(
+                        f"evaluations/{case.evaluation_id}/items.parquet"
+                        for case in spec.evaluation_sets
+                    ),
+                ),
+                commit_message="classification evaluation results",
+                extras={"parent_commit": fence.expected_parent},
+            )
+        )
+        try:
+            commit = await asyncio.shield(upload)
+        except asyncio.CancelledError:
+            actual = None
+            try:
+                actual = await asyncio.wait_for(asyncio.shield(upload), timeout=10)
+            except Exception, asyncio.CancelledError:
+                actual = None
+            await asyncio.to_thread(
+                _write_evidence,
+                directory,
+                "publication-attempt.json",
+                {
+                    **evidence,
+                    "status": "uploaded_after_cancellation"
+                    if actual is not None
+                    else "commit_outcome_unknown",
+                    "commit_sha": actual.sha if actual is not None else None,
+                },
+            )
+            raise
+        except Exception:
+            await asyncio.to_thread(
+                _write_evidence,
+                directory,
+                "publication-attempt.json",
+                {**evidence, "status": "commit_outcome_unknown", "commit_sha": None},
+            )
+            raise EvaluationError("publication_commit_failed") from None
+        await asyncio.to_thread(
+            _write_evidence,
+            directory,
+            "publication-attempt.json",
+            {**evidence, "status": "uploaded_pending_receipt", "commit_sha": commit.sha},
+        )
+        await policy.record_receipt(fence, commit)
+        await asyncio.to_thread(
+            _write_evidence,
+            directory,
+            "publication-attempt.json",
+            {**evidence, "status": "receipt_accepted", "commit_sha": commit.sha},
+        )
+        return f"{fence.canonical_id}@{commit.sha}"
+
+
+async def execute_evaluation(
+    spec: EvalSpec, *, secrets: RunSecrets, writer: JsonlProgressWriter | None = None
+) -> EvaluationResult:
+    """Construct the fixed installed authority adapter from the private Task channel."""
+    spec = EvalSpec.model_validate(spec.wire_payload())
+    if secrets.eval_authority is None:
+        return await run_evaluation(spec, token=secrets.hub_credential(), writer=writer)
+    authority = parse_authority(
+        secrets.eval_authority, run_id=spec.run_id, spec_sha256=spec.digest()
+    )
+    async with EvaluationPolicyRPC(authority, token=secrets.hub_credential()) as policy:
+        return await run_evaluation(
+            spec,
+            token=secrets.hub_credential(),
+            policy=policy,
+            publication_policy=policy,
+            writer=writer,
+        )
+
+
 async def main() -> int:
     """Execute the installed worker with ordinary secret/progress handling and no implicit grant."""
     return await runner_main(
-        lambda writer, secrets: run_evaluation(
-            load_config(EvalSpec, writer=writer), token=secrets.hub_credential(), writer=writer
+        lambda writer, secrets: execute_evaluation(
+            load_config(EvalSpec, writer=writer), secrets=secrets, writer=writer
         )
     )
 

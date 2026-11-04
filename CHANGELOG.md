@@ -21,8 +21,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   alongside unchanged `custom_id`, recording source ID semantics. Evaluation CLI commands
   export/validate the installed schema and delegate to the same worker.
 - `HFHubClient.repo_private` requires explicit boolean privacy metadata. Evaluation keeps
-  complete local attempt artifacts and refuses every non-null output repository without
-  separate trusted publication authority; read approval never grants write permission.
+  local attempt evidence and requires separate destination authority for publication. The fixed
+  private Task authority adapter binds policy RPCs to the Run/spec, performs create-only or
+  expected-parent writes, and accepts actual-commit receipts before success. Interrupted commits
+  retain known/unknown status; read approval never grants writes. Shared redaction covers the
+  bounded run-worker credential and delivered nested values.
 
 - `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
   conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,

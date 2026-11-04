@@ -1,56 +1,43 @@
 # Installed evaluation policy adapter handoff
 
-The worker accepts `ReadPolicy` from trusted installed Python code. The inert EvalSpec and
-CLI never choose an adapter, import path or boolean grant. The default standalone command
-remains closed with `custody_policy_unavailable`.
+`execute_evaluation` installs the fixed `EvaluationPolicyRPC` from the private authenticated
+Task secret `STRATA_EVAL_AUTHORITY`. No spec, CLI option, environment variable, callback import
+or unsigned caller JSON installs a grant. Missing authority remains closed. The adapter sends
+exact Run/spec/typed-ref requests to the fixed internal namespace; server credential expiry,
+active Run binding, fresh monotone custody and output authority remain mandatory server work.
 
-The coordinator owns the concrete server-issued approval verification and worker bootstrap.
-An adapter must verify issuer/authentication, run/actor/workspace binding, exact immutable
-refs, operation/scope, expiration/replay and the approved policy version, then combine fresh
-portable markers/registry facts/lineage/canonical and historical aliases monotonically. Unknown
-metadata or any positive protected fact must deny. A server-issued approval alone cannot
-erase a later positive custody fact. Recheck authorization at execution, not only launch.
+Implementation: `src/strata_forge/pipelines/_evaluation_authority.py` and `eval_runner.py`.
+Maintained synthetic exact wire fixture: `tests/unit/pipelines/fixtures/evaluation_policy_rpc.json`.
+Reference: `docs/modules/pipelines.md#private-run-authority-and-publication`, ADR0021 and ADR0019.
 
-The minimal shape below is an adapter seam, **not** an implementation of ticket verification.
-Neither protocol can be implemented with a caller's `sealed=false` or Hub readability.
+The version-1 private frame has exactly `version`, `run_id`, `spec_sha256`, `policy_origin`,
+`worker_credential`. Run IDs are 32 lowercase hex, spec digests 64 lowercase hex. Credentials
+are `strata_worker_` plus 43 base64url characters. Operator origin is HTTPS or literal loopback
+HTTP for local review, without userinfo/path/query/fragment. The server stores only hash/expiry
+and derives actor/owner itself; credentials do not enter persisted/public specs or diagnostics.
+The actual full stamped `wire_payload()` digest, including configs/splits/selection, is checked
+before RPC. Every response echoes exact version/run/spec/domain/ref fields.
 
-```python
-from typing import Literal, Protocol
-from strata_forge.pipelines.eval_runner import ReadDecision
+Fixed POST routes under `/api/internal/evaluation-policy` are `/read`, `/output/plan`,
+`/output/ready`, `/output/receipt`. Requests use run Bearer only, no cookies/redirects or ambient
+proxy credentials; bounded JSON and deadlines prevent arbitrary body/diagnostic growth.
 
-class VerifiedApprovalService(Protocol):
-    async def require_read(self, *, bound_run_id: str, ref: str, repo_type: Literal["model", "dataset"], spec_sha256: str) -> None:
-        """Verify authenticated issuer, bound actor/run/ref/scope/expiry; raise on failure."""
-        ...
+Read permission never authorizes publication. Existing output requires fresh canonical,
+private/unprotected metadata and expected parent. Prospective output is create-only with
+`exist_ok=False`, no conflict fallback; server fresh readback supplies the actual post-create
+parent before upload. Worker fresh privacy/parent checks and `parent_commit` enforce the ready
+contract, then the actual `CommitRef` must be accepted by the separate receipt endpoint before
+success. Output canonical/alias identity must not overlap input datasets. Unknown metadata,
+positive custody on prospective names, cancellation/terminal/expiry, missing authority or changed
+parents deny. Failed prospective creation/readback may leave an empty private repo; no cleanup
+mutation is attempted. Local attempt status records known commits or unknown outcomes.
 
-class FreshCustodyService(Protocol):
-    async def resolve(self, ref: str, *, repo_type: Literal["model", "dataset"]) -> Literal["unsealed", "sealed", "locked", "unknown"]:
-        """Resolve fresh monotone facts, including aliases/markers/lineage; no negative guessing."""
-        ...
+The server must install and independently exercise its resolver, active Run/output fences,
+credential service and private Task transport before enabling evaluation launches. Synthetic
+injected policy tests alone are insufficient. No real Hub writes, pretrained checkpoints or
+research rows are needed for integration acceptance. Current M1 lineage/alias coverage remains
+explicitly bounded; this adapter does not establish general sealed execution or external lineage.
 
-class InstalledEvaluationPolicy:
-    def __init__(self, run_id: str, approval: VerifiedApprovalService, custody: FreshCustodyService):
-        self.run_id, self.approval, self.custody = run_id, approval, custody
-
-    async def decide(self, ref: str, *, repo_type: Literal["model", "dataset"], spec_sha256: str) -> ReadDecision:
-        await self.approval.require_read(bound_run_id=self.run_id, ref=ref, repo_type=repo_type, spec_sha256=spec_sha256)
-        state = await self.custody.resolve(ref, repo_type=repo_type)
-        return ReadDecision(
-            ref=ref, repo_type=repo_type, spec_sha256=spec_sha256, authorized=True, custody=state, policy_version="installed-adapter-v1"
-        )
-```
-
-`authorized=True` above is produced only after the trusted verification service succeeds;
-it is never deserialized from job params or treated as a user grant. The worker revalidates
-the DTO, requires exact ref identity and `custody=unsealed`, and authorizes all refs before
-reader preparation/model load/row reads. The real adapter also needs bounded fixed errors,
-network/auth timeouts, freshness/replay tests and authenticated metadata transport. Registering
-the server kind stays disabled until that concrete bridge is independently accepted.
-
-Fresh Claude requests remain separate scopes: training defaults to final checkpoint, explicit
-selection_split must exclude marked gate/test tiers, GPU budget is 25h hard/20h hold (research
-owner/operator policy, not a universal worker default), and Ettin head mapping/step-zero
-equivalence belongs to trusted TRAIN initialization. Evaluation never relaxes missing-head
-loads or downloads the real checkpoint to simulate those acceptance cases.
-
-Use the actual `EvalSpec.digest()` for the full stamped worker spec, including config/split/selection; the policy decision echoes that digest and repository domain, and the worker requires both to match exactly.
+Training checkpoint selection/final defaults, marked gate/test exclusion, the research owner
+25 GPUh hard/20h hold budget and exact Ettin initialization remain TRAIN/operator scopes.
+Evaluation never relaxes complete trained-head loading or runs the real research checkpoint.

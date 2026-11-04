@@ -182,14 +182,14 @@ def validate_spec_cmd(
 
 async def _execute_eval_spec(path: Path, mode: str) -> None:
     from strata_forge.pipelines._common import check_engine_version, runner_main
-    from strata_forge.pipelines.eval_runner import run_evaluation
+    from strata_forge.pipelines.eval_runner import execute_evaluation
 
     async def execute(writer: JsonlProgressWriter | None, secrets: RunSecrets) -> None:
         parsed = await _read_eval_spec(path)
         if parsed.mode != mode:
             raise ValueError("evaluation_mode_mismatch")
         check_engine_version(parsed.engine_version)
-        await run_evaluation(parsed, token=secrets.hub_credential(), writer=writer)
+        await execute_evaluation(parsed, secrets=secrets, writer=writer)
 
     code = await runner_main(execute)
     if code:

@@ -23,11 +23,12 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   normalization. Restricted softmax is not calibrated full-class probability.
 - Bound reads, JSON, row populations, slices and artifacts. Refuse an exceeded bound; never
   silently drop rows/slices. Parquet fields are explicitly typed even when the first row refuses.
-- Publication is unavailable without separate trusted destination authority/fence; every
-  non-null output repo refuses before reads. A read approval or private=True is never a write
-  grant. Future publication must enforce exact canonical identity, fresh private/protection
-  state and expected parent, then capture actual CommitRef. Never invent an output SHA.
-  Reused local output directories refuse rather than rewrite.
+- Publication is unavailable without separate trusted destination authority/fence. Read approval
+  or private=True never grants writes. Preserve the fixed private authority RPC, exact canonical
+  identity, fresh private/protection state, atomic create-only refusal and expected-parent commit.
+  Accept the actual CommitRef receipt before success; retain unknown outcomes on interruption.
+  Never invent a SHA or overwrite local attempt evidence. No spec-controlled policy import,
+  environment/argv authority, redirect/cookie authentication or credential diagnostics.
 - Coroutine cancellation does not terminate a model thread. Supervised process-group teardown
   remains required. Local attempt completion is not an immutable publication receipt.
 - Tests use synthetic rows/fake policy/model/Hub plus real local Parquet; no pretrained downloads.

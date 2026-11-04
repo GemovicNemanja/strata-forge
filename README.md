@@ -10,7 +10,9 @@ dependencies (training, serving, remote compute) live behind extras, so the base
 Pinned classification evaluation uses explicit stable-ID joins and separate per-config reports,
 with native classifier or imported-probability inputs. The installed `eval schema` and
 `eval validate-spec` commands expose its inert contract. Execution requires a trusted read
-policy; standalone launch denies access without one. See [pipeline workers](docs/modules/pipelines.md).
+policy; the installed adapter consumes a run/spec-bound private Task authority frame. Publishing
+additionally requires a separate destination fence and accepted actual-commit receipt. Standalone
+launch denies access without installed authority. See [pipeline workers](docs/modules/pipelines.md).
 
 ## Install
 

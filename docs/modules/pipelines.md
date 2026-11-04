@@ -58,7 +58,7 @@ provenance, not proof of Strata production.
 
 ## Read policy and native files
 
-`run_evaluation(spec, *, token=False, policy=None, reader=None, writer=None, output_dir=None)`
+`run_evaluation(spec, *, token=False, policy=None, publication_policy=None, reader=None, writer=None, output_dir=None)`
 is async. `ReadPolicy`, `ReadDecision`, `EvaluationReader` and `EvaluationError` are exported
 from `strata_forge.pipelines.eval_runner`. Trusted Python callers can provide an installed policy/reader; no spec field or CLI
 option can choose a policy implementation. `ReadPolicy.decide(ref, repo_type=..., spec_sha256=...)` returns a strict
@@ -149,17 +149,58 @@ and selective-prediction methods are represented as not-produced; their unimplem
 are rejected rather than simulated.
 
 At most 64 finite headline count values enter progress. Full reports stay in artifacts.
-Evaluation publication is unavailable: a non-null `output_repo_id` refuses with
-`publication_policy_unavailable` before input-policy calls, model preparation or row reads.
-A read grant and `private=True` do not authorize writing. A publication path requires separate
-trusted destination authority, fresh canonical/private/portable-protection checks, a held fence,
-and expected-parent commit enforcement. No public or unknown fallback is allowed.
+
+## Private run authority and publication
+
+`execute_evaluation` is the installed CLI/worker entrypoint. Its fixed `EvaluationPolicyRPC`
+adapter consumes a `STRATA_EVAL_AUTHORITY` string only from the authenticated Task secrets file,
+read and unlinked by shared execution. The masked version-1 JSON frame has exactly `version`,
+`run_id` (32 lowercase hex), `spec_sha256` (64 lowercase hex), `policy_origin`, and
+`worker_credential` (`strata_worker_` followed by 43 base64url characters). The origin comes
+from trusted operator configuration: HTTPS, or literal loopback HTTP for local review, with
+no userinfo, path, query or fragment. Environment copies are discarded, never used as authority.
+The actual `wire_payload()` digest and Run ID must match before a request. No serialized spec,
+CLI option or import path chooses an adapter. Missing authority leaves execution closed.
+
+The adapter POSTs only `/api/internal/evaluation-policy/read` and
+`/api/internal/evaluation-policy/output/{plan,ready,receipt}`. Every request and response carries
+version, run and spec bindings. Read replies also match the exact typed pin. Requests use only
+the run-scoped Bearer credential, no cookies, ambient proxy credentials or redirects; JSON
+requests are capped at 4096 bytes, replies at 16384 bytes, and each call at 30 seconds overall.
+Malformed, unknown, denied or mismatched replies refuse with fixed errors. Server expiry,
+terminal/cancellation checks, fresh custody resolution and active Run fences remain required
+server responsibilities; the private frame itself is not a portable signed authorization.
+The maintained synthetic wire fixture is `tests/unit/pipelines/fixtures/evaluation_policy_rpc.json`.
+
+A non-null `output_repo_id` needs a separate `PublicationPolicy` and explicit Hub credential,
+otherwise it refuses before input reads. Read approval, lineage and private visibility never
+provide write permission. A preflight output plan runs before rows are materialized. At upload,
+existing destinations require exact approved canonical identity, fresh private/protection checks
+and a full expected parent. Create-only plans perform atomic `create_repo(private=True,
+exist_ok=False)`, refuse conflicts, then obtain fresh server readback and the actual parent;
+ambiguous absence never becomes permission to upload. Failed readback can leave an empty
+private repository; the worker does not delete it. Known input-dataset/output collisions refuse.
+The server must compare canonical identities and verified alias closures, including protected
+prospective names; worker metadata checks add privacy/parent verification and do not replace
+server custody checks.
+
+Under the ready Run fence, only the card, versioned metrics and exact declared item files are
+uploaded in one `commit_folder` with `parent_commit=expected_parent`. Local failure/audit files
+are excluded. The actual returned `CommitRef` is sent to the receipt endpoint and must be
+accepted before the successful end event contains `canonical_repo@actual_sha`. The artifact
+cannot contain its own future commit SHA; immutable publication identity is carried separately
+by the progress/receipt contract. No output SHA is inferred from a moving branch.
 
 Local output directories are reserved for one attempt and are not overwritten. A complete
-local result has `output_ref=null`; no output SHA is fabricated. Cancellation emits no successful
-end. Supervised process-group teardown remains necessary because coroutine cancellation alone
-does not prove that model threads stopped. Artifact transport and immutable publication remain
-separate consumer responsibilities.
+local-only result has `output_ref=null`. Publication attempts retain bounded local status,
+parent and actual commit when known. Cancellation emits no successful end/receipt; an upload
+already underway is shielded and observed for up to ten seconds, recording a known commit or
+`commit_outcome_unknown`. Network/process death can leave a successful mutation with no
+accepted receipt; retries must reconcile rather than claim rollback or overwrite evidence.
+Supervised process-group teardown remains necessary because coroutine cancellation alone does
+not prove that model threads stopped. This is an ordinary unsealed worker on trusted compute,
+not a general sealed execution guarantee. Server installation and end-to-end consumer review
+are required before enabling launches.
 
 ## CLI and execution profile
 

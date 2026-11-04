@@ -28,10 +28,18 @@ and withhold independent inference when group assumptions do not apply.
 
 Write explicitly typed Parquet and a versioned per-population local report/card. Reserve one
 output directory per attempt, preserve bounded local failure evidence, and emit no success on
-cancellation. Refuse every non-null publication destination until a separate trusted output
+cancellation. Refuse every non-null publication destination unless a separate trusted output
 fence authorizes it. Read approval and private visibility alone are insufficient; publication
 requires canonical identity, fresh protection/private checks and an enforced expected parent.
 An actual CommitRef must come from the completed authorized mutation, never an invented SHA.
+
+The installed adapter uses a fixed run-scoped server RPC and private Task authority frame;
+serialized specs and unsigned caller JSON never install grants. Bind every exchange to the
+actual stamped spec digest and typed ref. No redirects, cookies or ambient credentials are used.
+Output planning and ready readback are distinct: prospective creation is atomic/create-only,
+existing writes enforce an expected parent, and a separate actual-commit receipt is required
+before success. The server owns live Run fences, credential hashing/expiry and fresh custody
+checks. Client metadata checks cannot replace those services or prove complete external lineage.
 
 ## Consequences
 

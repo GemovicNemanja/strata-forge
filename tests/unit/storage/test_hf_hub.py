@@ -237,7 +237,7 @@ class TestCommitReferences:
             allow_patterns=("*.parquet",),
             ignore_patterns=("private-*",),
             commit_message="scores",
-            extras={"revision": "dev"},
+            extras={"revision": "dev", "parent_commit": "c" * 40},
         )
         assert ref.sha == "d" * 40
         assert calls[0]["allow_patterns"] == ["*.parquet"]
@@ -245,6 +245,7 @@ class TestCommitReferences:
         assert calls[0]["path_in_repo"] == "run"
         assert calls[0]["commit_message"] == "scores"
         assert calls[0]["revision"] == "dev"
+        assert calls[0]["parent_commit"] == "c" * 40
 
     @pytest.mark.parametrize(
         "value",

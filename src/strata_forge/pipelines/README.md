@@ -8,7 +8,15 @@ reports each declared dataset population separately, and writes Parquet plus ver
 `strata_forge.pipelines.evaluation_spec.EvalSpec` is the authoritative evaluation schema.
 `strata_forge.pipelines.eval_runner.run_evaluation` requires a trusted, pin-bound read policy;
 the standalone command refuses access without one. A caller's `sealed=false` is never a grant.
-Policy implementations belong to installed trusted code, outside the serialized spec.
+Policy implementations belong to installed trusted code, outside the serialized spec. The fixed
+entrypoint consumes a run/spec-bound `STRATA_EVAL_AUTHORITY` frame only from the private Task
+secrets file. It contacts the fixed server policy endpoints without cookies or redirects.
+
+Publication requires separate destination authority: fresh private/custody/canonical readback,
+atomic create-only handling or an existing expected parent, an expected-parent commit, and an
+accepted actual-commit receipt. Without it a non-null destination refuses. Interrupted attempts
+retain local known/unknown mutation evidence; cancellation is never reported as success.
+Server policy installation and consumer review are required before enabling launches.
 
 All model loads disable remote code and require safetensors. Classification requires complete
 trained weights, explicit label semantics and rendering. Evaluation preserves invalid outputs

@@ -6,15 +6,18 @@ import asyncio
 import copy
 import json
 import math
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import eval_runner as er
+from strata_forge.pipelines._common import RunSecrets
 from strata_forge.pipelines._evaluation_access import EvaluationError, ReadDecision, authorize_reads
+from strata_forge.pipelines._evaluation_authority import PublicationFence
 from strata_forge.pipelines._evaluation_items import gold_items, parse_predictions
 from strata_forge.pipelines._evaluation_reader import (
     HubEvaluationReader,
@@ -24,10 +27,13 @@ from strata_forge.pipelines._evaluation_reader import (
 )
 from strata_forge.pipelines._scoring import ScoredRow, ScoringResult
 from strata_forge.pipelines.evaluation_spec import EvalSpec, PredictionSet, Selection
+from strata_forge.storage import CommitRef
 from strata_forge.training._load_guard import LoadingAudit, ModelLoadingError, PaddingPolicy
 from strata_forge.training.progress import JsonlProgressWriter
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from strata_forge.pipelines._evaluation_reader import Row
     from strata_forge.pipelines._scoring import Scorer, ScoringInput
     from strata_forge.storage import HFHubClient
@@ -942,4 +948,270 @@ async def test_decoder_token_map_uses_explicit_label_order_not_json_object_order
     assert all(
         entry["probability_context"]["kind"] == "restricted_softmax"
         for entry in report["evaluations"]
+    )
+
+
+class PublicationFake:
+    """Trusted test-only destination authority, separate from read authorization."""
+
+    def __init__(self, spec: EvalSpec, *, canonical: str = "example/result-canonical") -> None:
+        self.spec = spec
+        self.canonical = canonical
+        self.events: list[str] = []
+        self.deny_plan = False
+        self.deny_receipt = False
+
+    async def plan(self, *, requested_repo_id: str, spec_sha256: str) -> object:
+        self.events.append("plan")
+        assert spec_sha256 == self.spec.digest()
+        assert requested_repo_id == self.spec.output_repo_id
+        if self.deny_plan:
+            raise EvaluationError("synthetic_output_denied")
+        return None
+
+    @asynccontextmanager
+    async def publication(
+        self, *, requested_repo_id: str, spec_sha256: str
+    ) -> AsyncGenerator[PublicationFence]:
+        self.events.append("ready")
+        assert spec_sha256 == self.spec.digest()
+        assert requested_repo_id == self.spec.output_repo_id
+        yield PublicationFence(
+            version=1,
+            run_id=self.spec.run_id,
+            spec_sha256=spec_sha256,
+            policy_version="custody-v1",
+            repo_type="dataset",
+            requested_id=requested_repo_id,
+            canonical_id=self.canonical,
+            mode="existing_private",
+            expected_parent="c" * 40,
+        )
+        self.events.append("released")
+
+    async def record_receipt(self, fence: PublicationFence, commit: CommitRef) -> None:
+        self.events.append("receipt:" + commit.sha)
+        assert fence.canonical_id == self.canonical
+        if self.deny_receipt:
+            raise EvaluationError("synthetic_receipt_denied")
+
+
+class PublicationHubFake:
+    def __init__(self) -> None:
+        self.private = True
+        self.parent = "c" * 40
+        self.commit_error = False
+        self.commits: list[dict[str, Any]] = []
+        self.started = asyncio.Event()
+        self.release: asyncio.Event | None = None
+
+    async def repo_private(self, repo: str, **kwargs: Any) -> bool:
+        return self.private
+
+    async def resolve_revision(self, repo: str, **kwargs: Any) -> str:
+        return self.parent
+
+    async def commit_folder(self, directory: Path, repo: str, **kwargs: Any) -> CommitRef:
+        assert (directory / "metrics.json").is_file()
+        assert (directory / "README.md").is_file()
+        self.commits.append({"repo": repo, **kwargs})
+        self.started.set()
+        if self.release is not None:
+            await self.release.wait()
+        if self.commit_error:
+            raise RuntimeError("hf_synthetic_write_secret_123456789")
+        return CommitRef(sha="d" * 40, url="https://example.invalid/actual-commit")
+
+
+def publication_spec() -> EvalSpec:
+    data = spec_data()
+    data["output_repo_id"] = "example/result-requested"
+    data["run_id"] = "a" * 32
+    return EvalSpec.model_validate(data)
+
+
+@pytest.mark.asyncio
+async def test_publication_keeps_local_artifacts_and_actual_commit_with_exact_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = publication_spec()
+    policy, hub = PublicationFake(spec), PublicationHubFake()
+
+    def factory(**_: object) -> PublicationHubFake:
+        return hub
+
+    monkeypatch.setattr(er, "HFHubClient", factory)
+    result = await er.run_evaluation(
+        spec,
+        token="hf_synthetic",
+        policy=Policy(),
+        publication_policy=cast("er.PublicationPolicy", cast("object", policy)),
+        reader=Reader(),
+        output_dir=tmp_path,
+    )
+    assert result.output_ref == "example/result-canonical@" + "d" * 40
+    assert result.metrics_path.is_file()
+    assert hub.commits == [
+        {
+            "repo": "example/result-canonical",
+            "repo_type": "dataset",
+            "allow_patterns": (
+                "README.md",
+                "metrics.json",
+                *(
+                    f"evaluations/{case.evaluation_id}/items.parquet"
+                    for case in spec.evaluation_sets
+                ),
+            ),
+            "commit_message": "classification evaluation results",
+            "extras": {"parent_commit": "c" * 40},
+        }
+    ]
+    assert policy.events == ["plan", "ready", "receipt:" + "d" * 40, "released"]
+    evidence = json.loads((tmp_path / "publication-attempt.json").read_text())
+    assert evidence["status"] == "receipt_accepted"
+    assert evidence["commit_sha"] == "d" * 40
+    assert evidence["spec_sha256"] == spec.digest()
+    assert "hf_synthetic" not in json.dumps(evidence)
+
+
+@pytest.mark.parametrize("case", ["read_denied", "plan_denied", "credential_missing"])
+@pytest.mark.asyncio
+async def test_publication_preflight_denies_before_rows(case: str, tmp_path: Path) -> None:
+    spec = publication_spec()
+    policy = PublicationFake(spec)
+    reader = Reader()
+    policy.deny_plan = case == "plan_denied"
+    with pytest.raises(EvaluationError):
+        await er.run_evaluation(
+            spec,
+            token=False if case == "credential_missing" else "hf_synthetic",
+            policy=Policy(custody="unknown" if case == "read_denied" else "unsealed"),
+            publication_policy=cast("er.PublicationPolicy", cast("object", policy)),
+            reader=reader,
+            output_dir=tmp_path,
+        )
+    assert reader.events == []
+    assert policy.events == (["plan"] if case == "plan_denied" else [])
+
+
+@pytest.mark.parametrize(
+    "case", ["public", "parent_changed", "input_alias", "commit_failed", "receipt_denied"]
+)
+@pytest.mark.asyncio
+async def test_failed_publication_never_reports_success(
+    case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = publication_spec()
+    canonical = spec.dataset_id.upper() if case == "input_alias" else "example/result-canonical"
+    policy, hub = PublicationFake(spec, canonical=canonical), PublicationHubFake()
+    hub.private = case != "public"
+    hub.parent = "f" * 40 if case == "parent_changed" else "c" * 40
+    hub.commit_error = case == "commit_failed"
+    policy.deny_receipt = case == "receipt_denied"
+
+    def factory(**_: object) -> PublicationHubFake:
+        return hub
+
+    monkeypatch.setattr(er, "HFHubClient", factory)
+    progress = tmp_path / "progress.jsonl"
+    directory = tmp_path / "artifacts"
+    with JsonlProgressWriter(progress) as writer, pytest.raises(EvaluationError):
+        await er.run_evaluation(
+            spec,
+            token="hf_synthetic",
+            policy=Policy(),
+            publication_policy=cast("er.PublicationPolicy", cast("object", policy)),
+            reader=Reader(),
+            output_dir=directory,
+            writer=writer,
+        )
+    assert not any(json.loads(line)["kind"] == "end" for line in progress.read_text().splitlines())
+    assert len(hub.commits) == (1 if case in ("commit_failed", "receipt_denied") else 0)
+    if case == "receipt_denied":
+        evidence = json.loads((directory / "publication-attempt.json").read_text())
+        assert evidence["status"] == "uploaded_pending_receipt"
+        assert evidence["commit_sha"] == "d" * 40
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_upload_retains_known_commit_without_success_or_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = publication_spec()
+    policy, hub = PublicationFake(spec), PublicationHubFake()
+    hub.release = asyncio.Event()
+
+    def factory(**_: object) -> PublicationHubFake:
+        return hub
+
+    monkeypatch.setattr(er, "HFHubClient", factory)
+    task = asyncio.create_task(
+        er.run_evaluation(
+            spec,
+            token="hf_synthetic",
+            policy=Policy(),
+            publication_policy=cast("er.PublicationPolicy", cast("object", policy)),
+            reader=Reader(),
+            output_dir=tmp_path,
+        )
+    )
+    await asyncio.wait_for(hub.started.wait(), timeout=10)
+    task.cancel()
+    hub.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    evidence = json.loads((tmp_path / "publication-attempt.json").read_text())
+    assert evidence["status"] == "uploaded_after_cancellation"
+    assert evidence["commit_sha"] == "d" * 40
+    assert not any(event.startswith("receipt:") for event in policy.events)
+
+
+@pytest.mark.asyncio
+async def test_installed_entrypoint_requires_private_bound_authority() -> None:
+    spec = EvalSpec.model_validate(spec_data())
+    with pytest.raises(EvaluationError, match="custody_policy_unavailable"):
+        await er.execute_evaluation(spec, secrets=RunSecrets())
+    with pytest.raises(EvaluationError, match="authority_frame_invalid"):
+        await er.execute_evaluation(spec, secrets=RunSecrets(eval_authority=SecretStr("not-json")))
+
+
+@pytest.mark.asyncio
+async def test_installed_entrypoint_uses_only_fixed_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = EvalSpec.model_validate({**spec_data(), "run_id": "a" * 32})
+    seen: list[object] = []
+    sentinel = object()
+
+    class FixedAdapter:
+        def __init__(self, authority: object, *, token: str | Literal[False]) -> None:
+            seen.extend((authority, token))
+
+        async def __aenter__(self) -> object:
+            return sentinel
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+    async def run(actual_spec: EvalSpec, **kwargs: object) -> object:
+        seen.append((actual_spec, kwargs))
+        return None
+
+    monkeypatch.setattr(er, "EvaluationPolicyRPC", FixedAdapter)
+    monkeypatch.setattr(er, "run_evaluation", run)
+    raw = json.dumps(
+        {
+            "version": 1,
+            "run_id": spec.run_id,
+            "spec_sha256": spec.digest(),
+            "policy_origin": "https://policy.example",
+            "worker_credential": "strata_worker_" + "x" * 43,
+        }
+    )
+    await er.execute_evaluation(spec, secrets=RunSecrets(eval_authority=SecretStr(raw)))
+    assert seen[1] is False
+    assert seen[2] == (
+        spec,
+        {"token": False, "policy": sentinel, "publication_policy": sentinel, "writer": None},
     )
