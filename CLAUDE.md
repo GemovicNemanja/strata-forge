@@ -6,6 +6,8 @@ Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`. If a module
 
 Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` for Cursor's rule engine, mirroring the relevant sections of this file.
 
+For the user-requested platform rework, start at [`plans/strata-rework/README.md`](plans/strata-rework/README.md), then read the central task registry, shared contracts and coordination rules before claiming work. This internal execution packet is user-authorized planning material; public API documentation continues to describe implemented behavior. Codex owns platform implementation and redesign; all custom-model data and experiments are reserved for Claude Code. Preserve module rules, secret boundaries and the existing exact tool-design sign-off gate before integration merges.
+
 ---
 
 ## 1. North star and non-goals
