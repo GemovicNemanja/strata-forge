@@ -92,7 +92,7 @@ this leaf without introducing a training-to-evaluation dependency.
 **Does NOT:** Implement the trainer scripts themselves — those live in `strata_forge.training` and are shipped as artifacts to remote machines.
 
 ### `strata_forge.training`
-**Owns:** TRL `SFTTrainer` wrapper, preference tuning (DPO/ORPO/KTO/GRPO), PEFT (LoRA/QLoRA), chat-template formatting, sequence packing, trainer entry-point scripts.
+**Owns:** TRL `SFTTrainer` wrapper, preference tuning (DPO/ORPO/KTO/GRPO), PEFT (LoRA/QLoRA), chat-template formatting, sequence packing, and the primary-classifier SDK over resolved objects with fixed head initialization and complete safe local reload. Compute-target workers compose these primitives in `pipelines`; training never imports those workers or evaluation runners.
 
 **Does NOT:** Launch remote jobs — that's `strata_forge.compute`.
 
