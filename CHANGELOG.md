@@ -54,6 +54,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Fixed
 
+- Evaluation policy RPCs retry only HTTP 503 and transport timeouts, with at most three exact
+  requests inside one 30-second budget. Each attempt clears cookies; permanent denials,
+  malformed replies and cancellation never trigger retries. Receipt recovery replays the same
+  immutable binding without repeating Hub mutations.
+
 - HF classifier and label-logit loads request and validate loading information, refusing any
   missing body/head weights or structural diagnostics before dataset materialization. A
   reusable private guard produces bounded name/count/code audits; scoring manifests preserve

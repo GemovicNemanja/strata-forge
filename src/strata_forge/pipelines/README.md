@@ -11,6 +11,8 @@ the standalone command refuses access without one. A caller's `sealed=false` is 
 Policy implementations belong to installed trusted code, outside the serialized spec. The fixed
 entrypoint consumes a run/spec-bound `STRATA_EVAL_AUTHORITY` frame only from the private Task
 secrets file. It contacts the fixed server policy endpoints without cookies or redirects.
+Transient HTTP 503 and transport timeouts permit at most three identical requests within one
+30-second budget. Denials and invalid replies refuse immediately; cancellation propagates.
 
 Publication requires separate destination authority: fresh private/custody/canonical readback,
 atomic create-only handling or an existing expected parent, an expected-parent commit, and an

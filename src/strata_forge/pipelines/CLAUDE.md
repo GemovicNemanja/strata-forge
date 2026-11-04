@@ -29,6 +29,8 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   Accept the actual CommitRef receipt before success; retain unknown outcomes on interruption.
   Never invent a SHA or overwrite local attempt evidence. No spec-controlled policy import,
   environment/argv authority, redirect/cookie authentication or credential diagnostics.
+  Policy RPC retries are limited to identical requests after HTTP 503 or transport timeouts,
+  at most three attempts inside one 30-second budget; never retry denials or Hub mutations.
 - Coroutine cancellation does not terminate a model thread. Supervised process-group teardown
   remains required. Local attempt completion is not an immutable publication receipt.
 - Tests use synthetic rows/fake policy/model/Hub plus real local Parquet; no pretrained downloads.

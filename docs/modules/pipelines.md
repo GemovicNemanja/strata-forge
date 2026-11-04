@@ -167,6 +167,12 @@ The adapter POSTs only `/api/internal/evaluation-policy/read` and
 version, run and spec bindings. Read replies also match the exact typed pin. Requests use only
 the run-scoped Bearer credential, no cookies, ambient proxy credentials or redirects; JSON
 requests are capped at 4096 bytes, replies at 16384 bytes, and each call at 30 seconds overall.
+Within that same overall budget, HTTP 503 and HTTP transport timeouts permit at most three
+identical attempts, separated by 0.25 and 0.5 seconds. Every attempt clears cookies and reuses
+the exact encoded body, origin/path and run-scoped credential. Permission denials, other status
+codes, redirects, other transport errors and invalid replies are never retried; cancellation
+propagates. A lost receipt reply can replay the same immutable receipt, without repeating the
+Hub creation or content commit. These retries never renew a grant or bypass fresh server checks.
 Malformed, unknown, denied or mismatched replies refuse with fixed errors. Server expiry,
 terminal/cancellation checks, fresh custody resolution and active Run fences remain required
 server responsibilities; the private frame itself is not a portable signed authorization.
