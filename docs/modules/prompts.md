@@ -356,3 +356,7 @@ calls and compare `rendered.split.stable_text`. If they differ, a
 stable variable is changing per call (it shouldn't be — that's why
 `stable_variables` is structurally separate). The `stable_digest` is
 the canonical comparison.
+
+## Modular composition contract
+
+[ADR 0023](../architecture/adr/0023-portable-modular-prompt-composition.md) freezes the Python-authoritative [portable modular contract](../contracts/modular-prompts-v1.md). This is an implementation contract; it does not replace the existing Jinja2 API or claim an installed modular compiler. Persistence and publication belong to the server.
