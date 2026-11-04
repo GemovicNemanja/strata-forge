@@ -6,6 +6,19 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
 
 - Specs reject extra fields. Fixed installed commands consume data, never executable imports,
   callbacks, shell strings or repo-supplied code. Preserve the engine-version handshake.
+- Primary classifier specs are separate from registry activation. Require an installed
+  training-purpose authority and streamed row bytes; enforce count/byte/range bounds BEFORE
+  parsing later rows. No Eval credential or environment policy fallback. Keep prototype bounds
+  distinct from scientific populations and preserve final-only/no-adapter/no-publication scope.
+- Recognized pinned Forge classifiers reload complete SDK state. Stored single-sequence render
+  metadata must match original/effective/SDK digests, labels, family and length; stored tokens
+  are initialization provenance, never label-logit evaluation parameters. Do not loosen native
+  paired behavior or accept malformed sidecars through fallback. Cancellation cannot let a
+  later native thread emit final worker success; transport termination/fences remain separate.
+- Preflight exact-pin metadata sizes before download and check actual regular-file sizes before
+  bounded local copies. Unsupported/unknown preflight refuses without unbounded fallback. Count
+  every lazy-tree file/folder and stop at cap+1 before later pages/assets; do not eagerly exhaust
+  a repository listing. Distinguish advertised metadata limits from hard HTTP wire-byte limits.
 - `evaluation_spec.EvalSpec` is the sole classification-evaluation schema, including semantic
   validators beyond JSON Schema. Consumers import it; they do not independently guess a mirror.
 - Evaluation authorizes every exact ref through a trusted `ReadPolicy` before preparing models
@@ -29,6 +42,8 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   Accept the actual CommitRef receipt before success; retain unknown outcomes on interruption.
   Never invent a SHA or overwrite local attempt evidence. No spec-controlled policy import,
   environment/argv authority, redirect/cookie authentication or credential diagnostics.
+  Policy RPC retries are limited to identical requests after HTTP 503 or transport timeouts,
+  at most three attempts inside one 30-second budget; never retry denials or Hub mutations.
 - Coroutine cancellation does not terminate a model thread. Supervised process-group teardown
   remains required. Local attempt completion is not an immutable publication receipt.
 - Tests use synthetic rows/fake policy/model/Hub plus real local Parquet; no pretrained downloads.

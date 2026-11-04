@@ -29,6 +29,8 @@ _PREFIX = "/api/internal/evaluation-policy"
 _TOKEN = re.compile(r"strata_worker_[A-Za-z0-9_-]{43}")
 _SHA = re.compile(r"[a-f0-9]{40}")
 _MAX_RESPONSE = 16_384
+_RPC_SECONDS = 30.0
+_RPC_BACKOFF = (0.25, 0.5)
 
 
 class _Strict(BaseModel):
@@ -249,38 +251,66 @@ class EvaluationPolicyRPC:
         encoded = json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")
         if len(encoded) > 4096 or self._client is None:
             raise EvaluationError("authority_request_invalid")
-        self._client.cookies.clear()
-        self._client.headers.pop("Cookie", None)
+        url = self.authority.policy_origin + _PREFIX + path
+        headers = {
+            "Authorization": "Bearer " + self.authority.worker_credential.get_secret_value(),
+            "Content-Type": "application/json",
+            "Accept-Encoding": "identity",
+        }
         result: Response | None = None
         error = "authority_rpc_failed"
         try:
-            async with (
-                asyncio.timeout(30),
-                self._client.stream(
-                    "POST",
-                    self.authority.policy_origin + _PREFIX + path,
-                    content=encoded,
-                    headers={
-                        "Authorization": "Bearer "
-                        + self.authority.worker_credential.get_secret_value(),
-                        "Content-Type": "application/json",
-                        "Accept-Encoding": "identity",
-                    },
-                    follow_redirects=False,
-                    auth=None,
-                ) as response,
-            ):
-                if response.status_code != 200:
-                    error = "authority_rpc_denied"
-                elif response.headers.get("content-encoding", "identity") != "identity":
-                    error = "authority_response_invalid"
-                else:
-                    data = bytearray()
-                    async for chunk in response.aiter_bytes(chunk_size=4096):
-                        if len(data) + len(chunk) > _MAX_RESPONSE:
-                            raise EvaluationError("authority_response_too_large")
-                        data.extend(chunk)
-                    result = response_type.model_validate_json(bytes(data))
+            async with asyncio.timeout(_RPC_SECONDS):
+                for attempt in range(len(_RPC_BACKOFF) + 1):
+                    result = None
+                    self._client.cookies.clear()
+                    self._client.headers.pop("Cookie", None)
+                    retry = False
+                    retryable_timeout = True
+                    try:
+                        async with self._client.stream(
+                            "POST",
+                            url,
+                            content=encoded,
+                            headers=headers,
+                            follow_redirects=False,
+                            auth=None,
+                        ) as response:
+                            if response.status_code == 503:
+                                error, retry = "authority_rpc_denied", True
+                            elif response.status_code != 200:
+                                retryable_timeout = False
+                                error = "authority_rpc_denied"
+                            elif response.headers.get("content-encoding", "identity") != "identity":
+                                retryable_timeout = False
+                                error = "authority_response_invalid"
+                            else:
+                                data = bytearray()
+                                try:
+                                    async for chunk in response.aiter_bytes(chunk_size=4096):
+                                        if len(data) + len(chunk) > _MAX_RESPONSE:
+                                            retryable_timeout = False
+                                            raise EvaluationError("authority_response_too_large")
+                                        data.extend(chunk)
+                                except httpx.TimeoutException:
+                                    # httpx closes after EOF inside its iterator; that cleanup
+                                    # timeout must not turn a complete reply into a retry.
+                                    if response.is_closed:
+                                        retryable_timeout = False
+                                    raise
+                                retryable_timeout = False
+                                result = response_type.model_validate_json(bytes(data))
+                    except httpx.TimeoutException:
+                        result, retry = None, retryable_timeout
+                        if retry:
+                            error = "authority_rpc_failed"
+                    except Exception:
+                        result, retry = None, False
+                    if not retry or attempt == len(_RPC_BACKOFF):
+                        break
+                    await asyncio.sleep(_RPC_BACKOFF[attempt])
+        except TimeoutError:
+            error, result = "authority_rpc_failed", None
         except Exception:
             result = None
         if result is None:

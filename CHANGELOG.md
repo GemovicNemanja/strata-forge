@@ -10,6 +10,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Strict primary-classifier worker API requires training-purpose read authority and streamed,
+  incrementally bounded rows. Final safe exports reload through installed scoring, including
+  decoder single-sequence rendering bound to unchanged model metadata. Full class probabilities
+  remain distinct from initialization verbalizers. Registry, dispatch and publication stay separate.
+
 - Async primary-classifier SDK over resolved native models/tokenizer/rows, with ordinary CE
   default and explicit Brier objectives. Trusted encoder/decoder initialization records exact
   transforms and step-zero parity, including nonzero LM bias and pad=EOS pooling. Final-only
@@ -59,6 +64,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   safetensors models offline. Serving declares bounded direct scoring dependencies.
 
 ### Fixed
+
+- Evaluation policy RPCs retry only HTTP 503 and transport timeouts, with at most three exact
+  requests inside one 30-second budget. Each attempt clears cookies; permanent denials,
+  malformed replies and cancellation never trigger retries. Receipt recovery replays the same
+  immutable binding without repeating Hub mutations.
 
 - HF classifier and label-logit loads request and validate loading information, refusing any
   missing body/head weights or structural diagnostics before dataset materialization. A

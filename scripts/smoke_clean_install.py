@@ -891,6 +891,7 @@ def check_scoring_models() -> None:
             tokenizer.pad_token_id = tokenizer_pad
             classifier.config.pad_token_id = model_pad
             with (
+                patch("strata_forge.pipelines._scoring.probe_forge_classifier", return_value=None),
                 patch.object(transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
                 patch.object(
                     transformers.AutoModelForSequenceClassification,
