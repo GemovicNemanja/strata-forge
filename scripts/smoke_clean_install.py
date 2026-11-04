@@ -506,9 +506,15 @@ def check_scoring_models() -> None:
 
     # These extras are deliberately inspected at runtime: this is the upstream API probe,
     # not a dependency of importing this script or of its pure-spec unit tests.
-    torch: Any = importlib.import_module("torch")
-    transformers: Any = importlib.import_module("transformers")
-    tokenizers: Any = importlib.import_module("tokenizers")
+    try:
+        torch: Any = importlib.import_module("torch")
+        transformers: Any = importlib.import_module("transformers")
+        tokenizers: Any = importlib.import_module("tokenizers")
+    except ImportError as exc:
+        raise ImportError(
+            "HF scoring model smoke requires torch, transformers and tokenizers; "
+            "install 'strata-forge[serving]'."
+        ) from exc
     set_seed(0)
     vocab = {
         "[PAD]": 0,

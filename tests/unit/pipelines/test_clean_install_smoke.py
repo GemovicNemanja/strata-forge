@@ -148,12 +148,30 @@ def test_install_check_refuses_a_source_tree_import() -> None:
         smoke.check_install()
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("torch") is None or importlib.util.find_spec("transformers") is None,
-    reason="actual tiny-model CPU regression requires optional torch and transformers",
-)
 def test_actual_tiny_models_cover_decoder_classifier_padding_and_local_shadow() -> None:
+    if (
+        importlib.util.find_spec("torch") is None
+        or importlib.util.find_spec("transformers") is None
+    ):
+        with pytest.raises(ImportError, match=r"strata-forge\[serving\]"):
+            smoke.check_scoring_models()
+        return
     smoke.check_scoring_models()
+
+
+def test_model_smoke_dependency_absence_has_an_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = importlib.import_module
+
+    def without_torch(name: str) -> object:
+        if name == "torch":
+            raise ImportError("synthetic dependency absence")
+        return real_import(name)
+
+    monkeypatch.setattr(smoke.importlib, "import_module", without_torch)
+    with pytest.raises(ImportError, match=r"strata-forge\[serving\]"):
+        smoke.check_scoring_models()
 
 
 class TestOverride:
