@@ -33,6 +33,14 @@ until ``train()`` is called.
 
 ## Boundaries
 
+- `_load_guard.py` is a private pure checkpoint-report leaf, importing only core errors and
+  Pydantic. Trained-artifact consumers request `output_loading_info=True`, unpack and validate
+  its tuple, and refuse every structural diagnostic before executing a model. Never add a
+  head exemption to inference. Its bounded audit contains names/counts/fixed codes, never raw
+  warning or error text. `HeadKeyDecision` is only an exact comparison; training still needs
+  a trusted registry initializer and receipt. Decoder initialization requires
+  `decoder_logit_head`. Keep the helper's contract in `docs/modules/training.md` synchronized.
+
 - **Owns:** ``sft.py``, ``preference.py``, ``peft.py``,
   ``chat_template.py``, ``packing.py``, ``methods.py``,
   ``dataset_format.py``.

@@ -158,6 +158,39 @@ delivered, to every load, including the merge step's base model,
 adapter and tokenizer, so a run never falls back to a credential
 the machine happens to hold.
 
+### Checkpoint completeness guard
+
+`training._load_guard` is a private reusable leaf that imports only core errors and Pydantic.
+Its trained-artifact guard consumes the `(model, loading_info)` result of a model load made
+with `output_loading_info=True`. Missing or malformed reports, unknown report fields, missing
+weights (including heads), unexpected weights, mismatches, nonempty error messages, and
+reported conversion errors are refused with `ModelLoadingError` before model execution.
+
+`LoadingAudit` is frozen and serializable. It retains fixed codes and counts, and at most 32
+parameter names per category, each at most 192 characters. Refusal messages include at most
+four names. Raw upstream messages, tensor values, shape payloads, and conversion-error text
+are excluded. Category counts and explicit `missing_omitted` / `unexpected_omitted` /
+`mismatched_omitted` counts retain omitted names; a truncated audit cannot authorize initialization.
+The inspected Transformers 5.8.1 `LoadStateDictInfo.to_dict()` omits `conversion_errors`; audits
+record `conversion_diagnostics="not_returned"` for that result. Supplied conversion diagnostics
+are checked. No alias, suffix, or tied-key conversion is inferred beyond the upstream report.
+
+`HeadKeyDecision` only compares complete observed missing/unexpected sets with exact declared
+created/removed keys. It is not a load exemption or an initializer receipt. A future training
+consumer must resolve an internal trusted initializer registry ID and record a receipt proving
+those exact parameters were initialized; a job spec cannot supply a callable, import path, or
+arbitrary key allowance. A decoder decision requires the ID `decoder_logit_head`. Intentional
+discarded keys need their own exact declaration; no broad unexpected-key allowance exists.
+
+The [HF scoring engines](compute.md#exact-hugging-face-scoring) consume this guard and record
+their accepted loading audit and pad policy. SFT/preference and merge loads retain their
+existing explicit loading flags; this helper does not silently change those consumers or
+introduce a classification training path. Their guard and initializer integration requires
+its own implementation. Synthetic CPU tests use complete and damaged local checkpoints,
+refuse missing body/head weights, and accept a fully saved checkpoint after explicit head
+initialization. These tests do not download pretrained models or reproduce a different
+Transformers/Torch version's conversion behavior.
+
 ## Preference tuning
 
 Each method has its own config class so the type hints reflect
@@ -517,6 +550,14 @@ JSONL line, read via `Backend.read_file` — see
 [ADR 0016](../architecture/adr/0016-backend-read-file.md)). Beyond the step counters it carries two
 things a run *watcher* needs, decided in
 [ADR 0017](../architecture/adr/0017-run-telemetry-on-the-progress-channel.md).
+
+`ProgressEvent` also accepts optional `output_ref` and `input_refs` for immutable artifact
+provenance. Values are bounded canonical `repo@<full lowercase 40-character SHA>` strings;
+input keys are `model` and `dataset`. They remain separate from numeric metrics and from
+`message`, which existing consumers use as a result destination. Scoring fills them with
+resolved input revisions and the actual returned output commit. Older events omit them or
+read as `None` / `{}`; consumers must use the engine version they validated before accepting
+an event-schema extension.
 
 **`stage` — where the run is, as an id.** One of `RUN_STAGES`:
 

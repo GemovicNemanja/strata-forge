@@ -125,8 +125,13 @@ class TestPlan:
     def test_inference_leg_checks_serving_and_no_training(self) -> None:
         names = self._names("serving,storage,hf")
         assert "inference spec, requests and results" in names
+        assert "HF scoring specs and rendered pairs" in names
+        assert "tiny safetensors classifiers and label logits (offline)" in names
         assert "vllm accepts the serving command line" in names
         assert not any(name.startswith("finetune ") for name in names)
+
+    def test_scoring_specs_are_built_without_model_downloads(self) -> None:
+        smoke.check_scoring_specs()
 
     def test_all_expands_to_every_declared_extra(self) -> None:
         extras = smoke.selected_extras("all")
@@ -151,6 +156,32 @@ def test_install_check_refuses_a_source_tree_import() -> None:
     # exactly the situation in which the smoke would prove nothing about a clean install.
     with pytest.raises(smoke.SmokeError, match="not from an installed distribution"):
         smoke.check_install()
+
+
+def test_actual_tiny_models_cover_decoder_classifier_padding_and_local_shadow() -> None:
+    if (
+        importlib.util.find_spec("torch") is None
+        or importlib.util.find_spec("transformers") is None
+    ):
+        with pytest.raises(ImportError, match=r"strata-forge\[serving\]"):
+            smoke.check_scoring_models()
+        return
+    smoke.check_scoring_models()
+
+
+def test_model_smoke_dependency_absence_has_an_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = importlib.import_module
+
+    def without_torch(name: str) -> object:
+        if name == "torch":
+            raise ImportError("synthetic dependency absence")
+        return real_import(name)
+
+    monkeypatch.setattr(smoke.importlib, "import_module", without_torch)
+    with pytest.raises(ImportError, match=r"strata-forge\[serving\]"):
+        smoke.check_scoring_models()
 
 
 class TestOverride:

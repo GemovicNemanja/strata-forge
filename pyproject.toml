@@ -74,7 +74,15 @@ compute = ["skypilot>=0.7,<1", "asyncssh>=2.18,<3"]
 # this package calls: 0.24 is the first release on the transformers>=5.5.3 line that `finetuning`
 # also targets, and every vLLM minor pins torch exactly. Keep in lockstep with compute/serving.py's
 # default setup string, which installs vLLM without consulting this file.
-serving = ["vllm>=0.24,<1"]
+serving = [
+    "vllm>=0.24,<1",
+    # HF scoring calls these directly rather than relying on vLLM's transitive dependencies.
+    # Keep compatible with the fine-tuning stack so [all] has a common supported range.
+    "torch>=2.9,<3",
+    "transformers>=5.5.3,<6",
+    "sentencepiece>=0.2,<0.3",
+    "protobuf>=5,<7",
+]
 bedrock = ["boto3>=1.35,<2"]
 storage = [
     # Do NOT raise the s3fs/gcsfs floors: `datasets` caps fsspec, and the 2026.7+ line of these two
