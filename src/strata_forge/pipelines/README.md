@@ -5,6 +5,12 @@ or computes exact Hugging Face classifier/label-token scores. Fine-tuning dispat
 methods and dataset shapes. Evaluation scores pinned prediction tables or native classifiers,
 reports each declared dataset population separately, and writes Parquet plus versioned JSON.
 
+Primary classifier execution is a separate trusted-Python API in `classifier_runner`, with a
+strict `ClassifierTrainSpec`, required training-purpose authority and streamed byte-bounded
+rows. It reuses the resolved-object SDK and safe installed artifact reload. No method registry,
+CLI, Task-secret transport, server dispatch, publication or resume is enabled. Prototype row
+budgets are 2 MiB per item/64 MiB cumulative and refuse instead of returning a prefix.
+
 `strata_forge.pipelines.evaluation_spec.EvalSpec` is the authoritative evaluation schema.
 `strata_forge.pipelines.eval_runner.run_evaluation` requires a trusted, pin-bound read policy;
 the standalone command refuses access without one. A caller's `sealed=false` is never a grant.

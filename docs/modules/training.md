@@ -625,3 +625,68 @@ premise/hypothesis evaluation renderer, with no model/dataset I/O. Templates rep
 `{premises}` and `{hypothesis}`; numbered LF text or compact UTF-8 JSON is deterministic.
 Declared premise/token/character limits describe this renderer's supported shape; refusal
 never slices a hypothesis. See [pipeline workers](pipelines.md) for overrides and artifacts.
+
+
+## Primary classifier SDK
+
+`ClassifierConfig`, `ClassifierExample`, `ClassifierRunner`, `initialize_classifier` and
+`load_classifier` provide a primary classification path over already-resolved Python objects.
+They perform no Hub fetch, upload or remote launch. ML imports are lazy under `[finetuning]`.
+The SDK is independent of the live method registry: `seq_cls` and `nli_pair` worker dispatch
+remain unavailable, and evaluation-worker credentials do not authorize training.
+
+`ClassifierConfig(labels=(...))` preserves explicit label order. The default is ordinary hard/
+soft cross-entropy. `objective="ce_brier"` requires an explicit positive `brier_weight`;
+`research_ce_brier(labels=...)` explicitly selects CE+0.1 sum-form Brier. Integer labels need
+`label_index_map`; aliases are declared. Soft distributions must be complete, finite and sum
+to one without repair. Nontrivial sample weights, class weights, smoothing, auxiliary roles
+and grouped/masked NLI binary objectives are unsupported and refuse. Explicit generic two-class
+CE does not imply a research entail-vs-not objective.
+
+Examples contain exact unique string item IDs, text, optional encoder text pair and a label;
+optional soft target distributions follow configured label order. `from_verifier` uses the
+same `VerifierConfig` renderer as evaluation, retains the premises/hypothesis and verifies
+rendering again during preparation. Declaring rendering while supplying unrelated text refuses.
+Overflow is `error` or explicit `drop`, retaining IDs/counts; hypotheses are never clipped.
+At most 100,000 rows and the existing declared rendering limits are supported in this slice.
+
+`await initialize_classifier(source, labels=..., initializer_id=...)` accepts a native
+`BertModel` with pooler for `encoder_random_head`, or `GPT2LMHeadModel`/
+`ModernBertDecoderForCausalLM` for `decoder_logit_head`. It copies body state strictly and
+refuses undeclared source keys. Decoder callers provide explicit unique single-token
+`verbalizer_ids` in label order and an `equivalence_inputs` batch containing input IDs and
+attention mask. Tokenizer/verbalizer resolution is the caller's responsibility; the receipt
+records actual IDs rather than guessing strings. No source checkpoint provenance is asserted:
+these are caller-resolved objects, and the receipt is not an inference load exemption.
+
+The fixed decoder wrapper copies the actual output projection and any output bias. The
+ModernBertDecoder adapter also copies LM dense/norm transformations without silently changing
+classifier/dense bias configuration. Last-attended-token pooling handles actual EOS inputs
+when EOS is also the pad ID. Step-zero comparison disables dropout and requires restricted
+probabilities to agree within `atol=1e-6, rtol=1e-5`, recording maximum probability error.
+Decoder paired/token-type input is unsupported. Native body attention supports eager/SDPA;
+other implementations must pass native support checks rather than invoking remote code.
+
+`await ClassifierRunner(config).train(initialized=..., tokenizer=..., rows=(...),
+output_dir=Path(...))` runs Transformers Trainer off the event loop. Typed controls include
+max steps/epochs, seed, batch size, LR/scheduler/warmup, FP32/BF16, gradient checkpointing and
+CPU selection. A tokenizer pad ID is required. The supported checkpoint policy is `final`;
+metric selection requires a separate implementation, and a selection split marked gate/test
+is specifically refused. Named training evaluation, bucketing, resume, adapters, auxiliary
+heads, calibration and abstention are not provided by this SDK slice.
+
+An output directory is reserved for one attempt and never overwritten. The `artifact` child
+contains safe model/config/tokenizer files plus `strata_classifier.json` (version 1, exact
+objective/initialization/selection/environment). Rendering metadata is copied when declared.
+Metadata is capped at 64 KiB before optimization; overflow audit includes bounded IDs/counts,
+while the SDK result retains the complete dropped-ID tuple. No checkpoints, optimizer state
+or pickled Trainer arguments are exported. `await load_classifier(Path(...))` resolves only
+local files, fixed installed model classes and complete safetensors, with remote code disabled.
+Missing, unexpected or mismatched weights refuse even when an initialization receipt exists.
+Decoder artifacts require this Forge loader; live `hf_classify` dispatch does not yet support
+the wrapper. No calibration or end-to-end worker claim follows from a local artifact.
+
+Cancellation requests cooperative stop at the next optimizer step and withholds artifact
+export if observed before export; an in-flight native operation cannot be forcibly terminated
+by cancelling its coroutine. Process supervision remains necessary. SDK seeds are process-wide;
+concurrent training jobs should use isolated processes for reproducible RNG streams.
