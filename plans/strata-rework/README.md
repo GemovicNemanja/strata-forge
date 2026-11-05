@@ -276,6 +276,10 @@ cross-repo acceptance, not satisfied by a local runner.
 
 ## TRAIN-001 — sequence classification and the complete verifier output
 
+**Bounded authority review.** The [classifier authority packet](drafts/classifier-authority-review.md)
+proposes purpose-separated read-only integration against the frozen primary-classifier worker.
+It neither implements nor resolves the broader scientific/output target below.
+
 **Scope authority.** Use signed phase-P5, which extends the older spec's incomplete output
 heads. The deliverable is 3-way strict deduction plus separate inconsistency flag,
 per-premise support scores and fitted abstention, for encoder and decoder-head variants.
