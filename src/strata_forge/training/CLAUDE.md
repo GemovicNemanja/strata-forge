@@ -44,6 +44,15 @@ unsupported registry/worker/adapter/calibration capabilities unavailable rather 
 
 ## Boundaries
 
+- `verifier_loss.py` is a synchronous, deterministic numerical leaf: fixed
+  `verifier_grouped_aux_v1` over caller-supplied tensors and strict resolved targets. This
+  pure differentiable calculation is synchronous so a caller's optimizer can consume its
+  graph; it performs no I/O or scheduling. Import Torch only inside numerical operations,
+  never Transformers. Preserve null-derived masks, explicit E/C/U order, complete-batch
+  denominators, graph-connected empty auxiliary zeros and row-first support means. Do not
+  infer dataset roles, marker positions, model heads or distributed reductions here. The
+  existing generic classifier and its primary CE/Brier paths remain independent.
+
 - `_load_guard.py` is a private pure checkpoint-report leaf, importing only core errors and
   Pydantic. Trained-artifact consumers request `output_loading_info=True`, unpack and validate
   its tuple, and refuse every structural diagnostic before executing a model. Never add a
@@ -156,6 +165,9 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   ``datasets`` are faked via ``sys.modules`` injection — no
   real ML imports in unit tests.
 - Coverage target: ≥ 90 % line.
+- Supplied-logit loss tests may use fabricated CPU tensors and autograd directly, with no
+  model/tokenizer/checkpoint or training run. Prove the declared numbers and gradients,
+  fixed errors and ML-free module imports separately from any model/worker acceptance.
 - Live integration tests (``@pytest.mark.live``) that exercise
   TRL against a tiny model can land in Phase 9.
 

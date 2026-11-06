@@ -690,3 +690,59 @@ Cancellation requests cooperative stop at the next optimizer step and withholds 
 export if observed before export; an in-flight native operation cannot be forcibly terminated
 by cancelling its coroutine. Process supervision remains necessary. SDK seeds are process-wide;
 concurrent training jobs should use isolated processes for reproducible RNG streams.
+
+## Supplied-logit verifier loss
+
+`strata_forge.training.verifier_loss` is a separate synchronous numerical API. Importing it
+requires no ML extra; calling `research_verifier_loss` requires Torch from `[finetuning]`.
+It does not import Transformers, initialize a model, parse dataset roles or activate training.
+The stable preset ID is `verifier_grouped_aux_v1`; ordinary `ClassifierConfig` still defaults
+to CE and the explicit primary `research_ce_brier` path retains its own behavior.
+
+```python
+from strata_forge.training.verifier_loss import (
+    EntailmentTarget, ResearchLossRow, ThreeWayTarget, research_verifier_loss,
+)
+
+rows = (
+    ResearchLossRow(primary=ThreeWayTarget(label_dist=(1.0, 0.0, 0.0))),
+    ResearchLossRow(primary=EntailmentTarget(entailment_target=0)),
+)
+terms = research_verifier_loss(primary_logits, class_order=("E", "C", "U"), rows=rows)
+# The caller owns these logits and the optimizer. terms.total retains its gradient graph.
+```
+
+Supply one floating `[B,3]` primary tensor and an explicit permutation of the semantic class
+names `E`, `C`, `U`. Three-way distributions follow that supplied order, are complete/finite
+and sum to one within 1e-6 without normalization. Two-way targets are strict integer 0/1:
+positive is E and negative is C+U. Stable log-softmax/log-sum-exp computes grouped CE;
+two-way Brier is the two-component sum `2*(p(E)-t)**2`. Every primary row contributes
+`CE + 0.1*sum_Brier`, averaged over the actual supplied batch row count.
+
+`ResearchLossRow.flag_target` is bool or null. Null excludes a row; false is a supervised
+negative. If any row is eligible, supply floating `flag_logits[B]`; BCE-with-logits averages
+only eligible rows. `support_set` is an exact subset of that row's unique ordered
+`premise_ids`. Null excludes support supervision; an empty set over a nonempty premise list
+is eligible all-negative supervision. Supply `support_logits` as a tuple of floating `[P_i]`
+tensors aligned to each row's IDs. Each eligible row first averages its own premise BCE,
+then those row means are averaged, so longer premise lists do not receive more row weight.
+An eligible zero-premise support row refuses because its mean is undefined.
+
+The total is `primary + flag + support`, with fixed auxiliary coefficients 1.0. Missing
+eligible logits, malformed targets, nonfinite/non-floating or wrong-shaped tensors, device
+mismatch and duplicate/unknown support IDs refuse. A wholly unlabeled auxiliary term is
+exact graph-compatible zero, with denominator 0 and zero gradients for supplied unused
+logits. Half/BF16 logits accumulate in FP32; FP64 inputs preserve FP64. IDs are row-local;
+the helper never infers token spans, markers or hypothesis conditioning. Its caller supplies
+correctly resolved targets, including the research protocol's null support on U rows.
+
+`ResearchLossTerms` returns differentiable `total`, `primary`, `flag`, `support`, their
+actual primary/flag/support row counts, and `preset_id`. The boundary revalidates frozen
+target instances and returns fixed `VerifierLossError` messages without raw nested errors.
+There are no smoothing, class/sample-weight, temperature or free-coefficient parameters.
+
+These are reductions over one complete supplied batch. Separately averaging distributed
+devices or accumulated microbatches with different eligible counts is not equivalent and
+is not implemented here. Model heads, PID-to-token geometry, worker role mapping,
+calibration/export/scoring of auxiliary heads, larger-population execution and live
+training remain separate contracts. See [the objective decision](../architecture/adr/0025-supplied-verifier-loss.md).

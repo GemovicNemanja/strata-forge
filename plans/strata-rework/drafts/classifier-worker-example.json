@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.3.0+9006b41867f65784c17a59d8f4dbef03aede0266",
+  "run_id": "11111111111111111111111111111111",
+  "method": "seq_cls",
+  "task_type": "SEQ_CLS",
+  "base": {
+    "ref": "fixture/complete-bert-base@1111111111111111111111111111111111111111",
+    "initialization": { "kind": "encoder_random_head" }
+  },
+  "dataset": {
+    "ref": "fixture/classifier-data@2222222222222222222222222222222222222222",
+    "config": "default",
+    "split": "train",
+    "format": "classification_text",
+    "columns": { "item_id": "item_id", "text": "text", "label": "label" },
+    "selection": { "mode": "all", "row_start": 0, "row_end": null, "row_limit": 100000 }
+  },
+  "training": {
+    "labels": ["class_a", "class_b", "class_c"],
+    "objective_preset": "cross_entropy",
+    "label_aliases": {},
+    "label_index_map": {},
+    "max_length": 128,
+    "overflow": "error",
+    "epochs": 1.0,
+    "max_steps": 1,
+    "learning_rate": 0.001,
+    "batch_size": 2,
+    "seed": 7,
+    "precision": "fp32",
+    "gradient_checkpointing": false,
+    "use_cpu": true,
+    "scheduler": "constant",
+    "warmup_steps": 0,
+    "checkpoint_selection": "final",
+    "rendering": null
+  },
+  "adapter": "none",
+  "merge_adapter": false,
+  "output": null,
+  "progress_path": "progress.jsonl"
+}

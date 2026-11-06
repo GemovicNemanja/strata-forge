@@ -276,6 +276,10 @@ cross-repo acceptance, not satisfied by a local runner.
 
 ## TRAIN-001 — sequence classification and the complete verifier output
 
+**Bounded authority review.** The [classifier authority packet](drafts/classifier-authority-review.md)
+proposes purpose-separated read-only integration against the frozen primary-classifier worker.
+It neither implements nor resolves the broader scientific/output target below.
+
 **Scope authority.** Use signed phase-P5, which extends the older spec's incomplete output
 heads. The deliverable is 3-way strict deduction plus separate inconsistency flag,
 per-premise support scores and fitted abstention, for encoder and decoder-head variants.
@@ -589,6 +593,8 @@ files, contract decisions, offline command results, remaining warnings/failures,
 manifests and spend (if authorized), integration state, docs, and next owner. Mark each
 acceptance item as passed, failed or not run. A fake model passing math tests, a job returning
 exit zero, an uploaded file and a usable cross-repo feature are different pieces of evidence.
+
+The [primary classifier worker review](drafts/classifier-worker-review.md) and [inert task contract](drafts/classifier-worker-contract.md) narrow the SDK-to-worker increment, including mandatory safe decoder export→installed scoring→evaluation interoperability. The [example](drafts/classifier-worker-example.json) is fictional design metadata, not an available worker. Training-purpose read authority, guarded model publication and exact app/agent wire are separate reviewed delivery units; no Eval credential or research exception may be reused.
 
 ## Prompt compiler CI publication
 
