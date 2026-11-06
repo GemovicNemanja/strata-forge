@@ -20,7 +20,7 @@ Optional extras pull in the heavy dependencies only when you need them:
 ```bash
 pip install "strata-forge[rag]"        # embeddings, vector store, reranking
 pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
-pip install "strata-forge[serving]"    # vLLM
+pip install "strata-forge[serving]"    # vLLM and exact HF scoring dependencies
 pip install "strata-forge[finetuning]" # torch, transformers, trl, peft, bitsandbytes
 pip install "strata-forge[all]"        # everything
 ```
@@ -65,6 +65,12 @@ installed as `strata-forge`.
 | `strata_forge.compute` | SkyPilot and SSH backends, serving, batch inference |
 | `strata_forge.training` | SFT / DPO / ORPO / KTO / GRPO with PEFT |
 | `strata_forge.pipelines` | Runnable entrypoints executed on a compute target |
+
+The inference pipeline accepts the default `vllm_chat` engine and HF forward-pass engines:
+`hf_classify` scores premise/hypothesis pairs; `hf_label_logits` reads exact single-token label
+probabilities and full-vocabulary outside mass. Both preserve explicit overflow failures and
+write Parquet plus input-commit provenance. See the [scoring contract](docs/modules/compute.md#exact-hugging-face-scoring)
+for required knobs, safe loading, length policy and result artifacts.
 
 ## Documentation
 

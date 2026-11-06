@@ -32,6 +32,21 @@ if TYPE_CHECKING:
 
 
 class TestProgressEvent:
+    def test_pinned_refs_roundtrip_without_becoming_metrics(self) -> None:
+        ref = "org/data@" + "a" * 40
+        event = ProgressEvent(kind="end", output_ref=ref, input_refs={"dataset": ref})
+        parsed = ProgressEvent.model_validate_json(event.model_dump_json())
+        assert parsed.output_ref == ref
+        assert parsed.input_refs == {"dataset": ref}
+        assert parsed.metrics == {}
+
+    @pytest.mark.parametrize(
+        "ref", ["org/data@main", "org/data@abc", "https://hub.example/data@" + "a" * 40]
+    )
+    def test_artifact_refs_require_canonical_full_commits(self, ref: str) -> None:
+        with pytest.raises(ValidationError):
+            ProgressEvent(kind="end", output_ref=ref)
+
     def test_defaults(self) -> None:
         ev = ProgressEvent(kind="step")
         assert ev.kind == "step"
