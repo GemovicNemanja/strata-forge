@@ -114,3 +114,118 @@ This surface applies a supplied T. It does not fit T, choose thresholds, write a
 compute ECE, bootstrap intervals, or impose research acceptance gates.
 
 Module rules: [`src/strata_forge/metrics/CLAUDE.md`](../../src/strata_forge/metrics/CLAUDE.md).
+
+## Two human raters and registered-reference selection
+
+The direct-import `strata_forge.metrics.agreement` module supplies synchronous nominal
+point agreement. It is separate from classifier accuracy and from annotation persistence,
+blinding, authorization and research acceptance. Its functions require only Pydantic, core
+errors and the Python standard library. They read no files, rows, credentials or models.
+No additional package-level or evaluation re-export is registered.
+
+```python
+from strata_forge.metrics.agreement import (
+    HumanRatings, RegisteredReference, pairwise_agreement,
+    reference_prevalence, research_annotation_gate,
+)
+
+labels = ("E", "C", "U")
+a = HumanRatings(
+    rater_id="human-a", rater_kind="human",
+    item_ids=("item-1", "item-2"), ratings=("E", "C"),
+)
+b = HumanRatings(
+    rater_id="human-b", rater_kind="human",
+    item_ids=("item-1", "item-2"), ratings=("E", "U"),
+)
+agreement = pairwise_agreement(a, b, labels=labels)
+references = reference_prevalence(
+    (
+        RegisteredReference(
+            item_id="item-1", solver_gold="E", adjudicated=None,
+            source_ref="declared-solver", version_ref="solver-version-1",
+        ),
+        RegisteredReference(
+            item_id="item-2", solver_gold=None, adjudicated="C",
+            source_ref="declared-adjudication", version_ref="adjudication-version-1",
+        ),
+    ),
+    labels=labels, item_set_ref="registered-item-set-1", reference_version="references-1",
+)
+gate = research_annotation_gate(agreement, references, threshold=0.70)
+assert agreement.percent_agreement.value == 0.5
+assert gate.selected_coefficient == "cohen_kappa"
+assert gate.confidence_method == "not_produced"
+```
+
+`HumanRatings` is frozen, strict and closed. The two rater IDs must be distinct and nonempty.
+The required `rater_kind="human"` is a caller assertion, not evidence of human identity or
+independence. This API refuses model/extra rater metadata instead of pooling it. Each rating
+vector has exactly one declared nonmissing label per unique, nonempty item ID. Both item-ID
+tuples must be identical in order; no joining, reordering or complete-case deletion occurs.
+The explicit class tuple has at least two unique nonempty exact strings, including categories
+that neither rater used. There is no integer-index inference or weighted/ordinal agreement.
+
+`PairwiseAgreement` records ordered labels/IDs, rater IDs, `n`, agreement count and the full
+contingency matrix (rater A rows, rater B columns). `percent_agreement` is a proportion in
+[0, 1], not a number in [0, 100]. All three estimates are retained together:
+
+- `p_o = sum(diagonal_counts) / n`.
+- Kappa chance is `sum(a_c * b_c) / n²`, using the **separate** rater count marginals.
+- AC1 chance is `sum(pbar_c * (1 - pbar_c)) / (K - 1)`, with
+  `pbar_c = (a_c + b_c) / (2*n)` and the complete declared category count K.
+- Each coefficient is `(p_o - p_chance) / (1 - p_chance)`.
+
+These definitions follow Gwet's two-rater formulation and generalized nominal AC1 equations
+37–38 in the [author's 2008 paper](https://agreestat.com/assets/paper-variance-high-agreement-2008.pdf).
+The [author-maintained reference](https://www.stat.ethz.ch/CRAN/web/packages/irrCAC/refman/irrCAC.html#gwet.ac1.raw)
+also explains why available-but-unused categories must remain explicit. The implementation
+uses independently written integer/Fraction arithmetic, with no irrCAC/R code or dependency.
+
+Counts, chance terms and coefficients are exact rational values during computation. Display
+estimates serialize as finite floats. They are not clipped or repaired: negative agreement
+is meaningful. Empty input has `n=0`, null values/chance terms and `reason="empty"` for all
+three estimates. A kappa chance denominator of zero has `value=null`, chance 1 and
+`reason="chance_agreement_one"`; no perfect/zero value is invented. AC1 can remain defined
+beside undefined kappa. Report constructors/JSON validation check the matrix, population and
+derived estimates for consistency. Outputs are frozen and support strict JSON round trips.
+
+### Reference basis and point comparison
+
+Each `RegisteredReference` must provide an item ID, optional `solver_gold`, optional
+`adjudicated`, and nonempty content-free `source_ref`/`version_ref`. Both supplied labels
+must belong to the declared categories. A valid gold label wins even when adjudication
+differs; only a null gold falls back to adjudication. Missing both or malformed gold refuses;
+the helper never obtains a reference from either compared rater. No source body, rationale,
+model opinion or automatic adjudication is accepted.
+
+`reference_prevalence` additionally requires explicit `item_set_ref` and `reference_version`.
+It preserves each chosen label, its `basis`, source/version and exact ordered IDs, with one
+count per complete declared category and the full item denominator. These are supplied
+provenance assertions. The primitive cannot establish registration, solver correctness,
+immutability, access permission or whether independent humans produced the records.
+
+`research_annotation_gate` requires reference and agreement label/ID tuples to match exactly.
+It selects AC1 iff any reference category satisfies integer `5*count >= 4*n`, otherwise
+kappa: 16/20 selects AC1, while 15/20 selects kappa. This selector uses reference counts
+only. It does not alter either coefficient's rater-derived chance term.
+
+`RESEARCH_ANNOTATION_THRESHOLD=0.70` names this helper's configurable default. A supplied
+threshold must be a finite built-in int or float, excluding bool. Comparison is inclusive,
+using the exact rational coefficient and the serialized float threshold's decimal spelling;
+no rounded displayed coefficient or hidden epsilon chooses pass/fail. No threshold changes
+the selector or sets policy for another consumer. A finite threshold outside the coefficient
+range is preserved as caller policy, without clamping.
+
+The returned `AgreementGate` retains both full reports, selected coefficient/value, threshold,
+`passed`, undefined reason and `confidence_method="not_produced"`. A selected undefined kappa
+has `passed=null`, `reason="selected_coefficient_undefined"` and its coefficient reason.
+An empty slice selects nothing and has `passed=null`, `reason="empty"`. These point comparisons
+do not implement a confidence interval, bootstrap, multi-rater method or completed G0/annotation
+gate. Callers must enforce the frozen reference source, role separation and applicable study
+protocol before interpreting them. Function-level refusals use fixed Forge `ValidationError`
+codes without echoing supplied item/rater/source values; input-model validation hides values.
+
+The [synthetic agreement fixture](../../tests/unit/metrics/fixtures/agreement_point_v1.json)
+retains hand-counted rational results, including unequal marginals, negative coefficients
+and a declared unused category. It contains no research annotations or model outputs.
