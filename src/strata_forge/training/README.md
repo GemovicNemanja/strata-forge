@@ -20,3 +20,8 @@ and complete safetensors reload are separate operations. Decoder artifacts use F
 wrapper for exact output bias and answer-position pooling. The SDK performs no Hub or remote
 operations and does not enable a worker method. See the primary-classifier section in the
 training reference for supported families, refusals and the final-only export policy.
+
+`training.verifier_loss` supplies the independent `verifier_grouped_aux_v1` numerical objective
+over caller-supplied logits and resolved targets. It combines grouped entailment-versus-not
+CE/Brier with null-masked flag and per-row support BCE. It does not create heads, parse dataset
+roles or change `ClassifierConfig` defaults. See [the supplied-logit contract](../../../docs/modules/training.md#supplied-logit-verifier-loss).
