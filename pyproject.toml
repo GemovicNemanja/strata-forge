@@ -66,6 +66,8 @@ inspect = ["inspect-ai>=0.3,<0.4"]
 langfuse = ["langfuse>=4.0,<5"]
 hf = ["datasets>=4.0,<6"]
 evals = ["nltk>=3.9,<4", "rouge-score>=0.1.2,<0.2"]
+# NumPy 2.4 supports Python 3.14; it is loaded only for numeric calibration operations.
+scoring = ["numpy>=2.4,<3"]
 rag = ["qdrant-client>=1.13,<2", "rank-bm25>=0.2.2,<0.3", "cohere>=5.13,<8"]
 compute = ["skypilot>=0.7,<1", "asyncssh>=2.18,<3"]
 # vLLM is driven as a CLI (`vllm serve`), so the floor is about what it DRAGS IN rather than an API
@@ -110,7 +112,7 @@ finetuning = [
     "bitsandbytes>=0.49,<1",
 ]
 all = [
-    "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,rag,bedrock]",
+    "strata-forge[redis,multimodal,inspect,compute,serving,storage,finetuning,langfuse,hf,evals,scoring,rag,bedrock]",
 ]
 
 [project.scripts]
@@ -158,6 +160,7 @@ dev = [
     # multimodal helpers, the Redis cache backend, etc. without forcing
     # users to install them in production.
     "pillow>=11.0",
+    "numpy>=2.4,<3",
 ]
 
 # ----------------------------- ruff -----------------------------

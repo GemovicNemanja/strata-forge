@@ -130,10 +130,20 @@ class TestPlan:
 
     def test_all_expands_to_every_declared_extra(self) -> None:
         extras = smoke.selected_extras("all")
-        assert {"finetuning", "serving", "storage", "hf"} <= extras
+        assert {"finetuning", "serving", "storage", "hf", "scoring"} <= extras
         names = self._names("all")
         assert "vllm accepts the serving command line" in names
+        assert "classification point metrics and temperature" in names
         assert any(name.startswith("finetune ") for name in names)
+
+    def test_scoring_leg_checks_only_the_numerical_surface(self) -> None:
+        names = self._names("scoring")
+        assert "classification point metrics and temperature" in names
+        assert not any(name.startswith("finetune ") or "vllm" in name for name in names)
+
+
+def test_scoring_smoke_uses_analytic_reference_values() -> None:
+    smoke.check_scoring()
 
 
 def test_install_check_refuses_a_source_tree_import() -> None:
