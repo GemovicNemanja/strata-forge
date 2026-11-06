@@ -1,0 +1,11 @@
+{
+  "metric_version": "nominal-two-human-raters-v1",
+  "cases": [
+    {"name": "three_categories", "labels": ["E", "C", "U"], "counts": [[3, 1, 0], [0, 2, 1], [1, 0, 2]], "percent": [7, 10], "kappa_chance": [17, 50], "ac1_chance": [33, 100], "kappa": [6, 11], "ac1": [37, 67]},
+    {"name": "unequal_marginals", "labels": ["E", "C", "U"], "counts": [[8, 1, 0], [0, 2, 0], [1, 0, 1]], "percent": [11, 13], "kappa_chance": [89, 169], "ac1_chance": [159, 676], "kappa": [27, 40], "ac1": [413, 517]},
+    {"name": "inclusive_threshold", "labels": ["yes", "no"], "counts": [[8, 2], [1, 9]], "percent": [17, 20], "kappa_chance": [1, 2], "ac1_chance": [399, 800], "kappa": [7, 10], "ac1": [281, 401]},
+    {"name": "declared_unobserved_category", "labels": ["yes", "no", "unused"], "counts": [[8, 2, 0], [1, 9, 0], [0, 0, 0]], "percent": [17, 20], "kappa_chance": [1, 2], "ac1_chance": [399, 1600], "kappa": [7, 10], "ac1": [961, 1201]},
+    {"name": "independent_unequal_marginals", "labels": ["E", "C", "U"], "counts": [[6, 1, 0], [2, 4, 1], [0, 3, 3]], "percent": [13, 20], "kappa_chance": [17, 50], "ac1_chance": [21, 64], "kappa": [31, 66], "ac1": [103, 215]},
+    {"name": "independent_no_agreement", "labels": ["E", "C", "U"], "counts": [[0, 5, 0], [2, 0, 0], [0, 0, 0]], "percent": [0, 1], "kappa_chance": [20, 49], "ac1_chance": [1, 4], "kappa": [-20, 29], "ac1": [-1, 3]}
+  ]
+}

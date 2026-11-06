@@ -296,11 +296,16 @@ It is platform capability; a benchmark win is a separate Models task.
    an eval split gives `eval_strategy=epoch` unless validly overridden; protect runner-owned
    fields from `extra_trainer_args`. Confirm current Trainer keyword names in contract tests.
 3. `training/classifier.py`, configs/registry, collator and fine-tune runner: `seq_cls` /
-   `task_type=SEQ_CLS`; soft CE + default 0.1 Brier, masked 2-way loss, optional class weights,
-   smoothing and sample weights. Use the metrics leaf, not evals. `overflow=error|drop`
+   `task_type=SEQ_CLS`; preserve generic CE as default and the older explicit primary CE+Brier
+   preset separately. CC-20261106-01 defines a named full research preset with grouped 2-way
+   CE, 0.1 sum-form Brier and null-masked auxiliary terms; its initial smoothing is zero and
+   class/sample weights are unit. Do not implement unspecified weighting/smoothing order or
+   make research coefficients global defaults. Use the metrics leaf, not evals. `overflow=error|drop`
    reports counts and never silently cuts a hypothesis. `premise_format=ids|plain` is explicit.
 4. Auxiliary heads follow role mappings. Inconsistency is separate BCE; refuse an unsat
-   split with that signal silently unmapped. Support requires ID-shaped premises and
+   split with that signal silently unmapped. A mapped role permits per-row nulls, masked
+   rather than converted to false; eligible logits/head geometry must actually exist.
+   Support requires ID-shaped premises and
    `premise_format=ids`; score exactly each row's premise IDs, conditioned on the hypothesis.
    Phase-P5 proposes a bilinear answer/CLS–marker head and default weights 1.0: confirm the
    design in the implementation PR, including causal-decoder conditioning, rather than
@@ -341,6 +346,12 @@ App/server method mirrors, per-PR agent sign-off, registry version and release o
 accepted before declaring end-to-end completion.
 
 ## PROMPT-001 — authoritative composition and conformance
+
+**Recorded CI decision (2026-11-06).** The user explicitly leaves the reviewed Node24
+conformance workflow patch pending. Preserve it as data; do not refresh OAuth scope,
+switch accounts or activate an alternate workflow. Python-authoritative compiler runtime 839
+and its local 74 Node conformance tests are reviewed source evidence, not completed hosted
+conformance or all PROMPT-001 acceptance. Existing required checks remain required.
 
 **Goal and boundary.** Make module/surface/version/build semantics deterministic and shared
 by Python training/evaluation code, TypeScript agent apps, API and MCP. The server owns
