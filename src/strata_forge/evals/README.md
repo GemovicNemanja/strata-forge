@@ -8,6 +8,8 @@ Markdown/HTML reports, parameter sweeps, trace replay, and an eval-regression ga
 `strata_forge.metrics` leaf. Its classification reports retain invalid predictions in gold
 support and the denominator; probability metrics record missing-vector coverage and raw or
 restricted provenance. Training can use the same definitions without importing this runner.
+The same aliases include Wilson proportion intervals, exact paired McNemar tests, and
+explicit-family Holm corrections, without choosing thresholds or resampling populations.
 
 Reference: [evaluations](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/evals.md)
 and [classification metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).

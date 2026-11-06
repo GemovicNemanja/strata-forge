@@ -13,6 +13,8 @@ and [module boundaries](../../../docs/architecture/module-boundaries.md).
 - `classification.py` re-exports implemented public functions/types from the pure
   `strata_forge.metrics` leaf. Classification definitions belong in that leaf, never in a
   runner or a training-to-evaluation dependency.
+- Wilson/McNemar/Holm comparison aliases retain declared populations, pairing, family IDs,
+  and log/underflow metadata. They do not infer cluster independence, choose alpha, or resample.
 - Outcome aggregates (`evals.metrics`) and explicit-label classification point metrics
   (`evals.classification`) have separate input contracts. Do not silently interchange them.
 - Permitted Forge imports follow the central boundary table. Never import agents or training.

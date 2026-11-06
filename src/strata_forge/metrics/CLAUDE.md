@@ -18,7 +18,14 @@ This is a pure deterministic numerical leaf. Read
 - Keep point definitions and serialized fields consistent with the synthetic conformance
   fixture in `tests/unit/metrics/fixtures/classification_point_v1.json`.
 - `TemperatureCalibration` is a draft component, not the full training calibration-file
-  schema. Do not introduce fitting, thresholds, confidence intervals, or pooling implicitly.
+  schema. Do not introduce fitting, thresholds, other interval definitions, or pooling implicitly.
+- `comparison.py` owns Wilson binomial intervals, exact conditional McNemar, and explicit
+  named-family Holm adjustment. Keep all-pair effect denominators distinct from discordant
+  test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
+  discard invalid predictions. Holm operates on represented p-values and cannot recover
+  underflowed inputs. The synthetic comparison fixture is the numerical conformance reference.
+- Bootstrap code requires an approved RNG/seed/order/quantile/population contract. No
+  bootstrap implementation or inference of independence from cluster-repeated rows is exported.
 - Update this file, module README, reference docs, and tests with any public API change.
 - `agreement` supports only two complete caller-declared human raters with distinct identities,
   identical unique ordered item IDs and an explicit complete nominal category set. Refuse missing
