@@ -4,7 +4,7 @@ Typed, async-first toolkit for AI/LLM work — inference, evaluation, fine-tunin
 remote compute orchestration across the major foundation-model providers.
 
 Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing. The public API is
-async, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Heavy optional
+async for execution and I/O, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Pure classification metrics are synchronous. Heavy optional
 dependencies (training, serving, remote compute) live behind extras, so the base install stays light.
 
 ## Install
@@ -22,11 +22,12 @@ pip install "strata-forge[rag]"        # embeddings, vector store, reranking
 pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
 pip install "strata-forge[serving]"    # vLLM
 pip install "strata-forge[finetuning]" # torch, transformers, trl, peft, bitsandbytes
+pip install "strata-forge[scoring]"    # NumPy for temperature application
 pip install "strata-forge[all]"        # everything
 ```
 
 Full set: `redis`, `multimodal`, `inspect`, `langfuse`, `hf`, `evals`, `rag`, `compute`, `serving`,
-`bedrock`, `storage`, `finetuning`, `all`.
+`bedrock`, `storage`, `finetuning`, `scoring`, `all`.
 
 ## Quickstart
 
@@ -58,6 +59,7 @@ installed as `strata-forge`.
 | `strata_forge.prompts` | Jinja2 and Langfuse-backed prompt registry |
 | `strata_forge.tracing` | Langfuse observability |
 | `strata_forge.datasets` | Dataset CRUD with a Hugging Face bridge |
+| `strata_forge.metrics` | Pure classification metrics with explicit labels, coverage, and probability provenance |
 | `strata_forge.evals` | Experiment runner, graders, metrics |
 | `strata_forge.agents` | Agent runtime, memory, multi-agent composition |
 | `strata_forge.rag` | Embed, chunk, store, retrieve, rerank |
