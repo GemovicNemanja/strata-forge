@@ -1,4 +1,4 @@
-"""Synchronous deterministic point metrics, shared by evaluation and training."""
+"""Synchronous deterministic metrics and comparisons, shared by evaluation and training."""
 
 from strata_forge.metrics.calibration import (
     CalibrationScores,
@@ -23,25 +23,45 @@ from strata_forge.metrics.classification import (
     macro_f1,
     nll,
 )
+from strata_forge.metrics.comparison import (
+    COMPARISON_VERSION,
+    MAX_EXACT_DISCORDANT,
+    AdjustedPValue,
+    HolmCorrection,
+    McNemarResult,
+    ProportionInterval,
+    holm_correction,
+    mcnemar_exact,
+    wilson_interval,
+)
 
 __all__ = [
+    "COMPARISON_VERSION",
+    "MAX_EXACT_DISCORDANT",
     "METRIC_VERSION",
     "NLL_CLIP_EPSILON",
     "PROBABILITY_SUM_TOLERANCE",
+    "AdjustedPValue",
     "CalibrationScores",
     "ClassScore",
     "ClassificationReport",
     "ConfusionMatrix",
+    "HolmCorrection",
     "LabelSpace",
+    "McNemarResult",
     "MetricValue",
     "ProbabilityKind",
+    "ProportionInterval",
     "TemperatureCalibration",
     "accuracy",
     "brier",
     "classification_report",
     "confusion_matrix",
+    "holm_correction",
     "invalid_rate",
     "macro_f1",
+    "mcnemar_exact",
     "nll",
     "temperature_scale",
+    "wilson_interval",
 ]
