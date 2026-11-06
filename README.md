@@ -59,7 +59,7 @@ installed as `strata-forge`.
 | `strata_forge.prompts` | Jinja2 and Langfuse-backed prompt registry |
 | `strata_forge.tracing` | Langfuse observability |
 | `strata_forge.datasets` | Dataset CRUD with a Hugging Face bridge |
-| `strata_forge.metrics` | Pure classification metrics with explicit labels, coverage, and probability provenance |
+| `strata_forge.metrics` | Pure classification metrics, explicit populations, and paired/family comparisons |
 | `strata_forge.evals` | Experiment runner, graders, metrics |
 | `strata_forge.agents` | Agent runtime, memory, multi-agent composition |
 | `strata_forge.rag` | Embed, chunk, store, retrieve, rerank |
