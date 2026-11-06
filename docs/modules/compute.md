@@ -337,7 +337,7 @@ character count.
   name. Missing/non-contiguous class ids, duplicate output names and unknown alias keys
   are refused. Output names are inert bounded strings, never expressions. `ScoredRow.columns()`
   supplies `p_<label>`, `pred` and `error` columns.
-- **Length policy:** classifiers tokenize pairs with `truncation="only_first"`, preserving
+- **Legacy worker length policy:** classifiers tokenize pairs with `truncation="only_first"`, preserving
   the complete hypothesis. A pair exceeding the limit increments `overflow_rows`. A
   truncated premise also increments `truncated_rows`. A hypothesis that cannot fit returns
   a row with `hypothesis_too_long`, no probabilities, and contributes to `failed_rows`;
@@ -359,6 +359,17 @@ length refusals, and report cumulative `succeeded`, `failed`, `overflow_rows` an
 `truncated_rows`. It emits no start/end lifecycle events. Unexpected model/tokenizer failures
 propagate; a runner integrating this module must apply its shared redactor before surfacing
 those exceptions and own final run success/failure policy and artifact persistence.
+
+The loaded scorer's trusted-Python `score(..., overflow_policy="error")` option refuses the
+whole call if any rendered input exceeds `max_length`, before a model forward or progress
+callback. It requests `truncation=False` for pairs and single inputs and verifies complete
+right-padded attention masks against the preflight lengths before each batch forward. Exact
+boundary inputs are scored in full. Refusals contain a fixed code, without input text. The
+per-call default `"legacy"` preserves the worker policy above; an earlier error-mode call does
+not change later calls. No `drop` mode is defined. Inference/Eval specs and their installed
+workers do not forward this option, so this primitive alone does not make those paths eligible
+for a no-truncation protocol. No partial result or drop receipt is returned after overflow.
+
 
 `pair_template` uses the same inert `{name}` substitution as `template`, with placeholder
 coverage validated before data loading. Scoring refuses rendered inputs above the character

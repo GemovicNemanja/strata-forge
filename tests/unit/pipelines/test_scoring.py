@@ -89,11 +89,15 @@ class Tokenizer:
         for index, first in enumerate(text):
             first_ids = self.encode(first, add_special_tokens=False)
             if text_pair is not None:
-                assert kwargs["truncation"] == "only_first"
                 pair_ids = self.encode(text_pair[index], add_special_tokens=False)
-                available = cast("int", kwargs["max_length"]) - len(pair_ids) - 3
-                assert available >= 0
-                sequences.append([99, *first_ids[:available], 98, *pair_ids, 98])
+                if kwargs["truncation"] is False:
+                    assert "max_length" not in kwargs
+                    sequences.append([99, *first_ids, 98, *pair_ids, 98])
+                else:
+                    assert kwargs["truncation"] == "only_first"
+                    available = cast("int", kwargs["max_length"]) - len(pair_ids) - 3
+                    assert available >= 0
+                    sequences.append([99, *first_ids[:available], 98, *pair_ids, 98])
             else:
                 assert kwargs["truncation"] is False
                 sequences.append([99, *first_ids])
@@ -716,3 +720,157 @@ async def test_empty_decoder_without_special_tokens_has_no_label_position(
 def test_model_vector_must_be_flat(data: _Data) -> None:
     with pytest.raises(ValidationError, match="unexpected shape"):
         scoring._vector(Tensor(data))  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("engine", ["hf_classify", "hf_label_logits"])
+async def test_error_overflow_policy_refuses_all_rows_before_forward(
+    fake_hf: types.SimpleNamespace, engine: scoring.ScoringEngine
+) -> None:
+    scorer = await scoring.load_scorer(
+        "org/model",
+        engine=engine,
+        token=False,
+        max_length=7,
+        label_tokens={"yes": "A", "no": "B"} if engine == "hf_label_logits" else None,
+    )
+    events: list[ProgressEvent] = []
+    paired = engine == "hf_classify"
+    with pytest.raises(ValidationError, match="input_too_long") as failure:
+        await scorer.score(
+            [
+                scoring.ScoringInput(text="A", text_pair="B" if paired else None),
+                scoring.ScoringInput(text="first " * 8, text_pair="B" if paired else None),
+            ],
+            batch_size=1,
+            on_progress=events.append,
+            overflow_policy="error",
+        )
+    assert "first" not in str(failure.value)
+    assert fake_hf.models[0].forward_calls == 0
+    assert fake_hf.tokenizer.calls == []
+    assert events == []
+
+
+async def test_error_policy_scores_exact_pair_boundary_without_truncation(
+    fake_hf: types.SimpleNamespace,
+) -> None:
+    scorer = await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=7)
+    result = await scorer.score(
+        [scoring.ScoringInput(text="first second", text_pair="A B")],
+        overflow_policy="error",
+    )
+    assert fake_hf.tokenizer.calls[0]["truncation"] is False
+    assert "max_length" not in fake_hf.tokenizer.calls[0]
+    assert result.overflow_rows == result.truncated_rows == result.failed_rows == 0
+    assert result.rows[0].probabilities
+    assert not result.rows[0].truncated
+    assert fake_hf.models[0].forward_calls == 1
+
+
+@pytest.mark.parametrize("policy", [None, True, 1, "drop", "ERROR", "truncate", [], {}])
+async def test_invalid_overflow_policy_refuses_before_tokenization(
+    fake_hf: types.SimpleNamespace, policy: object
+) -> None:
+    scorer = await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=7)
+    with pytest.raises(ValidationError, match="overflow_policy"):
+        await scorer.score([], overflow_policy=policy)  # pyright: ignore[reportArgumentType] -- deliberate invalid input
+    assert fake_hf.tokenizer.calls == []
+    assert fake_hf.models[0].forward_calls == 0
+
+
+async def test_error_policy_does_not_replace_legacy_behavior_on_later_call(
+    fake_hf: types.SimpleNamespace,
+) -> None:
+    scorer = await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=7)
+    rows = [scoring.ScoringInput(text="first " * 8, text_pair="B")]
+    with pytest.raises(ValidationError, match="input_too_long"):
+        await scorer.score(rows, overflow_policy="error")
+    result = await scorer.score(rows)
+    assert result.truncated_rows == result.overflow_rows == 1
+    assert fake_hf.tokenizer.calls[0]["truncation"] == "only_first"
+
+
+async def test_error_policy_empty_input_is_a_complete_empty_result(
+    fake_hf: types.SimpleNamespace,
+) -> None:
+    scorer = await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=7)
+    result = await scorer.score([], overflow_policy="error")
+    assert result.rows == []
+    assert result.overflow_rows == result.truncated_rows == result.failed_rows == 0
+    assert fake_hf.models[0].forward_calls == 0
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_ids",
+        "missing_mask",
+        "rank",
+        "rows",
+        "width",
+        "mask_shape",
+        "cut",
+        "left_pad",
+        "fractional",
+        "nonfinite",
+    ],
+)
+async def test_error_policy_rejects_inconsistent_tokenization_before_model(
+    fake_hf: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    original = Tokenizer.__call__
+
+    def corrupted(
+        self: Tokenizer, text: list[str], text_pair: list[str] | None = None, **kwargs: object
+    ) -> Mapping[str, Tensor]:
+        features = dict(original(self, text, text_pair, **kwargs))
+        if fault == "missing_ids":
+            features.pop("input_ids")
+        elif fault == "missing_mask":
+            features.pop("attention_mask")
+        elif fault == "rank":
+            features["input_ids"] = Tensor([1, 2, 3, 4, 5])
+        elif fault == "rows":
+            features["input_ids"] = Tensor([[1] * 5, [1] * 5])
+        elif fault == "width":
+            features.update(input_ids=Tensor([[1] * 8]), attention_mask=Tensor([[1] * 8]))
+        elif fault == "mask_shape":
+            features["attention_mask"] = Tensor([[1] * 6])
+        elif fault == "cut":
+            features.update(input_ids=Tensor([[1] * 4]), attention_mask=Tensor([[1] * 4]))
+        elif fault == "left_pad":
+            features["attention_mask"] = Tensor([[0, 1, 1, 1, 1]])
+        elif fault == "fractional":
+            features["attention_mask"] = Tensor([[1, 1, 0.5, 1, 1]])
+        else:
+            features["attention_mask"] = Tensor([[1, 1, float("nan"), 1, 1]])
+        return features
+
+    monkeypatch.setattr(Tokenizer, "__call__", corrupted)
+    scorer = await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=7)
+    with pytest.raises(ValidationError, match="tokenization_mismatch"):
+        await scorer.score([scoring.ScoringInput(text="A", text_pair="B")], overflow_policy="error")
+    assert fake_hf.models[0].forward_calls == 0
+
+
+async def test_error_policy_decoder_keeps_full_input_and_sorted_result_order(
+    fake_hf: types.SimpleNamespace,
+) -> None:
+    scorer = await scoring.load_scorer(
+        "org/model",
+        engine="hf_label_logits",
+        token=False,
+        max_length=7,
+        label_tokens={"yes": "A", "no": "B"},
+    )
+    result = await scorer.score(
+        [scoring.ScoringInput(text="first " * 6), scoring.ScoringInput(text="second")],
+        overflow_policy="error",
+        batch_size=2,
+    )
+    assert [row.index for row in result.rows] == [0, 1]
+    assert [row.pred for row in result.rows] == ["no", "no"]
+    assert result.overflow_rows == result.truncated_rows == result.failed_rows == 0
+    assert fake_hf.tokenizer.calls[0]["truncation"] is False
+    assert fake_hf.tokenizer.calls[0]["text"] == ["second", "first " * 6]
+    assert "max_length" not in fake_hf.tokenizer.calls[0]

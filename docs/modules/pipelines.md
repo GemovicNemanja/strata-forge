@@ -55,6 +55,12 @@ a cancelled native thread cannot later emit a success event. Supervised terminat
 release remain required transport responsibilities. No periodic checkpoint or exact resume is
 supported, and a restart is not mislabeled a continuation.
 
+The loaded scorer supports an explicit per-call `overflow_policy="error"` for trusted Python
+consumers. It refuses overlength calls before model forward and uses no truncation on accepted
+pairs/single inputs, checking complete right-padded attention masks. Its legacy default and all
+inert run specs/workers remain unchanged; they do not forward this option. This is not a
+research-run eligibility flag or a drop policy. See the [scoring length contract](compute.md#exact-hugging-face-scoring).
+
 Full-pin `hf_classify` probes a bounded `strata_classifier.json`. A definite file 404 permits the
 unchanged native factory; other failures refuse. Recognized Forge artifacts load their safe
 fixed file inventory and complete SDK classes. Metadata/config/receipt, exact class order,

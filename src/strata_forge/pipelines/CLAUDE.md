@@ -27,6 +27,9 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   installed trusted policy. No spec-controlled policy import or permissive fallback.
 - Native model scoring reuses `_scoring.load_scorer` and its complete-checkpoint guard. No
   implicit fresh head, adapter-base discovery, remote code, pickle fallback or hypothesis cut.
+- The loaded scorer's explicit per-call error overflow policy refuses overlength calls before
+  model forward, disables pair/single truncation and verifies complete right-padded masks.
+  Legacy default/spec/worker policy remains separate; no dropped-item semantics are inferred.
 - The verifier renderer is a declared bounded premise/hypothesis shape, not a universal task
   constraint. Its config lives in `training.verifier_config`; it performs no I/O.
 - Stable item IDs are exact unique strings. Inference keeps legacy `custom_id` and optionally

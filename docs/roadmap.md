@@ -10,6 +10,10 @@ Design rationale that's bigger than a single phase lives in
 [ADRs](architecture/adr/). Per-module reference docs live in
 [`docs/modules/`](modules/).
 
+The loaded HF scorer has a trusted-Python, per-call no-truncation error policy. Worker/spec
+forwarding, explicit dropped-item receipts and research eligibility remain separate integration
+work; the legacy worker policy is unchanged. See [exact scoring](modules/compute.md#exact-hugging-face-scoring).
+
 | # | Phase | Status |
 |---|---|---|
 | 0 | Foundations | ✅ done |

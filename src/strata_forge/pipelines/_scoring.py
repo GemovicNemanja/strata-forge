@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
 type ScoringEngine = Literal["hf_classify", "hf_label_logits"]
+type OverflowPolicy = Literal["legacy", "error"]
 type HubCredential = str | Literal[False]
 
 
@@ -220,6 +221,26 @@ def _vector(tensor: _Tensor) -> list[float]:
     return [float(cast("int | float", value)) for value in values]
 
 
+def _check_untruncated_features(
+    features: Mapping[str, _Tensor], batch: Sequence[tuple[int, int, bool]], max_length: int
+) -> None:
+    ids = features.get("input_ids")
+    mask = features.get("attention_mask")
+    if (
+        ids is None
+        or mask is None
+        or len(ids.shape) != 2
+        or ids.shape[0] != len(batch)
+        or ids.shape[1] > max_length
+        or tuple(mask.shape) != tuple(ids.shape)
+    ):
+        raise ValidationError("tokenization_mismatch: untruncated input shape required")
+    width = ids.shape[1]
+    for index, (length, _, _) in enumerate(batch):
+        if length > width or _vector(mask[index]) != [1.0] * length + [0.0] * (width - length):
+            raise ValidationError("tokenization_mismatch: complete right-padded input required")
+
+
 class Scorer:
     """A private loaded model with synchronous, length-batched forward passes."""
 
@@ -263,17 +284,23 @@ class Scorer:
         *,
         batch_size: int = 8,
         on_progress: Callable[[ProgressEvent], None] | None = None,
+        overflow_policy: OverflowPolicy = "legacy",
     ) -> ScoringResult:
-        """Score rendered inputs off the event loop; the callback runs in that worker."""
+        """Score off-loop; error overflow policy refuses the call before any model forward."""
+        if type(overflow_policy) is not str or overflow_policy not in ("legacy", "error"):
+            raise ValidationError("unsupported overflow_policy")
         if batch_size < 1:
             raise ValidationError("batch_size must be positive")
-        return await asyncio.to_thread(self._score, list(rows), batch_size, on_progress)
+        return await asyncio.to_thread(
+            self._score, list(rows), batch_size, on_progress, overflow_policy
+        )
 
     def _score(
         self,
         rows: list[ScoringInput],
         batch_size: int,
         on_progress: Callable[[ProgressEvent], None] | None,
+        overflow_policy: OverflowPolicy,
     ) -> ScoringResult:
         tokenizer = self._tokenizer
         results: dict[int, ScoredRow] = {}
@@ -307,6 +334,8 @@ class Scorer:
             specials = tokenizer.num_special_tokens_to_add(pair=row.text_pair is not None)
             length = first_length + pair_length + specials
             overflow = length > self._max_length
+            if overflow and overflow_policy == "error":
+                raise ValidationError("input_too_long: overflow_policy=error refuses scoring")
             error: str | None = None
             if self._engine == "hf_classify" and row.text_pair is None:
                 if overflow:
@@ -344,13 +373,17 @@ class Scorer:
             )
             tokenize_kwargs: dict[str, object] = {
                 "padding": True,
-                "truncation": "only_first" if pairs is not None else False,
+                "truncation": "only_first"
+                if pairs is not None and overflow_policy == "legacy"
+                else False,
                 "return_tensors": "pt",
                 "return_attention_mask": True,
             }
-            if pairs is not None:
+            if pairs is not None and overflow_policy == "legacy":
                 tokenize_kwargs["max_length"] = self._max_length
             features = tokenizer(inputs, pairs, **tokenize_kwargs)
+            if overflow_policy == "error":
+                _check_untruncated_features(features, batch, self._max_length)
             with self._torch.inference_mode():
                 output = self._model(
                     **{key: value.to(self._device) for key, value in features.items()}

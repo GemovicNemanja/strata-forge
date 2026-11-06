@@ -84,6 +84,9 @@ The inference pipeline accepts the default `vllm_chat` engine and HF forward-pas
 probabilities and full-vocabulary outside mass. Both preserve explicit overflow failures and
 write Parquet plus input-commit provenance. See the [scoring contract](docs/modules/compute.md#exact-hugging-face-scoring)
 for required knobs, safe loading, length policy and result artifacts.
+Trusted Python consumers of a loaded scorer can select `score(..., overflow_policy="error")`
+to refuse overlength calls without truncating inputs. Run specs/workers keep their existing
+length policy and do not forward this SDK option.
 
 ## Documentation
 
