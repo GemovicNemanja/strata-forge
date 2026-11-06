@@ -113,9 +113,20 @@ class TestRunConfig:
 
 
 class TestPlan:
+    def test_finetuning_profile_constructs_both_evaluation_modes(self) -> None:
+        assert "pinned classify and prediction-evaluation specs" in self._names(
+            "finetuning,storage"
+        )
+        smoke.check_evaluation_specs()
+
     @staticmethod
     def _names(extras: str) -> list[str]:
         return [name for name, _ in smoke.plan(smoke.selected_extras(extras))]
+
+    def test_modular_prompt_constructor_runs_in_base_and_every_worker_profile(self) -> None:
+        for extras in ("", "finetuning,storage", "serving,storage,hf", "all"):
+            assert "modular prompt compiler" in self._names(extras)
+        smoke.check_modular_prompts()
 
     def test_finetune_leg_checks_every_case_and_no_serving(self) -> None:
         names = self._names("finetuning,storage")
@@ -125,15 +136,30 @@ class TestPlan:
     def test_inference_leg_checks_serving_and_no_training(self) -> None:
         names = self._names("serving,storage,hf")
         assert "inference spec, requests and results" in names
+        assert "HF scoring specs and rendered pairs" in names
+        assert "tiny safetensors classifiers and label logits (offline)" in names
         assert "vllm accepts the serving command line" in names
         assert not any(name.startswith("finetune ") for name in names)
 
+    def test_scoring_specs_are_built_without_model_downloads(self) -> None:
+        smoke.check_scoring_specs()
+
     def test_all_expands_to_every_declared_extra(self) -> None:
         extras = smoke.selected_extras("all")
-        assert {"finetuning", "serving", "storage", "hf"} <= extras
+        assert {"finetuning", "serving", "storage", "hf", "scoring"} <= extras
         names = self._names("all")
         assert "vllm accepts the serving command line" in names
+        assert "classification point metrics and temperature" in names
         assert any(name.startswith("finetune ") for name in names)
+
+    def test_scoring_leg_checks_only_the_numerical_surface(self) -> None:
+        names = self._names("scoring")
+        assert "classification point metrics and temperature" in names
+        assert not any(name.startswith("finetune ") or "vllm" in name for name in names)
+
+
+def test_scoring_smoke_uses_analytic_reference_values() -> None:
+    smoke.check_scoring()
 
 
 def test_install_check_refuses_a_source_tree_import() -> None:
@@ -141,6 +167,32 @@ def test_install_check_refuses_a_source_tree_import() -> None:
     # exactly the situation in which the smoke would prove nothing about a clean install.
     with pytest.raises(smoke.SmokeError, match="not from an installed distribution"):
         smoke.check_install()
+
+
+def test_actual_tiny_models_cover_decoder_classifier_padding_and_local_shadow() -> None:
+    if (
+        importlib.util.find_spec("torch") is None
+        or importlib.util.find_spec("transformers") is None
+    ):
+        with pytest.raises(ImportError, match=r"strata-forge\[serving\]"):
+            smoke.check_scoring_models()
+        return
+    smoke.check_scoring_models()
+
+
+def test_model_smoke_dependency_absence_has_an_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = importlib.import_module
+
+    def without_torch(name: str) -> object:
+        if name == "torch":
+            raise ImportError("synthetic dependency absence")
+        return real_import(name)
+
+    monkeypatch.setattr(smoke.importlib, "import_module", without_torch)
+    with pytest.raises(ImportError, match=r"strata-forge\[serving\]"):
+        smoke.check_scoring_models()
 
 
 class TestOverride:

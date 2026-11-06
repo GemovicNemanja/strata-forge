@@ -53,6 +53,8 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - `BudgetContext` accounting must be thread/coroutine safe; spend updates use an `anyio.Lock`.
 - `redact.py` must never log, and no error message or `repr` from it may include a value it was given. A new `TokenPattern` needs a bounded quantifier on every repeat, a `max_chars` that covers its longest match plus any lookahead, no lookbehind longer than one character (`(?<![a-z])` and `\b` are fine), and no end-of-text test (`$`, `\Z`). Pattern searches resume one past each match's start, so overlapping and glued matches are all found and merged. Put the long variable part at the END: a bounded middle segment followed by a required delimiter stops matching a longer token altogether, so a middle bound must be one no real token reaches.
 
+- Run-scoped worker credentials use the bounded `strata_worker_` plus 43 base64url characters default pattern; raw and streamed matching follow the same no-end-test/max-span contract. Never depend only on knowing a particular issued token to scrub it.
+
 ## When to update this file
 
 - Adding a new sub-module (e.g. `strata_forge.core.profiling`).

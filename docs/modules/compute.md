@@ -275,6 +275,124 @@ secrets file the backend wrote beside the job, and append the same ``ProgressEve
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
 
+### Exact Hugging Face scoring
+
+`strata_forge.pipelines._scoring` contains reusable Hugging Face forward-pass scoring
+primitives used by `inference_runner` through `Hyperparams.engine`. The default remains
+`vllm_chat`; `hf_classify` and `hf_label_logits` run forward passes in-process without starting
+vLLM. HF engines require an explicit `max_model_len` token limit. `scoring_batch_size` controls
+length batches (default 8, range 1–256). They support one CUDA device, automatically falling
+back to CPU when CUDA is unavailable, and `dtype` accepts `auto`, `float32`, `float16` or
+`bfloat16`. Tensor parallelism and generation sampling knobs are refused for these engines.
+
+`await load_scorer(model_id, engine=..., token=..., max_length=..., revision=...)` loads a
+tokenizer and either `AutoModelForSequenceClassification` (`hf_classify`) or
+`AutoModelForCausalLM` (`hf_label_logits`). Both loads explicitly receive `token` and
+`trust_remote_code=False`; the model load also requires `use_safetensors=True` and
+`output_loading_info=True`. `token=False`
+means anonymous access, without the machine's cached credential. Only a Hub repo id is
+accepted, not a local model path. Dependencies are lazy; `[serving]` declares torch,
+transformers, sentencepiece and protobuf directly. The scorer neither reads secrets
+from the environment nor logs input text, credentials or model exceptions.
+
+A Hub id that collides with an existing relative local path is refused before loading:
+Transformers otherwise prefers that path and can ignore the requested Hub revision. This
+guard assumes a trusted worker filesystem; it does not isolate the loader from concurrent
+filesystem changes. Tokenizer padding is right-sided, using its existing pad token or its
+EOS token when needed. The model config is aligned to that exact token id, including decoder
+classification heads whose pooling independently reads `config.pad_token_id`. Invalid pad
+ids or a config that cannot retain the alignment are refused before scoring.
+
+Both engines load trained artifacts: every reported missing weight, including any head,
+unexpected weight, shape mismatch, structural error, or supplied conversion error is fatal.
+There is no implicit fresh-head initialization and no inference exemption for a training
+initializer. The private [checkpoint guard](training.md#checkpoint-completeness-guard) checks
+the installed Transformers `(model, loading_info)` contract before the dataset is materialized.
+It relies on upstream resolved tied-key reporting and never guesses parameter aliases.
+
+`scoring.json` records bounded `loading_info` (fixed codes, counts, at most 32 names per
+category, at most 192 characters per name) and `padding_policy` (source, actual token id,
+original model pad id, and alignment). Upstream warning/error text is not copied. A structural
+refusal writes a local `scoring.json` with `status="loading_refused"` and immutable input refs;
+it produces no result rows and does not upload a failed model's outputs. The progress protocol
+does not gain diagnostic fields. `conversion_diagnostics="not_returned"` explicitly records
+when the installed library omits those diagnostics rather than claiming they were checked.
+
+A full SHA resolved from a Hub pull-request ref is an ordinary immutable revision. The runner
+resolves model/dataset revisions to SHAs before loading. Unsupported sequence-classification
+architectures are refused by the built-in factory; there is no remote-code or generic-head
+fallback. Apertus remains a generation policy without a built-in sequence-classification path.
+
+Call `await scorer.score([ScoringInput(text=..., text_pair=...)], batch_size=...)` with
+already-rendered text. No Jinja, Python or template interpretation occurs here. Forward
+passes run in a worker thread, in evaluation/inference mode, sorted into length batches;
+results return in the original order with the input index. The scorer uses an explicit
+`max_length`; a caller must choose a limit supported by the model. It does not render or
+apply a chat template, choose a tokenizer revision independently, or truncate text by
+character count.
+
+- **Classifier:** every row requires `text_pair`. Probabilities use a numerically stable
+  softmax over all classifier logits, in numeric `config.id2label` order. `label_alias` maps
+  each source class name to its output name; it is mandatory for every generic `LABEL_n`
+  name. Missing/non-contiguous class ids, duplicate output names and unknown alias keys
+  are refused. Output names are inert bounded strings, never expressions. `ScoredRow.columns()`
+  supplies `p_<label>`, `pred` and `error` columns.
+- **Length policy:** classifiers tokenize pairs with `truncation="only_first"`, preserving
+  the complete hypothesis. A pair exceeding the limit increments `overflow_rows`. A
+  truncated premise also increments `truncated_rows`. A hypothesis that cannot fit returns
+  a row with `hypothesis_too_long`, no probabilities, and contributes to `failed_rows`;
+  equality is also refused when a nonempty premise would have no token space. The scorer
+  never silently changes that hypothesis.
+- **Decoder:** `label_tokens` maps output labels to literal verbalizer strings. Each must
+  encode to exactly one distinct token without special tokens; preflight refuses multi-token,
+  empty or colliding verbalizers before loading weights. One forward pass reads the logits
+  at each prompt's last real input token, with right padding, and computes probabilities
+  renormalized over those verbalizer ids. `mass_outside` is the full-vocabulary softmax mass
+  outside those ids, calculated directly rather than from a censored top-k result. It is
+  not a calibration guarantee or a logical uncertainty label. Overlength prompts return
+  `prompt_too_long` instead of being truncated; a prompt with no input-token position is
+  refused. Decoder inputs never take `text_pair`.
+
+An optional synchronous `on_progress` callback receives the existing `ProgressEvent(kind="step",
+stage="run")` shape from the worker thread. Steps count completed input rows, including
+length refusals, and report cumulative `succeeded`, `failed`, `overflow_rows` and
+`truncated_rows`. It emits no start/end lifecycle events. Unexpected model/tokenizer failures
+propagate; a runner integrating this module must apply its shared redactor before surfacing
+those exceptions and own final run success/failure policy and artifact persistence.
+
+`pair_template` uses the same inert `{name}` substitution as `template`, with placeholder
+coverage validated before data loading. Scoring refuses rendered inputs above the character
+limit rather than cutting either side. `hf_classify` requires `pair_template`, optionally
+`label_alias`; `hf_label_logits` requires `label_tokens` and refuses those classifier-only
+fields. Label maps are bounded to 16 entries and 64 characters per key/value. The chat engine
+refuses these scoring-only fields rather than silently ignoring them.
+
+The scoring run resolves model and dataset revisions once to full SHAs, then loads both at
+those commits. `RunSpec.model_revision` is optional and also pins the vLLM snapshot when set.
+Rows retain the `custom_id=row-<index>` positional join key; reconcile it with the pinned
+dataset/config/split and row limit in `scoring.json`. This is not a content-stable ID across
+different revisions or reordered inputs. No source rows or rendered prompts are echoed.
+
+Artifacts outside the disposable workdir are `results.parquet`, a `scoring.json` manifest
+with input refs, environment/package versions, label order, template hashes, parameters and
+counts, and a card whose `configs:` points the Viewer only at Parquet. A refused first row
+still has every probability column as null. Decoder rows always retain `mass_outside`, null
+when refused. A private atomic folder commit uploads only those three files; `end.output_ref`
+names the actual returned commit and `input_refs` the resolved model/dataset refs, separately
+from float metrics. `message` retains the repo ID or VM path for existing consumers.
+
+Partly successful runs retain all rows. All-failed scoring persists its evidence and exits
+nonzero; an empty split fails before weights load. An upload failure leaves local artifacts
+and a redacted failure naming their location. The private scorer itself owns no lifecycle or
+persistence; the runner does. A host's process-level cancellation/cleanup must terminate an
+in-flight worker-thread forward; cancelling the await alone does not do so.
+
+Clean-install smoke constructs both inert specs and reloads tiny locally initialized
+safetensors models for CPU forward passes, with Hub access disabled. Offline fake-model and
+Parquet checks do not establish performance or reference accuracy on a pretrained model.
+Model/VM acceptance and exact agent knob sign-off belong to release review. No release or
+deployment of these engines follows merely from their presence on a feature branch.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a

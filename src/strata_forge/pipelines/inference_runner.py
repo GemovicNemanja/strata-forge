@@ -1,11 +1,12 @@
-"""VM-side batch-inference runner: STRATA_RUN_CONFIG (inert JSON) -> vLLM -> HF results.
+"""VM-side batch inference and exact scoring from an inert JSON spec.
 
 Launched on the user's own VM by the control plane (``python -m
 strata_forge.pipelines.inference_runner``). It reads an INERT run spec from the
 ``STRATA_RUN_CONFIG`` env var, loads a Hugging Face dataset split, renders one prompt
-per row by simple ``{column}`` substitution (NO code execution), serves the model with
-vLLM on the same VM, runs a concurrency-bounded batch through an openai-compatible
-``LLMClient``, and then EITHER pushes ``{custom_id, output}`` results to the user's HF
+per row by simple ``{column}`` substitution (NO code execution). The default engine serves
+the model through vLLM and a concurrency-bounded ``LLMClient`` batch. HF scoring engines
+run classifier pairs or exact decoder label-token forward passes without a model server.
+The runner EITHER pushes results to the user's HF
 dataset repo (when a write token + an output repo are supplied) OR keeps them as a parquet
 file on the VM (outside the per-run workdir, for the user to retrieve over SSH). Live
 progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestrator tails it).
@@ -26,7 +27,7 @@ credentials + the network):
     download, the push — and a run that received none sends no credential rather than the
     VM's ambient ``HF_TOKEN`` or cached login (a repo the VM's Hub cache already holds still
     loads from that cache). It is scrubbed from any surfaced error.
-  - The runner downloads the model ITSELF, before the model server starts, and only its
+  - For chat, the runner downloads the model ITSELF before the model server starts, and only its
     servable files (:data:`SNAPSHOT_PATTERNS`: safetensors weights, configs, tokenizer and
     chat-template files — never a pickle checkpoint or a ``*.py`` file). The server then loads
     that local directory with ``HF_HUB_OFFLINE=1``, so it never holds the token and never
@@ -35,8 +36,13 @@ credentials + the network):
   - The model server gets an allow-listed environment
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
-  - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only). The ``error``
+  - HF scorers use built-in transformers classes, ``use_safetensors=True``,
+    ``trust_remote_code=False`` and the explicit token. Model and dataset reads use resolved
+    commits. A pair's hypothesis is never silently truncated; length refusals are counted.
+  - Progress + result rows carry no secret: events hold step counts, float metrics, bounded
+    immutable input/output refs and a repo id. Chat rows hold ``{custom_id, output, error}``;
+    score rows additionally retain named probabilities, prediction and length indicators.
+    Decoder scores include full-vocabulary ``mass_outside``. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
     column is pushed to the Hub with the results, an exception's text is not under this
     module's control, and neither is a phrase from ``serving_endpoint``'s public phase hook.
@@ -57,7 +63,9 @@ its entire timeout, invisibly.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
+import json
 import re
 import sys
 import time
@@ -66,11 +74,12 @@ from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.core.repro import env_snapshot
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
@@ -81,6 +90,7 @@ from strata_forge.pipelines._common import (
     RunError,
     RunSecrets,
     emit,
+    installed_engine_version,
     load_config,
     model_server_environ,
     phase_sink,
@@ -90,7 +100,9 @@ from strata_forge.pipelines._common import (
     ticking_phase,
     validate_repo_id,
 )
+from strata_forge.pipelines._scoring import ScoringInput, ScoringResult, load_scorer
 from strata_forge.storage import HFHubClient
+from strata_forge.training._load_guard import ModelLoadingError
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
@@ -177,6 +189,59 @@ class Hyperparams(BaseModel):
     max_model_len: int | None = Field(default=None, ge=1)
     dtype: str | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
+    engine: Literal["vllm_chat", "hf_classify", "hf_label_logits"] = "vllm_chat"
+    pair_template: str | None = Field(default=None, max_length=_MAX_RENDERED_CHARS)
+    label_alias: dict[str, str] | None = None
+    label_tokens: dict[str, str] | None = None
+    scoring_batch_size: int = Field(default=8, ge=1, le=256)
+
+    @model_validator(mode="after")
+    def _validate_scoring(self) -> Hyperparams:
+        if self.engine == "vllm_chat":
+            if (
+                self.pair_template is not None
+                or self.label_alias is not None
+                or self.label_tokens is not None
+            ):
+                raise ValueError(
+                    "pair_template, label_alias and label_tokens require an HF scoring engine"
+                )
+            if self.scoring_batch_size != 8:
+                raise ValueError("scoring_batch_size requires an HF scoring engine")
+            return self
+        if self.max_model_len is None:
+            raise ValueError("HF scoring requires an explicit max_model_len token limit")
+        if self.tensor_parallel_size != 1:
+            raise ValueError("HF scoring supports one device, not tensor parallelism")
+        if any(value is not None for value in (self.temperature, self.top_p, self.max_tokens)):
+            raise ValueError(
+                "HF scoring does not generate text: sampling parameters are not supported"
+            )
+        if self.dtype not in (None, "auto", "float32", "float16", "bfloat16"):
+            raise ValueError("HF scoring dtype must be auto, float32, float16 or bfloat16")
+        if self.engine == "hf_classify":
+            if self.pair_template is None:
+                raise ValueError("hf_classify requires pair_template for the hypothesis")
+            if self.label_tokens is not None:
+                raise ValueError("hf_classify uses label_alias, not label_tokens")
+        elif (
+            self.pair_template is not None or self.label_alias is not None or not self.label_tokens
+        ):
+            raise ValueError(
+                "hf_label_logits requires label_tokens, without pair_template or label_alias"
+            )
+        for mapping in (self.label_alias, self.label_tokens):
+            if mapping is not None and (
+                not 1 <= len(mapping) <= 16
+                or any(
+                    not key.strip() or len(key) > 64 or not value or len(value) > 64
+                    for key, value in mapping.items()
+                )
+            ):
+                raise ValueError(
+                    "label maps require 1-16 entries with nonempty keys/values of at most 64 characters"
+                )
+        return self
 
 
 class RunSpec(BaseModel):
@@ -190,9 +255,11 @@ class RunSpec(BaseModel):
     # step installs, so a spec cannot pick an engine the control plane did not validate against.
     engine_version: str | None = None
     model_id: str
+    model_revision: str | None = Field(default=None, max_length=256)
     dataset_id: str
     dataset_commit_sha: str | None = None
     dataset_config: str | None = None
+    id_column: str | None = Field(default=None, min_length=1, max_length=255)
     split: str
     column_mapping: dict[str, str] = Field(default_factory=dict)
     template: str
@@ -203,6 +270,12 @@ class RunSpec(BaseModel):
     progress_path: str | None = None
     # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
     run_id: str | None = None
+
+    @model_validator(mode="after")
+    def _stable_id_engine(self) -> RunSpec:
+        if self.id_column is not None and self.hyperparams.engine == "vllm_chat":
+            raise ValueError("id_column requires an HF scoring engine")
+        return self
 
 
 def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
@@ -237,7 +310,12 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
     to survive to the model. That reading is rare, and it is not worth the run this protects.
     """
-    placeholders = {m.group(1) for m in _PLACEHOLDER_RE.finditer(spec.template)}
+    templates = [spec.template]
+    if spec.hyperparams.pair_template is not None:
+        templates.append(spec.hyperparams.pair_template)
+    placeholders = {
+        m.group(1) for template in templates for m in _PLACEHOLDER_RE.finditer(template)
+    }
     unmapped = sorted(placeholders - set(spec.column_mapping))
     if not unmapped:
         return
@@ -252,7 +330,9 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     raise RunError(msg)
 
 
-def render_template(template: str, row: dict[str, Any], column_mapping: dict[str, str]) -> str:
+def render_template(
+    template: str, row: dict[str, Any], column_mapping: dict[str, str], *, truncate: bool = True
+) -> str:
     """Render ``template`` by replacing each ``{name}`` whose ``column_mapping[name]`` is a
     column present in ``row`` with ``str(row[col])``. Unknown placeholders stay literal.
 
@@ -267,6 +347,8 @@ def render_template(template: str, row: dict[str, Any], column_mapping: dict[str
         return str(row[col])
 
     rendered = _PLACEHOLDER_RE.sub(_sub, template)
+    if not truncate and len(rendered) > _MAX_RENDERED_CHARS:
+        raise RunError("rendered scoring input exceeds the character limit; no text was truncated")
     return rendered[:_MAX_RENDERED_CHARS]
 
 
@@ -287,7 +369,10 @@ def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any
         streaming=False,
     )
     columns = set(dataset.column_names or [])
-    missing = {c for c in spec.column_mapping.values() if c not in columns}
+    required = set(spec.column_mapping.values())
+    if spec.id_column is not None:
+        required.add(spec.id_column)
+    missing = required - columns
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
@@ -478,6 +563,7 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
     try:
         snapshot = await hub.download_snapshot(
             spec.model_id,
+            revision=spec.model_revision,
             allow_patterns=SNAPSHOT_PATTERNS,
             ignore_patterns=SNAPSHOT_IGNORED,
         )
@@ -510,7 +596,258 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     return out_repo
 
 
+def _build_scoring_inputs(spec: RunSpec, rows: list[dict[str, Any]]) -> list[ScoringInput]:
+    hp = spec.hyperparams
+    return [
+        ScoringInput(
+            text=render_template(spec.template, row, spec.column_mapping, truncate=False),
+            text_pair=(
+                render_template(hp.pair_template, row, spec.column_mapping, truncate=False)
+                if hp.pair_template is not None
+                else None
+            ),
+        )
+        for row in rows
+    ]
+
+
+def _scoring_rows(
+    result: ScoringResult,
+    labels: tuple[str, ...],
+    *,
+    decoder: bool,
+    redactor: Redactor,
+    item_ids: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in result.rows:
+        # Dataset.from_list uses the first row's columns: a refused first row must not
+        # erase every later probability column from the persisted dataset.
+        item: dict[str, Any] = {f"p_{label}": None for label in labels}
+        item.update(row.columns())
+        item.update(
+            custom_id=f"row-{row.index}",
+            output=row.pred,
+            overflow=row.overflow,
+            truncated=row.truncated,
+            error=redactor.redact(row.error) if row.error else None,
+        )
+        if decoder:
+            item["mass_outside"] = row.mass_outside
+        if item_ids is not None:
+            item["item_id"] = item_ids[row.index]
+        out.append(item)
+    return out
+
+
+def _stable_item_ids(spec: RunSpec, rows: list[dict[str, Any]]) -> tuple[str, ...] | None:
+    if spec.id_column is None:
+        return None
+    ids: list[str] = []
+    for row in rows:
+        value = row.get(spec.id_column)
+        if not isinstance(value, str) or not value or len(value) > 1024:
+            raise RunError("stable_item_id_invalid")
+        ids.append(value)
+    if len(set(ids)) != len(ids):
+        raise RunError("stable_item_id_duplicate")
+    return tuple(ids)
+
+
+def _write_scoring_results(
+    rows: list[dict[str, Any]], summary: dict[str, Any], outdir: Path
+) -> Path:
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ImportError("install 'strata-forge[hf]' for scoring Parquet artifacts") from exc
+    fields = [pa.field(name, pa.string()) for name in ("custom_id", "output", "error", "pred")]
+    fields.extend(pa.field(name, pa.bool_(), nullable=False) for name in ("overflow", "truncated"))
+    fields.extend(pa.field(f"p_{label}", pa.float64()) for label in summary["labels"])
+    if any("item_id" in row for row in rows):
+        fields.append(pa.field("item_id", pa.string(), nullable=False))
+    if any("mass_outside" in row for row in rows):
+        fields.append(pa.field("mass_outside", pa.float64()))
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / _RESULTS_FILENAME
+    pq.write_table(pa.Table.from_pylist(rows, schema=pa.schema(fields)), path)  # pyright: ignore[reportUnknownMemberType] — Arrow writer lacks complete stubs
+    (outdir / "scoring.json").write_text(
+        json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    (outdir / "README.md").write_text(
+        "---\nconfigs:\n- config_name: default\n  data_files:\n  - split: train\n    path: results.parquet\n---\n\n"
+        "# Batch scoring results\n\nInput commit references and scoring counts are in `scoring.json`.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_loading_refusal(summary: dict[str, Any], outdir: Path) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / "scoring.json"
+    path.write_text(json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+async def _execute_scoring(
+    spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
+) -> str:
+    hf_token = secrets.hf_token_value()
+    token = secrets.hub_credential()
+    hp = spec.hyperparams
+    gpu = GpuSampler()
+    phase = phase_sink(writer, hf_token, gpu=gpu)
+    hub = HFHubClient(token=token)
+    async with ticking_phase(phase, "Resolving input revisions", stage="load_model"):
+        model_sha, dataset_sha = await asyncio.gather(
+            hub.resolve_revision(spec.model_id, revision=spec.model_revision),
+            hub.resolve_revision(
+                spec.dataset_id, repo_type="dataset", revision=spec.dataset_commit_sha
+            ),
+        )
+    pinned = spec.model_copy(
+        update={"model_revision": model_sha, "dataset_commit_sha": dataset_sha}
+    )
+    input_refs: dict[Literal["model", "dataset"], str] = {
+        "model": f"{spec.model_id}@{model_sha}",
+        "dataset": f"{spec.dataset_id}@{dataset_sha}",
+    }
+    try:
+        async with ticking_phase(phase, "Loading the scoring model", stage="load_model"):
+            scorer = await load_scorer(
+                spec.model_id,
+                engine=hp.engine,  # pyright: ignore[reportArgumentType] — this branch excludes vllm_chat
+                token=token,
+                revision=model_sha,
+                max_length=hp.max_model_len or 0,
+                label_alias=hp.label_alias,
+                label_tokens=hp.label_tokens,
+                device="auto",
+                dtype=hp.dtype,
+            )
+    except ModelLoadingError as exc:
+        evidence = await asyncio.to_thread(
+            _write_loading_refusal,
+            {
+                "schema_version": 1,
+                "status": "loading_refused",
+                "engine": hp.engine,
+                "engine_version": installed_engine_version(),
+                "environment": env_snapshot(),
+                "input_refs": input_refs,
+                "loading_info": exc.audit.model_dump(mode="json"),
+                "padding_policy": None,
+            },
+            _local_results_dir(spec.run_id),
+        )
+        raise RunError(f"{exc}; bounded loading audit: {evidence}") from None
+    async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
+        rows = await asyncio.to_thread(_load_rows, pinned, token)
+    item_ids = _stable_item_ids(pinned, rows)
+    inputs = _build_scoring_inputs(pinned, rows)
+    if not inputs:
+        raise RunError("the run produced no rows: the dataset split was empty")
+    emit(
+        writer,
+        ProgressEvent(kind="start", stage="run", total_steps=len(inputs), input_refs=input_refs),
+    )
+    async with ticking_phase(phase, "Scoring rows", stage="run"):
+        result = await scorer.score(
+            inputs,
+            batch_size=hp.scoring_batch_size,
+            on_progress=lambda event: emit(writer, event),
+        )
+    out = _scoring_rows(
+        result,
+        scorer.labels,
+        decoder=hp.engine == "hf_label_logits",
+        redactor=run_redactor(hf_token),
+        item_ids=item_ids,
+    )
+    counts = {
+        "succeeded": float(len(out) - result.failed_rows),
+        "failed": float(result.failed_rows),
+        "overflow_rows": float(result.overflow_rows),
+        "truncated_rows": float(result.truncated_rows),
+    }
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "engine": hp.engine,
+        "engine_version": installed_engine_version(),
+        "spec_engine_version": spec.engine_version,
+        "environment": env_snapshot(),
+        "input_refs": input_refs,
+        "loading_info": scorer.loading_audit.model_dump(mode="json"),
+        "padding_policy": scorer.padding_policy.model_dump(mode="json"),
+        "dataset_config": spec.dataset_config,
+        "split": spec.split,
+        "row_limit": hp.row_limit,
+        "id_semantics": {
+            "kind": "stable_string",
+            "source_column": spec.id_column,
+            "artifact_column": "item_id",
+            "unique": True,
+        }
+        if item_ids is not None
+        else {"kind": "ordinal", "artifact_column": "custom_id"},
+        "rows": len(out),
+        "labels": scorer.labels,
+        "max_model_len": hp.max_model_len,
+        "dtype": hp.dtype,
+        "label_alias": hp.label_alias,
+        "label_tokens": hp.label_tokens,
+        "scoring_batch_size": hp.scoring_batch_size,
+        "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
+        "pair_template_sha256": hashlib.sha256(hp.pair_template.encode()).hexdigest()
+        if hp.pair_template is not None
+        else None,
+        "counts": counts,
+    }
+    async with ticking_phase(phase, "Writing results", stage="push"):
+        results_path = await asyncio.to_thread(
+            _write_scoring_results, out, summary, _local_results_dir(spec.run_id)
+        )
+    destination = str(results_path)
+    output_ref: str | None = None
+    if hf_token and spec.output_repo_id:
+        try:
+            async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
+                repo = validate_repo_id(spec.output_repo_id, "output repo")
+                await hub.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+                commit = await hub.commit_folder(
+                    results_path.parent,
+                    repo,
+                    repo_type="dataset",
+                    allow_patterns=(_RESULTS_FILENAME, "scoring.json", "README.md"),
+                    commit_message="batch scoring results",
+                )
+                destination = repo
+                output_ref = f"{repo}@{commit.sha}"
+        except Exception as exc:
+            raise RunError(
+                f"results are on the VM at {results_path}, but the push failed: {exc}"
+            ) from exc
+    emit(
+        writer,
+        ProgressEvent(
+            kind="end",
+            stage="push",
+            step=len(out),
+            total_steps=len(out),
+            metrics=counts,
+            message=destination,
+            input_refs=input_refs,
+            output_ref=output_ref,
+        ),
+    )
+    _check_produced_output(out, int(counts["succeeded"]))
+    return destination
+
+
 async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
+    if spec.hyperparams.engine != "vllm_chat":
+        return await _execute_scoring(spec, secrets, writer)
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, and the

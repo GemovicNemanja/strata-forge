@@ -1,0 +1,33 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 0b2164e..e10d0fe 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -70,3 +70,28 @@ jobs:
+           else
+             echo "No cassettes yet — skipping VCR replay."
+           fi
++
++  prompt-conformance:
++    name: Portable prompt conformance
++    runs-on: ubuntu-latest
++    permissions:
++      contents: read
++    env:
++      LITELLM_LOCAL_MODEL_COST_MAP: "True"
++    steps:
++      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
++        with:
++          persist-credentials: false
++      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
++        with:
++          enable-cache: false
++      - run: uv python install ${{ env.PYTHON_VERSION }}
++      - run: uv sync --frozen
++      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
++        with:
++          node-version: "24"
++      - run: node --test scripts/prompt_reference.test.mts
++      - name: Verify Python and Node operational imports
++        run: |
++          uv run python scripts/import_operational_prompts.py --output "$RUNNER_TEMP/strata-operational-prompts.json"
++          node scripts/prompt_reference.mts tests/fixtures/prompts/portable-bytes-v1.json tests/fixtures/prompts/composition-renders-v1.json "$RUNNER_TEMP/strata-operational-prompts.json"

@@ -8,6 +8,86 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- Immutable modular prompt composition provides an explicit literal/variable/pinned-module
+  AST, exact-version snapshot registry, deterministic domain-separated build/render identities,
+  typed chat/artifact targets and UTF-8 byte source maps. Declared constraint conflicts refuse;
+  duplicate literal passages remain advisory without rewriting output. Portable Python/Node
+  byte/render fixtures and an authorized archived Strata operational import preserve exact
+  content. Existing Jinja2 APIs remain compatible; persistence, permissions, publication and
+  provider dispatch evidence are separate responsibilities.
+
+- Strict primary-classifier worker API requires training-purpose read authority and streamed,
+  incrementally bounded rows. Final safe exports reload through installed scoring, including
+  decoder single-sequence rendering bound to unchanged model metadata. Full class probabilities
+  remain distinct from initialization verbalizers. Registry, dispatch and publication stay separate.
+
+- Async primary-classifier SDK over resolved native models/tokenizer/rows, with ordinary CE
+  default and explicit Brier objectives. Trusted encoder/decoder initialization records exact
+  transforms and step-zero parity, including nonzero LM bias and pad=EOS pooling. Final-only
+  safe export reloads complete local safetensors through fixed installed classes; missing
+  weights never receive a training-head exemption. Worker dispatch remains separate.
+
+- Pinned classification evaluation workers validate separate multi-config populations, stable
+  ID joins, declared label projections and probability provenance, and write explicitly typed
+  per-population Parquet plus versioned reports. Trusted pin-bound read policy is mandatory;
+  unknown/protected inputs deny before model/row access, and standalone execution denies
+  without an installed adapter. Exact paired comparison/family contexts preserve invalid
+  outputs and withhold independent inference for repeated groups.
+- `VerifierConfig` and `render_verifier_input` provide inert, bounded premise/hypothesis
+  rendering metadata without I/O. HF scoring's optional `id_column` adds stable `item_id`
+  alongside unchanged `custom_id`, recording source ID semantics. Evaluation CLI commands
+  export/validate the installed schema and delegate to the same worker.
+- `HFHubClient.repo_private` requires explicit boolean privacy metadata. Evaluation keeps
+  local attempt evidence and requires separate destination authority for publication. The fixed
+  private Task authority adapter binds policy RPCs to the Run/spec, performs create-only or
+  expected-parent writes, and accepts actual-commit receipts before success. Interrupted commits
+  retain known/unknown status; read approval never grants writes. Shared redaction covers the
+  bounded run-worker credential and delivered nested values.
+
+- `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
+  conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,
+  and explicit named-family Holm correction that retains caller order. Frozen results and
+  evaluation aliases require no numerical extra and choose no rejection threshold. Large
+  binomial tails avoid cancellation from subtracting log-gamma values. Bootstrap execution
+  remains outside these helpers' contract.
+
+- `strata_forge.metrics` provides explicit-label classification reports, accuracy, macro-F1,
+  confusion matrices with invalid-output counts, multiclass sum-form Brier score, and NLL.
+  Undefined values, denominators, probability coverage, clipping, and raw/restricted probability
+  provenance are preserved in serializable frozen models. `evals.classification` re-exports
+  the same functions. Pure metric functions are synchronous under ADR 0020.
+- Temperature application is stable and loads NumPy lazily through `[scoring]`. A draft
+  `TemperatureCalibration` component records its label order, fit provenance, and optional
+  before/after scores; it does not fit temperatures or write a training calibration file.
+- Inference specs can select `hf_classify` for paired classifier probabilities or
+  `hf_label_logits` for exact single-token label probabilities and full-vocabulary outside
+  mass. Scoring validates inert pair templates, preserves hypotheses, counts overflows and
+  refusals, and writes Parquet plus a pinned-input manifest without starting vLLM.
+- `HFHubClient.resolve_revision`, `commit_file` and `commit_folder` preserve actual input
+  and output commit SHAs. Progress events carry bounded immutable input/output refs apart
+  from float metrics, retaining the existing result-destination message.
+- Clean-install checks construct both scoring specs and reload tiny locally initialized
+  safetensors models offline. Serving declares bounded direct scoring dependencies.
+
+### Fixed
+
+- Evaluation policy RPCs retry only HTTP 503 and transport timeouts, with at most three exact
+  requests inside one 30-second budget. Each attempt clears cookies; permanent denials,
+  malformed replies and cancellation never trigger retries. Receipt recovery replays the same
+  immutable binding without repeating Hub mutations.
+
+- HF classifier and label-logit loads request and validate loading information, refusing any
+  missing body/head weights or structural diagnostics before dataset materialization. A
+  reusable private guard produces bounded name/count/code audits; scoring manifests preserve
+  those audits and the explicit pad policy without upstream warning text. Training head-key
+  decisions cannot grant an inference exemption.
+
+- HF scoring aligns model config padding to the actual tokenizer pad/EOS id so decoder
+  classifier heads can score unequal-length batches. Existing local paths that shadow a
+  requested Hub id are refused before loading rather than silently ignoring its revision.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added

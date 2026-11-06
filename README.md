@@ -4,8 +4,19 @@ Typed, async-first toolkit for AI/LLM work — inference, evaluation, fine-tunin
 remote compute orchestration across the major foundation-model providers.
 
 Built on **LiteLLM** for provider breadth and **Pydantic v2** for strict typing. The public API is
-async, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Heavy optional
+async for execution and I/O, with sync wrappers in `strata_forge.sync` for CLI and notebook ergonomics. Pure classification metrics are synchronous. Heavy optional
 dependencies (training, serving, remote compute) live behind extras, so the base install stays light.
+
+Pinned classification evaluation uses explicit stable-ID joins and separate per-config reports,
+with native classifier or imported-probability inputs. The installed `eval schema` and
+`eval validate-spec` commands expose its inert contract. Execution requires a trusted read
+policy; the installed adapter consumes a run/spec-bound private Task authority frame. Publishing
+additionally requires a separate destination fence and accepted actual-commit receipt. Standalone
+launch denies access without installed authority. See [pipeline workers](docs/modules/pipelines.md).
+
+Primary classifier training has an async SDK over resolved objects, with ordinary CE defaults,
+exact trusted head initialization and complete local safetensors reload. It performs no Hub or
+remote operations; worker/adapter/calibration integration remains separate. See [training](docs/modules/training.md).
 
 ## Install
 
@@ -20,13 +31,14 @@ Optional extras pull in the heavy dependencies only when you need them:
 ```bash
 pip install "strata-forge[rag]"        # embeddings, vector store, reranking
 pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
-pip install "strata-forge[serving]"    # vLLM
+pip install "strata-forge[serving]"    # vLLM and exact HF scoring dependencies
 pip install "strata-forge[finetuning]" # torch, transformers, trl, peft, bitsandbytes
+pip install "strata-forge[scoring]"    # NumPy for temperature application
 pip install "strata-forge[all]"        # everything
 ```
 
 Full set: `redis`, `multimodal`, `inspect`, `langfuse`, `hf`, `evals`, `rag`, `compute`, `serving`,
-`bedrock`, `storage`, `finetuning`, `all`.
+`bedrock`, `storage`, `finetuning`, `scoring`, `all`.
 
 ## Quickstart
 
@@ -55,9 +67,10 @@ installed as `strata-forge`.
 | `strata_forge.llm` | Provider abstraction, structured output, tool calling, two-axis fallback |
 | `strata_forge.core` | Cross-cutting errors, retry, logging, budget ceilings, reproducibility |
 | `strata_forge.config` | Pydantic Settings root with YAML overlays and `.env` support |
-| `strata_forge.prompts` | Jinja2 and Langfuse-backed prompt registry |
+| `strata_forge.prompts` | Jinja2 templates and immutable modular prompt builds with exact pins and UTF-8 attribution |
 | `strata_forge.tracing` | Langfuse observability |
 | `strata_forge.datasets` | Dataset CRUD with a Hugging Face bridge |
+| `strata_forge.metrics` | Pure classification metrics, explicit populations, and paired/family comparisons |
 | `strata_forge.evals` | Experiment runner, graders, metrics |
 | `strata_forge.agents` | Agent runtime, memory, multi-agent composition |
 | `strata_forge.rag` | Embed, chunk, store, retrieve, rerank |
@@ -65,6 +78,12 @@ installed as `strata-forge`.
 | `strata_forge.compute` | SkyPilot and SSH backends, serving, batch inference |
 | `strata_forge.training` | SFT / DPO / ORPO / KTO / GRPO with PEFT |
 | `strata_forge.pipelines` | Runnable entrypoints executed on a compute target |
+
+The inference pipeline accepts the default `vllm_chat` engine and HF forward-pass engines:
+`hf_classify` scores premise/hypothesis pairs; `hf_label_logits` reads exact single-token label
+probabilities and full-vocabulary outside mass. Both preserve explicit overflow failures and
+write Parquet plus input-commit provenance. See the [scoring contract](docs/modules/compute.md#exact-hugging-face-scoring)
+for required knobs, safe loading, length policy and result artifacts.
 
 ## Documentation
 

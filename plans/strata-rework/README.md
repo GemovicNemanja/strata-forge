@@ -595,3 +595,7 @@ acceptance item as passed, failed or not run. A fake model passing math tests, a
 exit zero, an uploaded file and a usable cross-repo feature are different pieces of evidence.
 
 The [primary classifier worker review](drafts/classifier-worker-review.md) and [inert task contract](drafts/classifier-worker-contract.md) narrow the SDK-to-worker increment, including mandatory safe decoder export→installed scoring→evaluation interoperability. The [example](drafts/classifier-worker-example.json) is fictional design metadata, not an available worker. Training-purpose read authority, guarded model publication and exact app/agent wire are separate reviewed delivery units; no Eval credential or research exception may be reused.
+
+## Prompt compiler CI publication
+
+The modular compiler runtime and local cross-language conformance are reviewable. The exact Node24 hosted-CI addition is retained as [a reviewed patch](drafts/prompt-conformance-workflow.patch). GitHub rejected updating `.github/workflows/ci.yml` because the authenticated personal OAuth token lacks `workflow` scope; no alternate account or automatic workflow modification is used. Apply/publish that CI change after the personal credential has the required scope. Local tests do not substitute for this remaining hosted-conformance gate.

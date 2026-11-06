@@ -31,7 +31,26 @@ until ``train()`` is called.
   JSON job spec (an orchestrator, a CLI, a launch form) drive
   training without writing Python.
 
+## Primary classifier SDK
+
+`classifier.py` and `_classifier_heads.py` own async primary training over caller-resolved
+objects. Heavy objects cross a documented dynamic native-library seam; imports remain lazy.
+Default CE, explicit Brier, strict labels/soft targets, exact head initialization, safe local
+export and complete reload are the supported boundary. The SDK imports core reproducibility
+helpers as well as core errors; no training-to-evals/pipelines dependency is permitted.
+Never treat a receipt as a fresh-head inference exemption or a caller-supplied provenance grant.
+Preserve decoder dense/norm/output bias and last-attended pooling, including pad=EOS. Keep
+unsupported registry/worker/adapter/calibration capabilities unavailable rather than enums-only.
+
 ## Boundaries
+
+- `_load_guard.py` is a private pure checkpoint-report leaf, importing only core errors and
+  Pydantic. Trained-artifact consumers request `output_loading_info=True`, unpack and validate
+  its tuple, and refuse every structural diagnostic before executing a model. Never add a
+  head exemption to inference. Its bounded audit contains names/counts/fixed codes, never raw
+  warning or error text. `HeadKeyDecision` is only an exact comparison; training still needs
+  a trusted registry initializer and receipt. Decoder initialization requires
+  `decoder_logit_head`. Keep the helper's contract in `docs/modules/training.md` synchronized.
 
 - **Owns:** ``sft.py``, ``preference.py``, ``peft.py``,
   ``chat_template.py``, ``packing.py``, ``methods.py``,
@@ -39,8 +58,8 @@ until ``train()`` is called.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
   for the conversation shapes consumed by
   :mod:`strata_forge.training.chat_template`, and
-  :mod:`strata_forge.core.errors` for the ``ForgeError`` base of
-  :class:`MissingBitsAndBytesError`. Nothing else.
+  :mod:`strata_forge.core.errors` for shared errors and
+  :mod:`strata_forge.core.repro` for classifier seed/environment records. Nothing else.
 - **Does NOT import** :mod:`strata_forge.tracing`, :mod:`strata_forge.agents`,
   :mod:`strata_forge.evals`, :mod:`strata_forge.rag`, :mod:`strata_forge.datasets`,
   :mod:`strata_forge.compute`. Trainer scripts that ride on
@@ -172,3 +191,12 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
 - Adding a new heavy dep to the ``[finetuning]`` extra.
 - Adding a vision-aware training path (it would need its own
   module, not a chat-template extension).
+
+## Shared verifier metadata
+
+`verifier_config.py` owns pure `VerifierConfig`, `RenderedVerifierInput` and
+`render_verifier_input`, exported by this module. It has no I/O/heavy imports or execution
+imports. Its bounded premise/hypothesis renderer is an explicit supported task shape, not a
+universal training constraint. Explicit eval overrides are validated and digested before use.
+Training checkpoint selection, head initialization and calibration writers have separate
+contracts; adding metadata does not silently enable those consumers.

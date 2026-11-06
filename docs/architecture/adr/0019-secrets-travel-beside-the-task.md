@@ -102,9 +102,12 @@ read and before any network call or subprocess. It refuses a `FORGE_SECRETS_FILE
 absolute path ending in `.secrets.json` without touching it, opens the file with `O_NOFOLLOW`
 and `O_NONBLOCK` (a FIFO is refused instead of waited on), requires a regular file owned by the
 effective user with no group or other bits, reads at most 64 KiB, and unlinks it whatever the
-outcome. It accepts only the key `HF_TOKEN` (`strata_forge.pipelines.HF_TOKEN_SECRET`, the name
-an orchestrator uses); any other key is refused, counted but not named. The values come back as `SecretStr` in a
-`RunSecrets` (`hf_token`), which `runner_main` passes to the runner in place of the raw string.
+outcome. It accepts `HF_TOKEN` and `STRATA_EVAL_AUTHORITY` (the constants exported by
+`strata_forge.pipelines`); unknown keys are refused, counted but not named. Values come back as
+`SecretStr` in `RunSecrets` (`hf_token`, `eval_authority`), which `runner_main` passes to the
+runner. The evaluation frame is parsed only by the fixed installed policy adapter and binds
+the actual Run/spec digest; it has no environment fallback. The shared redactor registers both
+the frame and its nested worker credential before rendering failures, including encoded values.
 Every failure is a named `RunError` whose message never carries the file's contents.
 
 ### The model server gets an allow-listed environment
