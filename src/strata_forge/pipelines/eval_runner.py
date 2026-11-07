@@ -45,6 +45,7 @@ from strata_forge.pipelines._evaluation_report import (
     build_report,
     build_set_report,
     counts,
+    input_ref_records,
     not_produced,
     write_artifacts,
 )
@@ -63,6 +64,10 @@ from strata_forge.training.verifier_config import VerifierConfig, render_verifie
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from strata_forge.pipelines._population import PopulationMember, PopulationOutcome
+    from strata_forge.pipelines._population_report import PopulationEvaluationResult
+    from strata_forge.pipelines.evaluation_population_spec import EvaluationPopulationSpecV2
 
 __all__ = [
     "EvalSpec",
@@ -738,6 +743,624 @@ async def run_evaluation(
         raise
     except Exception:
         raise EvaluationError("evaluation_execution_failed") from None
+
+
+async def _native_population_items(
+    job: EvalSpec,
+    case: EvaluationSet,
+    rows: tuple[Row, ...],
+    members: tuple[PopulationMember, ...],
+    config: VerifierConfig,
+    scorer: Scorer,
+    *,
+    writer: JsonlProgressWriter | None = None,
+    completed: int = 0,
+) -> tuple[tuple[EvaluationItem, ...], tuple[PopulationOutcome, ...]]:
+    from strata_forge.pipelines._population import PopulationOutcome
+    from strata_forge.pipelines._scoring import ScoringOutcomesV2
+
+    eligible = tuple(row for row, member in zip(rows, members, strict=True) if member.within_limits)
+    gold = gold_items(eligible, case) if eligible else ()
+    items = {item.item_id: item for item in gold}
+    outcomes: dict[int, PopulationOutcome] = {}
+    parser = PredictionSet.model_validate(
+        {
+            **case.model_dump(),
+            "column_mapping": None,
+            "source_labels": job.model_labels,
+            "predictions_ref": f"{job.model_id}@{job.model_revision}",
+            "predictions_config": case.dataset_config,
+            "predictions_split": case.split,
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": None,
+            "parse": "probability_columns",
+            "parse_config": {
+                "probability_columns": {label: f"p_{label}" for label in scorer.labels},
+                "probability_kind": "class_probabilities"
+                if job.engine == "hf_classify"
+                else "restricted_softmax",
+                "prediction_rule": "argmax",
+                "prediction_column": None,
+                "label_aliases": {},
+                "index_map": {},
+                "mass_outside_column": "mass_outside" if job.engine == "hf_label_logits" else None,
+            },
+        }
+    )
+    mapping = case.column_mapping or {}
+    for start in range(0, len(members), 128):
+        await asyncio.sleep(0)
+        selected: list[PopulationMember] = []
+        inputs: list[ScoringInput] = []
+        for member in members[start : start + 128]:
+            if not member.within_limits:
+                outcomes[member.index] = PopulationOutcome(
+                    index=member.index,
+                    item_id=member.item_id,
+                    tier=member.tier,
+                    outcome="suite_excluded",
+                    metric_eligible=False,
+                    token_count=None,
+                    model_limit=config.max_length,
+                    model_sent=False,
+                    error_code=None,
+                    refusal_stage=None,
+                )
+                continue
+            row = rows[member.index]
+            rendered = render_verifier_input(
+                config, row.get(mapping["premises"]), row.get(mapping["hypothesis"])
+            )
+            if rendered.error_code is not None or rendered.text is None:
+                items[member.item_id] = items[member.item_id].model_copy(
+                    update={
+                        "prediction_status": "refused",
+                        "error_code": rendered.error_code,
+                        "probability_exclusion_reason": "refused",
+                    }
+                )
+                outcomes[member.index] = PopulationOutcome(
+                    index=member.index,
+                    item_id=member.item_id,
+                    tier=member.tier,
+                    outcome="invalid",
+                    metric_eligible=True,
+                    token_count=None,
+                    model_limit=config.max_length,
+                    model_sent=False,
+                    error_code="render_refused",
+                    refusal_stage="render",
+                )
+                continue
+            selected.append(member)
+            inputs.append(ScoringInput(text=rendered.text, text_pair=rendered.text_pair))
+        native = await scorer.score_with_outcomes(
+            inputs, overflow="drop", batch_size=job.scoring_batch_size or 1
+        )
+        if type(native) is not ScoringOutcomesV2:
+            raise EvaluationError("native_scoring_evidence_invalid")
+        native = ScoringOutcomesV2.model_validate(native)
+        if len(native.rows) != len(selected):
+            raise EvaluationError("scoring_row_alignment_invalid")
+        for scored in native.rows:
+            member = selected[scored.index]
+            if scored.model_limit != config.max_length:
+                raise EvaluationError("native_scoring_limit_mismatch")
+            if scored.outcome == "overflow":
+                items.pop(member.item_id)
+                outcomes[member.index] = PopulationOutcome(
+                    index=member.index,
+                    item_id=member.item_id,
+                    tier=member.tier,
+                    outcome="overflow",
+                    metric_eligible=False,
+                    token_count=scored.token_count,
+                    model_limit=scored.model_limit,
+                    model_sent=False,
+                    error_code="input_too_long",
+                    refusal_stage="input",
+                )
+                continue
+            if scored.result is None:
+                raise EvaluationError("native_scoring_evidence_invalid")
+            output: Row = {
+                **{f"p_{label}": scored.result.probabilities.get(label) for label in scorer.labels},
+                "item_id": member.item_id,
+                "overflow": False,
+                "truncated": False,
+                "error": scored.result.error,
+                "mass_outside": scored.result.mass_outside,
+            }
+            item = parse_predictions(
+                (items[member.item_id],), (output,), parser, strata_scoring=True
+            )[0].model_copy(update={"source_prediction_ref": None, "source_prediction_id": None})
+            items[member.item_id] = item
+            valid = item.prediction_status == "valid"
+            outcomes[member.index] = PopulationOutcome(
+                index=member.index,
+                item_id=member.item_id,
+                tier=member.tier,
+                outcome="scored" if valid else "invalid",
+                metric_eligible=True,
+                token_count=scored.token_count,
+                model_limit=scored.model_limit,
+                model_sent=scored.model_sent,
+                error_code=None if valid else "scoring_refused",
+                refusal_stage=None if valid else "input",
+            )
+    return tuple(items[member.item_id] for member in members if member.item_id in items), tuple(
+        outcomes[index] for index in range(len(members))
+    )
+
+
+async def _import_population_items(
+    job: EvalSpec,
+    case: PredictionSet,
+    rows: tuple[Row, ...],
+    members: tuple[PopulationMember, ...],
+    source: EvaluationReader,
+) -> tuple[tuple[EvaluationItem, ...], tuple[PopulationOutcome, ...], str | None]:
+    from strata_forge.pipelines._population import PopulationOutcome
+
+    if case.prediction_manifest_path is not None:
+        declared = await source.json(case.predictions_ref, case.prediction_manifest_path)
+        if declared.get("schema_version") in (
+            "strata.scoring.population.v2",
+            "strata.eval.metrics.v2",
+        ):
+            raise EvaluationError("prediction_overflow_evidence_unavailable")
+    producer = await _prediction_manifest(job, case, source)
+    predictions = await source.rows(
+        case.predictions_ref,
+        case.predictions_config,
+        case.predictions_split,
+        None,
+        _prediction_columns(case, producer),
+    )
+    all_ids = {member.item_id for member in members}
+    included = {member.item_id for member in members if member.within_limits}
+    seen: set[str] = set()
+    selected: list[Row] = []
+    for row in predictions:
+        item_id = stable_id(row.get(case.prediction_id_column), "prediction_id_missing")
+        if item_id in seen or item_id not in all_ids:
+            raise EvaluationError("prediction_population_invalid")
+        seen.add(item_id)
+        if item_id in included:
+            if producer == "evaluation":
+                status = row.get("prediction_status")
+                if type(status) is not str or status not in {
+                    "valid",
+                    "invalid",
+                    "missing",
+                    "refused",
+                }:
+                    raise EvaluationError("prediction_manifest_mismatch")
+                row = {**row, "error": "source_prediction_refused" if status == "refused" else None}
+            selected.append(row)
+    eligible = tuple(row for row, member in zip(rows, members, strict=True) if member.within_limits)
+    gold = gold_items(eligible, case) if eligible else ()
+    parsed = parse_predictions(gold, selected, case, strata_scoring=producer is not None)
+    if producer == "evaluation":
+        statuses = {
+            stable_id(row.get(case.prediction_id_column), "prediction_id_missing"): row.get(
+                "prediction_status"
+            )
+            for row in selected
+        }
+        parsed = tuple(
+            item.model_copy(
+                update={
+                    "prediction_status": "missing",
+                    "error_code": "prediction_missing",
+                    "probability_exclusion_reason": "missing_prediction",
+                }
+            )
+            if statuses.get(item.item_id) == "missing" and item.pred is None
+            else item
+            for item in parsed
+        )
+    by_id = {item.item_id: item for item in parsed}
+    outcomes: list[PopulationOutcome] = []
+    for member in members:
+        item = by_id.get(member.item_id)
+        status = (
+            "suite_excluded"
+            if not member.within_limits
+            else "scored"
+            if item is not None and item.prediction_status == "valid"
+            else "invalid"
+        )
+        outcomes.append(
+            PopulationOutcome(
+                index=member.index,
+                item_id=member.item_id,
+                tier=member.tier,
+                outcome=status,
+                metric_eligible=member.within_limits,
+                token_count=None,
+                model_limit=None,
+                model_sent=False if not member.within_limits else None,
+                error_code="prediction_missing"
+                if status == "invalid" and (item is None or item.prediction_status == "missing")
+                else "prediction_invalid"
+                if status == "invalid"
+                else None,
+                refusal_stage="missing"
+                if status == "invalid" and (item is None or item.prediction_status == "missing")
+                else "prediction"
+                if status == "invalid"
+                else None,
+            )
+        )
+    return parsed, tuple(outcomes), producer
+
+
+async def _population_comparisons(
+    job: EvalSpec,
+    reports: list[dict[str, object]],
+    populations: dict[str, tuple[EvaluationItem, ...]],
+    source: EvaluationReader,
+) -> dict[str, float]:
+    """Compare identical target populations without equating model-condition identities."""
+    p_values: dict[str, float] = {}
+    for case, report in zip(job.evaluation_sets, reports, strict=True):
+        candidate = populations[case.evaluation_id]
+        comparisons: list[dict[str, object]] = []
+        for request in case.compare_to:
+            baseline = await source.json(request.baseline_ref, "metrics.json")
+            entries = baseline.get("evaluations")
+            if (
+                baseline.get("schema_version") != "strata.eval.metrics.v2"
+                or type(entries) is not list
+            ):
+                raise EvaluationError("comparison_report_version_unsupported")
+            matching = [
+                cast("Row", entry)
+                for entry in cast("list[object]", entries)
+                if type(entry) is dict
+                and cast("Row", entry).get("evaluation_id") == request.baseline_evaluation_id
+            ]
+            if len(matching) != 1:
+                raise EvaluationError("comparison_population_mismatch")
+            entry = matching[0]
+            target, population = entry.get("target"), entry.get("population")
+            current_target, current_population = report.get("target"), report.get("population")
+            if (
+                not _same_population(job, case, entry, baseline)
+                or entry.get("labels") != list(case.labels)
+                or entry.get("label_space") != case.label_space
+                or type(target) is not dict
+                or type(current_target) is not dict
+                or type(population) is not dict
+                or type(current_population) is not dict
+            ):
+                raise EvaluationError("comparison_population_mismatch")
+            # Source projections/model/tokenizer/rendering can differ. These are canonical
+            # gold/target identities, rather than a requirement for equal model conditions.
+            if (
+                target != current_target
+                or cast("Row", population).get("selected_population_sha256")
+                != cast("Row", current_population).get("selected_population_sha256")
+                or cast("Row", population).get("metric_population_sha256")
+                != cast("Row", current_population).get("metric_population_sha256")
+            ):
+                raise EvaluationError("comparison_population_mismatch")
+            rows = await source.rows(
+                request.baseline_ref,
+                request.baseline_evaluation_id,
+                "train",
+                None,
+                ("item_id", "gold", "pred", "prediction_status", "metric_eligible", "outcome"),
+            )
+            all_ids: set[str] = set()
+            index: dict[str, Row] = {}
+            for row in rows:
+                item_id = stable_id(row.get("item_id"), "comparison_id_invalid")
+                if item_id in all_ids or type(row.get("metric_eligible")) is not bool:
+                    raise EvaluationError("comparison_item_invalid")
+                all_ids.add(item_id)
+                if row["metric_eligible"] is True:
+                    if type(row.get("outcome")) is not str or row.get("outcome") not in {
+                        "scored",
+                        "invalid",
+                    }:
+                        raise EvaluationError("comparison_item_invalid")
+                    index[item_id] = row
+                elif type(row.get("outcome")) is not str or row.get("outcome") not in {
+                    "suite_excluded",
+                    "overflow",
+                }:
+                    raise EvaluationError("comparison_item_invalid")
+            if set(index) != {item.item_id for item in candidate} or any(
+                index[item.item_id].get("gold") != item.gold for item in candidate
+            ):
+                raise EvaluationError("comparison_population_mismatch")
+            b = c = 0
+            for item in candidate:
+                row = index[item.item_id]
+                status = row.get("prediction_status")
+                if (
+                    type(status) is not str
+                    or status not in {"valid", "invalid", "missing", "refused"}
+                    or (status == "valid" and row.get("pred") not in case.labels)
+                ):
+                    raise EvaluationError("comparison_item_invalid")
+                baseline_correct = status == "valid" and row.get("pred") == item.gold
+                b += baseline_correct and not item.correct
+                c += item.correct and not baseline_correct
+            inference: dict[str, object] = not_produced("requires_cluster_method")
+            if not candidate:
+                inference = not_produced("no_metric_population")
+            elif request.sampling_unit == "independent_items" and _independent(case, candidate):
+                statistic = mcnemar_exact(b, c, n_pairs=len(candidate))
+                inference = {"status": "computed", "result": statistic.model_dump(mode="json")}
+                if statistic.p_value is not None:
+                    p_values[f"{case.evaluation_id}/{request.comparison_id}"] = statistic.p_value
+            comparisons.append(
+                {
+                    "comparison_id": request.comparison_id,
+                    "baseline_ref": request.baseline_ref,
+                    "baseline_evaluation_id": request.baseline_evaluation_id,
+                    "baseline_provenance": "retained_report_consistency_only",
+                    "n_pairs": len(candidate),
+                    "accuracy_delta": (c - b) / len(candidate) if candidate else None,
+                    "baseline_correct_candidate_wrong": b,
+                    "candidate_correct_baseline_wrong": c,
+                    "inference": inference,
+                }
+            )
+        report["comparisons"] = comparisons
+    return p_values
+
+
+def _population_holm(job: EvalSpec, p_values: dict[str, float]) -> list[dict[str, object]]:
+    return [
+        {
+            "family_id": family.family_id,
+            "members": family.members,
+            "adjustment": {
+                "status": "computed",
+                "result": holm_correction(
+                    {member: p_values[member] for member in family.members},
+                    family_id=family.family_id,
+                ).model_dump(mode="json"),
+            }
+            if all(member in p_values for member in family.members)
+            else not_produced("comparison_inference_unavailable"),
+        }
+        for family in job.holm_families
+    ]
+
+
+async def run_population_evaluation(
+    spec: EvaluationPopulationSpecV2,
+    *,
+    token: str | Literal[False] = False,
+    policy: ReadPolicy | None = None,
+    reader: EvaluationReader | None = None,
+    writer: JsonlProgressWriter | None = None,
+    output_dir: Path | None = None,
+    scorer_loader: Callable[..., Awaitable[Scorer]] = load_scorer,
+) -> PopulationEvaluationResult:
+    """Evaluate an explicit local population profile; imported flags never authorize a drop."""
+    from strata_forge.pipelines._population import (
+        PopulationError,
+        population_counts,
+        population_members,
+    )
+    from strata_forge.pipelines._population_report import (
+        PopulationEvaluationResult,
+        closed_execution_error,
+        finish_attempt,
+        population_summary,
+        reserve_attempt,
+        target_identity,
+        write_evaluation_attempt,
+    )
+    from strata_forge.pipelines.evaluation_population_spec import EvaluationPopulationSpecV2
+
+    try:
+        if type(spec) is not EvaluationPopulationSpecV2:
+            raise PopulationError("population_job_invalid")
+        current = EvaluationPopulationSpecV2.model_validate(spec.wire_payload())
+        job, digest = current.job, current.digest()
+        check_engine_version(job.engine_version)
+        if token is not False and (type(token) is not str or not token.strip()):
+            raise EvaluationError("credential_invalid")
+        decisions = await authorize_reads(current.input_reads(), policy, spec_sha256=digest)
+        attempt = await asyncio.to_thread(
+            reserve_attempt,
+            output_dir or results_dir(job.run_id, name="strata-evaluation-results"),
+            run_id=job.run_id,
+            report_name="metrics.json",
+        )
+        source = reader or HubEvaluationReader(token)
+        for ref, kind in current.input_reads():
+            await source.prepare(ref, model=kind == "model")
+        scorer: Scorer | None = None
+        rendering: VerifierConfig | None = None
+        renderer_audit: dict[str, object] = {}
+        if job.mode == "classify":
+            rendering, renderer_audit = await _rendering(job, source)
+            scorer = await scorer_loader(
+                job.model_id,
+                engine=job.engine,
+                token=token,
+                revision=job.model_revision,
+                max_length=rendering.max_length,
+                label_alias=job.label_aliases if job.engine == "hf_classify" else None,
+                label_tokens={label: job.label_tokens[label] for label in job.model_labels or ()}
+                if job.label_tokens is not None
+                else None,
+                dtype=job.dtype,
+                device="auto",
+            )
+            if type(scorer) is not Scorer or scorer.labels != job.model_labels:
+                raise EvaluationError("model_label_order_mismatch")
+        settings = {entry.evaluation_id: entry for entry in current.populations}
+        reports: list[dict[str, object]] = []
+        artifacts: list[
+            tuple[EvaluationSet, tuple[EvaluationItem, ...], tuple[PopulationOutcome, ...]]
+        ] = []
+        all_outcomes: list[PopulationOutcome] = []
+        populations: dict[str, tuple[EvaluationItem, ...]] = {}
+        emit(
+            writer,
+            ProgressEvent(
+                kind="start",
+                stage="run",
+                input_refs={
+                    "dataset": f"{job.dataset_id}@{job.dataset_commit_sha}",
+                    **(
+                        {"model": f"{job.model_id}@{job.model_revision}"}
+                        if job.mode == "classify"
+                        else {}
+                    ),
+                },
+            ),
+        )
+        for case in job.evaluation_sets:
+            await asyncio.sleep(0)
+            columns = settings[case.evaluation_id]
+            projected: tuple[str, ...] = tuple(
+                dict.fromkeys(
+                    (
+                        *_gold_columns(case),
+                        columns.tier_column,
+                        *([columns.within_limits_column] if columns.within_limits_column else []),
+                    )
+                )
+            )
+            dataset_ref = f"{job.dataset_id}@{job.dataset_commit_sha}"
+            rows = await source.rows(
+                dataset_ref, case.dataset_config, case.split, case.selection, projected
+            )
+            limit = (
+                min(case.selection.row_limit, case.selection.row_end - case.selection.row_start)
+                if case.selection.row_end is not None
+                else case.selection.row_limit
+            )
+            if len(rows) > limit:
+                raise PopulationError("population_selection_mismatch")
+            members = population_members(rows, id_column=case.id_column, columns=columns)
+            if isinstance(case, PredictionSet):
+                items, outcomes, producer = await _import_population_items(
+                    job, case, rows, members, source
+                )
+                kind = (
+                    case.parse_config.probability_kind
+                    if isinstance(case.parse_config, ProbabilityColumns)
+                    else None
+                )
+                context: dict[str, object] = {
+                    "predictions_ref": case.predictions_ref,
+                    "manifest_status": f"strata_{producer}_consistent"
+                    if producer
+                    else "external_declared",
+                    "overflow_evidence": "not_computed_prediction_import",
+                }
+            else:
+                if scorer is None or rendering is None:
+                    raise EvaluationError("classifier_fields_missing")
+                items, outcomes = await _native_population_items(
+                    job,
+                    case,
+                    rows,
+                    members,
+                    rendering,
+                    scorer,
+                    writer=writer,
+                    completed=len(all_outcomes),
+                )
+                kind = (
+                    "class_probabilities" if job.engine == "hf_classify" else "restricted_softmax"
+                )
+                context = {
+                    "model_ref": f"{job.model_id}@{job.model_revision}",
+                    "engine": job.engine,
+                    "rendering": renderer_audit,
+                    "loading_info": scorer.loading_audit.model_dump(mode="json"),
+                    "padding_policy": scorer.padding_policy.model_dump(mode="json"),
+                    "overflow_evidence": "native_computed",
+                    "limit_source": "explicit_scoring_limit",
+                }
+            report = build_set_report(case, items, kind=kind, source=context)
+            if not items:
+                report["classification_status"] = "not_produced"
+                report["classification_reason"] = "no_metric_population"
+                report["metrics"] = {
+                    key: not_produced("no_metric_population")
+                    for key in cast("dict[str,object]", report["metrics"])
+                }
+            scope: dict[str, object] = {
+                "dataset_ref": dataset_ref,
+                "config": case.dataset_config,
+                "split": case.split,
+                "selection": case.selection.model_dump(mode="json"),
+                "id_column": case.id_column,
+            }
+            report["population"] = population_summary(members, outcomes, source=scope)
+            report["target"] = target_identity(case, items)
+            report["population_status"] = "no_metric_population" if not items else "measured"
+            reports.append(report)
+            populations[case.evaluation_id] = items
+            all_outcomes.extend(outcomes)
+            artifacts.append((case, items, outcomes))
+        p_values = await _population_comparisons(job, reports, populations, source)
+        manifest: dict[str, object] = {
+            "schema_version": "strata.eval.metrics.v2",
+            "run_id": job.run_id,
+            "execution_status": "completed",
+            "spec_sha256": digest,
+            "effective_spec": current.wire_payload(),
+            "engine_version": installed_engine_version(),
+            "input_refs": input_ref_records(job),
+            "custody_policy_versions": [decision.policy_version for decision in decisions],
+            "counts": population_counts(all_outcomes).model_dump(mode="json"),
+            "evaluations": reports,
+            "artifacts": [
+                {
+                    "evaluation_id": case.evaluation_id,
+                    "path": f"evaluations/{case.evaluation_id}/items.parquet",
+                    "rows": len(outcomes),
+                }
+                for case, _, outcomes in artifacts
+            ],
+            "holm_families": _population_holm(job, p_values),
+        }
+        await asyncio.to_thread(write_evaluation_attempt, attempt, manifest, artifacts)
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError
+        finish_attempt(attempt)
+        totals = population_counts(all_outcomes)
+        emit(
+            writer,
+            ProgressEvent(
+                kind="end",
+                stage="push",
+                step=len(all_outcomes),
+                total_steps=len(all_outcomes),
+                metrics={
+                    key: float(value)
+                    for key, value in totals.model_dump().items()
+                    if isinstance(value, int)
+                },
+                message=str(attempt.directory / "metrics.json"),
+            ),
+        )
+        return PopulationEvaluationResult(
+            directory=attempt.directory,
+            report_path=attempt.directory / "metrics.json",
+            spec_sha256=digest,
+            counts=totals,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error = closed_execution_error(exc)
+    raise error from None
 
 
 def _write_evidence(directory: Path, filename: str, value: dict[str, object]) -> None:

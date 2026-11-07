@@ -330,7 +330,59 @@ serialization/digests remain separate.
 
 The pure `_population` metadata contracts retain successful, invalid, native-overflow and
 suite-excluded outcomes separately. Integer counts satisfy `N=E+D+S+F` and `M=S+F`; failed
-outputs are never called successfully scored. These types and counters do not execute a
-model, verify an imported overflow assertion or grant access. Installed CLI/registered workers
-do not accept these envelopes. Native no-truncation execution and local report integration
-must satisfy the worker's own authority, source and population checks before being enabled.
+outputs are never called successfully scored. These types and counters do not grant access or verify an imported overflow assertion.
+Installed CLI/registered workers do not accept these envelopes.
+
+
+### Trusted local population execution
+
+`inference_runner.execute_population_scoring(spec, *, token=False, policy=None, reader=None,
+writer=None, output_dir=None, scorer_loader=load_scorer)` and
+`eval_runner.run_population_evaluation` with the same keyword shape revalidate a serialized
+wrapper copy, check the engine handshake, then authorize every exact role/ref against the
+**outer** digest before source/model access. Missing/unknown/positive custody or inner-only
+approvals refuse. Policy and test-only resolution hooks are installed Python code, never
+serialized imports or callbacks. Inference uses the same bounded native-Parquet reader as
+evaluation; the legacy dataset backend is unchanged.
+
+Native execution reuses safe complete-checkpoint loading, supported paired classifier or
+single label-logit shapes, existing VerifierConfig/SDK rendering identity checks, and
+`Scorer.score_with_outcomes`. Suite-excluded rows never render or tokenize. Over-limit inputs
+receive `outcome="overflow"`, exact token_count/model_limit and no prediction/forward. Equal
+limits remain eligible. Render/input refusals remain invalid and wrong; unexpected loader,
+model, tokenization or batch errors fail the attempt. No implicit seq2seq/chat-template or
+additional architecture support is enabled.
+
+The local scoring result has `directory`, `report_path`, full `spec_sha256` and typed counts.
+`scoring.json` uses `strata.scoring.population.v2` with all selected rows in results.parquet.
+Evaluation writes `strata.eval.metrics.v2` and all selected memberships in each
+`evaluations/<id>/items.parquet`. Nullable gold/correctness/vectors on excluded rows never
+create a false zero. Counts distinguish suite exclusions E, native overflow D, valid S and
+ordinary invalid F; metrics use M=S+F. Failed hard labels can retain independently valid
+vectors. All-excluded/overflow attempts retain complete counts and explicit
+no_metric_population status; all-invalid metric populations remain all wrong.
+
+Reports retain per-tier counts, selected/metric/target identity hashes, ordered label and
+probability semantics and each model/render condition. The declared effective spec includes
+static templates and is private audit data; item tables omit dataset text, rendered requests,
+responses and reasoning. Public result projection is a separate integration. Attempts reserve
+an owned directory and write into a pending subdirectory off-loop; the complete manifest moves
+last only after the awaited write and an active owner-task check. Canceled native/write threads
+cannot publish a later final manifest/end event. This is not proof of process/GPU teardown.
+
+Imported predictions keep honest caller-reported selection semantics. Raw overflow/token-count
+columns do not exclude a row. A request to import a population-v2 manifest as verified drop
+refuses until separately reviewed receipt evidence or exact recomputation exists. Legacy and
+external ordinary invalid/missing forecasts remain usable and wrong; they are never promoted
+to native untruncated execution evidence.
+
+V2 paired comparisons require the same declared gold/source population and exact M IDs/gold,
+with compatible target labels/metric semantics. Model/checkpoint/tokenizer/source projection/
+condition-specific rendering may differ and remain provenance. Different drop sets refuse;
+no silent common subset or altered Holm family is formed. Stored baseline report consistency
+is not producer execution attestation. Existing independent/clustered inference eligibility
+and metric helpers remain authoritative.
+
+Remote output destinations refuse in this profile. No installed CLI, registry, private secret,
+server/app/agent route, research admission, engine release or source pin is activated by these
+trusted Python functions. Their synthetic CPU/Parquet acceptance does not execute research.

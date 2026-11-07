@@ -14,11 +14,12 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from strata_forge.core.errors import ValidationError
 from strata_forge.pipelines._classifier_checkpoint import probe_forge_classifier
 from strata_forge.pipelines._common import REPO_ID_RE
+from strata_forge.pipelines._population import MAX_POPULATION, PopulationData
 from strata_forge.training._load_guard import (
     LoadingAudit,
     ModelLoadingError,
@@ -75,6 +76,53 @@ class ScoringResult(BaseModel):
     overflow_rows: int
     truncated_rows: int
     failed_rows: int
+
+
+class ScoringItemOutcomeV2(PopulationData):
+    """Native token evidence with an unchanged legacy score payload when one was produced."""
+
+    index: int = Field(ge=0)
+    outcome: Literal["scored", "invalid", "overflow"]
+    token_count: int = Field(ge=0)
+    model_limit: int = Field(ge=1)
+    model_sent: bool
+    result: ScoredRow | None
+
+    @model_validator(mode="after")
+    def _evidence(self) -> ScoringItemOutcomeV2:
+        if self.outcome == "overflow":
+            if self.token_count <= self.model_limit or self.model_sent or self.result is not None:
+                raise ValueError("scoring_outcome_invalid")
+        elif (
+            self.token_count > self.model_limit
+            or self.result is None
+            or self.result.index != self.index
+            or self.result.overflow
+            or self.result.truncated
+            or (self.outcome == "scored") != (self.result.error is None)
+            or self.model_sent != (self.outcome == "scored")
+        ):
+            raise ValueError("scoring_outcome_invalid")
+        return self
+
+
+class ScoringOutcomesV2(PopulationData):
+    rows: tuple[ScoringItemOutcomeV2, ...]
+    overflow_rows: int = Field(ge=0)
+    failed_rows: int = Field(ge=0)
+    scored_rows: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _partition(self) -> ScoringOutcomesV2:
+        if (
+            [row.index for row in self.rows] != list(range(len(self.rows)))
+            or self.overflow_rows != sum(row.outcome == "overflow" for row in self.rows)
+            or self.failed_rows != sum(row.outcome == "invalid" for row in self.rows)
+            or self.scored_rows != sum(row.outcome == "scored" for row in self.rows)
+            or len(self.rows) != self.overflow_rows + self.failed_rows + self.scored_rows
+        ):
+            raise ValueError("scoring_outcome_invalid")
+        return self
 
 
 class _Tensor(Protocol):
@@ -295,6 +343,139 @@ class Scorer:
             self._score, list(rows), batch_size, on_progress, overflow_policy
         )
 
+    async def score_with_outcomes(
+        self,
+        rows: Sequence[ScoringInput],
+        *,
+        overflow: Literal["drop"],
+        batch_size: int = 8,
+        on_progress: Callable[[ProgressEvent], None] | None = None,
+    ) -> ScoringOutcomesV2:
+        """Compute native drop evidence; every retained forward uses complete uncut inputs."""
+        if type(overflow) is not str or overflow != "drop":
+            raise ValidationError("unsupported_overflow_policy")
+        if type(batch_size) is not int or not 1 <= batch_size <= 256:
+            raise ValidationError("scoring_batch_size_invalid")
+        if len(rows) > MAX_POPULATION:
+            raise ValidationError("population_limit_exceeded")
+        active = True
+
+        def progress(event: ProgressEvent) -> None:
+            if active and on_progress is not None:
+                on_progress(event)
+
+        try:
+            return await asyncio.to_thread(self._score_outcomes, list(rows), batch_size, progress)
+        finally:
+            # Cancellation cannot stop an existing forward, but its late callback cannot
+            # report completion for this abandoned attempt or a replacement caller.
+            active = False
+
+    def _input_lengths(self, row: ScoringInput) -> tuple[int, int, int, int]:
+        tokenizer = self._tokenizer
+        first_length = len(tokenizer.encode(row.text, add_special_tokens=False))
+        pair_length = (
+            len(tokenizer.encode(row.text_pair, add_special_tokens=False))
+            if row.text_pair is not None
+            else 0
+        )
+        if (
+            self._engine == "hf_classify"
+            and row.text_pair is None
+            and not self._classifier_single_sequence
+        ):
+            raise ValidationError("hf_classify requires text_pair for every row")
+        if (
+            self._engine == "hf_classify"
+            and row.text_pair is not None
+            and not self._classifier_pair_allowed
+        ):
+            raise ValidationError("Forge decoder classifiers require a single rendered input")
+        if self._engine == "hf_label_logits" and row.text_pair is not None:
+            raise ValidationError("hf_label_logits accepts a single rendered prompt")
+        specials = tokenizer.num_special_tokens_to_add(pair=row.text_pair is not None)
+        length = first_length + pair_length + specials
+        return first_length, pair_length, specials, length
+
+    def _score_outcomes(
+        self,
+        rows: list[ScoringInput],
+        batch_size: int,
+        on_progress: Callable[[ProgressEvent], None] | None,
+    ) -> ScoringOutcomesV2:
+        if self._engine == "hf_classify" and len({row.text_pair is None for row in rows}) > 1:
+            raise ValidationError("mixed classifier input shapes are unsupported")
+        lengths = [self._input_lengths(row)[3] for row in rows]
+        accepted = [index for index, length in enumerate(lengths) if 0 < length <= self._max_length]
+        empty = [index for index, length in enumerate(lengths) if length == 0]
+        dropped = sum(length > self._max_length for length in lengths)
+
+        def progress(event: ProgressEvent) -> None:
+            if on_progress is not None:
+                complete = event.step or 0
+                failed = event.metrics.get("failed", 0.0) if event.metrics else 0.0
+                on_progress(
+                    ProgressEvent(
+                        kind="step",
+                        stage="run",
+                        step=dropped + len(empty) + complete,
+                        total_steps=len(rows),
+                        metrics={
+                            "rows_overflow_dropped": float(dropped),
+                            "rows_scored_success": complete - failed,
+                            "rows_failed_or_invalid": failed + len(empty),
+                        },
+                    )
+                )
+
+        scored = self._score([rows[index] for index in accepted], batch_size, progress, "error")
+        by_original = {
+            accepted[row.index]: row.model_copy(update={"index": accepted[row.index]})
+            for row in scored.rows
+        }
+        by_original.update(
+            {
+                index: ScoredRow(index=index, error="empty_prompt: scoring needs an attended token")
+                for index in empty
+            }
+        )
+        outcomes = tuple(
+            ScoringItemOutcomeV2(
+                index=index,
+                outcome="overflow"
+                if index not in by_original
+                else "invalid"
+                if by_original[index].error
+                else "scored",
+                token_count=length,
+                model_limit=self._max_length,
+                model_sent=index in by_original and by_original[index].error is None,
+                result=by_original.get(index),
+            )
+            for index, length in enumerate(lengths)
+        )
+        result = ScoringOutcomesV2(
+            rows=outcomes,
+            overflow_rows=dropped,
+            failed_rows=scored.failed_rows + len(empty),
+            scored_rows=len(accepted) - scored.failed_rows,
+        )
+        if on_progress is not None:
+            on_progress(
+                ProgressEvent(
+                    kind="step",
+                    stage="run",
+                    step=len(rows),
+                    total_steps=len(rows),
+                    metrics={
+                        "rows_overflow_dropped": float(dropped),
+                        "rows_scored_success": float(result.scored_rows),
+                        "rows_failed_or_invalid": float(result.failed_rows),
+                    },
+                )
+            )
+        return result
+
     def _score(
         self,
         rows: list[ScoringInput],
@@ -311,28 +492,7 @@ class Scorer:
         if self._engine == "hf_classify" and len({row.text_pair is None for row in rows}) > 1:
             raise ValidationError("mixed classifier input shapes are unsupported")
         for index, row in enumerate(rows):
-            first_length = len(tokenizer.encode(row.text, add_special_tokens=False))
-            pair_length = (
-                len(tokenizer.encode(row.text_pair, add_special_tokens=False))
-                if row.text_pair is not None
-                else 0
-            )
-            if (
-                self._engine == "hf_classify"
-                and row.text_pair is None
-                and not self._classifier_single_sequence
-            ):
-                raise ValidationError("hf_classify requires text_pair for every row")
-            if (
-                self._engine == "hf_classify"
-                and row.text_pair is not None
-                and not self._classifier_pair_allowed
-            ):
-                raise ValidationError("Forge decoder classifiers require a single rendered input")
-            if self._engine == "hf_label_logits" and row.text_pair is not None:
-                raise ValidationError("hf_label_logits accepts a single rendered prompt")
-            specials = tokenizer.num_special_tokens_to_add(pair=row.text_pair is not None)
-            length = first_length + pair_length + specials
+            first_length, pair_length, specials, length = self._input_lengths(row)
             overflow = length > self._max_length
             if overflow and overflow_policy == "error":
                 raise ValidationError("input_too_long: overflow_policy=error refuses scoring")

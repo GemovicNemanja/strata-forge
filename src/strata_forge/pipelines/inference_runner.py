@@ -110,6 +110,11 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from strata_forge.core.redact import Redactor
+    from strata_forge.pipelines._evaluation_access import ReadPolicy
+    from strata_forge.pipelines._evaluation_reader import EvaluationReader
+    from strata_forge.pipelines._population_report import PopulationScoringResult
+    from strata_forge.pipelines._scoring import ScoredRow, Scorer
+    from strata_forge.pipelines.scoring_population_spec import InferencePopulationSpecV2
 
 __all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
 
@@ -998,6 +1003,278 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # the per-row errors can be read.
     _check_produced_output(out, ok)
     return destination
+
+
+async def execute_population_scoring(
+    spec: InferencePopulationSpecV2,
+    *,
+    token: str | Literal[False] = False,
+    policy: ReadPolicy | None = None,
+    reader: EvaluationReader | None = None,
+    writer: JsonlProgressWriter | None = None,
+    output_dir: Path | None = None,
+    scorer_loader: Callable[..., Awaitable[Scorer]] = load_scorer,
+) -> PopulationScoringResult:
+    """Execute native population-v2 scoring without changing legacy dispatch or authority."""
+    from strata_forge.pipelines._common import check_engine_version
+    from strata_forge.pipelines._evaluation_access import authorize_reads
+    from strata_forge.pipelines._evaluation_reader import HubEvaluationReader
+    from strata_forge.pipelines._population import (
+        PopulationError,
+        PopulationOutcome,
+        population_counts,
+        population_members,
+    )
+    from strata_forge.pipelines._population_report import (
+        PopulationScoringResult,
+        closed_execution_error,
+        finish_attempt,
+        population_summary,
+        reserve_attempt,
+        write_scoring_attempt,
+    )
+    from strata_forge.pipelines._scoring import Scorer, ScoringOutcomesV2
+    from strata_forge.pipelines.scoring_population_spec import InferencePopulationSpecV2
+
+    try:
+        if type(spec) is not InferencePopulationSpecV2:
+            raise PopulationError("population_job_invalid")
+        current = InferencePopulationSpecV2.model_validate(spec.wire_payload())
+        job, hp = current.job, current.job.hyperparams
+        if (
+            job.id_column is None
+            or job.dataset_config is None
+            or job.run_id is None
+            or hp.engine == "vllm_chat"
+        ):
+            raise PopulationError("population_job_invalid")
+        check_engine_version(job.engine_version)
+        if token is not False and (type(token) is not str or not token.strip()):
+            raise PopulationError("credential_invalid")
+        digest = current.digest()
+        decisions = await authorize_reads(current.input_reads(), policy, spec_sha256=digest)
+        attempt = await asyncio.to_thread(
+            reserve_attempt,
+            output_dir or _local_results_dir(job.run_id),
+            run_id=job.run_id,
+            report_name="scoring.json",
+        )
+        source = reader or HubEvaluationReader(token)
+        for ref, kind in current.input_reads():
+            await source.prepare(ref, model=kind == "model")
+        _validate_template_coverage(job)
+        scorer = await scorer_loader(
+            job.model_id,
+            engine=hp.engine,
+            token=token,
+            revision=job.model_revision,
+            max_length=hp.max_model_len or 0,
+            label_alias=hp.label_alias,
+            label_tokens=hp.label_tokens,
+            device="auto",
+            dtype=hp.dtype,
+        )
+        if type(scorer) is not Scorer:
+            raise PopulationError("native_scoring_evidence_invalid")
+        dataset_ref = f"{job.dataset_id}@{job.dataset_commit_sha}"
+        columns: tuple[str, ...] = tuple(
+            dict.fromkeys(
+                (
+                    job.id_column,
+                    current.population.tier_column,
+                    *(
+                        [current.population.within_limits_column]
+                        if current.population.within_limits_column
+                        else []
+                    ),
+                    *job.column_mapping.values(),
+                )
+            )
+        )
+        rows = await source.rows(
+            dataset_ref, job.dataset_config, job.split, current.selection, columns
+        )
+        limit = (
+            min(
+                current.selection.row_limit, current.selection.row_end - current.selection.row_start
+            )
+            if current.selection.row_end is not None
+            else current.selection.row_limit
+        )
+        if len(rows) > limit:
+            raise PopulationError("population_selection_mismatch")
+        members = population_members(rows, id_column=job.id_column, columns=current.population)
+        emit(
+            writer,
+            ProgressEvent(
+                kind="start",
+                stage="run",
+                total_steps=len(members),
+                input_refs={
+                    "model": f"{job.model_id}@{job.model_revision}",
+                    "dataset": dataset_ref,
+                },
+            ),
+        )
+        outcomes: dict[int, PopulationOutcome] = {}
+        scores: dict[str, ScoredRow] = {}
+        for start in range(0, len(members), 128):
+            await asyncio.sleep(0)
+            inputs: list[ScoringInput] = []
+            selected: list[int] = []
+            for member in members[start : start + 128]:
+                if not member.within_limits:
+                    outcomes[member.index] = PopulationOutcome(
+                        index=member.index,
+                        item_id=member.item_id,
+                        tier=member.tier,
+                        model_limit=hp.max_model_len,
+                        outcome="suite_excluded",
+                        metric_eligible=False,
+                        token_count=None,
+                        model_sent=False,
+                        error_code=None,
+                        refusal_stage=None,
+                    )
+                    continue
+                refused = False
+                first = ""
+                second: str | None = None
+                try:
+                    first = render_template(
+                        job.template, rows[member.index], job.column_mapping, truncate=False
+                    )
+                    second = (
+                        render_template(
+                            hp.pair_template, rows[member.index], job.column_mapping, truncate=False
+                        )
+                        if hp.pair_template is not None
+                        else None
+                    )
+                except RunError:
+                    refused = True
+                if refused:
+                    outcomes[member.index] = PopulationOutcome(
+                        index=member.index,
+                        item_id=member.item_id,
+                        tier=member.tier,
+                        model_limit=hp.max_model_len,
+                        outcome="invalid",
+                        metric_eligible=True,
+                        token_count=None,
+                        model_sent=False,
+                        error_code="render_refused",
+                        refusal_stage="render",
+                    )
+                    continue
+                selected.append(member.index)
+                inputs.append(ScoringInput(text=first, text_pair=second))
+            scored = await scorer.score_with_outcomes(
+                inputs, overflow="drop", batch_size=hp.scoring_batch_size
+            )
+            if type(scored) is not ScoringOutcomesV2:
+                raise PopulationError("native_scoring_evidence_invalid")
+            scored = ScoringOutcomesV2.model_validate(scored)
+            if len(scored.rows) != len(selected):
+                raise PopulationError("population_alignment_invalid")
+            for row in scored.rows:
+                if row.model_limit != hp.max_model_len:
+                    raise PopulationError("native_scoring_limit_mismatch")
+                member = members[selected[row.index]]
+                outcomes[member.index] = PopulationOutcome(
+                    index=member.index,
+                    item_id=member.item_id,
+                    tier=member.tier,
+                    outcome=row.outcome,
+                    metric_eligible=row.outcome != "overflow",
+                    token_count=row.token_count,
+                    model_limit=row.model_limit,
+                    model_sent=row.model_sent,
+                    error_code="input_too_long"
+                    if row.outcome == "overflow"
+                    else "scoring_refused"
+                    if row.outcome == "invalid"
+                    else None,
+                    refusal_stage="input" if row.outcome != "scored" else None,
+                )
+                if row.result is not None:
+                    scores[member.item_id] = row.result
+            partial = population_counts(tuple(outcomes.values()))
+            emit(
+                writer,
+                ProgressEvent(
+                    kind="step",
+                    stage="run",
+                    step=len(outcomes),
+                    total_steps=len(members),
+                    metrics={
+                        key: float(value)
+                        for key, value in partial.model_dump().items()
+                        if isinstance(value, int)
+                    },
+                ),
+            )
+        ordered = tuple(outcomes[index] for index in range(len(members)))
+        scope: dict[str, object] = {
+            "dataset_ref": dataset_ref,
+            "config": job.dataset_config,
+            "split": job.split,
+            "selection": current.selection.model_dump(mode="json"),
+            "id_column": job.id_column,
+        }
+        manifest: dict[str, object] = {
+            "schema_version": "strata.scoring.population.v2",
+            "run_id": job.run_id,
+            "execution_status": "completed",
+            "spec_sha256": digest,
+            "effective_spec": current.wire_payload(),
+            "engine_version": installed_engine_version(),
+            "input_refs": [{"ref": ref, "repo_type": kind} for ref, kind in current.input_reads()],
+            "custody_policy_versions": [decision.policy_version for decision in decisions],
+            "overflow_evidence": "native_computed",
+            "limit_source": "explicit_scoring_limit",
+            "labels": scorer.labels,
+            "loading_info": scorer.loading_audit.model_dump(mode="json"),
+            "padding_policy": scorer.padding_policy.model_dump(mode="json"),
+            "probability_kind": "class_probabilities"
+            if hp.engine == "hf_classify"
+            else "restricted_softmax",
+            "population": population_summary(members, ordered, source=scope),
+        }
+        await asyncio.to_thread(
+            write_scoring_attempt, attempt, manifest, ordered, scores, scorer.labels
+        )
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError
+        finish_attempt(attempt)
+        counts = population_counts(ordered)
+        emit(
+            writer,
+            ProgressEvent(
+                kind="end",
+                stage="push",
+                step=len(members),
+                total_steps=len(members),
+                metrics={
+                    key: float(value)
+                    for key, value in counts.model_dump().items()
+                    if isinstance(value, int)
+                },
+                message=str(attempt.directory / "scoring.json"),
+            ),
+        )
+        return PopulationScoringResult(
+            directory=attempt.directory,
+            report_path=attempt.directory / "scoring.json",
+            spec_sha256=digest,
+            counts=counts,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error = closed_execution_error(exc)
+    raise error from None
 
 
 async def main() -> int:

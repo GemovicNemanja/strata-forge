@@ -32,6 +32,16 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
 - The loaded scorer's explicit per-call error overflow policy refuses overlength calls before
   model forward, disables pair/single truncation and verifies complete right-padded masks.
   Legacy default/spec/worker policy remains separate; no dropped-item semantics are inferred.
+- Population-v2 execution uses native score_with_outcomes: full token evidence, no cut input,
+  suite exclusions before render/tokenization and exact N=E+D+S+F/M=S+F counts. Ordinary invalid
+  outputs remain wrong; valid independent probability vectors survive invalid hard labels.
+  Imported flags/manifests never self-grant a verified drop. Model/tokenizer/rendering conditions
+  may differ in comparisons; exact gold/source/M identities and compatible targets must agree.
+- Population wrappers revalidate a serialized copy before every operation. Read policy binds
+  the OUTER digest before source/model IO; raw outcome/count DTOs are not authorization or
+  native execution evidence. Keep CLI/registry/server/issuer/publication activation separate.
+  Pending writes remain incomplete after cancellation; final manifests move only after awaited
+  writes and an active owner-task check. Native thread termination is not claimed.
 - The verifier renderer is a declared bounded premise/hypothesis shape, not a universal task
   constraint. Its config lives in `training.verifier_config`; it performs no I/O.
 - Stable item IDs are exact unique strings. Inference keeps legacy `custom_id` and optionally

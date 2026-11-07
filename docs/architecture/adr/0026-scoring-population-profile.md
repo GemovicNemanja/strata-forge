@@ -41,10 +41,9 @@ exact recomputation; this decision introduces no issuer/credential/attestation f
 
 ## Consequences
 
-The specification and pure metadata types do not execute models or grant access. Installed
-CLI/registry and legacy workers reject population envelopes until a separate operational
-integration is approved. Trusted native worker functions must demonstrate actual tiny CPU
-safe-load/tokenization/forward plus real Parquet/metric receipts, before publication or source
-pin activation. Unsupported architectures, publication, calibration/statistical acceptance,
+The specification and pure metadata types do not grant access. Trusted native Python
+worker functions require outer-digest-bound read policy and produce private local receipts.
+Installed CLI/registry and legacy workers reject population envelopes; their activation is
+separate from tiny CPU safe-load/tokenization/forward and Parquet/metric source acceptance. Unsupported architectures, publication, calibration/statistical acceptance,
 process teardown and research admission remain separate gates. No new model or task support
 can be inferred from a JSON type or a completed population audit.
