@@ -57,11 +57,11 @@ The retained notices cover the image-only distributions. Setup requires an expli
 Docker executable and Unix socket; no ambient Docker context or credential configuration is
 used. Image cache availability is not guaranteed by a prior successful build.
 
-The image copies its public worker scripts with explicit `0444` permissions so
+The image applies explicit `0444` permissions to its public worker scripts so
 the fixed nonroot worker can read them regardless of the operator's host umask.
+The [recipe](../../containers/headless-sql/Dockerfile) sets only those file modes
+inside the image before selecting the worker user and supports the legacy builder.
 This does not relax the permissions of private host contexts or credentials.
-The Linux image uses Docker's fixed-octal
-[`COPY --chmod`](https://docs.docker.com/reference/dockerfile/#copy---chmod).
 
 The standalone worker requires its fixed UID/cgroups/limits/no-new-privileges/seccomp profile
 before READY. It disables Python replacement/frame scans, extension installation/loading,

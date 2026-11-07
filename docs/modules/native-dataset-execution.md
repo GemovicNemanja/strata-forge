@@ -124,11 +124,11 @@ ambient credentials/context; it inspects only its exact pinned base/tag. An abse
 be pulled only by this explicit setup, never by an executor query. Public artifact hashes
 and licenses are retained alongside the profile. No native dependency is added to the parent.
 
-The image copies its public worker scripts with explicit `0444` permissions so
+The image applies explicit `0444` permissions to its public worker scripts so
 the fixed nonroot worker can read them regardless of the operator's host umask.
-Private host context and credential modes remain restricted. The Linux image
-uses Docker's fixed-octal
-[`COPY --chmod`](https://docs.docker.com/reference/dockerfile/#copy---chmod).
+The [recipe](../../containers/native-datasets/Dockerfile) sets only those file modes
+inside the image before selecting the worker user and supports the legacy builder.
+Private host context and credential modes remain restricted.
 
 `tests/integration/datasets/test_native_dataset_execution.py` requires the explicit
 STRATA_TEST_DATASET_INSTALLATION file; selection without it fails instead of silently using
