@@ -142,3 +142,12 @@ owned through repeated cancellation. Never infer stopped work from missing engin
 actual successful wait and stoppedPID0 are required after a possible start. Resource uncertainty
 retains the unavailable owner and staged source. Actual integration tests require separately
 prepared image installation and fail a missing prerequisite; they must not silently pass.
+
+## Native dataset transformation profile
+
+`_dataset_wire.py`, `dataset_execution_types.py` and `_dataset_worker.py` own the separate fixed
+conversion/named-table/materialization profile. Sync validation remains pure under ADR0032;
+all native parsing/execution stays in the image. `_sql_container.py` selects only its closed
+internal SQL/dataset enum profiles; preserve old SQL wire/image/worker/default behavior.
+The new profile has no remote source, durable job or platform grant. See
+[the reference](../../../docs/modules/native-dataset-execution.md).

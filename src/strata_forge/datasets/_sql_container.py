@@ -12,6 +12,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import cast
 from urllib.parse import quote
@@ -50,6 +51,23 @@ _FLAGS = (
     "core=0:0",
     "--tmpfs",
     "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=0700,uid=65532,gid=65532",  # noqa: S108 — private bounded container tmpfs, not a host temporary path.
+)
+
+
+class _Profile(Enum):
+    SQL = "sql_local_arm64_v1"
+    DATASET = "dataset_transform_arm64_v1"
+
+
+_DATASET_FLAGS = tuple(
+    "512m"
+    if value == "256m"
+    else "fsize=67108864:67108864"
+    if value == "fsize=33554432:33554432"
+    else value.replace("size=67108864", "size=134217728")
+    if value == _FLAGS[-1]
+    else value
+    for value in _FLAGS
 )
 
 
@@ -95,8 +113,20 @@ class ContainerOutcome:
 class SQLContainerOwner:
     """One local owner; uncertainty retains its lease rather than adopting new work."""
 
-    def __init__(self, installation: dict[str, wire.JSON]) -> None:
-        self._installation = wire.installation(installation)
+    def __init__(
+        self, installation: dict[str, wire.JSON], *, _profile: _Profile = _Profile.SQL
+    ) -> None:
+        if type(_profile) is not _Profile:
+            raise wire.WireError("profile_refused")
+        self._profile = _profile
+        if _profile is _Profile.DATASET:
+            from strata_forge.datasets import _dataset_wire
+
+            self._installation = _dataset_wire.installation(installation)
+        else:
+            self._installation = wire.installation(installation)
+        self._flags = _DATASET_FLAGS if _profile is _Profile.DATASET else _FLAGS
+        self._output_dir: Path | None = None
         self._directory = Path(tempfile.mkdtemp(prefix="strata-sql-cli-"))
         self._directory.chmod(0o700)
         self._command_prefix = (
@@ -220,14 +250,14 @@ class SQLContainerOwner:
         expected: dict[str, object] = {
             "NetworkMode": "none",
             "ReadonlyRootfs": True,
-            "Memory": 268435456,
-            "MemorySwap": 268435456,
+            "Memory": 536870912 if self._profile is _Profile.DATASET else 268435456,
+            "MemorySwap": 536870912 if self._profile is _Profile.DATASET else 268435456,
             "NanoCpus": 1000000000,
             "PidsLimit": 32,
             "CapDrop": ["ALL"],
             "SecurityOpt": ["no-new-privileges"],
             "LogConfig": {"Type": "none", "Config": {}},
-            "Tmpfs": {"/tmp": _FLAGS[-1].split(":", 1)[1]},  # noqa: S108 — exact container-private tmpfs readback.
+            "Tmpfs": {"/tmp": self._flags[-1].split(":", 1)[1]},  # noqa: S108 — exact container-private tmpfs readback.
         }
         if any(
             type(host.get(key)) is not type(item) or host.get(key) != item
@@ -236,12 +266,45 @@ class SQLContainerOwner:
             return False
         if (
             config.get("User") != "65532:65532"
-            or config.get("Entrypoint") != ["python", "-I", "-B", "/app/_sql_worker.py"]
+            or config.get("Entrypoint")
+            != [
+                "python",
+                "-I",
+                "-B",
+                "/app/_dataset_worker.py"
+                if self._profile is _Profile.DATASET
+                else "/app/_sql_worker.py",
+            ]
             or config.get("Cmd") != ["--operation", self._operation]
         ):
             return False
-        if len(mounts) != 1 or type(mounts[0]) is not dict:
+        if (
+            len(mounts) != (2 if self._profile is _Profile.DATASET else 1)
+            or type(mounts[0]) is not dict
+        ):
             return False
+        if self._profile is _Profile.DATASET:
+            expected_output = [
+                cast("dict[str, object]", m)
+                for m in mounts
+                if type(m) is dict and cast("dict[str, object]", m).get("Destination") == "/output"
+            ]
+            if len(expected_output) != 1 or self._output_dir is None:
+                return False
+            output = expected_output[0]
+            if (
+                output.get("Type") != "bind"
+                or output.get("Source") != str(self._output_dir)
+                or output.get("RW") is not True
+            ):
+                return False
+            mounts = [
+                m
+                for m in mounts
+                if type(m) is dict and cast("dict[str, object]", m).get("Destination") == "/input"
+            ]
+            if len(mounts) != 1:
+                return False
         mount = cast("dict[str, object]", mounts[0])
         return (
             mount.get("Type") == "bind"
@@ -340,10 +403,21 @@ class SQLContainerOwner:
         return await reader.readexactly(size)
 
     async def run(
-        self, *, input_dir: Path, request: bytes, operation_id: str, deadline: float
+        self,
+        *,
+        input_dir: Path,
+        request: bytes,
+        operation_id: str,
+        deadline: float,
+        output_dir: Path | None = None,
     ) -> ContainerOutcome:
         if not self.available:
             raise wire.WireError("unavailable")
+        if (self._profile is _Profile.DATASET) != (type(output_dir) is type(input_dir)):
+            raise wire.WireError("profile_refused")
+        if self._profile is _Profile.SQL and output_dir is not None:
+            raise wire.WireError("profile_refused")
+        self._output_dir = output_dir
         self._clean = False
         self._cid = ""
         self._operation = operation_id
@@ -377,7 +451,7 @@ class SQLContainerOwner:
                     image.get("Id") != self._installation["image_id"]
                     or image.get("Os") != "linux"
                     or image.get("Architecture") != "arm64"
-                    or labels.get("org.strata.sql.profile") != wire.PROFILE
+                    or labels.get("org.strata.sql.profile") != self._profile.value
                     or labels.get("org.strata.sql.bundle")
                     != self._installation["worker_bundle_sha256"]
                 ):
@@ -393,7 +467,12 @@ class SQLContainerOwner:
                     "org.strata.sql.owner=" + self._owner,
                     "--label",
                     "org.strata.sql.operation=" + operation_id,
-                    *_FLAGS,
+                    *self._flags,
+                    *(
+                        ("--mount", "type=bind,source=" + str(output_dir) + ",target=/output")
+                        if self._profile is _Profile.DATASET
+                        else ()
+                    ),
                     "--mount",
                     "type=bind,source=" + str(input_dir) + ",target=/input,readonly",
                     cast("str", self._installation["image_id"]),
@@ -416,12 +495,16 @@ class SQLContainerOwner:
                 if process.stdout is None or process.stdin is None:
                     raise wire.WireError("unavailable")
                 ready = wire.parse(await self._frame(process.stdout, 8192), limit=8192)
-                if wire.canonical(ready, limit=8192) != wire.canonical(
-                    expected_ready(
-                        operation_id, cast("str", self._installation["worker_bundle_sha256"])
-                    ),
-                    limit=8192,
-                ):
+                bundle = cast("str", self._installation["worker_bundle_sha256"])
+                if self._profile is _Profile.DATASET:
+                    from strata_forge.datasets._dataset_worker import (
+                        expected_ready as dataset_ready,
+                    )
+
+                    expected = dataset_ready(operation_id, bundle)
+                else:
+                    expected = expected_ready(operation_id, bundle)
+                if wire.canonical(ready, limit=8192) != wire.canonical(expected, limit=8192):
                     raise wire.WireError("profile_refused")
                 process.stdin.write(
                     wire.frame(wire.parse(request, limit=wire.MAX_REQUEST), limit=wire.MAX_REQUEST)
