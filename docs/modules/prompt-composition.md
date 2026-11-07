@@ -2,7 +2,7 @@
 
 `strata_forge.prompts` provides an independent explicit composition dialect alongside its
 existing Jinja2 templates. Python compiles authored modules/surfaces. A bounded TypeScript
-reference consumer renders Python builds against the same fixtures; it cannot compile
+consumer in the private `packages/prompt-sdk/` package renders Python builds against the same fixtures; it cannot compile
 definitions or publish an alternative compiler identity.
 
 See [ADR 0023](../architecture/adr/0023-portable-modular-prompt-composition.md), the
@@ -107,6 +107,44 @@ inspection methods are synchronous pure helpers. Registry/compile/render operati
 There is no synchronous I/O exception or runtime wrapper. Existing Jinja2 APIs keep their
 signatures, expression dialect, stores and cache-hint behavior.
 
+## Exact local consumption
+
+Python exposes lazy `ConsumedBuild`, `LocalBuildSource`, `LocalBuildReference`, `consume_build`
+and `render_consumed` exports. `consume_build(raw, expected_build_id=..., expected_size_bytes=...,
+source=...)` requires exact `bytes`, a full lowercase SHA-256 and integer byte size from 1 to
+8 MiB. It verifies size/hash and calls the existing `PromptBuild` schema validator. `raw` is
+not parsed/reserialized or normalized. `render_consumed` revalidates the immutable snapshot
+and calls `render_build`, returning its existing `PromptRender`; source labels never change
+deterministic build/render identities.
+
+The explicit `LocalBuildSource(kind="caller_bytes", partition="application:local", reference=None)`
+is descriptive. A supplied `LocalBuildReference` carries exact project/surface/native resource,
+version and manifest IDs as caller assertions, without fetching them. It neither authorizes
+native reads nor attests source/permissions/selected software. There is no URL, token,
+environment credential, cache, automatic latest resolution, stale/offline replacement or
+provider/trace operation. Unknown remote authority remains unavailable.
+
+The private Node 24 source package [`strata-prompt-sdk-local`](../../packages/prompt-sdk/README.md)
+provides `consumePinnedBuild(Uint8Array, {expectedBuildId, expectedSizeBytes, source})` and
+`renderConsumed`, plus the existing lower-level reference helpers. It copies byte carriers and
+freezes metadata, refuses accessor/proxy metadata, and delegates to the extracted unchanged
+portable kernel. Source `.mts` exports run directly; no prebuilt `dist` is required and no
+Node/browser polyfill is inferred. No registry package is published. Package tests use Node's
+built-in runner and no runtime dependencies. The sibling package is outside the unchanged
+Python wheel/sdist allowlist.
+
+The shared renderer corpus and byte identities remain unchanged. The copied Server
+`a421c48632835b14242ad58f3827462f4af5b374` synthetic stored-build fixture has pinned provenance in
+`packages/prompt-sdk/test/fixtures/README.md`; its native/account IDs are fictional. Local pin
+validation is distinct from the server's current-grant/contributor/source and browser-proof
+checks. Browser-only retrieval cannot be repurposed as a headless credential exchange.
+
+The legacy package import chain still imports its existing LiteLLM/tiktoken dependencies;
+the consumption path performs no tokenizer lookup/asset download or optional ML/trace work.
+Jinja `PromptTemplate` and its cache-hint renderer remain a separate API. Request/response
+capture, provider adapters, remote SDK authorization/ingestion and persisted trace inspection
+are separate unimplemented integrations.
+
 The `strata-prompt-json-v1` profile permits null, booleans, Unicode scalar strings, safe integers,
 dense arrays and printable-ASCII-keyed objects. It rejects duplicate keys before overwriting,
 numeric exponents/fractions/negative zero, nonfinite values, surrogates and host objects. It
@@ -141,6 +179,7 @@ Node 24 runs the same corpus plus malformed schema/metadata/host-value tests:
 ```bash
 uv run pytest tests/unit/prompts
 node --test scripts/prompt_reference.test.mts
+node --test packages/prompt-sdk/test/*.test.mts
 node scripts/prompt_reference.mts tests/fixtures/prompts/portable-bytes-v1.json tests/fixtures/prompts/composition-renders-v1.json
 uv run python scripts/import_operational_prompts.py --output /tmp/strata-operational-prompts.json
 node scripts/prompt_reference.mts /tmp/strata-operational-prompts.json
@@ -152,7 +191,7 @@ constructs and renders the compiler without extras or tokenizer assets. With Typ
 strict reference check is:
 
 ```bash
-tsc --strict --noEmit --target es2022 --module nodenext --moduleResolution nodenext --types node --typeRoots ./node_modules/@types --skipLibCheck --allowImportingTsExtensions scripts/prompt_reference.mts scripts/prompt_reference.test.mts
+tsc --strict --noEmit --target es2022 --module nodenext --moduleResolution nodenext --types node --typeRoots ./node_modules/@types --skipLibCheck --allowImportingTsExtensions scripts/prompt_reference.mts scripts/prompt_reference.test.mts packages/prompt-sdk/src/index.mts packages/prompt-sdk/test/consumption.test.mts
 ```
 
 These development types are not Python package/runtime dependencies. The portable corpus also

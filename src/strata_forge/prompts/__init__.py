@@ -1,5 +1,24 @@
 """Sandboxed Jinja2 templates and immutable portable modular prompt composition."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from strata_forge.prompts.consumption import (
+        ConsumedBuild as ConsumedBuild,
+    )
+    from strata_forge.prompts.consumption import (
+        LocalBuildReference as LocalBuildReference,
+    )
+    from strata_forge.prompts.consumption import (
+        LocalBuildSource as LocalBuildSource,
+    )
+    from strata_forge.prompts.consumption import (
+        consume_build as consume_build,
+    )
+    from strata_forge.prompts.consumption import (
+        render_consumed as render_consumed,
+    )
+
 from strata_forge.prompts.cache_aware import (
     DEFAULT_MIN_CACHEABLE_TOKENS,
     CacheHints,
@@ -74,9 +93,12 @@ __all__ = [
     "CompositionCapabilities",
     "CompositionDiagnostic",
     "CompositionRegistry",
+    "ConsumedBuild",
     "DependencyLock",
     "InMemoryPromptStore",
     "LangfusePromptStore",
+    "LocalBuildReference",
+    "LocalBuildSource",
     "ModulePart",
     "ModuleRevision",
     "PortableDocument",
@@ -102,6 +124,7 @@ __all__ = [
     "canonical_bytes",
     "compile_surface",
     "composition_capabilities",
+    "consume_build",
     "create_sandboxed_environment",
     "definition_from_wire",
     "definition_identity",
@@ -112,5 +135,20 @@ __all__ = [
     "portable_sha256",
     "render",
     "render_build",
+    "render_consumed",
     "validate_template_variables",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in {
+        "ConsumedBuild",
+        "LocalBuildReference",
+        "LocalBuildSource",
+        "consume_build",
+        "render_consumed",
+    }:
+        import strata_forge.prompts.consumption as consumption
+
+        return getattr(consumption, name)
+    raise AttributeError(name)

@@ -43,6 +43,10 @@ independent explicit modular dialect under [ADR 0023](../../../docs/architecture
 The Jinja2 API retains its behavior and signatures. `CompositionRegistry`, `compile_surface`
 and `render_build` are async. Canonicalization, schema validation and immutable snapshot
 inspection are synchronous pure helpers; no synchronous I/O or runtime wrapper is admitted.
+`consumption.py` wraps the same build validation/renderer for exact caller-supplied bytes.
+Its local source/partition/native locator are descriptive assertions, never remote authority.
+The private Node-only package in `packages/prompt-sdk/` owns the extracted reference consumer;
+the conformance CLI imports it directly without an unbuilt distribution requirement.
 
 - Text is literal; only explicit variable nodes insert scalar data once. Never reinterpret
   braces or run expressions, filters, imports or callable resolution in this dialect.
@@ -85,6 +89,9 @@ Treat anything not in `__init__.py` as internal.
 - `CompositionCapabilities`, `composition_capabilities` — fixed versioned bounds.
 - `definition_from_wire`, `definition_identity`, `canonical_bytes`, `parse_portable_json`,
   `portable_sha256` — pure closed-schema and portable-byte helpers.
+- Lazy `ConsumedBuild`, `LocalBuildSource`, `LocalBuildReference`, `consume_build` and
+  `render_consumed` — exact local pin/size and existing typed rendering, without retrieval,
+  credentials, caching or request/response capture.
 
 ## Internal patterns
 

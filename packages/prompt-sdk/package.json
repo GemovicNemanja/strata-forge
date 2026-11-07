@@ -1,0 +1,11 @@
+{
+  "name": "strata-prompt-sdk-local",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24 <25" },
+  "exports": { ".": { "types": "./src/index.mts", "default": "./src/index.mts" } },
+  "files": ["src", "README.md"],
+  "scripts": { "test": "node --test test/*.test.mts" }
+}

@@ -25,6 +25,14 @@ and snapshot inspection are synchronous under ADR 0023. Python is authoritative.
 reference consumer passes the same byte/render fixtures and cannot publish an alternative
 compiler identity. Existing Jinja2 templates and stores keep their API.
 
+`consume_build` accepts local caller-owned canonical bytes with mandatory expected SHA-256,
+byte size and an explicit `LocalBuildSource`; `render_consumed` rechecks that snapshot and
+delegates to the same modular renderer. Descriptive partitions/native locators confer no
+remote access or provenance attestation. The private Node 24 package in
+[`packages/prompt-sdk/`](../../../packages/prompt-sdk/README.md) consumes the same fixtures and
+contains the extracted reference kernel, with no separate compiler or hidden distribution build.
+Neither consumer fetches content, stores a cache, calls models or captures attempts.
+
 Module rules: [`CLAUDE.md`](CLAUDE.md). References:
 [`Jinja2/cache-aware API`](../../../docs/modules/prompts.md),
 [`modular composition API`](../../../docs/modules/prompt-composition.md).
