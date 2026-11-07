@@ -831,13 +831,19 @@ async def test_error_policy_rejects_inconsistent_tokenization_before_model(
         elif fault == "rank":
             features["input_ids"] = Tensor([1, 2, 3, 4, 5])
         elif fault == "rows":
-            features["input_ids"] = Tensor([[1] * 5, [1] * 5])
+            features["input_ids"] = Tensor(cast("_Data", [[1] * 5, [1] * 5]))
         elif fault == "width":
-            features.update(input_ids=Tensor([[1] * 8]), attention_mask=Tensor([[1] * 8]))
+            features.update(
+                input_ids=Tensor(cast("_Data", [[1] * 8])),
+                attention_mask=Tensor(cast("_Data", [[1] * 8])),
+            )
         elif fault == "mask_shape":
-            features["attention_mask"] = Tensor([[1] * 6])
+            features["attention_mask"] = Tensor(cast("_Data", [[1] * 6]))
         elif fault == "cut":
-            features.update(input_ids=Tensor([[1] * 4]), attention_mask=Tensor([[1] * 4]))
+            features.update(
+                input_ids=Tensor(cast("_Data", [[1] * 4])),
+                attention_mask=Tensor(cast("_Data", [[1] * 4])),
+            )
         elif fault == "left_pad":
             features["attention_mask"] = Tensor([[0, 1, 1, 1, 1]])
         elif fault == "fractional":
