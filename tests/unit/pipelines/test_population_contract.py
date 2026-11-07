@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -51,7 +51,9 @@ def test_wire_presence_golden_digest_and_direct_json_dict_roundtrips(name: str) 
         assert again.wire_payload() == raw
         assert again.digest() == expected
     if name == "inference":
-        assert set(value.wire_payload()["job"]["hyperparams"]) == set(raw["job"]["hyperparams"])
+        assert set(cast("dict[str, Any]", value.wire_payload()["job"])["hyperparams"]) == set(
+            raw["job"]["hyperparams"]
+        )
         assert "temperature" not in value.model_dump_json()
         nested = RunSpec.model_validate(raw["job"])
     else:
@@ -211,7 +213,7 @@ def test_population_exact_partition_and_invalid_origin_counts() -> None:
     ],
 )
 def test_population_metadata_cannot_silently_drop_or_bucket(change: str) -> None:
-    rows = copy.deepcopy(FIXTURE["accounting"]["rows"])
+    rows: list[dict[str, object]] = copy.deepcopy(FIXTURE["accounting"]["rows"])
     if change == "duplicate":
         rows[-1]["item_id"] = rows[0]["item_id"]
     elif change == "missing_id":

@@ -7,7 +7,7 @@ import json
 import sys
 import types
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn, cast
 
 import pytest
 
@@ -56,7 +56,7 @@ def job(name: str) -> Any:
 
 
 def rows() -> tuple[dict[str, object], ...]:
-    result = []
+    result: list[dict[str, object]] = []
     for item_id, tier, premise, premises, gold, eligible in [
         ("short", "a", "first", ["first"], "E", True),
         ("exact", "a", "first first first", ["first first"], "C", True),
@@ -87,7 +87,7 @@ class Policy:
     ):
         self.calls: list[tuple[str, str, str]] = []
         self.wrong_digest = wrong_digest
-        self.custody = custody
+        self.custody: Literal["unsealed", "unknown"] = custody
 
     async def decide(
         self, ref: str, *, repo_type: Literal["model", "dataset"], spec_sha256: str
@@ -139,7 +139,7 @@ async def test_native_worker_exact_partition_and_own_outer_authority(
     value = job(name)
     source = Reader()
     policy = Policy()
-    encoded = []
+    encoded: list[str] = []
     original = fake_hf.tokenizer.encode
 
     def observe(text: str, *, add_special_tokens: bool) -> list[int]:
@@ -160,7 +160,7 @@ async def test_native_worker_exact_partition_and_own_outer_authority(
         path = output / "evaluations/threeway/items.parquet"
     assert {digest for _, _, digest in policy.calls} == {value.digest()}
     assert result.spec_sha256 == value.digest()
-    table = pq.read_table(path).to_pylist()
+    table = cast("Any", pq).read_table(path).to_pylist()
     assert [row["item_id"] for row in table] == [
         "short",
         "exact",
@@ -193,7 +193,9 @@ async def test_native_worker_exact_partition_and_own_outer_authority(
     if name == "native_evaluation":
         report = manifest["evaluations"][0]
         assert report["classification"]["accuracy"]["n"] == 3
-        assert report["classification"]["invalid_rate"]["value"] == pytest.approx(1 / 3)
+        assert report["classification"]["invalid_rate"]["value"] == cast("Any", pytest).approx(
+            1 / 3
+        )
         assert table[2]["gold"] is None
         assert table[3]["gold"] is None
 
@@ -243,9 +245,12 @@ async def test_all_native_overflow_or_excluded_has_no_metric_denominator(
             "reason": "no_metric_population",
             "result": None,
         }
-        assert len(pq.read_table(result.directory / "evaluations/threeway/items.parquet")) == 2
+        assert (
+            len(cast("Any", pq).read_table(result.directory / "evaluations/threeway/items.parquet"))
+            == 2
+        )
     else:
-        table = pq.read_table(result.directory / "results.parquet")
+        table = cast("Any", pq).read_table(result.directory / "results.parquet")
         assert len(table) == 2
         assert all(name in table.column_names for name in ("p_E", "p_C", "p_U"))
         assert all(row["p_E"] is None for row in table.to_pylist())
@@ -259,7 +264,7 @@ async def test_external_invalid_hard_label_preserves_independent_vector_and_no_f
 
     value = job("external_prediction_evaluation")
     gold = tuple(dict(row) for row in rows()[:3])
-    predictions = (
+    predictions: tuple[dict[str, object], ...] = (
         {
             "item_id": "short",
             "pred": "E",
@@ -281,7 +286,11 @@ async def test_external_invalid_hard_label_preserves_independent_vector_and_no_f
     assert result.counts.rows_failed_or_invalid == 2
     assert result.counts.rows_model_sent is None
     assert report["metrics"]["brier_raw"]["result"]["n"] == 2
-    table = pq.read_table(result.directory / "evaluations/threeway/items.parquet").to_pylist()
+    table = (
+        cast("Any", pq)
+        .read_table(result.directory / "evaluations/threeway/items.parquet")
+        .to_pylist()
+    )
     assert table[1]["outcome"] == "invalid"
     assert table[1]["p_C"] == 0.8
     assert all(row["token_count"] is None for row in table)
@@ -306,9 +315,11 @@ class ComparisonReader(Reader):
             import pyarrow.parquet as pq
 
             return tuple(
-                pq.read_table(
+                cast("Any", pq)
+                .read_table(
                     self.baseline / f"evaluations/{config}/items.parquet", columns=list(columns)
-                ).to_pylist()
+                )
+                .to_pylist()
             )
         return await super().rows(ref, config, split, selection, columns)
 
@@ -369,7 +380,7 @@ async def test_native_binary_projection_can_compare_with_different_source_label_
         projection=None,
     )
     case["parse_config"]["probability_columns"] = {"E": "p_E", "not_E": "p_not_E"}
-    predictions = (
+    predictions: tuple[dict[str, object], ...] = (
         {"item_id": "short", "pred": "E", "p_E": 0.8, "p_not_E": 0.2},
         {"item_id": "exact", "pred": "not_E", "p_E": 0.2, "p_not_E": 0.8},
     )
@@ -437,13 +448,13 @@ async def test_cancelled_owned_thread_cannot_publish_complete_manifest_or_end(
 
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     if stage == "native":
-        original = _scoring.Scorer._score_outcomes
+        original_score = _scoring.Scorer._score_outcomes  # pyright: ignore[reportPrivateUsage] — owned thread-cancellation schedule.
 
-        def native(self: object, *args: Any, **kwargs: Any) -> Any:
+        def native(self: _scoring.Scorer, *args: Any, **kwargs: Any) -> Any:
             entered.set()
             assert release.wait(5)
             try:
-                return original(self, *args, **kwargs)
+                return original_score(self, *args, **kwargs)
             finally:
                 finished.set()
 
@@ -493,7 +504,7 @@ async def test_raw_upstream_failure_has_no_retained_context_or_source(
 ) -> None:
     value = job(name)
 
-    async def refuse(*args: object, **kwargs: object) -> object:
+    async def refuse(*args: object, **kwargs: object) -> NoReturn:
         raise RuntimeError("FICTIONAL_PRIVATE_SOURCE_CANARY")
 
     call = execute_population_scoring if name == "inference" else run_population_evaluation
@@ -558,7 +569,7 @@ async def test_native_ten_membership_metric_and_per_tier_reference(
 
     monkeypatch.setattr(Model, "__call__", forward)
     fixture = FIXTURE["accounting"]
-    source = []
+    source: list[dict[str, object]] = []
     for row in fixture["rows"]:
         text = (
             "a " * 12
@@ -593,9 +604,13 @@ async def test_native_ten_membership_metric_and_per_tier_reference(
     } == fixture["per_tier"]
     expected = fixture["metrics_expected"]
     for name in ("accuracy", "macro_f1", "invalid_rate"):
-        assert report["classification"][name]["value"] == pytest.approx(expected[name], abs=1e-6)
+        assert report["classification"][name]["value"] == cast("Any", pytest).approx(
+            expected[name], abs=1e-6
+        )
     for name in ("brier_raw", "nll_raw"):
-        assert report["metrics"][name]["result"]["value"] == pytest.approx(expected[name], abs=1e-6)
+        assert report["metrics"][name]["result"]["value"] == cast("Any", pytest).approx(
+            expected[name], abs=1e-6
+        )
         assert report["metrics"][name]["result"]["n"] == 4
 
 
@@ -612,5 +627,7 @@ async def test_reader_cannot_silently_expand_the_declared_selection(
     value = cls.model_validate(raw)
     call = execute_population_scoring if name == "inference" else run_population_evaluation
     with pytest.raises(PopulationError, match="population_selection_mismatch"):
-        await call(value, reader=Reader(), policy=Policy(), output_dir=tmp_path / "expanded")
+        await cast("Any", call)(  # Matching parameterized spec/worker pair is selected above.
+            value, reader=Reader(), policy=Policy(), output_dir=tmp_path / "expanded"
+        )
     assert fake_hf.models[0].forward_calls == 0

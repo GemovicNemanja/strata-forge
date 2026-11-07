@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from strata_forge.pipelines import eval_runner, inference_runner
-from strata_forge.pipelines._evaluation_reader import _parquet_rows
+from strata_forge.pipelines._evaluation_reader import (
+    _parquet_rows,  # pyright: ignore[reportPrivateUsage] — actual native Parquet integration seam.
+)
 from strata_forge.pipelines.evaluation_population_spec import EvaluationPopulationSpecV2
 from strata_forge.pipelines.scoring_population_spec import InferencePopulationSpecV2
 from tests.unit.pipelines.test_population_workers import Policy, Reader, job
@@ -22,10 +24,13 @@ if TYPE_CHECKING:
 
 def native_checkpoint(path: Path, family: str) -> None:
     import torch
-    import transformers
+    import transformers as transformers_module
 
-    torch.set_num_threads(1)
-    torch.manual_seed(7)
+    # Third-party factory kwargs and generated model APIs have intentionally dynamic stubs.
+    transformers = cast("Any", transformers_module)
+
+    cast("Any", torch).set_num_threads(1)
+    cast("Any", torch).manual_seed(7)
     if family == "bert":
         model = transformers.BertForSequenceClassification(
             transformers.BertConfig(
@@ -62,7 +67,10 @@ def native_checkpoint(path: Path, family: str) -> None:
 def route_native_factories(monkeypatch: pytest.MonkeyPatch, path: Path) -> dict[str, list[Any]]:
     import httpx
     import huggingface_hub
-    import transformers
+    import transformers as transformers_module
+
+    # Third-party factory kwargs and generated model APIs have intentionally dynamic stubs.
+    transformers = cast("Any", transformers_module)
     from huggingface_hub.errors import RemoteEntryNotFoundError
 
     observations: dict[str, list[Any]] = {"factories": [], "encoded": [], "forwards": []}
@@ -183,7 +191,7 @@ async def test_actual_default_native_scorer_cpu_and_bounded_parquet(
             )
             raw["job"]["rendering"].update(template="{premises} {hypothesis}", pair_template=None)
         value = EvaluationPopulationSpecV2.model_validate(raw)
-    data = []
+    data: list[dict[str, object]] = []
     for item_id, p, premises, eligible in [
         ("short", "a", ["a"], True),
         ("exact", "a " * 6, ["a " * 4], True),
@@ -203,19 +211,29 @@ async def test_actual_default_native_scorer_cpu_and_bounded_parquet(
             }
         )
     parquet = tmp_path / "source.parquet"
-    pq.write_table(pa.Table.from_pylist(data), parquet)
+    cast("Any", pq).write_table(pa.Table.from_pylist(data), parquet)
     reader = ParquetReader(parquet)
     policy = Policy()
     if name == "inference":
         result = await inference_runner.execute_population_scoring(
-            value, policy=policy, reader=reader, output_dir=tmp_path / "result"
+            cast("InferencePopulationSpecV2", value),
+            policy=policy,
+            reader=reader,
+            output_dir=tmp_path / "result",
         )
-        table = pq.read_table(result.directory / "results.parquet").to_pylist()
+        table = cast("Any", pq).read_table(result.directory / "results.parquet").to_pylist()
     else:
         result = await eval_runner.run_population_evaluation(
-            value, policy=policy, reader=reader, output_dir=tmp_path / "result"
+            cast("EvaluationPopulationSpecV2", value),
+            policy=policy,
+            reader=reader,
+            output_dir=tmp_path / "result",
         )
-        table = pq.read_table(result.directory / "evaluations/threeway/items.parquet").to_pylist()
+        table = (
+            cast("Any", pq)
+            .read_table(result.directory / "evaluations/threeway/items.parquet")
+            .to_pylist()
+        )
     assert observed["factories"] == ["tokenizer", "weights"]
     assert len(observed["forwards"]) == 2
     assert max(observed["forwards"]) == 7
@@ -236,7 +254,9 @@ async def test_actual_default_native_scorer_cpu_and_bounded_parquet(
     assert result.counts.rows_failed_or_invalid == 1
     assert {digest for _, _, digest in policy.calls} == {value.digest()}
     for row in table[:2]:
-        assert sum(row[f"p_{label}"] for label in ("E", "C", "U")) == pytest.approx(1, abs=1e-6)
+        assert sum(row[f"p_{label}"] for label in ("E", "C", "U")) == cast("Any", pytest).approx(
+            1, abs=1e-6
+        )
         assert row["truncated"] is False
         assert row["model_sent"] is True
     manifest = json.loads(result.report_path.read_text())

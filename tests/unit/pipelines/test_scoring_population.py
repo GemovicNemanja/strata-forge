@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -107,7 +107,7 @@ async def test_late_forward_cannot_emit_callbacks_after_cancel(
     original = scorer._score  # pyright: ignore[reportPrivateUsage] — controlled owned native-thread schedule.
     events: list[object] = []
 
-    def held(*args: object, **kwargs: object) -> object:
+    def held(*args: Any, **kwargs: Any) -> object:
         entered.set()
         assert release.wait(5)
         try:
