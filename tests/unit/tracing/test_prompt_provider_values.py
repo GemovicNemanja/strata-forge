@@ -275,3 +275,56 @@ def test_actual_portable_safe_integer_capacity_refusal_has_limit_classification(
     assert encode_provider_value(
         2**80
     )  # Native integers remain tagged strings, never a widened canon integer.
+
+
+def test_shared_explicit_native_recipes_and_actual_projection_vectors() -> None:
+    import json
+    from pathlib import Path
+    from typing import cast
+
+    fixture = cast(
+        "dict[str, object]",
+        json.loads(
+            (
+                Path(__file__).parents[3] / "tests/fixtures/prompts/provider-input-v1.json"
+            ).read_text()
+        ),
+    )
+
+    def decode(item: dict[str, object]) -> object:
+        kind = item["kind"]
+        if kind == "null":
+            return None
+        if kind in {"string", "boolean"}:
+            return item["value"]
+        if kind == "integer":
+            return int(cast("str", item["decimal"]))
+        if kind == "binary64":
+            return struct.unpack(">d", bytes.fromhex(cast("str", item["bits"])))[0]
+        if kind == "array":
+            return [decode(child) for child in cast("list[dict[str, object]]", item["items"])]
+        if kind == "object":
+            return {
+                key: decode(child)
+                for key, child in cast("list[tuple[str, dict[str, object]]]", item["entries"])
+            }
+        raise AssertionError("fixture_recipe_invalid")
+
+    for vector in cast("list[dict[str, object]]", fixture["vectors"]):
+        raw = encode_provider_value(decode(cast("dict[str, object]", vector["native_recipe"])))
+        assert raw.hex() == vector["tagged_utf8_hex"]
+        assert hashlib.sha256(raw).hexdigest() == vector["tagged_sha256"]
+    for vector in cast("list[dict[str, object]]", fixture["projections"]):
+        model = decode(cast("dict[str, object]", vector["model_recipe"]))
+        arguments = cast(
+            "dict[str, object]", decode(cast("dict[str, object]", vector["arguments_recipe"]))
+        )
+        if vector["method"] == "acompletion":
+            messages = arguments.pop("messages")
+            projection = project_chat(model, messages, arguments)
+        else:
+            projection = project_responses(model, arguments)
+        assert projection.model_dump(mode="json") == vector["projection"]
+        raw = bytes.fromhex(cast("str", vector["framed_utf8_hex"]))
+        assert projection.canonical_tagged_sha256 == hashlib.sha256(raw).hexdigest()
+        assert projection.encoded_size_bytes == len(raw)

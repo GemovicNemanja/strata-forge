@@ -477,3 +477,13 @@ returns, that original return still reaches the caller; increased pending cancel
 the observer's response retired and skips projection. Cancellation is not process death.
 Caller partitions and hashes stay sensitive local assertions, with no persistence/export,
 headless credentials, automatic ingestion or tenant grant implied.
+
+Synthetic conformance uses the actual unchanged LLMClient with explicitly injected fake
+providers: Chat/Responses builders, rich opaque SDK objects, cache hits, structured reprompts,
+nonstreaming tool loops, retry/provider/model fallback, budget/parse failures and cancellation.
+The facade's direct object/exception identity tests are distinct from LLMClient's existing
+upstream normalization/mapping. The shared
+[typed value fixture](../../tests/fixtures/prompts/provider-input-v1.json) declares native
+integer-versus-binary64 recipes explicitly; independent Node test vectors do not imply a Node
+provider adapter or universal numeric equivalence after arbitrary host JSON parsing. These
+controls use no actual provider/network/model execution or secret configuration.
