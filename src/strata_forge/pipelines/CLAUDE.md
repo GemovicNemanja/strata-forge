@@ -19,8 +19,10 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   bounded local copies. Unsupported/unknown preflight refuses without unbounded fallback. Count
   every lazy-tree file/folder and stop at cap+1 before later pages/assets; do not eagerly exhaust
   a repository listing. Distinguish advertised metadata limits from hard HTTP wire-byte limits.
-- `evaluation_spec.EvalSpec` is the sole classification-evaluation schema, including semantic
-  validators beyond JSON Schema. Consumers import it; they do not independently guess a mirror.
+- `evaluation_spec.EvalSpec` is the sole classification-evaluation task schema, including semantic
+  validators beyond JSON Schema. Population-v2 operational envelopes wrap it rather than mirror
+  it; they preserve nested presence and bind the complete envelope digest. Legacy v1 serialization
+  and entrypoint defaults stay separate. Consumers import schemas rather than guess a mirror.
 - Evaluation authorizes every exact ref through a trusted `ReadPolicy` before preparing models
   or materializing rows. Missing, unknown, denied or positive custody refuses; caller flags,
   Hub readability and cached bytes are not authorization. Standalone execution denies without
@@ -30,6 +32,19 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
 - The loaded scorer's explicit per-call error overflow policy refuses overlength calls before
   model forward, disables pair/single truncation and verifies complete right-padded masks.
   Legacy default/spec/worker policy remains separate; no dropped-item semantics are inferred.
+- Population-v2 execution uses native score_with_outcomes: full token evidence, no cut input,
+  suite exclusions before render/tokenization and exact N=E+D+S+F/M=S+F counts. Ordinary invalid
+  outputs remain wrong; valid independent probability vectors survive invalid hard labels.
+  Imported flags/manifests never self-grant a verified drop. Model/tokenizer/rendering conditions
+  may differ in comparisons; exact gold/source/M identities and compatible targets must agree.
+- Population wrappers revalidate a serialized copy before every operation. Read policy binds
+  the OUTER digest before source/model IO; raw outcome/count DTOs are not authorization or
+  native execution evidence. Keep CLI/registry/server/issuer/publication activation separate.
+  Local population attempts require an empty current-UID 0700 leaf; never chmod/take over an
+  existing caller directory. Owned new directories/files are 0700/0600 independent of umask,
+  including temporary metric Parquet. Existing parents remain caller-managed POSIX paths.
+  Pending writes remain incomplete after cancellation; final manifests move only after awaited
+  writes and an active owner-task check. Native thread termination is not claimed.
 - The verifier renderer is a declared bounded premise/hypothesis shape, not a universal task
   constraint. Its config lives in `training.verifier_config`; it performs no I/O.
 - Stable item IDs are exact unique strings. Inference keeps legacy `custom_id` and optionally

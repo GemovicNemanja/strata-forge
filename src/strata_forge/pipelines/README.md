@@ -37,3 +37,10 @@ CLI exposes `eval schema`, `eval validate-spec`, `eval classify` and `eval score
 The launch commands use the same worker and deny without a trusted policy adapter.
 
 Reference: https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/pipelines.md
+
+The population-v2 specification models wrap the existing task schemas with explicit drop
+and suite/tier accounting. Presence-preserving serialization keeps their full-envelope
+identity distinct from v1. Trusted Python execution is available through `inference_runner.execute_population_scoring`
+and `eval_runner.run_population_evaluation`, with required outer-digest-bound read policy and
+private local receipts. Installed CLI/registered entrypoints do not accept these envelopes;
+see the population specification boundary in the module reference.

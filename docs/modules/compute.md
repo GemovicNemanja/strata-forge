@@ -370,6 +370,17 @@ not change later calls. No `drop` mode is defined. Inference/Eval specs and thei
 workers do not forward this option, so this primitive alone does not make those paths eligible
 for a no-truncation protocol. No partial result or drop receipt is returned after overflow.
 
+`score_with_outcomes(rows, overflow="drop", batch_size=8, on_progress=None)` is a separate
+trusted-Python SDK entry with a distinct result model. It computes full lengths, excludes
+native token overflow before forward, and reuses error-mode completeness checks for retained
+inputs. Results preserve original indices, exact token_count/enforced model_limit, model_sent
+and scored/invalid/overflow status. Empty attended sequences are input refusals, not overflow.
+No fields/defaults are added to legacy ScoredRow/ScoringResult. Late callbacks are closed when
+a caller cancels; an existing native thread is not claimed terminated. Operational suite/tier
+and metric-population receipts belong to the [population workers](pipelines.md#trusted-local-population-execution),
+not to an imported overflow flag or the SDK result object as an authorization capability.
+
+
 
 `pair_template` uses the same inert `{name}` substitution as `template`, with placeholder
 coverage validated before data loading. Scoring refuses rendered inputs above the character
