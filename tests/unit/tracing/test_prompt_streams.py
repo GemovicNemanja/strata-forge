@@ -29,6 +29,10 @@ from tests.unit.tracing.test_prompt_provider import FakeProvider, issued_invocat
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
 
+    from strata_forge.llm.providers.base import ProviderClient
+    from strata_forge.llm.registry import Model
+    from strata_forge.tracing.prompt_attempts import PreparedInvocation
+
 
 class StreamFake(FakeProvider):
     def __init__(self, native: object) -> None:
@@ -537,3 +541,185 @@ def test_shared_recorded_metadata_fixture_preserves_canonical_bytes(index: int) 
         stream.output_projection is None and stream.served_model is None
         for stream in metadata.streams
     )
+
+
+async def test_fixed_forwarding_keeps_auth_route_and_nonstreaming_objects_unobserved() -> None:
+    original = StreamFake(sequence([]))
+    auth = {"fictional": object()}
+    described: list[tuple[str, object]] = []
+    model = object()
+    original.auth_kwargs = lambda: auth
+    original.responses_auth_kwargs = lambda: auth
+    original.litellm_model = lambda value: f"fixture/{value}"
+
+    def describe(identifier: str, actual: Model) -> None:
+        described.append((identifier, actual))
+
+    original.describe_to_litellm = describe
+    observation = await prepare_stream_observation(await issued_invocation())
+    wrapper = wrap_streaming_provider(
+        original, observation=observation, provider_slot="openai_compat"
+    )
+    assert wrapper.auth_kwargs() is auth
+    assert wrapper.responses_auth_kwargs() is auth
+    assert wrapper.litellm_model("fictional") == "fixture/fictional"
+    wrapper.describe_to_litellm("fictional", cast("Model", model))
+    assert described == [("fictional", model)]
+    assert await wrapper.acompletion(provider_model_id="fixture", messages=[]) is original.returned
+    assert await wrapper.aresponses(provider_model_id="fixture", request={}) is original.returned
+    assert original.owner is asyncio.current_task()
+    assert observation.snapshot().admitted_streams == 0
+    await cast("AsyncGenerator[object, object]", original.native).aclose()
+
+
+async def test_unissued_working_objects_and_source_claims_refuse_with_fixed_management_errors() -> (
+    None
+):
+    invocation = await issued_invocation()
+    for source in (object(), invocation.snapshot()):
+        with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
+            await prepare_stream_observation(cast("PreparedInvocation", source))
+    observation, _, wrapper = await observed(sequence([]))
+    view = wrapper.astream(provider_model_id="fixture", messages=[])
+    advance = view.__anext__()
+    for value in (observation, wrapper, view, advance):
+        with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
+            type(value)()
+    with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
+        object.__new__(type(wrapper)).astream(provider_model_id="fixture", messages=[])
+    with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
+        wrap_streaming_provider(
+            cast("ProviderClient", object()), observation=observation, provider_slot="openai_compat"
+        )
+    advance.close()
+    await view.aclose()
+
+
+async def test_foreign_thread_factory_forwards_original_and_explicit_snapshot_refuses() -> None:
+    native = sequence([])
+    observation, _, wrapper = await observed(native)
+    returned = await asyncio.to_thread(wrapper.astream, provider_model_id="fixture", messages=[])
+    assert returned is native
+    snapshot = observation.snapshot()
+    assert snapshot.loss.scope_mismatch_seen is True
+    assert snapshot.admitted_streams == 0
+    with pytest.raises(StreamObservationError, match="stream_observation_scope_invalid"):
+        await asyncio.to_thread(observation.snapshot)
+    await native.aclose()
+
+
+async def test_foreign_thread_native_drive_is_forwarded_without_argument_projection() -> None:
+    marker = object()
+    observation, _, wrapper = await observed(sequence([marker]))
+    view = wrapper.astream(provider_model_id="fixture", messages=[])
+
+    def drive() -> object:
+        try:
+            next(view.__anext__())
+        except StopIteration as done:
+            return done.value
+        raise AssertionError("native immediate item missing")
+
+    assert await asyncio.to_thread(drive) is marker
+    snapshot = observation.snapshot()
+    assert snapshot.loss.scope_mismatch_seen is True
+    assert snapshot.streams[0].input_binding.stage == "unobserved"
+    assert snapshot.streams[0].raw_items_observed == 0
+    await view.aclose()
+
+
+def test_factory_without_running_loop_forwards_native_without_loop_retention() -> None:
+    loop = asyncio.new_event_loop()
+    native = sequence([])
+    try:
+        observation, _, wrapper = loop.run_until_complete(observed(native))
+        assert wrapper.astream(provider_model_id="fixture", messages=[]) is native
+        assert observation.snapshot().loss.scope_mismatch_seen is True
+        loop.run_until_complete(native.aclose())
+    finally:
+        loop.close()
+
+
+async def test_management_snapshot_failure_is_fixed_without_affecting_native_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.tracing import prompt_streams as runtime
+
+    marker = object()
+    observation, _, wrapper = await observed(sequence([marker]))
+    view = wrapper.astream(provider_model_id="fixture", messages=[])
+
+    def failure(*_args: object, **_kwargs: object) -> Any:
+        raise ValueError("fictional unreported metadata cause")
+
+    with monkeypatch.context() as local:
+        local.setattr(runtime.ProviderStreamObservationMetadata, "model_validate", failure)
+        with pytest.raises(StreamObservationError) as caught:
+            observation.snapshot()
+    assert caught.value.__context__ is None
+    assert "unreported" not in str(caught.value)
+    assert await anext(view) is marker
+    await view.aclose()
+
+
+async def test_retirement_allocation_failure_preserves_native_work_and_closed_loss_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.tracing import prompt_streams as runtime
+
+    marker = object()
+    observation, _, wrapper = await observed(sequence([marker]))
+    view = wrapper.astream(provider_model_id="fixture", messages=[])
+
+    def failure(*_args: object, **_kwargs: object) -> Any:
+        raise MemoryError("fictional retirement allocation")
+
+    with monkeypatch.context() as local:
+        local.setattr(runtime.ProviderStreamMetadata, "model_validate", failure)
+        observation.close()
+    observation.close()
+    assert await anext(view) is marker
+    snapshot = observation.snapshot()
+    assert snapshot.closed is True
+    assert snapshot.streams == ()
+    assert snapshot.loss.metadata_lost_count == 1
+    await view.aclose()
+
+
+async def test_terminal_metadata_failure_cannot_replace_original_raw_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.tracing import prompt_streams as runtime
+
+    marker = object()
+    observation, _, wrapper = await observed(sequence([marker]))
+    view = wrapper.astream(provider_model_id="fixture", messages=[])
+
+    def failure(*_args: object) -> None:
+        raise MemoryError("fictional terminal allocation")
+
+    monkeypatch.setattr(runtime, "_note_result", failure)
+    assert await anext(view) is marker
+    snapshot = observation.snapshot()
+    assert snapshot.streams == ()
+    assert snapshot.loss.metadata_lost_count == 1
+    await view.aclose()
+
+
+async def test_saturating_counter_flag_does_not_change_original_item_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.tracing import prompt_streams as runtime
+
+    # This bounded test-only ceiling exercises saturation without fabricating trillions
+    # of calls or adding a runtime limit/configuration selector.
+    monkeypatch.setattr(runtime, "MAX_STREAM_SAFE_INTEGER", 1)
+    marker = object()
+    observation, _, wrapper = await observed(sequence([marker, marker]))
+    view = wrapper.astream(provider_model_id="fixture", messages=[])
+    assert await anext(view) is marker
+    assert await anext(view) is marker
+    record = first(observation)
+    assert record.raw_items_observed == record.data_advance_attempts == 1
+    assert record.counter_saturated is True
+    await view.aclose()
