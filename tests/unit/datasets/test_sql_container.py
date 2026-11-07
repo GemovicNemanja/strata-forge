@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -204,4 +205,40 @@ async def test_bounded_helper_output_is_drained_and_actual_process_reaped(
         assert caught.value.__context__ is None
         assert not any(p.returncode is None for p in observed)
     finally:
+        await owner.aclose()
+
+
+async def test_precreate_engine_identity_mismatch_does_not_restore_availability() -> None:
+    import time
+
+    owner = Owner()
+    vars(owner).update(_create_issued=False, _start_issued=False, _cid="")
+    owner.engine = "engine-B"
+    same = cast(
+        "Callable[[SQLContainerOwner,float],Awaitable[None]]",
+        vars(SQLContainerOwner)["_same_engine"],
+    )
+    try:
+        with pytest.raises(wire.WireError) as caught:
+            await same(owner, time.monotonic() + 1)
+        assert caught.value.code == "cleanup_unresolved"
+        assert await owner.cleanup() is False
+        assert not owner.available
+        before = owner.calls.copy()
+        with pytest.raises(wire.WireError) as later:
+            await owner.run(
+                input_dir=Path("/fictional/unread"),
+                request=b"never_parse",
+                operation_id="0" * 32,
+                deadline=time.monotonic() + 1,
+            )
+        assert later.value.code == "unavailable"
+        assert owner.calls == before
+        with pytest.raises(wire.WireError) as closing:
+            await owner.aclose()
+        assert closing.value.code == "cleanup_unresolved"
+        assert owner.calls == before
+    finally:
+        # No actual engine operation exists in this controlled fixture.
+        vars(owner).update(_clean=True)
         await owner.aclose()

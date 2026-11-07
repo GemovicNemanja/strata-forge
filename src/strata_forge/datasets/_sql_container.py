@@ -111,6 +111,7 @@ class SQLContainerOwner:
         self._cid = ""
         self._operation = ""
         self._engine = ""
+        self._identity_mismatch = False
         self._create_issued = False
         self._start_issued = False
         self._waited = False
@@ -120,7 +121,7 @@ class SQLContainerOwner:
 
     @property
     def available(self) -> bool:
-        return self._clean and not self._closed
+        return self._clean and not self._closed and not self._identity_mismatch
 
     async def _spawn(
         self, args: tuple[str, ...], *, pipe: bool = False
@@ -181,6 +182,7 @@ class SQLContainerOwner:
 
     async def _same_engine(self, deadline: float) -> None:
         if await self._engine_id(deadline) != self._engine:
+            self._identity_mismatch = True
             raise wire.WireError("cleanup_unresolved")
 
     async def _inspect(self, name: str, deadline: float) -> dict[str, object]:
@@ -254,6 +256,9 @@ class SQLContainerOwner:
         okay = False
         try:
             if not self._create_issued:
+                if self._identity_mismatch:
+                    self._clean = False
+                    return False
                 self._clean = True
                 return True
             await self._same_engine(deadline)

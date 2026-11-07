@@ -116,7 +116,10 @@ SQL/data travel only through the private framed input/output; stderr is discarde
 container log driver is `none`. Parent imports no DuckDB/pytz to perform SQL.
 
 The captured public engine ID is rechecked before cleanup and after the exact absence check.
-It is an operational identity, not hostile-operator or cloned-daemon attestation. A possible
+It is an operational identity, not hostile-operator or cloned-daemon attestation. An observed
+identity mismatch retires future admission even if create was never issued; that pre-create
+case is an availability policy, not evidence that any worker ran. Cleanup/close cannot silently
+clear that retirement through the no-create shortcut. A possible
 start requires successful actual `docker wait` and a fresh nonrunning/PID0 observation before
 removal and admission release. A same-engine 404/empty list is not stop evidence. A lost create
 acknowledgement can be investigated only by its exact opaque name and owner/operation/image

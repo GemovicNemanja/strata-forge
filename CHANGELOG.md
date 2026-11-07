@@ -11,7 +11,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 ### Fixed
 
 - Refuse SQL result frames after failed worker exits and bind each local executor to one
-  captured event loop before source or engine work.
+  captured event loop before source or engine work. Retain engine-identity retirement
+  even when no container create was issued.
 
 ### Added
 
