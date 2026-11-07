@@ -19,8 +19,10 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   bounded local copies. Unsupported/unknown preflight refuses without unbounded fallback. Count
   every lazy-tree file/folder and stop at cap+1 before later pages/assets; do not eagerly exhaust
   a repository listing. Distinguish advertised metadata limits from hard HTTP wire-byte limits.
-- `evaluation_spec.EvalSpec` is the sole classification-evaluation schema, including semantic
-  validators beyond JSON Schema. Consumers import it; they do not independently guess a mirror.
+- `evaluation_spec.EvalSpec` is the sole classification-evaluation task schema, including semantic
+  validators beyond JSON Schema. Population-v2 operational envelopes wrap it rather than mirror
+  it; they preserve nested presence and bind the complete envelope digest. Legacy v1 serialization
+  and entrypoint defaults stay separate. Consumers import schemas rather than guess a mirror.
 - Evaluation authorizes every exact ref through a trusted `ReadPolicy` before preparing models
   or materializing rows. Missing, unknown, denied or positive custody refuses; caller flags,
   Hub readability and cached bytes are not authorization. Standalone execution denies without

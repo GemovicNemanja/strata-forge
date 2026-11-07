@@ -308,3 +308,29 @@ scoring engines; existing ordinal artifacts are not reinterpreted as stable-ID e
 
 See [metrics](metrics.md), [training](training.md), [storage](storage.md) and
 [the worker boundary decision](../architecture/adr/0021-pinned-evaluation-workers.md).
+
+## Population-v2 specification boundary
+
+`scoring_population_spec.InferencePopulationSpecV2` and
+`evaluation_population_spec.EvaluationPopulationSpecV2` are strict operational envelopes
+around the existing inference and evaluation task models. They require version2, an explicit
+protocol and `overflow="drop"`; a dataset suite-filter column is explicit, with null meaning
+no supplied suite filter. Tier metadata has a64-distinct-value/128-byte-per-value budget.
+Those are prototype metadata bounds, not scientific tier definitions.
+
+The nested legacy job remains authoritative for its task-specific fields. Wrapper serialization
+retains nested field presence: absent generation defaults never become present-null keys that
+could change the profile or digest. `wire_payload`, ordinary model/JSON serialization and
+revalidation agree. `digest()` binds the complete wrapper, including population columns,
+selection and every condition's pinned inputs. The inference envelope requires exact model/
+dataset SHAs, finite selection, stable IDs and HF scoring knobs; generation/serving fields and
+remote output destinations refuse. Evaluation envelopes cover each declared set exactly and
+retain the existing strict EvalSpec task validators. Legacy RunSpec, EvalSpec v1 and their
+serialization/digests remain separate.
+
+The pure `_population` metadata contracts retain successful, invalid, native-overflow and
+suite-excluded outcomes separately. Integer counts satisfy `N=E+D+S+F` and `M=S+F`; failed
+outputs are never called successfully scored. These types and counters do not execute a
+model, verify an imported overflow assertion or grant access. Installed CLI/registered workers
+do not accept these envelopes. Native no-truncation execution and local report integration
+must satisfy the worker's own authority, source and population checks before being enabled.

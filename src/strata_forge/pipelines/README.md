@@ -37,3 +37,8 @@ CLI exposes `eval schema`, `eval validate-spec`, `eval classify` and `eval score
 The launch commands use the same worker and deny without a trusted policy adapter.
 
 Reference: https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/pipelines.md
+
+The population-v2 specification models wrap the existing task schemas with explicit drop
+and suite/tier accounting. Presence-preserving serialization keeps their full-envelope
+identity distinct from v1. They are data-only contracts and are not accepted by the installed
+CLI/registered entrypoints; see the population specification boundary in the module reference.
