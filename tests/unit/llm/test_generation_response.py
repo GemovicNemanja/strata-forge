@@ -13,6 +13,10 @@ from strata_forge.llm.generation import GenerationResponse
 def response() -> dict[str, Any]:
     # Nullable channel fields are present in real protocol objects without implying content.
     return {
+        "response_id_present": False,
+        "response_id": None,
+        "system_fingerprint_present": True,
+        "system_fingerprint": None,
         "status": "completed",
         "finish_reason": "stop",
         "final_present": True,

@@ -211,3 +211,23 @@ def test_bounded_wire_parser_fixed_context_free_refusal(raw: str) -> None:
         parse_generation_spec(raw)
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
+
+
+def test_json_schema_alias_and_mutation_roundtrip_stays_on_exact_wire() -> None:
+    raw = raw_spec()
+    raw["generation"]["output_format"] = {
+        "kind": "json_schema",
+        "dialect": "strata-json-schema-v1",
+        "schema": copy.deepcopy(FIXTURE["schema"]),
+    }
+    spec = GenerationRunSpecV2.model_validate(raw)
+    copied = revalidate_generation_spec(spec)
+    assert copied.wire_payload() == raw
+    assert copied.digest() == spec.digest()
+    assert parse_generation_spec(copied.model_dump_json()).digest() == spec.digest()
+    wrong = copy.deepcopy(raw)
+    wrong["generation"]["output_format"]["schema_body"] = wrong["generation"]["output_format"].pop(
+        "schema"
+    )
+    with pytest.raises(ValidationError):
+        GenerationRunSpecV2.model_validate(wrong)

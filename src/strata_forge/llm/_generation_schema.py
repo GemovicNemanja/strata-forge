@@ -226,6 +226,15 @@ def validate_schema(value: object) -> dict[str, JsonValue]:
                 and cast("float", schema["minimum"]) > cast("float", schema["maximum"])
             ):
                 raise GenerationError("generation_schema_unsupported")
+            if kind == "integer":
+                lower = max(
+                    -MAX_SAFE_INTEGER, cast("float", schema.get("minimum", -MAX_SAFE_INTEGER))
+                )
+                upper = min(
+                    MAX_SAFE_INTEGER, cast("float", schema.get("maximum", MAX_SAFE_INTEGER))
+                )
+                if math.ceil(lower) > math.floor(upper):
+                    raise GenerationError("generation_schema_unsupported")
         else:
             allowed.add("enum")
         if set(schema) - allowed:

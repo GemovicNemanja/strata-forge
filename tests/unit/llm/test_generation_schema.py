@@ -215,3 +215,11 @@ def test_byte_node_and_cycle_bounds_refuse_without_expansion() -> None:
         canonical_json(["x"] * 1000, max_bytes=64)
     with pytest.raises(GenerationError):
         validate_schema({"type": "object", "unknown": "x" * 16384})
+
+
+@pytest.mark.parametrize(("minimum", "maximum"), [(1.2, 1.3), (1e20, 1e21), (-1e21, -1e20)])
+def test_integer_interval_with_no_supported_value_refuses(minimum: float, maximum: float) -> None:
+    raw = copy.deepcopy(SCHEMA)
+    raw["properties"]["count"].update(minimum=minimum, maximum=maximum)
+    with pytest.raises(GenerationError):
+        validate_schema(raw)

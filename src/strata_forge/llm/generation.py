@@ -13,6 +13,8 @@ from strata_forge.llm._generation_schema import (
     GenerationError,
     JsonValue,
     canonical_json,
+    conforms,
+    parse_json,
     scalar_text,
     validate_schema,
 )
@@ -104,6 +106,19 @@ class GenerationOptions(GenerationData):
     output_format: OutputFormat
     channels: ChannelPolicy
 
+    @field_validator("output_format", mode="before")
+    @classmethod
+    def _output_snapshot(cls, value: object) -> object:
+        # Pydantic instance revalidation otherwise feeds the Python alias name back as wire data.
+        if type(value) is JsonSchemaOutput:
+            if (
+                set(value.__dict__) != set(JsonSchemaOutput.model_fields)
+                or value.__pydantic_extra__
+            ):
+                raise ValueError("generation_controls_invalid")
+            return value.wire_payload()
+        return value
+
     @field_validator("top_k")
     @classmethod
     def _top_k(cls, value: int) -> int:
@@ -193,6 +208,10 @@ class GenerationUsage(GenerationData):
 class GenerationResponse(GenerationData):
     """Preserved protocol channels; validity and completion state remain separate facts."""
 
+    response_id_present: bool
+    response_id: str | None = Field(max_length=512)
+    system_fingerprint_present: bool
+    system_fingerprint: str | None = Field(max_length=512)
     status: Literal[
         "completed", "incomplete_length", "provider_refusal", "invalid_json", "invalid_schema"
     ]
@@ -205,7 +224,7 @@ class GenerationResponse(GenerationData):
     refusal_text: str | None = Field(max_length=MAX_GENERATION_CHANNEL_BYTES)
     json_status: Literal["not_requested", "valid", "invalid"]
     schema_status: Literal["not_requested", "not_evaluated", "valid", "invalid"]
-    parsed_json: dict[str, JsonValue] | None
+    parsed_json: JsonValue
     usage: GenerationUsage
 
     @model_validator(mode="after")
@@ -216,9 +235,19 @@ class GenerationResponse(GenerationData):
                 (self.final_present, self.final_text),
                 (self.reasoning_present, self.reasoning_text),
                 (self.refusal_present, self.refusal_text),
+                (self.response_id_present, self.response_id),
+                (self.system_fingerprint_present, self.system_fingerprint),
             )
         ):
             raise ValueError("generation_channels_invalid")
+        for metadata in (self.response_id, self.system_fingerprint):
+            if metadata is not None and (
+                not scalar_text(metadata)
+                or len(metadata.encode("utf-8")) > 512
+                or any(ord(char) < 32 or ord(char) == 127 for char in metadata)
+            ):
+                raise ValueError("generation_response_invalid")
+        canonical_json(self.parsed_json)
         texts = [
             value
             for value in (self.final_text, self.reasoning_text, self.refusal_text)
@@ -264,11 +293,10 @@ class GenerationResponse(GenerationData):
                 self.json_status == "invalid"
                 and (self.schema_status != "not_evaluated" or self.parsed_json is not None)
             )
-            or (
-                self.json_status == "valid"
-                and (self.parsed_json is None or self.schema_status not in ("valid", "invalid"))
-            )
+            or (self.json_status == "valid" and (self.schema_status not in ("valid", "invalid")))
         ):
+            raise ValueError("generation_response_invalid")
+        if self.schema_status == "valid" and type(self.parsed_json) is not dict:
             raise ValueError("generation_response_invalid")
         return self
 
@@ -286,4 +314,276 @@ def revalidate_request(value: GenerationRequest) -> GenerationRequest:
         failed = True
     if failed or result is None:
         raise GenerationError("generation_request_invalid")
+    return result
+
+
+def request_body(
+    request: GenerationRequest, *, user_text: str, served_model: str
+) -> dict[str, JsonValue]:
+    """Translate fixed controls without granting an endpoint or native profile capability."""
+    current = revalidate_request(request)
+    if (
+        not scalar_text(user_text)
+        or len(user_text) > 200_000
+        or not scalar_text(served_model)
+        or not served_model
+        or len(served_model) > 512
+    ):
+        raise GenerationError("generation_request_invalid")
+    body: dict[str, JsonValue] = {
+        "model": served_model,
+        "messages": [{"role": "user", "content": user_text}],
+        "temperature": current.temperature,
+        "top_p": current.top_p,
+        "top_k": current.top_k,
+        "min_p": current.min_p,
+        "max_completion_tokens": current.max_tokens,
+        "stop": list(current.stop),
+        "n": 1,
+        "stream": False,
+    }
+    if current.effective_seed_decimal is not None:
+        body["seed"] = int(current.effective_seed_decimal)
+    if isinstance(current.channels, QwenChannels):
+        body["chat_template_kwargs"] = {"enable_thinking": current.channels.enable_thinking}
+    elif isinstance(current.channels, HarmonyChannels):
+        body["reasoning_effort"] = current.channels.effort
+    if isinstance(current.output_format, JsonSchemaOutput):
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "strata_output",
+                "strict": True,
+                "schema": current.output_format.schema_body,
+            },
+        }
+    return body
+
+
+def _protocol_object(value: JsonValue) -> dict[str, JsonValue]:
+    if type(value) is not dict:
+        raise GenerationError("generation_response_invalid")
+    return value
+
+
+def _nullable_text(value: JsonValue) -> str | None:
+    if value is not None and type(value) is not str:
+        raise GenerationError("generation_response_invalid")
+    return value
+
+
+def _usage(value: JsonValue) -> GenerationUsage:
+    if value is None:
+        return GenerationUsage(
+            input_tokens=None, generated_tokens=None, reasoning_tokens=None, final_tokens=None
+        )
+    raw = _protocol_object(value)
+    if set(raw) - {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "prompt_tokens_details",
+        "completion_tokens_details",
+    }:
+        raise GenerationError("generation_response_invalid")
+
+    def count(field: str) -> int | None:
+        result = raw.get(field)
+        if result is not None and (type(result) is not int or result < 0):
+            raise GenerationError("generation_response_invalid")
+        return result
+
+    generated, prompt = count("completion_tokens"), count("prompt_tokens")
+    total = count("total_tokens")
+    if (
+        total is not None
+        and generated is not None
+        and prompt is not None
+        and total != generated + prompt
+    ):
+        raise GenerationError("generation_response_invalid")
+    detail = raw.get("completion_tokens_details")
+    reasoning: int | None = None
+    if detail is not None:
+        details = _protocol_object(detail)
+        if set(details) - {
+            "reasoning_tokens",
+            "accepted_prediction_tokens",
+            "rejected_prediction_tokens",
+            "audio_tokens",
+        } or any(
+            item is not None and (type(item) is not int or item < 0) for item in details.values()
+        ):
+            raise GenerationError("generation_response_invalid")
+        reasoning_value = details.get("reasoning_tokens")
+        if reasoning_value is not None and (
+            type(reasoning_value) is not int or reasoning_value < 0
+        ):
+            raise GenerationError("generation_response_invalid")
+        reasoning = reasoning_value
+    final = generated - reasoning if generated is not None and reasoning is not None else None
+    return GenerationUsage(
+        input_tokens=prompt,
+        generated_tokens=generated,
+        reasoning_tokens=reasoning,
+        final_tokens=final,
+    )
+
+
+def _response(
+    request: GenerationRequest, raw: dict[str, JsonValue], served_model: str
+) -> GenerationResponse:
+    top_fields = {
+        "id",
+        "object",
+        "created",
+        "model",
+        "choices",
+        "usage",
+        "system_fingerprint",
+        "service_tier",
+        "prompt_logprobs",
+        "prompt_token_ids",
+        "prompt_text",
+        "kv_transfer_params",
+    }
+    if (
+        set(raw) - top_fields
+        or raw.get("object") != "chat.completion"
+        or raw.get("model") != served_model
+    ):
+        raise GenerationError("generation_response_invalid")
+    if "created" in raw and (type(raw["created"]) is not int or raw["created"] < 0):
+        raise GenerationError("generation_response_invalid")
+    if any(
+        raw.get(field) is not None
+        for field in ("prompt_logprobs", "prompt_token_ids", "prompt_text", "kv_transfer_params")
+    ):
+        raise GenerationError("generation_response_invalid")
+    choices = raw.get("choices")
+    if type(choices) is not list or len(choices) != 1:
+        raise GenerationError("generation_response_invalid")
+    choice = _protocol_object(choices[0])
+    if (
+        set(choice)
+        - {
+            "index",
+            "message",
+            "logprobs",
+            "finish_reason",
+            "stop_reason",
+            "token_ids",
+            "routed_experts",
+        }
+        or type(choice.get("index")) is not int
+        or choice["index"] != 0
+        or any(
+            choice.get(field) is not None for field in ("logprobs", "token_ids", "routed_experts")
+        )
+    ):
+        raise GenerationError("generation_response_invalid")
+    finish = choice.get("finish_reason")
+    if finish not in ("stop", "length", "content_filter"):
+        raise GenerationError("generation_response_invalid")
+    message = _protocol_object(choice.get("message"))
+    if (
+        set(message)
+        - {
+            "role",
+            "content",
+            "reasoning",
+            "refusal",
+            "annotations",
+            "audio",
+            "function_call",
+            "tool_calls",
+        }
+        or message.get("role") != "assistant"
+        or any(
+            message.get(field) is not None for field in ("annotations", "audio", "function_call")
+        )
+        or message.get("tool_calls") not in (None, [])
+    ):
+        raise GenerationError("generation_response_invalid")
+    final = _nullable_text(message.get("content"))
+    reasoning = _nullable_text(message.get("reasoning"))
+    refusal = _nullable_text(message.get("refusal"))
+    if isinstance(request.channels, PlainChannels) and reasoning is not None:
+        raise GenerationError("generation_response_invalid")
+    if not isinstance(request.channels, PlainChannels) and "reasoning" not in message:
+        raise GenerationError("generation_response_invalid")
+    if (
+        isinstance(request.channels, QwenChannels)
+        and not request.channels.enable_thinking
+        and reasoning not in (None, "")
+    ):
+        raise GenerationError("generation_response_invalid")
+    if finish == "stop" and final is None and refusal is None:
+        raise GenerationError("generation_response_invalid")
+    json_status: Literal["not_requested", "valid", "invalid"] = "not_requested"
+    schema_status: Literal["not_requested", "not_evaluated", "valid", "invalid"] = "not_requested"
+    parsed: JsonValue = None
+    if isinstance(request.output_format, JsonSchemaOutput):
+        json_status, schema_status = "invalid", "not_evaluated"
+        if final is not None:
+            failed = False
+            try:
+                parsed = parse_json(final, max_bytes=MAX_GENERATION_CHANNEL_BYTES)
+            except GenerationError:
+                failed = True
+            if not failed:
+                json_status = "valid"
+                schema_status = (
+                    "valid" if conforms(request.output_format.schema_body, parsed) else "invalid"
+                )
+    status: Literal[
+        "completed", "incomplete_length", "provider_refusal", "invalid_json", "invalid_schema"
+    ]
+    if refusal is not None or finish == "content_filter":
+        status = "provider_refusal"
+    elif finish == "length":
+        status = "incomplete_length"
+    elif json_status == "invalid":
+        status = "invalid_json"
+    elif schema_status == "invalid":
+        status = "invalid_schema"
+    else:
+        status = "completed"
+    return GenerationResponse(
+        response_id_present="id" in raw,
+        response_id=_nullable_text(raw.get("id")),
+        system_fingerprint_present="system_fingerprint" in raw,
+        system_fingerprint=_nullable_text(raw.get("system_fingerprint")),
+        status=status,
+        finish_reason=finish,
+        final_present="content" in message,
+        final_text=final,
+        reasoning_present="reasoning" in message,
+        reasoning_text=reasoning,
+        refusal_present="refusal" in message,
+        refusal_text=refusal,
+        json_status=json_status,
+        schema_status=schema_status,
+        parsed_json=parsed,
+        usage=_usage(raw.get("usage")),
+    )
+
+
+def parse_generation_response(
+    request: GenerationRequest, raw: bytes, *, served_model: str
+) -> GenerationResponse:
+    """Read exact protocol fields; no tag splitting, first-object extraction or repair."""
+    failed = False
+    result: GenerationResponse | None = None
+    try:
+        current = revalidate_request(request)
+        result = _response(
+            current,
+            _protocol_object(parse_json(raw, max_bytes=MAX_GENERATION_RESPONSE_BYTES)),
+            served_model,
+        )
+    except ValueError, GenerationError:
+        failed = True
+    if failed or result is None:
+        raise GenerationError("generation_response_invalid")
     return result

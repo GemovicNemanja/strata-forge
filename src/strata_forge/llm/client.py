@@ -113,6 +113,7 @@ if TYPE_CHECKING:
 
     from strata_forge.llm.cache import CacheBackend
     from strata_forge.llm.fallback import FallbackEntry
+    from strata_forge.llm.generation import GenerationRequest, GenerationResponse
     from strata_forge.llm.loop_events import LoopEvent
     from strata_forge.llm.messages import (
         AnyMessage,
@@ -525,6 +526,27 @@ class LLMClient:
     def chain(self) -> list[ModelFallback]:
         """The resolved fallback chain (read-only snapshot)."""
         return list(self._chain)
+
+    async def generate_one(
+        self, messages: Sequence[AnyMessage], *, request: GenerationRequest
+    ) -> GenerationResponse:
+        """Run one closed local-generation sample without legacy normalization or fallback."""
+        from strata_forge.llm.generation import GenerationError
+
+        if (
+            len(self._chain) != 1
+            or self._chain[0].providers != ("openai_compat",)
+            or self._cache is not None
+            or type(messages) not in (list, tuple)
+            or len(messages) != 1
+            or type(messages[0]) is not UserMessage
+            or type(messages[0].content) is not str
+        ):
+            raise GenerationError("generation_client_configuration_unsupported")
+        provider = self._provider_clients.get("openai_compat")
+        if type(provider) is not OpenAICompatProvider:
+            raise GenerationError("generation_client_configuration_unsupported")
+        return await provider.agenerate_one(messages[0].content, request)
 
     # --- Constructors -----------------------------------------------------
 

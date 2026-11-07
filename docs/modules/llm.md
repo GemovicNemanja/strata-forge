@@ -1036,7 +1036,35 @@ that lexical boundary. Integer-schema values follow mathematical JSON Schema sem
 (e.g.1.0 is integral), while booleans are never numbers. String lengths count Unicode code
 points and preserve normalization/newlines.
 
-These are contract and validation primitives; no generation execution, native-profile
-availability or worker registration follows from constructing them. The fixed raw-provider
-transport exception and remaining integration boundaries are defined by
+`LLMClient.generate_one([UserMessage(content=text)], request=GenerationRequest(...))` is the
+additive one-sample entry. It requires a single explicit OpenAI-compatible route, no cache,
+one plain text user message and an exact provider implementation. The fixed endpoint observer
+is unavailable: neither the legacy provider config, requested profile, model name nor a caller
+URL establishes native support. No native worker/process capability is enabled. Tests privately
+replace this observation with fictional facts and exercise the actual installed SDK against
+owned HTTP fixtures; this is not vLLM/model conformance.
+
+The distinct raw provider operation snapshots request/message data before awaits, uses an
+absolute deadline, refuses redirects/compression/non-JSON/error status without draining their
+bodies and bounds unknown-length streams before full-body materialization. The 2MiB raw ceiling
+and 1MiB decoded-channel ceiling differ; escaped inner content need not fit both at its maximum.
+A network transport may deliver the first crossing chunk; it is not forwarded/materialized as
+a complete body and no subsequent chunk is read. All SDK error text is replaced with a fixed
+context-free code. Coroutine cancellation propagates and closes owned HTTP resources, without
+claiming native process termination.
+
+SDK credentials, organization/project/webhook settings and client/proxy configuration are
+explicit. SDK 2.36 always reads OPENAI_CUSTOM_HEADERS, so its presence refuses before SDK
+construction; the guard examines names only and never reads its value or mutates environment.
+Existing completion configuration/auth/redirect behavior is unchanged. No generation cache,
+provider fallback or automatic retry applies.
+
+Results preserve final/reasoning/refusal presence, null/empty text, bounded descriptive
+response ID/system fingerprint presence and nullable usage. These returned strings are not
+model identity authority. Exact raw fields are parsed without think-tag/Harmony regex or JSON
+repair. Final-only JSON validation retains wrong-schema arrays/null as parsed invalid output;
+length termination is incomplete even when its final JSON is valid. Unknown usage stays
+unknown. No zero-cost/GPU duration, research eligibility or native model support is inferred.
+
+The fixed raw-provider transport exception and remaining integration boundaries are defined by
 [ADR0029](../architecture/adr/0029-closed-local-generation-protocol.md).
