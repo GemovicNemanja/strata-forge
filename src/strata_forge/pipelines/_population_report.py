@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 — Pydantic resolves result paths at runtime
 from typing import TYPE_CHECKING, Literal, Protocol, cast
@@ -22,7 +25,8 @@ from strata_forge.pipelines._population import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Generator, Sequence
+    from typing import BinaryIO
 
     from strata_forge.pipelines._evaluation_items import EvaluationItem
     from strata_forge.pipelines._scoring import ScoredRow
@@ -56,6 +60,7 @@ _SAFE_ERRORS = frozenset(
         "population_alignment_invalid",
         "population_selection_mismatch",
         "artifact_directory_not_empty",
+        "artifact_directory_not_private",
         "report_limit_exceeded",
         "custody_policy_unavailable",
         "custody_resolution_failed",
@@ -129,19 +134,61 @@ class PopulationAttempt:
     report_name: Literal["scoring.json", "metrics.json"]
 
 
+def _new_private_directory(directory: Path) -> None:
+    # Only directories this call creates are chmodded; an existing caller path is never taken over.
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
+
+
+@contextmanager
+def _private_output(path: Path) -> Generator[BinaryIO]:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        # Umask may remove owner bits too. The descriptor names only this newly created file.
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as file:
+            yield file
+    finally:
+        os.close(descriptor)
+
+
+def _write_private(path: Path, content: bytes) -> None:
+    with _private_output(path) as file:
+        file.write(content)
+
+
 def reserve_attempt(
     directory: Path, *, run_id: str, report_name: Literal["scoring.json", "metrics.json"]
 ) -> PopulationAttempt:
-    if directory.is_symlink() or (directory.exists() and any(directory.iterdir())):
+    # A public parent is allowed; this exact current-owner 0700 leaf is the read boundary.
+    # Missing ancestors are created privately, while existing parents remain caller-managed.
+    missing: list[Path] = []
+    parent = directory.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    for path in reversed(missing):
+        _new_private_directory(path)
+    with suppress(FileExistsError):
+        _new_private_directory(directory)
+    metadata = directory.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise PopulationError("artifact_directory_not_private")
+    if any(directory.iterdir()):
         raise PopulationError("artifact_directory_not_empty")
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        with (directory / ".population-attempt.json").open("x", encoding="utf-8") as file:
-            json.dump({"run_id": run_id, "status": "started"}, file)
+        _write_private(
+            directory / ".population-attempt.json",
+            json.dumps({"run_id": run_id, "status": "started"}).encode("utf-8"),
+        )
     except FileExistsError:
         raise PopulationError("artifact_directory_not_empty") from None
     pending = directory / ".population-pending"
-    pending.mkdir(mode=0o700)
+    _new_private_directory(pending)
     return PopulationAttempt(directory, pending, report_name)
 
 
@@ -210,7 +257,7 @@ def _manifest(attempt: PopulationAttempt, value: dict[str, object]) -> None:
     ).encode("utf-8")
     if len(encoded) > MAX_REPORT_BYTES:
         raise PopulationError("report_limit_exceeded")
-    (attempt.pending / attempt.report_name).write_bytes(encoded + b"\n")
+    _write_private(attempt.pending / attempt.report_name, encoded + b"\n")
 
 
 def _audit_fields() -> list[_ArrowField]:
@@ -263,12 +310,13 @@ def write_scoring_attempt(
             {f"p_{label}": score.probabilities.get(label) if score else None for label in labels}
         )
         rows.append(row)
-    pq.write_table(  # pyright: ignore[reportUnknownMemberType] — Arrow writer lacks complete stubs
-        pa.Table.from_pylist(rows, schema=pa.schema(fields)), attempt.pending / "results.parquet"
-    )
-    (attempt.pending / "README.md").write_text(
-        "---\nconfigs:\n- config_name: default\n  data_files:\n  - split: train\n    path: results.parquet\n---\n\n# Native population scoring\n\nPrivate item audit and explicit population counts are in results.parquet and scoring.json.\n",
-        encoding="utf-8",
+    with _private_output(attempt.pending / "results.parquet") as file:
+        pq.write_table(  # pyright: ignore[reportUnknownMemberType] — Arrow writer lacks complete stubs
+            pa.Table.from_pylist(rows, schema=pa.schema(fields)), file
+        )
+    _write_private(
+        attempt.pending / "README.md",
+        b"---\nconfigs:\n- config_name: default\n  data_files:\n  - split: train\n    path: results.parquet\n---\n\n# Native population scoring\n\nPrivate item audit and explicit population counts are in results.parquet and scoring.json.\n",
     )
     _manifest(attempt, manifest)
 
@@ -281,10 +329,14 @@ def write_evaluation_attempt(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    evaluations = attempt.pending / "evaluations"
+    _new_private_directory(evaluations)
     for case, items, outcomes in sets:
-        directory = attempt.pending / "evaluations" / case.evaluation_id
-        directory.mkdir(parents=True)
+        directory = evaluations / case.evaluation_id
+        _new_private_directory(directory)
         metric_path = directory / ".metric-items.parquet"
+        # The legacy schema writer truncates an existing file without changing its 0600 mode.
+        _write_private(metric_path, b"")
         _write_items(metric_path, case, items)
         table = cast("_ArrowTable", pq.read_table(metric_path))  # pyright: ignore[reportUnknownMemberType] — bounded schema/read protocol narrows Arrow stubs
         by_id = {cast("str", row["item_id"]): row for row in table.to_pylist()}
@@ -302,9 +354,10 @@ def write_evaluation_attempt(
                 truncated=row.get("truncated", False),
             )
             rows.append(row)
-        pq.write_table(  # pyright: ignore[reportUnknownMemberType] — Arrow writer lacks complete stubs
-            pa.Table.from_pylist(rows, schema=pa.schema(fields)), directory / "items.parquet"
-        )
+        with _private_output(directory / "items.parquet") as file:
+            pq.write_table(  # pyright: ignore[reportUnknownMemberType] — Arrow writer lacks complete stubs
+                pa.Table.from_pylist(rows, schema=pa.schema(fields)), file
+            )
         metric_path.unlink()
     card = (
         "---\nconfigs:\n"
@@ -314,10 +367,12 @@ def write_evaluation_attempt(
         )
         + "---\n\n"
     )
-    (attempt.pending / "README.md").write_text(
-        card
-        + "# Population evaluation\n\nPrivate item audits retain exclusions separately; metrics use the explicitly recorded population.\n",
-        encoding="utf-8",
+    _write_private(
+        attempt.pending / "README.md",
+        (
+            card
+            + "# Population evaluation\n\nPrivate item audits retain exclusions separately; metrics use the explicitly recorded population.\n"
+        ).encode("utf-8"),
     )
     _manifest(attempt, manifest)
 

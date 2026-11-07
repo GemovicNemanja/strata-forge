@@ -40,6 +40,9 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
 - Population wrappers revalidate a serialized copy before every operation. Read policy binds
   the OUTER digest before source/model IO; raw outcome/count DTOs are not authorization or
   native execution evidence. Keep CLI/registry/server/issuer/publication activation separate.
+  Local population attempts require an empty current-UID 0700 leaf; never chmod/take over an
+  existing caller directory. Owned new directories/files are 0700/0600 independent of umask,
+  including temporary metric Parquet. Existing parents remain caller-managed POSIX paths.
   Pending writes remain incomplete after cancellation; final manifests move only after awaited
   writes and an active owner-task check. Native thread termination is not claimed.
 - The verifier renderer is a declared bounded premise/hypothesis shape, not a universal task

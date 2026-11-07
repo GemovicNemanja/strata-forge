@@ -366,7 +366,12 @@ Reports retain per-tier counts, selected/metric/target identity hashes, ordered 
 probability semantics and each model/render condition. The declared effective spec includes
 static templates and is private audit data; item tables omit dataset text, rendered requests,
 responses and reasoning. Public result projection is a separate integration. Attempts reserve
-an owned directory and write into a pending subdirectory off-loop; the complete manifest moves
+an empty current-UID directory with exact POSIX 0700 permissions, refusing existing public,
+non-owner or symlink leaves without changing their permissions. Newly created ancestor/pending/
+audit directories are 0700 and owned files (including temporary metric tables) are 0600,
+independent of umask. Existing parents remain caller-managed; a public parent does not grant
+read access through the private leaf. This is a trusted local POSIX path contract, not a
+general hostile-filesystem capability. Writes run in a pending subdirectory off-loop; the complete manifest moves
 last only after the awaited write and an active owner-task check. Canceled native/write threads
 cannot publish a later final manifest/end event. This is not proof of process/GPU teardown.
 
