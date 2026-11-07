@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "runtime_source_commit": "6977a3bfad5edc56c280a2a098269d292b4e29f6",
+  "runtime_source_commit": "41b9ae61735e68fd618f9689c874533b4e2132b2",
   "base_commit": "6c1dca30786ecbf7a33f4d2204af53bead7b65f4",
   "worker_checkpoint": "8c5c21de55bb70f9e73e5facecf52e35fb854084",
   "actual_matrix_source_commit": "4e3977fa3e73f4614033f6e8d23ccd8ef9789695",
-  "final_successor_scope": "six-line precreate engine identity retirement; no worker or normal started path changes",
+  "final_successor_scope": "fixed portable /tmp parent staging followed by canonical resolve; no worker or other five leaf changes",
   "setup": {
     "base_image": "python@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97",
     "image_id": "sha256:2795753ec856a024d117e29d96715196e1f919890e859d64b0607473b963e690",
@@ -178,13 +178,15 @@
     "worker_bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac"
   },
   "installed_target": {
+    "version": 1,
+    "source_commit": "41b9ae61735e68fd618f9689c874533b4e2132b2",
     "status": "passed",
-    "scope": "installed_target_base_only_cold_lazy_constructor",
-    "python": "3.14.4",
-    "wheel_sha256": "9c1043e74aad57df5381560cc2f9ce8fa5754af4cd7851e206e06554af4280dc",
+    "wheel_sha256": "f720e5a9186c2b8cf80e486e600f1d7876587be6d4aa370e19b625ee59ee134e",
     "wheel_bytes": 655766,
+    "python": "3.14.4",
+    "scope": "installed_target_base_only_cold_lazy_constructor",
     "runtime_sources": {
-      "sql.py": "a3f4309ef0eae60f363fd0fd510f8d759ec88ce5a9ece8f2c046bc6b75880920",
+      "sql.py": "d23c0c1fda46c15f5e6ac2dedbdf1425a5bbb756f00ecb614d843e58195158ea",
       "sql_types.py": "0cb8d6e208320ec57188a28c26c9dc60bf78c2469f468970d786d24f148dea12",
       "_sql_container.py": "bef722d13135520d99e91029169f39b53d57a8352e7aff4b0fecde663e339087",
       "_sql_worker.py": "d553bee93178137c89e4ab070c520b72324b74ca3ba928a841843a200bf65347",
@@ -236,6 +238,21 @@
       "source": "6977a3b",
       "errors": 0,
       "warnings": 0
+    },
+    {
+      "kind": "portable_staging_parent_controls",
+      "source": "41b9ae6",
+      "passed": 32,
+      "seconds": "1.98"
+    },
+    {
+      "kind": "independent_actual_installed_SDK_known_query",
+      "source": "41b9ae6",
+      "passed": 1,
+      "columns": 8,
+      "rows": 3,
+      "host": "macOS",
+      "linux_end_to_end": false
     }
   ],
   "authority": "trusted local operator and descriptive source assertion only; no remote issuer/grants",
@@ -249,14 +266,82 @@
   },
   "evidence_sha256": {
     "worker-ready-initial-RED.json": "efed6871f20651b7d8f991480376c7de447d6f84037532ff5297a5fa0fb2bbca",
+    "linux-stdlib-unavailable.json": "9a7eb7e59cad88cc595d7931856bb22a2e0ea34835906ad17c9ed90c25c4e157",
     "precreate-engine-identity-4e-RED.log": "e6f42686cfc689b7c64dd0e343452a2959a2c118ade47f13b1f46bfa49bfdcbb",
     "root-failed-exit-successor.log": "c349572f9d12486ea5ffcdcc97e0548b6e944223f1870947d033fd2ee1614d03",
+    "installed-portable-proof.json": "78d65d66b4391be2e7b3b81d34272c5555f920e67ae9fbe25bf3a7ed1c62dfee",
     "missing-pytz-RED.stderr": "f70c0d67972201584114c6a66930430d18b4e8942c21cdc518eae23bc579b6e3",
     "installed-target-cold.log": "c10d5216d2e91884cdb84fab8c8a98be6812d9a2c8bb8a401626d4515fd520c5",
+    "portable-tmp-successor.log": "d4aa958cd525d65053d27a44a345fdff1e67dd9a40be847ce1d210bcd4855daa",
+    "portable-peer-receipt.json": "12198d6fc297147ba71c1ba919dc4ed0759e18227530265e32f295df29b14393",
     "initial-actual-matrix.log": "f72ddf703f5d58e99871f5cff2ae9ddfd89a0234f90cc4c4bfb2de9b6d53c62c",
     "all-datasets-4e3977f.log": "dd5d4080ad4a0190e78fc16db77adf6807d440548d5a5780c54cf3e781b38c2b",
     "precreate-engine-identity-successor.log": "44dd5b956fc67014bf49054ff59431dadcf5c64da5a2d97fdd4c4a75d50e8a18",
     "actual-matrix-4e3977f.log": "44d617aef3de5fd3d751ccfce3eedd2f71e8aefad9d4e0666a4a80fa94b7f646",
+    "portable-peer-summary.json": "4cce3ead0f057db8febe0b1f7b06b9deef281347996b258dd960c92820821736",
+    "portable-peer-handoff.md": "c8dbb869e224a7fadf890d0b4a7e4a2f0037656b97f13d8e4cf954a9f49865ec",
+    "manifest-697-history.json": "217da5de3d72a9bf36d2f117a493aaf45c1374706fdb7a2a7a560a31bfda3cea",
     "missing-pytz-RED-lifecycle.json": "512183d9171c1208e5e7a7bad2c355d5dae3d5105583c3bd89603af817c8e3a9"
+  },
+  "predecessor_runtime_source_commit": "6977a3bfad5edc56c280a2a098269d292b4e29f6",
+  "installed_target_history": {
+    "status": "passed",
+    "scope": "installed_target_base_only_cold_lazy_constructor",
+    "python": "3.14.4",
+    "wheel_sha256": "9c1043e74aad57df5381560cc2f9ce8fa5754af4cd7851e206e06554af4280dc",
+    "wheel_bytes": 655766,
+    "runtime_sources": {
+      "sql.py": "a3f4309ef0eae60f363fd0fd510f8d759ec88ce5a9ece8f2c046bc6b75880920",
+      "sql_types.py": "0cb8d6e208320ec57188a28c26c9dc60bf78c2469f468970d786d24f148dea12",
+      "_sql_container.py": "bef722d13135520d99e91029169f39b53d57a8352e7aff4b0fecde663e339087",
+      "_sql_worker.py": "d553bee93178137c89e4ab070c520b72324b74ca3ba928a841843a200bf65347",
+      "_sql_wire.py": "f9a3e01b2d02c2ba9a46caff340ebdd1faa53284daf93e23d2f6d1aea1d6e917",
+      "__init__.py": "da7240f438c63e0a03d0d43b8eb39fc4b6659a84ae58cab37203eafc014c6d41"
+    },
+    "parent_absent_packages": [
+      "duckdb",
+      "torch",
+      "numpy"
+    ],
+    "native_parent_imports": [],
+    "network_attempts": 0
+  },
+  "portable_peer_summary": {
+    "source_pin": "41b9ae61735e68fd618f9689c874533b4e2132b2",
+    "installed_target": "/private/tmp/strata-headless-sql-installed-portable-20261107",
+    "actual_query_count": 1,
+    "returned_rows": 3,
+    "columns": 8,
+    "fictional_source_bytes": 1461,
+    "caller_fd_unchanged": true,
+    "caller_fd_position": 17,
+    "caller_fd_still_open": true,
+    "lazy_sql_imports": true,
+    "parent_duckdb_import_attempts": 0,
+    "parent_duckdb_loaded": false,
+    "engine_id": "bcab2e88-3f7e-4573-af68-22ef9140c812",
+    "image_id": "sha256:05af70db10d7935a425621709a97b11607bfcb84370ec53b30444771770deb41",
+    "worker_bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac",
+    "receipt_sha256": "2031f07c7c18b240ccf620c09595ec610e1faaf0e4f9fe6abe8771f70d2cfdee",
+    "result_canonical_sha256": "05532d4ab67fe07143c6810163678983f432056fe70c78d827206859451c1caa",
+    "cleanup": {
+      "attach_reaped": true,
+      "container_removed": true,
+      "container_waited": true,
+      "exit_code": 0,
+      "oom_killed": false,
+      "staging_removed": true,
+      "stopped_pid_zero": true
+    }
+  },
+  "optional_linux_stdlib_probe": {
+    "status": "unavailable_image_or_engine",
+    "executed": false,
+    "scope": "stdlib_linux_tmp_only_not_SQL_SDK",
+    "image_id": "sha256:05af70db10d7935a425621709a97b11607bfcb84370ec53b30444771770deb41",
+    "start_issued": false,
+    "container_creation_acknowledged": false,
+    "cleanup_confirmation": "not_observed",
+    "qualification": "Optional test-only create refusal returned no ID; its generated name was not persisted before create, so an unstarted/no-mount residue cannot independently be excluded. No Linux execution or cleanup claim; no broad Docker inspection attempted."
   }
 }

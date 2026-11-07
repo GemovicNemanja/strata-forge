@@ -1,0 +1,10 @@
+{
+  "status": "unavailable_image_or_engine",
+  "executed": false,
+  "scope": "stdlib_linux_tmp_only_not_SQL_SDK",
+  "image_id": "sha256:05af70db10d7935a425621709a97b11607bfcb84370ec53b30444771770deb41",
+  "start_issued": false,
+  "container_creation_acknowledged": false,
+  "cleanup_confirmation": "not_observed",
+  "qualification": "Optional test-only create refusal returned no ID; its generated name was not persisted before create, so an unstarted/no-mount residue cannot independently be excluded. No Linux execution or cleanup claim; no broad Docker inspection attempted."
+}
