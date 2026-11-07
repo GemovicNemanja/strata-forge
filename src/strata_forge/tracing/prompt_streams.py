@@ -688,17 +688,19 @@ def _admit(
             ),
         )
         _iterators.add(view)
+        reference = weakref.ref(view)
         with state.lock:
             if state.closed:
                 _increment(state, "metadata_lost_count")
                 return cast("object", native)
+            state.views.append(reference)
             state.records[index] = record
-            state.views.append(weakref.ref(view))
         return view
     except Exception:
         with state.lock:
-            if state.records.pop(index, None) is None:
-                _increment(state, "metadata_lost_count")
+            # A reserved entry remains lost even if publication partly succeeded.
+            state.records.pop(index, None)
+            _increment(state, "metadata_lost_count")
         return cast("object", native)
 
 

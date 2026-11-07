@@ -483,3 +483,36 @@ async def test_reported_counters_preserve_native_advance_and_error_relationships
     with pytest.raises(ValidationError):
         ProviderStreamMetadata.model_validate({**first(observation).model_dump(), **change})
     await view.aclose()
+
+
+@pytest.mark.parametrize("failed_step", ["retirement_index", "record_publication"])
+async def test_admission_allocation_failure_keeps_reserved_loss_accounting_coherent(
+    failed_step: str,
+) -> None:
+    class FailedRetirementIndex(list[object]):
+        def append(self, _value: object) -> None:
+            raise MemoryError("fictional weak-index allocation failure")
+
+    class FailedRecordPublication(dict[int, ProviderStreamMetadata]):
+        def __setitem__(self, key: int, value: ProviderStreamMetadata) -> None:
+            super().__setitem__(key, value)
+            raise MemoryError("fictional post-publication allocation failure")
+
+    native = sequence([None])
+    observation, fake, wrapper = await observed(native)
+    # Only this synthetic internal allocation fault replaces fixed private bookkeeping.
+    state = object.__getattribute__(observation, "_state")
+    if failed_step == "retirement_index":
+        state.views = FailedRetirementIndex()
+    else:
+        state.records = FailedRecordPublication()
+    returned = wrapper.astream(provider_model_id="fixture", messages=[])
+    try:
+        assert returned is native
+        assert fake.factory_calls == 1
+        snapshot = observation.snapshot()
+        assert snapshot.admitted_streams == 1
+        assert snapshot.streams == ()
+        assert snapshot.loss.metadata_lost_count == 1
+    finally:
+        await returned.aclose()

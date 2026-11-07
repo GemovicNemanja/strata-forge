@@ -161,3 +161,8 @@ may keep only bounded weak view references for fixed-slot extra-argument retirem
 no user/native callback or process/terminal inference. Keep all lower llm/provider/prompts/
 portable modules independent of tracing. The source binding qualifies caller-provided local
 bytes; counts/first-item timing do not establish provider execution, wire, TTFT or model success.
+
+Stream admission reserves the entry before constructing its metadata. Any allocation failure
+removes a partially published record and accounts for that reserved hole exactly once. The
+fixed 4 KiB header plus 4 KiB lifetime reservations inside 256 KiB admits an effective 63
+entries under MAX_STREAMS=64; do not claim all 64 fit or silently widen budgets.

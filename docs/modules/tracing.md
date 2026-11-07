@@ -539,9 +539,10 @@ global working-value root; keeping metadata does not retain abandoned generator/
 argument/error/callback/task/loop cycles. Native GC/finalization remains unobserved. Working
 repr/copy/pickle controls are not protection against explicit host-level introspection.
 
-Admission reserves4KiB per record plus a4KiB header inside256KiB and at most64 lifetime
-entries; the aggregate reserve can fill before the count ceiling. Entry numbers are never
-reused. Saturating2^53-1 counters have an explicit saturation flag. Unsupported, overbudget,
+Admission reserves 4 KiB per record plus a 4 KiB header inside 256 KiB. This permits an
+effective 63 lifetime entries beneath the MAX_STREAMS count cap of 64; no limit is widened.
+Entry numbers are never reused. A failed admission allocation removes any partly published
+record and counts that reserved entry as metadata loss, keeping ledger holes coherent. Saturating2^53-1 counters have an explicit saturation flag. Unsupported, overbudget,
 foreign-scope, closed or observer-failed capture never skips, retries or replaces the
 original factory/protocol call. Lost admitted metadata remains an explicit ledger hole.
 The SDK cannot infer cache/fallback/tool-loop causal links, served model/revision, remote
