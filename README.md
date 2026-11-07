@@ -82,7 +82,7 @@ installed as `strata-forge`.
 | `strata_forge.config` | Pydantic Settings root with YAML overlays and `.env` support |
 | `strata_forge.prompts` | Jinja2 templates and immutable modular prompt builds with exact pins and UTF-8 attribution |
 | `strata_forge.tracing` | Langfuse observability |
-| `strata_forge.datasets` | Dataset CRUD with a Hugging Face bridge |
+| `strata_forge.datasets` | Dataset CRUD, Hugging Face bridge, and [isolated local SQL](docs/modules/headless-sql.md) over provided pinned Parquet |
 | `strata_forge.metrics` | Pure classification metrics, explicit populations, and paired/family comparisons |
 | `strata_forge.evals` | Experiment runner, graders, metrics |
 | `strata_forge.agents` | Agent runtime, memory, multi-agent composition |

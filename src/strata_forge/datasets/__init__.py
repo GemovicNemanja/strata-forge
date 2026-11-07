@@ -17,6 +17,8 @@ from strata_forge.datasets.synthetic import distill, self_instruct
 from strata_forge.datasets.versioning import DatasetDelta, dataset_version, diff
 
 if TYPE_CHECKING:
+    from strata_forge.datasets.sql import LocalSQLExecutor as LocalSQLExecutor
+    from strata_forge.datasets.sql import SQLResult as SQLResult
     from strata_forge.datasets.sql_types import LocalParquetFiles as LocalParquetFiles
     from strata_forge.datasets.sql_types import LocalSQLInstallation as LocalSQLInstallation
     from strata_forge.datasets.sql_types import SQLExecutionError as SQLExecutionError
@@ -32,10 +34,12 @@ __all__ = [
     "InMemoryDatasetStore",
     "LangfuseDatasetStore",
     "LocalParquetFiles",
+    "LocalSQLExecutor",
     "LocalSQLInstallation",
     "SQLExecutionError",
     "SQLInputManifest",
     "SQLQuerySpec",
+    "SQLResult",
     "dataset_version",
     "diff",
     "distill",
@@ -46,6 +50,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if type(name) is str and name in {"LocalSQLExecutor", "SQLResult"}:
+        from strata_forge.datasets import sql
+
+        return getattr(sql, name)
     if type(name) is str and name in {
         "LocalParquetFiles",
         "LocalSQLInstallation",

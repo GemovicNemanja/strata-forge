@@ -351,8 +351,11 @@ Install it with: pip install 'ai-forge[hf]'.
   propagates verbatim. Inspect via `strata_forge.llm.errors` —
   `ProviderError` subclasses tell you exactly what failed.
 
-## Local SQL value contracts
+## Isolated local SQL
 
 `SQLQuerySpec`, `SQLInputManifest`, `LocalSQLInstallation`, `LocalParquetFiles` and the fixed
 `SQLExecutionError` are lazy exports for closed local SQL values. They perform no SQL execution,
-source file reads, container operations or authority resolution. See [the detailed contract](headless-sql.md).
+source file reads, container operations or authority resolution. The separately constructed
+`LocalSQLExecutor` runs one query per instance over already-held pinned Parquet descriptors
+in the fixed local Docker profile, returning only after owned cleanup. It installs no
+remote authorization, server/MCP route or hosted capability. See [the detailed contract](headless-sql.md).

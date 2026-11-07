@@ -1,4 +1,4 @@
-# Local SQL value contracts
+# Isolated local dataset SQL
 
 `strata_forge.datasets.sql_types` provides closed immutable values; it does not execute SQL,
 read source files, inspect/start Docker or confer access. Importing it requires only the
@@ -41,10 +41,9 @@ NS timestamps, intervals, maps, unions, UUID/enum and unknown types refuse. No a
 stringification occurs. Input casefold collisions refuse; duplicate result column names can
 remain separate ordinal descriptors.
 
-`native_cell` operates on resolved builtin Python values only; its fixtures are not evidence
-of DuckDB result conversion. Actual native Parquet/UTC/ICU/schema behavior and full SQL
-execution remain unavailable until the isolated worker and lifecycle pass their own tests.
-The committed JSON fixture is metadata-only, not an actual Parquet source or authority.
+`native_cell` operates on resolved builtin Python values only. The generated `typed.parquet`
+fixture and owned-container tests verify the fixed native conversion path separately; the
+JSON manifest is descriptive metadata and confers no access.
 
 
 ## Fixed image worker
@@ -79,3 +78,76 @@ installed source/artifact/profile hashes, actual engine identity and cleanup rec
 its initial logging-readback refusal. Parent lifecycle sources used for that probe were
 uncommitted and are explicitly outside this worker checkpoint's acceptance. A complete SDK
 operation still requires independently checked parent admission, cancellation and cleanup.
+
+
+## Local executor
+
+`LocalSQLExecutor` and `SQLResult` are lazy dataset exports. A trusted local Unix operator
+provides `LocalSQLInstallation` and already-held ordinary read-only file descriptors:
+
+```python
+async with LocalSQLExecutor(installation=installation) as executor:
+    result = await executor.query(spec=query_spec, source=provided_files)
+    payload = result.wire_payload()
+```
+
+This is one active query with no queue **per executor instance**. Multiple caller-created
+instances are not constrained by a process/organization-wide quota. A future service must
+provide its own shared owner/admission and reviewed authorization; none is installed here.
+`aclose` refuses busy work rather than silently cancelling another caller's query. Use the
+query task's cancellation, await it, then close. Repeated close after confirmed cleanup is
+safe. An uncertain owner stays unavailable; an explicit close can retry only its cleanup,
+never SQL or adoption of another epoch's resources.
+
+The original monotonic budget starts before staging. The SDK duplicates caller descriptors,
+checks read-only regular files and copies/hashes every part through bounded reads without
+moving the caller's file offsets. A private 0700 job directory contains a read-only `input`
+child; only that child is mounted into the worker. Caller descriptors remain open. Source
+hash/count/schema mismatches, changed bytes or unknown cleanup never produce a result.
+Blocking copy/hash/removal work is owned and drained after repeated cancellation.
+
+The selected Docker Unix socket and immutable image/bundle are checked before create;
+pre-start container settings and worker READY independently check the supported profile.
+No shell, parent credentials, caller environment, source URLs or Docker context is inherited.
+The minimal CLI environment has only a fixed PATH; HOME is omitted, never repurposed. Raw
+SQL/data travel only through the private framed input/output; stderr is discarded and the
+container log driver is `none`. Parent imports no DuckDB/pytz to perform SQL.
+
+The captured public engine ID is rechecked before cleanup and after the exact absence check.
+It is an operational identity, not hostile-operator or cloned-daemon attestation. A possible
+start requires successful actual `docker wait` and a fresh nonrunning/PID0 observation before
+removal and admission release. A same-engine 404/empty list is not stop evidence. A lost create
+acknowledgement can be investigated only by its exact opaque name and owner/operation/image
+bindings; an empty lookup retains uncertainty because a daemon create may still be pending.
+If no start was issued, an observed owned unstarted container may be removed as cleanup-only.
+No arbitrary name collision or foreign container is killed. There is no automatic query retry.
+
+The parent reads READY, writes one request and incrementally reads one capped response through
+EOF. It verifies exact operation/request/source/bundle identities, observed population and
+closed typed table fields. A successful result returns only after actual wait/stoppedPID0,
+container removal, helper/attach process reap and staging removal. Its immutable canonical
+receipt records those observed facts, asserted manifest, source/SQL/spec/result hashes,
+selected image/engine/bundle and elapsed stage/container/total milliseconds. Content and
+receipt digests do not certify source authority or a hostile host. `SQLResult` reconstruction
+revalidates its complete closed data and returns independent copies.
+
+Deadlines are logical result-admission limits, not hard OS cleanup/reap guarantees. A native
+call is retired by killing its actual owned container; cancellation is propagated only after
+owned cleanup settles. Unavailable engine/unknown wait/removal keeps ownership and refuses
+new admission. Cleanup can exceed the original budget, and no late success is returned. Host
+or interpreter death has no durable recovery owner and may leave an unknown outcome. The
+local Unix/Docker Desktop and Linux ARM64 image evidence does not establish other platforms,
+hostile-kernel isolation or network/filesystem isolation from an operator with the Docker
+socket or same UID.
+
+`tests/integration/datasets/test_headless_sql.py` is an explicit actual-container suite. First
+run the separate setup script, then supply its installation-file path as
+`STRATA_TEST_SQL_INSTALLATION`; selection without it fails as a missing prerequisite instead
+of counting a fake protocol pass. Query never invokes setup. Tests use generated fictional
+Parquet only: SELECT/WITH/DESCRIBE/SUMMARIZE, dynamic mutation/external-read refusals, UTC and
+nested values, physical case collisions, prefix versus aggregate/cell refusal, native
+recursive-query deadline, repeated cancellation held through actual wait, and missing image.
+Oversized text currently uses the shared scalar validator's fixed `invalid_spec`; it returns
+no result. SELECT-kind admission plus these tests is a bounded supported profile, not a proof
+of every DuckDB function's purity. Engine settings and the OS/container boundary are required.
+No server route, MCP tool, worker registry, hosted authorization or remote source is enabled.

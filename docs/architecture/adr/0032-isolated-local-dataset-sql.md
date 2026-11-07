@@ -1,6 +1,7 @@
 # ADR 0032 — isolated local dataset SQL
 
-Status: local value/codec prerequisite; executable worker remains unavailable.
+Status: local SDK profile; implemented scope and current limits are recorded in
+[the module reference](../../modules/headless-sql.md).
 
 ## Context
 

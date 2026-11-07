@@ -112,9 +112,9 @@ Anything raised from this module is a `ForgeError` subclass.
 ## Local SQL value boundary
 
 `sql_types.py` exposes immutable closed query/manifest/operator/file-description values only;
-`_sql_wire.py` is the shared stdlib-only canonical frame/type/cell codec. No local executor,
-DuckDB import, Docker inspection/start, source read or capability registration follows from
-constructing these values. Origin assertions, hashes and descriptors do not confer platform
+`_sql_wire.py` is the shared stdlib-only canonical frame/type/cell codec. No DuckDB import,
+Docker inspection/start, source read or capability registration follows from constructing
+these values. Origin assertions, hashes and descriptors do not confer platform
 access. SQL syntax is not parsed by the parent. See
 [the value reference](../../../docs/modules/headless-sql.md) and
 [ADR0032](../../../docs/architecture/adr/0032-isolated-local-dataset-sql.md).
@@ -132,3 +132,13 @@ belong inside the image worker only. Parent SQL parsing, remote sources, arbitra
 source callbacks and a host-native fallback remain prohibited. Fixed native profile/readback,
 all-part Parquet/hash/schema/count and small-batch typed conversion changes require actual
 fictional image proof in addition to fake-native unit controls.
+
+
+`sql.py` owns the async local executor, FD staging and immutable result/receipt; `_sql_container.py`
+owns fixed CLI/image/engine/profile and actual container lifecycle. Admission is one active query
+per executor, not a global quota. No raw native errors/SQL/paths enter diagnostics, no setup or
+pull follows from a query, and no native SQL runs in the parent. Source bytes and cleanup remain
+owned through repeated cancellation. Never infer stopped work from missing engine/container:
+actual successful wait and stoppedPID0 are required after a possible start. Resource uncertainty
+retains the unavailable owner and staged source. Actual integration tests require separately
+prepared image installation and fail a missing prerequisite; they must not silently pass.

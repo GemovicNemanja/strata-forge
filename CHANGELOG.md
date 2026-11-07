@@ -10,10 +10,10 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
-- Add a pinned isolated SQL image worker and synthetic native Parquet/profile proof; parent execution remains a separate lifecycle prerequisite.
+- Add a local isolated SQL SDK over pinned provided Parquet, bounded typed results and actual
+  container wait/removal with drained cancellation. No remote authority or wire is registered.
+- Add a pinned isolated SQL image worker and synthetic native Parquet/profile proof.
 
-
-### Added
 
 - Immutable local SQL query/input/operator/file-description values and a bounded standalone
   typed-value/frame codec, without native SQL, container execution or authority registration.
