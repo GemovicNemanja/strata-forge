@@ -391,3 +391,63 @@ and metric helpers remain authoritative.
 Remote output destinations refuse in this profile. No installed CLI, registry, private secret,
 server/app/agent route, research admission, engine release or source pin is activated by these
 trusted Python functions. Their synthetic CPU/Parquet acceptance does not execute research.
+
+## Local classifier latency and throughput
+
+`ClassifierBenchmarkPlanV1`, `ResolvedBenchmarkTarget`, `benchmark_scorer` and
+`benchmark_verifier` provide a separate bounded local SDK. Package exports load lazily and do
+not register a worker or CLI. The native objects are already resolved; neither function loads,
+writes or publishes artifacts. Declared full model/tokenizer refs are metadata rather than
+origin/custody attestations. Inputs and native aliases remain caller-owned and serialized.
+
+The first profile admits only CPU/FP32/concurrency-one BERT, GPT-2 and ModernBERT decoder
+models and fixed Forge wrappers with matching actual context/input embedding layouts. Unknown
+layouts, other devices/precision, compiled or quantized models refuse without fallback. This
+does not narrow the independent scorer's family support. Plans explicitly declare batch size,
+warmup calls, measured calls and elapsed milliseconds; no warmup/probe/autotuning is hidden.
+Inputs are bounded to 128 rows, 256 KiB per source row, 8 MiB total source, 32 MiB encoded
+inputs, supported native context and 100,000 row applications including warmups. These are
+admission limits, not activation-memory or VRAM guarantees.
+
+`hf_scoring_sdk` measures the whole accepted scorer call with `overflow_policy="error"` and
+no progress callback. It includes local executor queueing, length scan/grouping, tokenization,
+all native batches, host conversion and result construction. A call may contain several native
+batches and is not a per-row latency. `verifier_preencoded_sdk` measures accepted scoring of one
+fixed encoded batch, including mode handling/postprocessing; it is not forward-only.
+`verifier_encode_score_sdk` includes actual rendering/tokenization/geometry and scoring for
+one fixed batch. Neither verifier mode silently re-batches. No original source is inferred
+from preencoded tensors or their geometry hash.
+
+Warmup calls are counted separately and excluded from measured quantiles/rates. Named
+nearest-rank p50/p95/p99 preserve their sample ranks and empirical CDF step; one sample yields
+identical percentiles without a confidence claim. `rows_per_second` divides all successful
+measured row applications by the whole measurement window through output validation.
+`sdk_active_rows_per_second` uses summed SDK durations and excludes benchmark validation/gaps.
+Amortized time per row is labelled amortized, not an observed row percentile. Zero elapsed
+rate denominators yield null plus `zero_elapsed`, never infinity. No output is dropped,
+truncated, silently repaired or normalized to make a failed call appear faster. Restricted
+label-token softmax remains distinct from full-class forecasts; support scores remain raw.
+
+The fixed fingerprint binds input order/shapes/markers and tokenizer semantic backend/special
+IDs. It excludes only fast-tokenizer backend `padding`/`truncation` runtime state which the
+SDK explicitly overrides. This permits zero declared warmups without manufacturing an untimed
+probe. Semantic tokenizer/input changes refuse the result. Fingerprinting/rechecking occurs
+outside measured call/loop windows but inside the total elapsed budget. No weights are hashed
+or loaded inside a timer. Model training/device/optimizer operations through other aliases
+must be serialized; the SDK cannot detect every external alias or mutation restored in place.
+
+A complete `ClassifierBenchmarkResult` requires every declared warmup/measured call and every
+row to succeed. Execution failure or soft deadline returns an incomplete status with fixed
+reason, partial bounded timing/count audit and null headline statistics. Invalid admission
+raises fixed `BenchmarkError`; missing extras raise a useful `ImportError`. Cancellation
+propagates after draining the outstanding SDK operation and returns no result. Cancel during
+verifier encoding prevents the subsequent score leg. An already admitted scorer call may
+finish its internal batches while draining; no later SDK call starts. Native calls are not
+forcibly killed, and an overrun never becomes a complete result.
+
+Cold start, isolated forward, separate tokenization timing, accelerator/serving latency and
+remote queue/artifact time are explicitly unavailable. Results contain no raw input/IDs,
+predictions, credentials, model repr, hostname or environment variables, and are not automatic
+tracing or agent grounding. Comparison consumers must compare matching workload, boundary,
+settings, heads, dtype/device and runtime conditions rather than pooling incompatible results.
+See [the benchmark decision](../architecture/adr/0028-bounded-local-classifier-benchmarks.md).

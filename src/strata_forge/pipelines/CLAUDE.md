@@ -66,3 +66,15 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   remains required. Local attempt completion is not an immutable publication receipt.
 - Tests use synthetic rows/fake policy/model/Hub plus real local Parquet; no pretrained downloads.
   Keep source/module docs, clean-install constructors and meaningful regressions in the same change.
+
+## Local classifier benchmark SDK
+
+`benchmark_spec.py` and `classifier_benchmark.py` own bounded CPU/FP32/concurrency-one local
+measurements over resolved objects. Lazy package exports are not worker/CLI registration.
+Preserve the exact boundary name, call/row counts, warmup exclusion, nearest-rank method and
+both rate denominators. No successful headline after overflow/drop/truncation/missing output,
+changed workload, invalid clock, deadline or failure. Current native family/layout checks are
+benchmark admission only and never change scorer support or defaults. Native calls may overrun
+a soft budget; shield/drain cancellation and hold known alias claims until cleanup finishes.
+Do not add a serialized callable/import/factory, loader, publication or authority fallback.
+Private clock/operation fakes are test seams only. ADR0028 documents the pure-value exception.

@@ -1,8 +1,10 @@
 """Runnable pipeline entrypoints executed on a compute target.
 
-These modules are launched on a compute target by an orchestrator rather than imported
-in-process. Each reads an inert run spec from the environment, composes the library's
-primitives (serving / batch / storage), and appends ProgressEvents to the file named by
+Worker modules are launched on a compute target by an orchestrator. The separate local
+classifier benchmark SDK consumes resolved objects in-process; its exports do not register
+a worker, load an artifact or grant access. Each worker reads an inert run spec from the
+environment, composes the library's primitives (serving / batch / storage), and appends
+ProgressEvents to the file named by
 ``FORGE_PROGRESS_PATH`` so the orchestrator can tail progress over its own channel.
 
 An orchestrator stamps every spec with the engine version it validated the spec against
@@ -13,9 +15,59 @@ spec a newer one validated: the spec's fields may be identical, and only the beh
 them changed.
 """
 
+from typing import TYPE_CHECKING
+
 from strata_forge import __version__
 
-__all__ = ["EVAL_AUTHORITY_SECRET", "HF_TOKEN_SECRET", "SPEC_VERSION"]
+if TYPE_CHECKING:
+    from strata_forge.pipelines.benchmark_spec import (
+        BenchmarkError as BenchmarkError,
+    )
+    from strata_forge.pipelines.benchmark_spec import (
+        ClassifierBenchmarkPlanV1 as ClassifierBenchmarkPlanV1,
+    )
+    from strata_forge.pipelines.benchmark_spec import (
+        ClassifierBenchmarkResult as ClassifierBenchmarkResult,
+    )
+    from strata_forge.pipelines.benchmark_spec import (
+        ResolvedBenchmarkTarget as ResolvedBenchmarkTarget,
+    )
+    from strata_forge.pipelines.classifier_benchmark import (
+        benchmark_scorer as benchmark_scorer,
+    )
+    from strata_forge.pipelines.classifier_benchmark import (
+        benchmark_verifier as benchmark_verifier,
+    )
+
+__all__ = [
+    "EVAL_AUTHORITY_SECRET",
+    "HF_TOKEN_SECRET",
+    "SPEC_VERSION",
+    "BenchmarkError",
+    "ClassifierBenchmarkPlanV1",
+    "ClassifierBenchmarkResult",
+    "ResolvedBenchmarkTarget",
+    "benchmark_scorer",
+    "benchmark_verifier",
+]
+
+
+def __getattr__(name: str) -> object:
+    if name in {
+        "BenchmarkError",
+        "ClassifierBenchmarkPlanV1",
+        "ClassifierBenchmarkResult",
+        "ResolvedBenchmarkTarget",
+    }:
+        from strata_forge.pipelines import benchmark_spec
+
+        return getattr(benchmark_spec, name)
+    if name in {"benchmark_scorer", "benchmark_verifier"}:
+        from strata_forge.pipelines import classifier_benchmark
+
+        return getattr(classifier_benchmark, name)
+    raise AttributeError(name)
+
 
 # The engine version a spec is validated against, and the version an orchestrator writes into
 # ``engine_version`` (alone, or as ``f"{SPEC_VERSION}+{commit}"``). It is the package version

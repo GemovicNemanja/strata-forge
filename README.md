@@ -23,6 +23,9 @@ register a worker or change the primary training defaults.
 The separate local population profile scans a complete named source before optimizer use,
 caches selected unpadded inputs on disk and consumes exactly one recorded epoch. Its trusted
 Python policy seam does not enable remote dispatch or change v1 worker limits.
+A separate bounded local CPU benchmark SDK reports explicit scorer/verifier call boundaries,
+warmups, latency percentiles and two throughput denominators. It does not load models, run
+remote jobs or make hardware/research performance claims.
 
 ## Install
 

@@ -10,6 +10,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Bounded local classifier benchmark SDK with explicit CPU/FP32 scorer/verifier boundaries,
+  warmup/row accounting, nearest-rank latency, whole-loop versus SDK-active throughput and
+  drained cancellation. No loader, worker, artifact write or remote capability is added.
+
+
 - Separate local schema-2 complete-source classifier preflight, bounded disk cache and exact
   one-epoch consumer, with private complete overflow/count/order receipts. Primary CE and
   explicit auxiliary verifier codecs share the consumer without changing v1 worker limits,
