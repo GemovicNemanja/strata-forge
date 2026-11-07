@@ -1,0 +1,11 @@
+import pytest
+from strata_forge.datasets import _sql_wire as wire
+
+
+def test_rejected_output_chunk_cannot_be_discarded_then_report_success():
+    decoder = wire.FrameDecoder(limit=32)
+    decoder.feed(wire.frame({'v': 1}, limit=32))
+    with pytest.raises(wire.WireError):
+        decoder.feed(b'X' * 33)
+    with pytest.raises(wire.WireError):
+        decoder.finish()

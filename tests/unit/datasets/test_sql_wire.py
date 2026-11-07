@@ -185,3 +185,41 @@ def test_cell_byte_limit_includes_json_escaping_and_nested_counts() -> None:
 def test_encoded_values_are_canonical_and_closed(cell: object) -> None:
     with pytest.raises(wire.WireError):
         wire.checked_cell({"kind": "integer", "bits": 64, "signed": True}, cell)
+
+
+def test_rejected_output_chunk_cannot_be_discarded_then_report_success() -> None:
+    decoder = wire.FrameDecoder(limit=32)
+    decoder.feed(wire.frame({"v": 1}, limit=32))
+    with pytest.raises(wire.WireError):
+        decoder.feed(b"X" * 33)
+    with pytest.raises(wire.WireError):
+        decoder.finish()
+
+
+def test_unsupported_decimal_never_reaches_unbounded_formatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+
+    original = builtins.format
+
+    def guard(value: object, format_spec: str = "") -> str:
+        if type(value) is Decimal:
+            raise AssertionError("unsupported decimal reached formatting")
+        return original(value, format_spec)
+
+    value = Decimal("1E+1000000")
+    monkeypatch.setattr(builtins, "format", guard)
+    with pytest.raises(wire.WireError):
+        wire.native_cell({"kind": "decimal", "precision": 38, "scale": 0}, value)
+
+
+def test_impossible_object_cardinality_refuses_before_key_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(_values: object) -> bool:
+        raise AssertionError("oversized object reached all-key traversal")
+
+    monkeypatch.setattr(wire, "all", forbidden, raising=False)
+    with pytest.raises(wire.WireError):
+        wire.query({str(index): None for index in range(100)})

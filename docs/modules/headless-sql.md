@@ -30,7 +30,10 @@ exclude SQL, rejected values, native error text and causes. A content digest gra
 
 The shared private stdlib codec encodes one bounded length-prefixed frame, rejects duplicate
 keys, unsafe/alternate numeric spellings, invalid Unicode, cycles, depth/byte limits and
-trailing/incomplete frames. It contains no SQL parser. Supported cell values use explicit tags:
+trailing/incomplete frames. Any feed refusal permanently ends that decoder, so a valid
+earlier prefix cannot become a successful EOF after discarded invalid bytes. Decimal bounds
+are checked before formatting and closed object cardinality before traversing keys. It
+contains no SQL parser. Supported cell values use explicit tags:
 integers are decimal strings, decimals preserve scale, finite floats use exact hex, and NaN/
 infinities/null are distinct. Bytes use canonical base64; lists/arrays/structs preserve bounded
 ordered values. Supported finite dates/times/timestamps retain units/offsets; sentinel bounds,

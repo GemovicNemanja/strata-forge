@@ -81,6 +81,7 @@ def _sha(value: object, length: int = 64) -> str:
 def _obj(value: object, keys: set[str], optional: set[str] | None = None) -> dict[str, JSON]:
     _need(type(value) is dict)
     source = cast("dict[object, object]", value)
+    _need(len(keys) <= len(source) <= len(keys | (optional or set())))
     _need(all(type(k) is str for k in source))
     _need(keys <= source.keys() <= keys | (optional or set()))
     return cast("dict[str, JSON]", source)
@@ -407,13 +408,13 @@ def _native_cell(dtype: dict[str, JSON], value: object, depth: int) -> dict[str,
         _need(type(value) is Decimal, "result_type_unsupported")
         decimal = cast("Decimal", value)
         _need(decimal.is_finite(), "result_type_unsupported")
-        text = format(decimal, "f")
         scale = cast("int", dtype["scale"])
         precision = cast("int", dtype["precision"])
         _need(
             decimal.as_tuple().exponent == -scale and len(decimal.as_tuple().digits) <= precision,
             "result_type_unsupported",
         )
+        text = format(decimal, "f")
         result = {"kind": kind, "value": text}
     elif kind == "float":
         _need(type(value) is float, "result_type_unsupported")
@@ -600,6 +601,18 @@ class FrameDecoder:
         self.ended = False
 
     def feed(self, chunk: object) -> None:
+        code: str | None = None
+        try:
+            self._feed(chunk)
+        except WireError as refusal:
+            code = refusal.code
+        if code is not None:
+            self.ended = True
+            self.buffer.clear()
+            self.expected = None
+            raise WireError(code)
+
+    def _feed(self, chunk: object) -> None:
         _need(not self.ended and type(chunk) is bytes)
         data = cast("bytes", chunk)
         _need(len(data) <= 65536 and len(self.buffer) + len(data) <= self.limit + 4, "output_limit")
