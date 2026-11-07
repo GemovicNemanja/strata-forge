@@ -1,8 +1,8 @@
 """Runnable pipeline entrypoints executed on a compute target.
 
 Worker modules are launched on a compute target by an orchestrator. The separate local
-classifier benchmark SDK consumes resolved objects in-process; its exports do not register
-a worker, load an artifact or grant access. Each worker reads an inert run spec from the
+benchmark and registered temperature-fit SDKs consume trusted local objects in-process;
+their exports do not register a worker, load an artifact or grant access. Each worker reads an inert run spec from the
 environment, composes the library's primitives (serving / batch / storage), and appends
 ProgressEvents to the file named by
 ``FORGE_PROGRESS_PATH`` so the orchestrator can tail progress over its own channel.
@@ -38,6 +38,24 @@ if TYPE_CHECKING:
     from strata_forge.pipelines.classifier_benchmark import (
         benchmark_verifier as benchmark_verifier,
     )
+    from strata_forge.pipelines.evaluation_analysis import (
+        fit_registered_temperature as fit_registered_temperature,
+    )
+    from strata_forge.pipelines.evaluation_analysis_spec import (
+        EvaluationAnalysisError as EvaluationAnalysisError,
+    )
+    from strata_forge.pipelines.evaluation_analysis_spec import (
+        TemperatureFitPlanV1 as TemperatureFitPlanV1,
+    )
+    from strata_forge.pipelines.evaluation_analysis_spec import (
+        TemperatureFitReceipt as TemperatureFitReceipt,
+    )
+    from strata_forge.pipelines.evaluation_analysis_spec import (
+        TemperatureFitRow as TemperatureFitRow,
+    )
+    from strata_forge.pipelines.evaluation_analysis_spec import (
+        TemperatureFitSourceMetadata as TemperatureFitSourceMetadata,
+    )
 
 __all__ = [
     "EVAL_AUTHORITY_SECRET",
@@ -46,13 +64,33 @@ __all__ = [
     "BenchmarkError",
     "ClassifierBenchmarkPlanV1",
     "ClassifierBenchmarkResult",
+    "EvaluationAnalysisError",
     "ResolvedBenchmarkTarget",
+    "TemperatureFitPlanV1",
+    "TemperatureFitReceipt",
+    "TemperatureFitRow",
+    "TemperatureFitSourceMetadata",
     "benchmark_scorer",
     "benchmark_verifier",
+    "fit_registered_temperature",
 ]
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "EvaluationAnalysisError",
+        "TemperatureFitPlanV1",
+        "TemperatureFitReceipt",
+        "TemperatureFitRow",
+        "TemperatureFitSourceMetadata",
+    }:
+        from strata_forge.pipelines import evaluation_analysis_spec
+
+        return getattr(evaluation_analysis_spec, name)
+    if name == "fit_registered_temperature":
+        from strata_forge.pipelines.evaluation_analysis import fit_registered_temperature
+
+        return fit_registered_temperature
     if name in {
         "BenchmarkError",
         "ClassifierBenchmarkPlanV1",

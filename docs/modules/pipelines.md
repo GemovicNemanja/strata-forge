@@ -451,3 +451,65 @@ predictions, credentials, model repr, hostname or environment variables, and are
 tracing or agent grounding. Comparison consumers must compare matching workload, boundary,
 settings, heads, dtype/device and runtime conditions rather than pooling incompatible results.
 See [the benchmark decision](../architecture/adr/0028-bounded-local-classifier-benchmarks.md).
+
+## Registered local temperature fitting
+
+`TemperatureFitPlanV1` and `fit_registered_temperature(plan, *, source, policy)` provide an
+independent local raw-logit fit SDK. The closed plan has protocol
+`strata.eval.analysis.local.v1` and only `mode="temperature_fit"`. There is no advertised
+bootstrap mode, worker/CLI registration, model loader/forward, artifact writer, output repo,
+credential or policy discovery. Existing EvalSpec/population/default/RPC wire is unchanged.
+
+`TemperatureFitSource` exposes metadata and a closeable async stream; `TemperatureFitPolicy`
+issues current `RegisteredFitDecision` values. Both are trusted installed Python seams,
+never imports or grants reconstructed from caller JSON. No production registry/issuer is
+installed. Missing policy refuses. Ordinary read permission alone does not grant fit
+eligibility, and source refs/content hashes do not attest origin or resolve custody.
+The caller must supply independent owned source streams and cannot treat an arbitrary Python
+object's matching fields as authentication.
+
+`TemperatureFitSourceMetadata` binds full typed dataset/model/tokenizer refs, optional actual
+prediction ref, config/split, column roles, explicit ordered labels/integer map, expected
+count, normalized-row digest, source-receipt/head/rendering identities and input kind.
+Only identity projection and a complete named split are admitted. Full-class versus
+restricted-label logits map to distinct component probability families; temperature never
+reconstructs outside mass, full vocabulary or a grouped binary objective. Current scoring
+SDKs expose probabilities, so a live exact-logit capture adapter remains a separate task.
+No inverse-log/clamping or extra hidden model call is performed.
+
+Fresh policy must cover every exact ref/domain with unsealed canonical resolution and a
+matching registered calibration-fit role/revision/count/digest. Unknown/positive protection,
+missing refs, held-out/test/gate roles, ho_dev or its known aliases refuse before iteration.
+Current registration/canonical binding is frozen through the operation. Explicit monitoring
+or selection reuse remains recorded, not inferred independent. No scientific data or
+checkpoint choice is authorized by the interface itself.
+
+`temperature_fit_row_bytes` defines `strata.analysis.fit.rows.v1`: sorted compact UTF-8 JSON
+of item_id/gold/logits, numeric logit values normalized to binary64, followed by LF. Scalar
+integer gold requires the explicit map. The full stream must have the expected count and
+unique IDs and match the declared digest. No prefix, row exclusion, null target, probability
+input or weighting is inferred. Inputs are copied into owned numerical data.
+
+Admission limits are 100,000 rows, 16 KiB per normalized record, 64 MiB cumulative record bytes,
+256 MiB planned numerical working data and an explicit soft budget up to one hour. Known
+codec dimensions are checked before storage/math; admission arithmetic is not an RSS or
+caller-memory guarantee. Point helpers run in chunks up to 1024 rows; derivative work is
+stepped in chunks up to 8 passes. Policy/elapsed checks occur at bounded chunks, before rows,
+and after all final awaited metadata/version work. A single awaited operation may overrun;
+there is no hard thread/process timeout.
+
+The frozen `TemperatureFitReceipt` records actual count/bytes/input digest, exact plan/source,
+solver status/T/unclipped objective, component content digest, before/after point NLL/Brier
+with explicit clipping/coverage, full initial/final registry-and-canonical-read snapshots,
+decision-chain hashes/check counts, elapsed time through final policy and software versions.
+No raw IDs/gold/logits, hostname/env capture, traces or native errors are included. Its
+component/receipt digest is content consistency, not persisted artifact identity, scientific
+quality, model resolution or authorization. No verified application consumer is supplied.
+Before/after clipped NLL can differ from the unclipped fit objective by design.
+
+Cancellation drains the owned read/policy/math step and closes the stream; repeated cancel
+and cleanup errors cannot emit a late receipt. Admission, revocation, missing extras,
+malformed source and soft deadlines return no partial T. Errors are fixed and content-free;
+missing NumPy has a scoring-extra installation hint. Optional numerical availability is
+checked after policy but before row iteration. Public execution stays async; the pure
+metric exception is documented in [ADR0030](../architecture/adr/0030-registered-local-temperature-fitting.md).

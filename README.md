@@ -27,6 +27,10 @@ A separate bounded local CPU benchmark SDK reports explicit scorer/verifier call
 warmups, latency percentiles and two throughput denominators. It does not load models, run
 remote jobs or make hardware/research performance claims.
 
+A separate local temperature-fit SDK consumes exact raw logits from a complete registered
+named source under an explicit trusted policy. It retains numerical and fit provenance,
+never infers held-out eligibility or enables a worker/model call.
+
 ## Install
 
 ```bash

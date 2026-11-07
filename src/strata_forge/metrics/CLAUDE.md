@@ -39,3 +39,9 @@ This is a pure deterministic numerical leaf. Read
 - Preserve undefined coefficient reasons and `confidence_method="not_produced"`. No implicit
   multi-rater, missingness, CI/bootstrap or annotation-resource implementation. Keep the synthetic
   `agreement_point_v1.json` conformance fixture synchronized; no NumPy or ML dependency is needed.
+
+- `temperature_fit` owns explicit bounded raw-logit scalar-temperature math only. No source
+  registration, fit eligibility or model application is inferred. Zero derivative may reflect
+  rounding/underflow; identification is never claimed, and flat_unidentified requires actual
+  equal logits. Preserve unclipped objective versus existing clipped point NLL, bounds and
+  deterministic candidate/tie rules. Async registered-source orchestration stays in pipelines.
