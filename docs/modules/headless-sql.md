@@ -57,6 +57,12 @@ The retained notices cover the image-only distributions. Setup requires an expli
 Docker executable and Unix socket; no ambient Docker context or credential configuration is
 used. Image cache availability is not guaranteed by a prior successful build.
 
+The image copies its public worker scripts with explicit `0444` permissions so
+the fixed nonroot worker can read them regardless of the operator's host umask.
+This does not relax the permissions of private host contexts or credentials.
+The Linux image uses Docker's fixed-octal
+[`COPY --chmod`](https://docs.docker.com/reference/dockerfile/#copy---chmod).
+
 The standalone worker requires its fixed UID/cgroups/limits/no-new-privileges/seccomp profile
 before READY. It disables Python replacement/frame scans, extension installation/loading,
 persistent secrets and logging. DuckDB reports disabled logging as `0`; the worker verifies
