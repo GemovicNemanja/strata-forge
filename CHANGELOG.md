@@ -10,6 +10,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Bounded local paired cluster percentile math and current-policy analysis with exact paired
+  populations, fixed seeded draws and drained cancellation; no issuer, worker or wire activation.
+
 - Count-based classification reports revalidate the complete confusion matrix and reuse the
   existing point definitions without expanding integer row multiplicities.
 

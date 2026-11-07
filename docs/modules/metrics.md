@@ -392,3 +392,34 @@ The returned report owns a newly validated matrix; changing an input instance's 
 afterward does not change it. Invalid inputs raise core ValidationError with fixed message
 `confusion matrix is invalid` and no retained native diagnostic context. Existing row-based
 functions, formulas, metric version and probability-metric behavior are unchanged.
+
+## Paired cluster percentile math
+
+`paired_cluster_percentile(observations, profile=...)` is a pure synchronous bounded local
+function. `PairedClusterObservation` holds exact item/group IDs, explicit gold/prediction
+indexes and optional ordered probabilities; `PairedClusterProfile` requires all fixed
+settings. It does not resolve sources or attest data access, independence or completeness.
+Package exports load the leaf lazily; numerical execution uses the existing scoring extra.
+
+The supported profile draws C clusters with replacement in each of 10000 replicates using
+private NumPy Generator/PCG64 seed 20261104. Canonical UTF-8 ID/group order fixes the input
+sequence. Both arms and all requested metrics share each draw. Cluster multiplicities weight
+all rows, so unequal cluster sizes change the denominator. Existing count-report math supplies
+accuracy/macro-F1/invalid rate, keeping invalid predictions wrong and absent classes zero-F1.
+Existing sum-form Brier and clipped NLL supply per-cluster sufficient statistics. Requested
+probability metrics require complete compatible vectors across all rows, without normalization
+or one-hot repair. Floating regrouping agrees with expanded point calls to 1e-12 abs/rel.
+
+Candidate-minus-baseline delta is retained for every metric, including losses. Each baseline,
+candidate and paired-delta distribution uses exact nearest-rank 95% indexes 249/9749. Delta
+intervals are not marginal-endpoint subtraction. No p-value, BCa, gate or simultaneous claim
+is produced. M0 returns undefined metrics; C1 retains points without intervals/draws. A complete
+result requires all 10000 finite replicates. Constant outputs can yield an empirical zero-width
+interval without proving cluster independence.
+
+M<=100000, K 2..16, C<=10000 and B*C<=100M are admission limits; the work count is cluster
+draws, not machine instructions. Planned numerical arrays are capped at 256 MiB, with one
+draw/multiplicity and B*Q*3 values, never B*M row replicas. The pure API blocks its caller;
+use the async pipeline for current-policy checks, soft elapsed budget and drained cancellation.
+Frozen result consistency/hashes do not attest the underlying observations. See
+[ADR0031](../architecture/adr/0031-paired-local-cluster-percentiles.md).

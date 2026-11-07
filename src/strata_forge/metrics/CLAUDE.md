@@ -24,8 +24,9 @@ This is a pure deterministic numerical leaf. Read
   test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
   discard invalid predictions. Holm operates on represented p-values and cannot recover
   underflowed inputs. The synthetic comparison fixture is the numerical conformance reference.
-- Bootstrap code requires an approved RNG/seed/order/quantile/population contract. No
-  bootstrap implementation or inference of independence from cluster-repeated rows is exported.
+- `cluster_bootstrap` owns only ADR0031's fixed PCG64/10000/seed 20261104 row-pooled paired
+  profile. Preserve canonical ordering, variable row denominators, shared point formulas and
+  exact percentile ranks. No independence, p-value, BCa or gate is inferred.
 - Update this file, module README, reference docs, and tests with any public API change.
 - `agreement` supports only two complete caller-declared human raters with distinct identities,
   identical unique ordered item IDs and an explicit complete nominal category set. Refuse missing
@@ -51,3 +52,8 @@ This is a pure deterministic numerical leaf. Read
   report math. Never trust model_construct, manual mutation, subclasses or coercion hooks.
   Preserve integer multiplicities, invalid false negatives, absent/empty policies and existing
   row behavior. Validated counts are not population/independence or bootstrap attestation.
+
+- Cluster math consumes complete supplied observations; policy/registry belongs in pipelines.
+  Reconstruct exact immutable values, retain invalid-as-wrong/absent-class definitions, bound
+  one-draw/distribution arrays and never allocate B*M replicas or silently omit a replicate.
+  Synchronous math cannot enforce current policy or hard cancellation; async ownership is separate.

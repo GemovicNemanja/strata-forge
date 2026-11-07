@@ -536,3 +536,44 @@ malformed source and soft deadlines return no partial T. Errors are fixed and co
 missing NumPy has a scoring-extra installation hint. Optional numerical availability is
 checked after policy but before row iteration. Public execution stays async; the pure
 metric exception is documented in [ADR0030](../architecture/adr/0030-registered-local-temperature-fitting.md).
+
+## Registered local paired cluster uncertainty
+
+`paired_registered_cluster_uncertainty(plan, baseline=..., candidate=..., policy=...)` uses
+closed `PairedClusterPlanV1`/source/row values in `cluster_analysis_spec` and explicit trusted
+Python `PairedClusterSource` and `PairedClusterPolicy` protocols. No registry, issuer, loader,
+worker/CLI, artifact writer or policy-RPC activation is installed. Source objects cannot be
+selected by serialized imports/URLs/callbacks, and metadata must not materialize rows.
+
+Metadata and a current exact typed read/population-registration decision precede NumPy and
+both row iterators. Unknown/protected/denied/missing facts refuse. Decisions bind the complete
+plan/source metadata, exact canonical refs and counts/digests; same-name model/dataset pins
+need separate typed coverage. The canonical registration/reads stay fixed, with checks during
+1024-row read chunks, before/after numerical preparation, at most every 100 replicates and
+following final fresh metadata. Readable data or a caller's SHA/registration flag is no grant.
+
+Both streams are consumed through EOF with exact row counts/digests and unique stable IDs.
+The join requires identical M IDs, normalized explicit gold and exact base_problem_id under
+the same target/config/split/label/projection/slice context. Models/renderers may differ.
+There is no positional join, intersection, guessed integer map or source-name authorization.
+Each source retains N/E/D/S/F/M; S/F and invalid-origin subdivisions are recomputed from M,
+while outside-M N/E/D remain declared source evidence. Invalid hard labels stay wrong but may
+retain valid independent vectors. Complete compatible probabilities are mandatory if Brier
+or NLL is requested; hard-only analysis may retain partial-vector coverage without emitting
+probability intervals. Raw versus declared-applied calibration remains provenance, not a
+verified calibration-application claim. This operation performs no fitting.
+
+`paired_cluster_row_bytes` emits the strict normalized UTF-8 source codec, with explicit gold
+representation, float64 probabilities, sorted compact keys and LF. It grants no access.
+Combined source bytes are limited to 64 MiB, rows 16 KiB, metadata/receipt 64 KiB, M 100000 and
+planned numerical arrays 256 MiB. The fixed10000/seed 20261104 row-pooled profile follows
+[ADR0031](../architecture/adr/0031-paired-local-cluster-percentiles.md). Larger populations
+refuse rather than silently taking a prefix or changing existing worker caps.
+
+Every read/policy/numerical chunk is owned and shielded/drained on repeated cancellation;
+streams close before release. A soft budget can be exceeded by one native call; no partial
+result or late complete receipt follows cancellation, denial or deadline. Fixed errors carry
+no raw diagnostics/context. Receipts contain metadata/checksums/points/intervals/versions,
+never raw row/group labels, vectors, draws or replicate arrays. Their hashes are consistency,
+not source/custody/independence attestation. Existing fit/EvalSpec/population/scorer behavior
+and worker purpose/wire remain separate and unchanged.

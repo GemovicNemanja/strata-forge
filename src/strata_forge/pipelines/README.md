@@ -49,3 +49,8 @@ see the population specification boundary in the module reference.
 strict source membership and lazy stable1–16 sample/seed planning. They perform no native
 execution or registration. Existing worker/spec defaults remain separate; see
 [the generation contract](../../../docs/modules/pipelines.md#separate-generation-contract).
+
+The local `paired_registered_cluster_uncertainty` SDK requires explicit trusted source/policy
+objects, exact paired metric populations and current typed unsealed decisions. It installs no
+issuer, loader, worker or remote wire. Fixed cluster percentiles retain declared outside-M
+population counts and refuse partial probabilities, unknown custody and incomplete/canceled work.

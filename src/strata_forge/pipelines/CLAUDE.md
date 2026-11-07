@@ -93,3 +93,14 @@ Adapters are trusted Python code, never serialized grants/imports. No default is
 model call, file output, bootstrap placeholder or verified-application claim. Owned reads/math
 are shielded/drained under repeated cancellation; cleanup faults cannot replace cancellation
 or emit late success. Bound all inputs/work/receipts and keep raw diagnostics out of errors.
+
+## Registered local paired cluster uncertainty
+
+Keep the separate cluster-analysis schema/SDK independent of fit and evaluation-worker schemas.
+Both explicit trusted source objects need current typed unsealed resolution and complete paired
+population registration before NumPy/rows. Exact M IDs/gold/groups, complete probability-family
+compatibility and source counts/digests survive every check. No caller JSON grants, intersections,
+implicit projection, raw-row receipts, issuer, remote-purpose or artifact/worker activation.
+Shield/drain repeated cancellation, close streams and recheck current policy through final return;
+no partial10000-run, late success, hard thread timeout, independence or gate claim. ADR0031 owns
+the fixed numerical profile and source-codec pure-value exception.

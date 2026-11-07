@@ -38,6 +38,27 @@ if TYPE_CHECKING:
     from strata_forge.pipelines.classifier_benchmark import (
         benchmark_verifier as benchmark_verifier,
     )
+    from strata_forge.pipelines.cluster_analysis import (
+        paired_cluster_row_bytes as paired_cluster_row_bytes,
+    )
+    from strata_forge.pipelines.cluster_analysis import (
+        paired_registered_cluster_uncertainty as paired_registered_cluster_uncertainty,
+    )
+    from strata_forge.pipelines.cluster_analysis_spec import (
+        ClusterAnalysisError as ClusterAnalysisError,
+    )
+    from strata_forge.pipelines.cluster_analysis_spec import (
+        PairedClusterArmRow as PairedClusterArmRow,
+    )
+    from strata_forge.pipelines.cluster_analysis_spec import (
+        PairedClusterPlanV1 as PairedClusterPlanV1,
+    )
+    from strata_forge.pipelines.cluster_analysis_spec import (
+        PairedClusterReceipt as PairedClusterReceipt,
+    )
+    from strata_forge.pipelines.cluster_analysis_spec import (
+        PairedClusterSourceMetadata as PairedClusterSourceMetadata,
+    )
     from strata_forge.pipelines.evaluation_analysis import (
         fit_registered_temperature as fit_registered_temperature,
     )
@@ -64,7 +85,12 @@ __all__ = [
     "BenchmarkError",
     "ClassifierBenchmarkPlanV1",
     "ClassifierBenchmarkResult",
+    "ClusterAnalysisError",
     "EvaluationAnalysisError",
+    "PairedClusterArmRow",
+    "PairedClusterPlanV1",
+    "PairedClusterReceipt",
+    "PairedClusterSourceMetadata",
     "ResolvedBenchmarkTarget",
     "TemperatureFitPlanV1",
     "TemperatureFitReceipt",
@@ -73,10 +99,26 @@ __all__ = [
     "benchmark_scorer",
     "benchmark_verifier",
     "fit_registered_temperature",
+    "paired_cluster_row_bytes",
+    "paired_registered_cluster_uncertainty",
 ]
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "ClusterAnalysisError",
+        "PairedClusterPlanV1",
+        "PairedClusterReceipt",
+        "PairedClusterArmRow",
+        "PairedClusterSourceMetadata",
+    }:
+        import strata_forge.pipelines.cluster_analysis_spec as cluster_analysis_spec
+
+        return getattr(cluster_analysis_spec, name)
+    if name in {"paired_registered_cluster_uncertainty", "paired_cluster_row_bytes"}:
+        import strata_forge.pipelines.cluster_analysis as cluster_analysis
+
+        return getattr(cluster_analysis, name)
     if name in {
         "EvaluationAnalysisError",
         "TemperatureFitPlanV1",

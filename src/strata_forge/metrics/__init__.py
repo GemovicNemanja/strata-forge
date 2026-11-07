@@ -3,6 +3,21 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from strata_forge.metrics.cluster_bootstrap import (
+        ClusterBootstrapError as ClusterBootstrapError,
+    )
+    from strata_forge.metrics.cluster_bootstrap import (
+        ClusterBootstrapResult as ClusterBootstrapResult,
+    )
+    from strata_forge.metrics.cluster_bootstrap import (
+        PairedClusterObservation as PairedClusterObservation,
+    )
+    from strata_forge.metrics.cluster_bootstrap import (
+        PairedClusterProfile as PairedClusterProfile,
+    )
+    from strata_forge.metrics.cluster_bootstrap import (
+        paired_cluster_percentile as paired_cluster_percentile,
+    )
     from strata_forge.metrics.temperature_fit import (
         TemperatureFitBounds as TemperatureFitBounds,
     )
@@ -62,11 +77,15 @@ __all__ = [
     "CalibrationScores",
     "ClassScore",
     "ClassificationReport",
+    "ClusterBootstrapError",
+    "ClusterBootstrapResult",
     "ConfusionMatrix",
     "HolmCorrection",
     "LabelSpace",
     "McNemarResult",
     "MetricValue",
+    "PairedClusterObservation",
+    "PairedClusterProfile",
     "ProbabilityKind",
     "ProportionInterval",
     "TemperatureCalibration",
@@ -84,12 +103,23 @@ __all__ = [
     "macro_f1",
     "mcnemar_exact",
     "nll",
+    "paired_cluster_percentile",
     "temperature_scale",
     "wilson_interval",
 ]
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "ClusterBootstrapError",
+        "ClusterBootstrapResult",
+        "PairedClusterObservation",
+        "PairedClusterProfile",
+        "paired_cluster_percentile",
+    }:
+        import strata_forge.metrics.cluster_bootstrap as cluster_bootstrap
+
+        return getattr(cluster_bootstrap, name)
     if name in {
         "TemperatureFitBounds",
         "TemperatureFitError",
