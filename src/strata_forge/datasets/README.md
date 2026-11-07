@@ -27,3 +27,11 @@ Closed query, pinned input-manifest and trusted operator/file-description values
 without DuckDB or Docker. They do not execute SQL or grant source access. The standalone shared
 codec preserves supported values and refuses lossy/unknown types. See
 [the reference](../../../docs/modules/headless-sql.md) for the implemented boundary.
+
+
+## Provided native dataset execution
+
+`LocalDatasetExecutor` uses a separately configured fixed image for explicit CSV/JSONL or
+Parquet conversion, pinned named-table SQL and immutable Parquet materialization. It supplies
+no platform grants or durable jobs. See [the contract](../../../docs/modules/native-dataset-execution.md)
+for byte/result limits, scalar grammar and owned cleanup.

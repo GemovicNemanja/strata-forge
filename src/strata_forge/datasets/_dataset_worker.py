@@ -336,6 +336,13 @@ def _parquet(
 def _validated_output(
     conn: native._Connection, utc: object, deadline: float
 ) -> tuple[list[sql.JSON], int]:
+    count_row = conn.execute("SELECT count(*) FROM strata_result").fetchone()
+    wire.need(
+        type(count_row) is tuple and len(count_row) == 1 and type(count_row[0]) is int,
+        "worker_failed",
+    )
+    observed = cast("int", cast("tuple[object, ...]", count_row)[0])
+    wire.need(0 <= observed <= wire.MAX_ROWS, "output_limit")
     conn.execute("SELECT * FROM strata_result")
     columns = native._columns(conn, source=True)
     total = 0
@@ -453,16 +460,16 @@ def main() -> int:
         query = "SELECT * FROM dataset" if kind == "convert" else cast("str", spec["sql"])
         statements = conn.extract_statements(query)
         wire.need(len(statements) == 1 and statements[0].type.name == "SELECT", "query_refused")
-        conn.execute("CREATE TABLE strata_result AS " + query)
         if kind == "query":
             table = native._table(
                 conn,
-                {"sql": "SELECT * FROM strata_result", "max_result_rows": spec["max_result_rows"]},
+                {"sql": query, "max_result_rows": spec["max_result_rows"]},
                 pytz.UTC,
                 deadline,
             )
             result: dict[str, sql.JSON] = {"table": table, "output": None}
         else:
+            conn.execute("CREATE TABLE strata_result AS " + query)
             schema, rows = _validated_output(conn, pytz.UTC, deadline)
             conn.execute(
                 "COPY strata_result TO '/output/data.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)"

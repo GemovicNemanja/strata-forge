@@ -699,3 +699,11 @@ This finishes the roadmap. Future work (new vendors, new
 training methods, MCP tool support, guardrails layer, advanced
 telemetry) attaches against the now-complete public surface;
 none of it requires re-opening the phase plan.
+
+## Provided-file dataset execution boundary
+
+The [native dataset executor](modules/native-dataset-execution.md) supports explicit isolated
+conversion, named-table read SQL and bounded Parquet materialization with owned cleanup.
+Native server versioning/source authority, durable background jobs and larger distributed
+inputs require their separate service/lifecycle implementation; local receipts do not
+complete those platform capabilities.

@@ -17,6 +17,25 @@ from strata_forge.datasets.synthetic import distill, self_instruct
 from strata_forge.datasets.versioning import DatasetDelta, dataset_version, diff
 
 if TYPE_CHECKING:
+    from strata_forge.datasets.dataset_execution import DatasetResult as DatasetResult
+    from strata_forge.datasets.dataset_execution import LocalDatasetExecutor as LocalDatasetExecutor
+    from strata_forge.datasets.dataset_execution_types import (
+        DatasetConvertSpec as DatasetConvertSpec,
+    )
+    from strata_forge.datasets.dataset_execution_types import (
+        DatasetExecutionError as DatasetExecutionError,
+    )
+    from strata_forge.datasets.dataset_execution_types import (
+        DatasetInputManifest as DatasetInputManifest,
+    )
+    from strata_forge.datasets.dataset_execution_types import (
+        DatasetInstallation as DatasetInstallation,
+    )
+    from strata_forge.datasets.dataset_execution_types import DatasetQuerySpec as DatasetQuerySpec
+    from strata_forge.datasets.dataset_execution_types import NamedParquetFiles as NamedParquetFiles
+    from strata_forge.datasets.dataset_execution_types import (
+        ProvidedDatasetFiles as ProvidedDatasetFiles,
+    )
     from strata_forge.datasets.sql import LocalSQLExecutor as LocalSQLExecutor
     from strata_forge.datasets.sql import SQLResult as SQLResult
     from strata_forge.datasets.sql_types import LocalParquetFiles as LocalParquetFiles
@@ -27,15 +46,24 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Dataset",
+    "DatasetConvertSpec",
     "DatasetDelta",
+    "DatasetExecutionError",
+    "DatasetInputManifest",
+    "DatasetInstallation",
     "DatasetItem",
     "DatasetNotFoundError",
+    "DatasetQuerySpec",
+    "DatasetResult",
     "DatasetStore",
     "InMemoryDatasetStore",
     "LangfuseDatasetStore",
+    "LocalDatasetExecutor",
     "LocalParquetFiles",
     "LocalSQLExecutor",
     "LocalSQLInstallation",
+    "NamedParquetFiles",
+    "ProvidedDatasetFiles",
     "SQLExecutionError",
     "SQLInputManifest",
     "SQLQuerySpec",
@@ -50,6 +78,23 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if type(name) is str and name in {"LocalDatasetExecutor", "DatasetResult"}:
+        from strata_forge.datasets import dataset_execution
+
+        return getattr(dataset_execution, name)
+    if type(name) is str and name in {
+        "DatasetConvertSpec",
+        "DatasetExecutionError",
+        "DatasetInputManifest",
+        "DatasetInstallation",
+        "DatasetQuerySpec",
+        "NamedParquetFiles",
+        "ProvidedDatasetFiles",
+    }:
+        from strata_forge.datasets import dataset_execution_types
+
+        return getattr(dataset_execution_types, name)
+
     if type(name) is str and name in {"LocalSQLExecutor", "SQLResult"}:
         from strata_forge.datasets import sql
 

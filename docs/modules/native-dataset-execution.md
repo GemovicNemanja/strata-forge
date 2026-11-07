@@ -27,6 +27,65 @@ hashes remain descriptive evidence, not source permission or hostile-host attest
 
 CSV lexical validation rejects quotes inside unquoted fields and lone CR separators before
 stdlib CSV parsing; it preserves quoted doubled quotes and embedded LF/CRLF without rewriting
-the source. The dataset worker sets engine memory to192 MB and temp storage to64 MB and checks
-DuckDB2.0's reported `183.1 MiB`/`61.0 MiB` both before READY and after configuration lock.
-These are engine settings inside the independent512 MiB OS memory/128 MiB scratch profile.
+the source. The dataset worker sets engine memory to 192 MB and temp storage to 64 MB and checks
+DuckDB 2.0's reported `183.1 MiB`/`61.0 MiB` both before READY and after configuration lock.
+These are engine settings inside the independent 512 MiB OS memory/128 MiB scratch profile.
+
+## Executor and byte ownership
+
+`LocalDatasetExecutor(installation=DatasetInstallation)` is an explicit async context with one
+active operation and no queue **per instance**. The first operation captures its loop. There
+is no process/project quota, platform source resolver, durable job or query-time image setup.
+A server adapter must supply its own shared admission and current native source policy.
+
+- `convert(spec=DatasetConvertSpec, source=ProvidedDatasetFiles)` validates supplied Parquet
+  or explicitly typed CSV/JSONL and returns normalized Parquet.
+- `query(spec=DatasetQuerySpec, sources=tuple[NamedParquetFiles,...])` returns the existing
+  bounded lossless typed table. Its prefix does not imply a complete scan or persisted data.
+- `materialize(spec=DatasetQuerySpec, sources=...)` writes the full SELECT result, refusing
+  more than one million output rows before the cell scan. Result-row preview limits do not
+  silently truncate materialized data.
+
+All options are explicit canonical v1 values; supplied descriptors are read-only regular
+files, duplicated and copied through bounded `pread` without changing caller offsets. Raw
+imports bind exact part hashes/sizes. Named inputs bind complete existing SQLInputManifest
+values and unique ASCII aliases; their ordered binding digest must match the query spec.
+Aggregate limits apply across all tables: four tables, 32 parts, 64 MiB and one million rows.
+Text imports additionally cap at 16 MiB. Source assertions remain unverified upstream claims.
+
+`DatasetResult.wire_payload()` returns independent metadata/typed table copies. Its canonical
+receipt binds exact spec/input/alias/query bytes, operation, selected engine/image/bundle,
+output schema/count/hash/size and observed cleanup. `output_bytes()` returns immutable Parquet
+bytes for conversion/materialization only; query results have no output bytes. Both fields
+are excluded from automatic model dumps/repr. Receipts can be reconstructed/validated but
+are descriptive, not platform permission or hostile-host execution attestation.
+
+Native output is opened no-follow as a regular file, checked for exact sole filename,
+size/hash and read with a 64 MiB cap. Success waits for actual container exit/wait/PID0,
+removal/attach reap and staging removal. Cancellation retires admission and drains owned
+copy/read/container/cleanup before propagating; unknown cleanup retains an unavailable owner.
+Close refuses active work; cancel/await that operation first. No automatic query retry or
+terminal inference from elapsed time exists. The original deadline limits result adoption,
+not the time required to prove process death.
+
+Immutable output bytes may require transient copies; callers must account for them in their
+own global quota/admission and stream chunks respecting their actual storage adapter limits.
+The package does not silently enlarge a store's chunk or object cap. Parent DuckDB/Arrow,
+provider/model execution, remote credentials and browser authority are absent from this API.
+
+## Explicit operator setup and evidence
+
+`containers/native-datasets/setup.py --docker <absolute-executable> --engine-socket <absolute-UDS>
+--artifact-cache <owned-public-cache>` builds the separate fixed Linux ARM64 image from pinned
+public Python/DuckDB/pytz artifacts. It uses empty private Docker config, fixed PATH and no
+ambient credentials/context; it inspects only its exact pinned base/tag. An absent base can
+be pulled only by this explicit setup, never by an executor query. Public artifact hashes
+and licenses are retained alongside the profile. No native dependency is added to the parent.
+
+`tests/integration/datasets/test_native_dataset_execution.py` requires the explicit
+STRATA_TEST_DATASET_INSTALLATION file; selection without it fails instead of silently using
+fake execution. Its fixtures are generated fictional bytes, not upstream datasets. Native
+profile and parent-platform evidence must be reported separately; macOS parent plus Linux
+ARM64 worker is not a Linux parent or hostile-kernel isolation claim. Unknown create/start,
+engine identity or cleanup is never converted into success. This local executor does not
+complete the native dataset service, durable background SQL jobs or DATA-001.

@@ -120,3 +120,11 @@ make test      # unit tests
 ## License
 
 [Apache License 2.0](https://github.com/GemovicNemanja/strata-forge/blob/main/LICENSE).
+
+### Provided native datasets
+
+The opt-in `strata_forge.datasets.LocalDatasetExecutor` validates supplied CSV/JSONL or
+Parquet, queries exact named Parquet inputs and returns bounded immutable materialized
+Parquet with execution receipts. It requires explicit pinned operator image setup and has
+no platform grants, background job scheduler or parent native-engine fallback. See
+[the execution contract](docs/modules/native-dataset-execution.md).

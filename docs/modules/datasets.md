@@ -359,3 +359,11 @@ source file reads, container operations or authority resolution. The separately 
 `LocalSQLExecutor` runs one query per instance over already-held pinned Parquet descriptors
 in the fixed local Docker profile, returning only after owned cleanup. It installs no
 remote authorization, server/MCP route or hosted capability. See [the detailed contract](headless-sql.md).
+
+
+## Bounded provided-file execution
+
+The independent [native dataset executor](native-dataset-execution.md) converts explicitly
+typed supplied files, queries pinned named Parquet tables and returns immutable materialized
+bytes with observed execution receipts. It does not replace DatasetStore, infer upstream
+source permission or install a server-side dataset service.
