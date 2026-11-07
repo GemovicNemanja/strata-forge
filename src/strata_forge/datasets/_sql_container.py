@@ -11,7 +11,7 @@ import signal
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import cast
@@ -101,6 +101,17 @@ async def _read_all(reader: asyncio.StreamReader, limit: int) -> bytes:
 
 
 @dataclass(frozen=True)
+class ContainerSettlement:
+    """Observed fixed-owner cleanup facts without process or source references."""
+
+    operation_id: str
+    container_waited: bool
+    stopped_pid_zero: bool
+    container_removed: bool
+    attach_reaped: bool
+
+
+@dataclass(frozen=True)
 class ContainerOutcome:
     payload: bytes
     engine_id: str
@@ -108,6 +119,7 @@ class ContainerOutcome:
     bundle_sha256: str
     exit_code: int
     oom_killed: bool
+    settlement: ContainerSettlement | None = None
 
 
 class SQLContainerOwner:
@@ -148,6 +160,7 @@ class SQLContainerOwner:
         self._clean = True
         self._closed = False
         self._attach: asyncio.subprocess.Process | None = None
+        self._stopped_pid_zero = self._removed = self._attach_reaped = False
 
     @property
     def available(self) -> bool:
@@ -366,6 +379,7 @@ class SQLContainerOwner:
                     or details.get("Pid") != 0
                 ):
                     raise wire.WireError("cleanup_unresolved")
+                self._stopped_pid_zero = True
                 await self._same_engine(deadline)
                 await self._command("rm", self._cid, deadline=deadline)
                 await self._same_engine(deadline)
@@ -382,12 +396,14 @@ class SQLContainerOwner:
                 )
                 await self._same_engine(deadline)
                 okay = absent == b"" and (not self._start_issued or self._waited)
+                self._removed = okay
         except Exception:
             okay = False
         finally:
             if self._attach is not None:
                 try:
                     await _reap_cli(self._attach)
+                    self._attach_reaped = self._attach.returncode is not None
                 except Exception:
                     okay = False
         self._clean = okay
@@ -423,6 +439,7 @@ class SQLContainerOwner:
         self._operation = operation_id
         self._name = "strata-sql-" + self._owner + "-" + operation_id
         self._create_issued = self._start_issued = self._waited = False
+        self._stopped_pid_zero = self._removed = self._attach_reaped = False
         self._attach = None
         outcome: ContainerOutcome | None = None
         code = "unavailable"
@@ -564,6 +581,17 @@ class SQLContainerOwner:
             raise wire.WireError(code)
         if time.monotonic() >= deadline:
             raise wire.WireError("deadline")
+        if self._profile is _Profile.DATASET:
+            return replace(
+                outcome,
+                settlement=ContainerSettlement(
+                    operation_id,
+                    self._waited,
+                    self._stopped_pid_zero,
+                    self._removed,
+                    self._attach_reaped,
+                ),
+            )
         return outcome
 
     async def aclose(self) -> None:

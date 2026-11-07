@@ -68,6 +68,43 @@ Close refuses active work; cancel/await that operation first. No automatic query
 terminal inference from elapsed time exists. The original deadline limits result adoption,
 not the time required to prove process death.
 
+## Observing a settled failure
+
+`LocalDatasetExecutor.failure_observation(error)` inspects only the exact actual
+`DatasetExecutionError` issued by that executor's failed call. It returns an opaque
+immutable `DatasetFailureObservation`, or `None` when the original task/loop/call,
+error identity, current owner or completed settlement cannot be established. A
+caller-created exception with the same code is not an observation. Capture it in
+the actual SDK call's exception handler before crossing a task boundary.
+
+The observation's `wire_payload()` returns a fresh closed descriptive mapping, or
+`None` after retirement. It contains only version, fixed code/kind, operation and
+request digests, measured engine/image/bundle/profile, wait/PID-zero/removal/attach/
+staging/exit/OOM facts and `reusable_at_settlement`. SQL, schema, rows, paths,
+descriptors, raw exceptions, credentials and permission proofs are absent. The
+handle has a safe representation, rejects copy/pickle/mutation, and retains only a
+weak executor. The executor retains weak error/task references and bounded immutable
+metadata; an observation does not extend their lifetime.
+
+A complete correlated worker refusal plus actual container and staging settlement
+can describe the same executor as reusable at that instant. This does not promise
+that another query succeeds, certify input origin or authorize a platform read or
+write. Known profile/deadline/resource/unavailable refusals remain conservatively
+nonreusable in this projection. Missing or uncertain create/start/cleanup evidence
+and cancellation issue no observation. The unchanged direct-Python API may permit
+reuse after confirmed cancellation cleanup; absence of a public witness is not an
+assertion that the legacy executor is poisoned. A conservative downstream adapter
+must not infer continued health from an error code, elapsed time, task completion
+or an `available` flag.
+
+The next admitted operation or `aclose()` retires inspection of the previous
+observation. Mutating `error.code`, retaining a copied payload, closing an owner or
+using another task cannot create eligibility. Returned metadata can be retained as
+historical description; neither it nor its booleans are a source or execution
+capability. Actual same-instance failure→success acceptance is separate from the
+controlled parent tests. Worker, wire, image, profile and resource caps are unchanged;
+the legacy read-SQL result serializer ignores the optional internal settlement data.
+
 The original deadline remains in the parent monotonic clock domain. Loop cancellation is
 scheduled from its remaining duration, including CLI setup and cleanup; arbitrary event-loop
 clock origins are not interchangeable absolute timestamps. The read-SQL executor shares this

@@ -226,8 +226,61 @@ async def test_native_csv_grammar_refusal_then_healthy_reuse(
         assert caught.value.code == "source_mismatch"
         assert caught.value.__context__ is None
         assert executor._staging is None
+        observation = executor.failure_observation(caught.value)
+        assert observation is not None
+        failure = observation.wire_payload()
+        assert failure is not None
+        assert failure["code"] == "source_mismatch"
+        assert failure["kind"] == "convert"
+        assert failure["reusable_at_settlement"] is True
+        assert failure["cleanup"] == {
+            "container_waited": True,
+            "stopped_pid_zero": True,
+            "container_removed": True,
+            "attach_reaped": True,
+            "staging_removed": True,
+            "exit_code": 1,
+            "oom_killed": False,
+        }
+        original_owner = executor._owner
         good = await convert(executor, tmp_path, b"id,text\n1,healthy\n", fmt="csv")
         assert cast("dict[str, sql.JSON]", good.wire_payload()["output"])["rows"] == 1
+        assert executor._owner is original_owner
+        assert observation.wire_payload() is None
+
+
+@pytest.mark.parametrize(
+    ("statement", "code"),
+    [("DROP TABLE items", "query_refused"), ("SELECT missing_column FROM items", "worker_failed")],
+)
+async def test_native_failed_query_observation_then_same_executor_health(
+    installation: DatasetInstallation, tmp_path: Path, statement: str, code: str
+) -> None:
+    async with LocalDatasetExecutor(installation=installation) as executor:
+        converted = await convert(executor, tmp_path, b'{"id":1,"text":"fictional"}\n')
+        source, fd = named(converted, tmp_path, "items")
+        original_owner = executor._owner
+        try:
+            with pytest.raises(DatasetExecutionError) as caught:
+                await executor.query(spec=query_spec((source,), statement), sources=(source,))
+            assert caught.value.code == code
+            observation = executor.failure_observation(caught.value)
+            assert observation is not None
+            failure = observation.wire_payload()
+            assert failure is not None
+            assert failure["code"] == code
+            assert failure["kind"] == "query"
+            assert failure["reusable_at_settlement"] is True
+            assert len(cast("str", failure["operation_id"])) == 32
+            assert len(cast("str", failure["request_sha256"])) == 64
+            healthy = await executor.query(
+                spec=query_spec((source,), "SELECT id FROM items"), sources=(source,)
+            )
+            assert table(healthy)["returned_rows"] == 1
+            assert executor._owner is original_owner
+            assert observation.wire_payload() is None
+        finally:
+            os.close(fd)
 
 
 async def test_native_empty_and_full_parquet_type_roundtrip(

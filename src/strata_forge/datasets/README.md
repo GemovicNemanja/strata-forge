@@ -35,3 +35,13 @@ codec preserves supported values and refuses lossy/unknown types. See
 Parquet conversion, pinned named-table SQL and immutable Parquet materialization. It supplies
 no platform grants or durable jobs. See [the contract](../../../docs/modules/native-dataset-execution.md)
 for byte/result limits, scalar grammar and owned cleanup.
+
+## Settled native failure metadata
+
+The explicit local dataset executor can describe a fully settled worker refusal
+without exposing SQL, rows, paths or native diagnostics. Its issued immutable
+failure observation binds the actual error and current executor call. It can
+describe same-instance reusability after verified cleanup; it is not source
+permission, a retry instruction or a substitute for current platform policy.
+Cancellation and uncertain cleanup do not provide that witness. See
+[native execution](../../../docs/modules/native-dataset-execution.md).

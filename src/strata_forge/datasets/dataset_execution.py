@@ -14,8 +14,10 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +25,8 @@ from strata_forge.datasets import _dataset_wire as wire
 from strata_forge.datasets import _sql_wire as sql
 from strata_forge.datasets._dataset_worker import bundle_sha256
 from strata_forge.datasets._sql_container import (  # pyright: ignore[reportPrivateUsage] -- fixed sibling is the only dataset profile selector.
+    ContainerOutcome,
+    ContainerSettlement,
     SQLContainerOwner,
     _Profile,  # pyright: ignore[reportPrivateUsage] -- closed fixed sibling selector.
     drain,
@@ -35,6 +39,9 @@ from strata_forge.datasets.dataset_execution_types import (
     NamedParquetFiles,
     ProvidedDatasetFiles,
 )
+
+if TYPE_CHECKING:
+    from typing import Never, SupportsIndex
 
 
 def _description(value: object) -> dict[str, sql.JSON]:
@@ -294,6 +301,57 @@ def _remove(directory: Path) -> None:
     shutil.rmtree(directory)
 
 
+class DatasetFailureObservation:
+    """Issued time-qualified failure metadata, never source permission or a replay grant."""
+
+    __slots__ = ("__weakref__", "_owner")
+
+    def __new__(cls) -> DatasetFailureObservation:
+        raise DatasetExecutionError("invalid_spec")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise DatasetExecutionError("invalid_spec")
+
+    def __delattr__(self, name: str) -> None:
+        raise DatasetExecutionError("invalid_spec")
+
+    def __repr__(self) -> str:
+        return "DatasetFailureObservation()"
+
+    def __copy__(self) -> DatasetFailureObservation:
+        raise DatasetExecutionError("invalid_spec")
+
+    def __deepcopy__(self, memo: object) -> DatasetFailureObservation:
+        raise DatasetExecutionError("invalid_spec")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Never:
+        raise DatasetExecutionError("invalid_spec")
+
+    def wire_payload(self) -> dict[str, sql.JSON] | None:
+        """Inspect fresh independent metadata only during the original failed task's lease."""
+        if type(self) is not DatasetFailureObservation:
+            return None
+        reference: object = None
+        with contextlib.suppress(AttributeError):
+            reference = object.__getattribute__(self, "_owner")
+        if type(reference) is not weakref.ReferenceType:
+            return None
+        owner: object = cast("weakref.ReferenceType[object]", reference)()
+        if type(owner) is not LocalDatasetExecutor:
+            return None
+        return LocalDatasetExecutor._failure_payload(  # pyright: ignore[reportPrivateUsage] -- fixed issued observation only.
+            owner, self
+        )
+
+
+@dataclass(frozen=True)
+class _FailureRecord:
+    observation: DatasetFailureObservation
+    error: weakref.ReferenceType[DatasetExecutionError]
+    task: weakref.ReferenceType[asyncio.Task[object]]
+    canonical: bytes
+
+
 class LocalDatasetExecutor:
     """One bounded local operation per selected owner; no remote authority or auto retry."""
 
@@ -308,6 +366,126 @@ class LocalDatasetExecutor:
         self._busy = False
         self._closed = False
         self._closing: asyncio.Task[bool] | None = None
+        self._failure: _FailureRecord | None = None
+
+    def _failure_payload(
+        self, observation: DatasetFailureObservation
+    ) -> dict[str, sql.JSON] | None:
+        record = self._failure
+        if (
+            record is None
+            or record.observation is not observation
+            or record.error() is None
+            or self._closed
+            or self._busy
+            or self._owner is None
+            or not self._owner.available
+            or self._staging is not None
+        ):
+            return None
+        try:
+            task = asyncio.current_task()
+            if (
+                asyncio.get_running_loop() is not self._loop
+                or task is None
+                or task is not record.task()
+                or task.cancelling()
+            ):
+                return None
+        except RuntimeError:
+            return None
+        payload = sql.parse(record.canonical, limit=4096)
+        return cast("dict[str, sql.JSON]", payload)
+
+    def failure_observation(self, error: DatasetExecutionError) -> DatasetFailureObservation | None:
+        """Observe only this executor's exact correlated and fully settled worker refusal."""
+        if type(self) is not LocalDatasetExecutor or type(error) is not DatasetExecutionError:
+            return None
+        record = self._failure
+        if record is None or record.error() is not error:
+            return None
+        if LocalDatasetExecutor._failure_payload(self, record.observation) is None:
+            return None
+        return record.observation
+
+    def _observe_failure(
+        self,
+        error: DatasetExecutionError,
+        kind: str,
+        operation: str,
+        request_sha: str,
+        code: str,
+        outcome: ContainerOutcome,
+    ) -> None:
+        if type(outcome) is not ContainerOutcome:
+            return
+        settlement = outcome.settlement
+        task = asyncio.current_task()
+        if (
+            task is None
+            or task.cancelling()
+            or type(settlement) is not ContainerSettlement
+            or type(settlement.operation_id) is not str
+            or settlement.operation_id != operation
+            or not all(
+                value is True
+                for value in (
+                    settlement.container_waited,
+                    settlement.stopped_pid_zero,
+                    settlement.container_removed,
+                    settlement.attach_reaped,
+                )
+            )
+            or type(outcome.exit_code) is not int
+            or outcome.exit_code != 1
+            or outcome.oom_killed is not False
+            or type(outcome.image_id) is not str
+            or type(outcome.bundle_sha256) is not str
+            or outcome.image_id != self._installation["image_id"]
+            or outcome.bundle_sha256 != self._installation["worker_bundle_sha256"]
+            or type(outcome.engine_id) is not str
+            or re.fullmatch(r"[A-Za-z0-9:-]{1,128}", outcome.engine_id) is None
+            or self._staging is not None
+            or self._owner is None
+            or not self._owner.available
+        ):
+            return
+        canonical = sql.canonical(
+            {
+                "version": 1,
+                "code": code,
+                "kind": kind,
+                "operation_id": operation,
+                "request_sha256": request_sha,
+                "profile": wire.PROFILE,
+                "engine_id": outcome.engine_id,
+                "image_id": outcome.image_id,
+                "worker_bundle_sha256": outcome.bundle_sha256,
+                "cleanup": {
+                    "container_waited": True,
+                    "stopped_pid_zero": True,
+                    "container_removed": True,
+                    "attach_reaped": True,
+                    "staging_removed": True,
+                    "exit_code": 1,
+                    "oom_killed": False,
+                },
+                "reusable_at_settlement": code
+                not in {
+                    "cleanup_unresolved",
+                    "deadline",
+                    "profile_refused",
+                    "resource_limit",
+                    "unavailable",
+                },
+            },
+            limit=4096,
+        )
+        observation = object.__new__(DatasetFailureObservation)
+        object.__setattr__(observation, "_owner", weakref.ref(self))
+        self._failure = _FailureRecord(
+            observation, weakref.ref(error), weakref.ref(task), canonical
+        )
 
     def _check_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -369,6 +547,7 @@ class LocalDatasetExecutor:
         if self._busy:
             raise DatasetExecutionError("busy")
         self._closed = True
+        self._failure = None
         caller = asyncio.current_task()
         cancels = caller.cancelling() if caller is not None else 0
         if self._closing is None or (self._closing.done() and self._closing.result()):
@@ -452,12 +631,14 @@ class LocalDatasetExecutor:
         ):
             raise DatasetExecutionError("unavailable")
         self._busy = True
+        self._failure = None
         started = time.monotonic()
         deadline = started + cast("int", spec["timeout_ms"]) / 1000
         stop = threading.Event()
         result: DatasetResult | None = None
         cancelled = False
         code = "worker_failed"
+        refused: tuple[str, str, str, ContainerOutcome] | None = None
         try:
             # Loop scheduling uses its own epoch; eligibility retains this original clock.
             async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
@@ -537,7 +718,9 @@ class LocalDatasetExecutor:
                 )
                 if outcome.exit_code == 1:
                     wire.need(data["kind"] == "error", "worker_failed")
-                    raise sql.WireError(data["code"])
+                    refusal = sql.WireError(data["code"])
+                    refused = (operation, request_sha, refusal.code, outcome)
+                    raise refusal
                 wire.need(
                     type(outcome.exit_code) is int
                     and outcome.exit_code == 0
@@ -636,5 +819,9 @@ class LocalDatasetExecutor:
         if cancelled:
             raise asyncio.CancelledError
         if result is None:
-            raise DatasetExecutionError(code)
+            error = DatasetExecutionError(code)
+            if refused is not None and refused[2] == code:
+                with contextlib.suppress(Exception):
+                    self._observe_failure(error, kind, *refused)
+            raise error
         return result

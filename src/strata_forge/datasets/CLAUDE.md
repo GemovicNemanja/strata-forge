@@ -155,3 +155,12 @@ all native parsing/execution stays in the image. `_sql_container.py` selects onl
 internal SQL/dataset enum profiles; preserve old SQL wire/image/worker/default behavior.
 The new profile has no remote source, durable job or platform grant. See
 [the reference](../../../docs/modules/native-dataset-execution.md).
+
+Failure observations are privately issued metadata for the exact real error,
+call, executor, task and loop. Do not trust caller-constructed flags or later
+mutable exception fields. Correlated worker refusal, actual wait/PID-zero/removal/
+attach settlement and staging drain precede issuance; uncertainty and cancellation
+provide no reusable witness. Preserve legacy direct-Python cancellation/reuse and
+default exception behavior. Inspection is bounded and performs no I/O or hashing;
+it returns independent metadata, retains no raw exception/source/FD/credential,
+and cannot grant source access or justify automatic retry/reconstruction.
