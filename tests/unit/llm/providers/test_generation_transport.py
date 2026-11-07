@@ -485,3 +485,83 @@ async def test_expired_deadline_after_synchronous_response_parse_refuses_success
             await client().generate_one([UserMessage(content="Synthetic")], request=value)
     assert len(state["requests"]) == 1
     assert state["stream"].closed >= 1
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["dict", "list", "hostile_string", "unknown_string", "error_subclass", "multiple", "context"],
+)
+async def test_malformed_observer_errors_are_fixed_without_native_context(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    class HostileString(str):
+        def __hash__(self) -> int:
+            raise AssertionError("untrusted string subclass must not be hashed")
+
+    class DerivedError(GenerationError):
+        pass
+
+    async def broken(_provider: object, _request: object) -> Any:
+        if shape == "dict":
+            raise GenerationError({"source": "FICTIONAL_PRIVATE"})
+        if shape == "list":
+            raise GenerationError(["FICTIONAL_PRIVATE"])
+        if shape == "hostile_string":
+            raise GenerationError(HostileString("generation_profile_unavailable"))
+        if shape == "unknown_string":
+            raise GenerationError("FICTIONAL_PRIVATE")
+        if shape == "error_subclass":
+            raise DerivedError("generation_profile_unavailable")
+        if shape == "multiple":
+            raise GenerationError("generation_profile_unavailable", "FICTIONAL_PRIVATE")
+        try:
+            raise ValueError("FICTIONAL_PRIVATE")
+        except ValueError as cause:
+            raise GenerationError({"source": "FICTIONAL_PRIVATE"}) from cause
+
+    monkeypatch.setattr(provider, "_observe_generation_endpoint", broken)
+    with pytest.raises(GenerationError) as found:
+        await client().generate_one([UserMessage(content="Synthetic")], request=request())
+    assert type(found.value) is GenerationError
+    assert found.value.args == ("generation_transport_failed",)
+    assert found.value.__context__ is None
+    assert found.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("generation_profile_unavailable", "generation_profile_unavailable"),
+        ("generation_http_error", "generation_http_error"),
+        ("FICTIONAL_PRIVATE", "generation_transport_failed"),
+    ],
+)
+async def test_only_exact_allowlisted_error_strings_cross_the_boundary(
+    monkeypatch: pytest.MonkeyPatch, message: str, expected: str
+) -> None:
+    async def broken(_provider: object, _request: object) -> Any:
+        raise GenerationError(message)
+
+    monkeypatch.setattr(provider, "_observe_generation_endpoint", broken)
+    with pytest.raises(GenerationError) as found:
+        await client().generate_one([UserMessage(content="Synthetic")], request=request())
+    assert found.value.args == (expected,)
+    assert found.value.__context__ is None
+    assert found.value.__cause__ is None
+
+
+async def test_malformed_transport_refusal_cannot_break_fixed_error_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install(monkeypatch)
+
+    async def broken(transport: Any, _request: object) -> httpx.Response:
+        transport.refusal_code = {"source": "FICTIONAL_PRIVATE"}
+        raise RuntimeError("FICTIONAL_PRIVATE")
+
+    monkeypatch.setattr(provider._GenerationTransport, "handle_async_request", broken)  # pyright: ignore[reportPrivateUsage] — deliberately corrupt internal refusal state, no native endpoint claim.
+    with pytest.raises(GenerationError) as found:
+        await client().generate_one([UserMessage(content="Synthetic")], request=request())
+    assert found.value.args == ("generation_transport_failed",)
+    assert found.value.__context__ is None
+    assert found.value.__cause__ is None

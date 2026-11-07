@@ -383,9 +383,18 @@ class OpenAICompatProvider(ProviderClient):
                 "generation_redirect_refused",
                 "generation_http_error",
             }
-            if transport is not None and transport.refusal_code in safe:
+            if (
+                transport is not None
+                and type(transport.refusal_code) is str
+                and transport.refusal_code in safe
+            ):
                 failure = transport.refusal_code
-            elif type(error) is GenerationError and len(error.args) == 1 and error.args[0] in safe:
+            elif (
+                type(error) is GenerationError
+                and len(error.args) == 1
+                and type(error.args[0]) is str
+                and error.args[0] in safe
+            ):
                 failure = error.args[0]
             elif type(error) is TimeoutError:
                 failure = "generation_timeout"
