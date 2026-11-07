@@ -245,3 +245,33 @@ def test_projection_is_explicit_domain_method_presence_and_never_raw_json_wire()
         first.canonical_tagged_sha256
         != hashlib.sha256(b'{"temperature":0.7,"messages":[]}').hexdigest()
     )
+
+
+def test_omitted_top_level_names_are_not_scanned_or_validated_as_projected_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = values._quoted_size  # pyright: ignore[reportPrivateUsage] - prove no traversal of the exact omitted name
+    unknown = "omitted_" + "x" * 100_000 + "\ud800"
+
+    def checked(text: str) -> int:
+        assert text is not unknown
+        return original(text)
+
+    monkeypatch.setattr(values, "_quoted_size", checked)
+    first = project_chat("fixture", [], {unknown: object()})
+    second = project_chat("fixture", [], {"other_omitted": object()})
+    assert first.status == "observed"
+    assert first.omitted_fields_count == 1
+    assert first == second
+
+
+def test_actual_portable_safe_integer_capacity_refusal_has_limit_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(portable, "MAX_SAFE_INTEGER", 0)
+    with pytest.raises(ProviderValueError, match="projection_limit") as caught:
+        values._encode({"domain": "fixture", "fixed": 1})  # pyright: ignore[reportPrivateUsage] - actual fixed-frame canon capacity boundary
+    assert caught.value.__context__ is None
+    assert encode_provider_value(
+        2**80
+    )  # Native integers remain tagged strings, never a widened canon integer.

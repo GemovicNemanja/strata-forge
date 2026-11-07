@@ -178,3 +178,20 @@ def test_honest_metadata_loss_keeps_admission_holes_and_rejects_reuse_or_false_c
                 "post_close_calls_counted": False,
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("side", "count"),
+    [
+        ("request_projection", 0),
+        ("request_projection", 11),
+        ("request_projection", 12),
+        ("response_projection", 9),
+        ("response_projection", 12),
+    ],
+)
+def test_reported_projection_counts_match_owning_method_and_side(side: str, count: int) -> None:
+    base = reported_attempt().model_dump()
+    projection = cast("dict[str, object]", base[side])
+    with pytest.raises(ValidationError):
+        reported_attempt(**{side: {**projection, "selected_present_fields_count": count}})

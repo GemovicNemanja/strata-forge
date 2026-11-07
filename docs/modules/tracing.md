@@ -432,3 +432,9 @@ render placement, retry relationships and vendor acceptance. Count/hash/size fie
 null when unobserved, and settled admission holes require matching declared metadata loss.
 These parsers issue no live capture handle. The ProviderClient wrapper is a separate source
 unit; these pure projection/metadata helpers alone do not instrument LLMClient.
+
+Unknown top-level names are only checked to be exact built-in strings within the bounded
+map. Their content/length/Unicode is intentionally not scanned or validated as projected
+content, and unknown values are never read. Selected nested object keys retain charged
+scalar validation. Existing portable depth/byte/safe-integer capacity refusals map to
+projection_limit; malformed structure/Unicode/key/cycle refusals map to unsupported.

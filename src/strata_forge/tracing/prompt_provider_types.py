@@ -209,6 +209,16 @@ class ProviderAttemptMetadata(_ProviderDomain):
         request, response = self.request_projection, self.response_projection
         if request.status not in {"observed", "unsupported", "limit"}:
             raise ValueError("observation_invalid")
+        count = request.selected_present_fields_count
+        if count is not None and not (
+            1 <= count <= 10 if self.method == "acompletion" else 0 <= count <= 12
+        ):
+            raise ValueError("observation_invalid")
+        if (
+            response.selected_present_fields_count is not None
+            and not 0 <= response.selected_present_fields_count <= 8
+        ):
+            raise ValueError("observation_invalid")
         if self.call_outcome == "returned":
             if (
                 self.error_category is not None

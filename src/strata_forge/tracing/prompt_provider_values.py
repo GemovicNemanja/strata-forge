@@ -182,7 +182,8 @@ def _encode(tree: PortableValue) -> bytes:
         failure = (
             "projection_limit"
             if type(error) is PromptCompositionError
-            and error.diagnostic.code in {"portable_depth_limit", "portable_bytes_limit"}
+            and error.diagnostic.code
+            in {"portable_depth_limit", "portable_bytes_limit", "portable_integer_range"}
             else "projection_unsupported"
         )
     if failure is not None:
@@ -209,7 +210,6 @@ def _mapping(value: object) -> dict[str, object]:
     for key in mapping:
         if type(key) is not str:
             raise ProviderValueError("projection_unsupported")
-        _quoted_size(key)
     return cast("dict[str, object]", value)
 
 
