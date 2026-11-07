@@ -743,6 +743,77 @@ There are no smoothing, class/sample-weight, temperature or free-coefficient par
 
 These are reductions over one complete supplied batch. Separately averaging distributed
 devices or accumulated microbatches with different eligible counts is not equivalent and
-is not implemented here. Model heads, PID-to-token geometry, worker role mapping,
-calibration/export/scoring of auxiliary heads, larger-population execution and live
-training remain separate contracts. See [the objective decision](../architecture/adr/0025-supplied-verifier-loss.md).
+is not implemented here. The auxiliary SDK below supplies local heads/geometry and export;
+worker role mapping, calibration, larger-population execution and live training remain
+separate contracts. See [the objective decision](../architecture/adr/0025-supplied-verifier-loss.md).
+
+## Auxiliary verifier SDK
+
+`VerifierGeometryConfig` is a distinct schema-2 renderer for explicit row-local premise IDs.
+It does not change schema-1 `VerifierConfig`, the primary classifier SDK defaults, worker
+specifications, registry entries or scorer dispatch. `VerifierPremise` and `VerifierExample`
+retain unique `p[1-9][0-9]*` identifiers in row order and validate any supplied support IDs.
+The premise segment is exactly `pid: text` lines separated by one LF. PID-start offsets are
+recorded while building that segment; PID-looking text inside a premise is not searched.
+
+Encoder geometry uses the tokenizer's native `(premises,hypothesis)` pair with attended CLS
+at position zero. Decoder geometry inserts premises before the hypothesis in its declared
+single-sequence template and pools at the last attended answer position. Fast-tokenizer
+sequence IDs, actual offset mappings and special/padding masks resolve the first premise
+token overlapping each PID's first character. Missing/outside/shared markers refuse.
+Raw Unicode is retained. No truncation or dropping occurs: limits remain at most 20 premises,
+8,192 tokens and 200,000 rendered characters. A supplied overlength batch refuses before its
+forward; this is not complete-split training preflight or scoring overflow-drop support.
+
+`initialize_verifier_classifier(primary, geometry=..., seed=..., ownership="share")` requires
+explicit sharing. It reuses primary child modules and exact parameter names, without allocating
+a duplicate backbone. Its copied config belongs to the wrapper; weights, mode/device changes
+and optimizer updates affect shared primary aliases. Retire the old alias and avoid concurrent
+operations through it. The primary seed must match the retained initializer receipt. The
+supported native primary families are BERT, GPT-2 and the installed ModernBERT-decoder wrapper;
+this does not add a ModernBERT encoder, Ettin conversion or arbitrary custom architecture.
+
+The complete primary path is preserved, including BERT pooler/dropout and decoder dense/norm
+transforms and selected output bias. Auxiliary heads instead read raw final backbone states:
+CLS or the attended answer position plus raw PID marker states. Their exact safe-tensor ABI is:
+
+| Tensor | Shape |
+| --- | --- |
+| `inconsistency_head.weight`, `.bias` | `[1,H]`, `[1]` |
+| `support_head.weight`, `.bias` | `[H,H]`, `[1]` |
+
+Weights use seeded `normal(0, config.initializer_range)` and biases start at zero. Bilinear
+support is `h^T W m_pid + b`, with ragged per-row PID attribution. Native wrapper `post_init`
+collects lifecycle metadata through a no-reinitialization `init_weights` override; it must
+never reset shared trained parameters. Initialization receipts describe exact transformations
+on caller-resolved objects, not model-source, custody or rights attestations.
+
+`encode_verifier_batch` resolves a tuple of explicit examples, returning a `VerifierBatch`.
+Its frozen wrapper contains mutable native tensors; it is not an authorization or immutable
+input attestation. `batch.forward_kwargs()` feeds the fixed native model for a graph-connected
+forward. The existing supplied-logit loss is selected explicitly; its semantic `E,C,U` order
+must correspond to the caller's model order. No implicit label alias mapping, class/sample
+weights, smoothing, Trainer objective or scientific threshold is introduced.
+
+`score_verifier_batch` returns local primary softmax, `p_inconsistent` and raw bilinear
+`support_scores` keyed by PID. Absent heads return null, not zero; a present support head on an
+empty premise list returns an empty map. These are not calibrated outputs or thresholded sets.
+Missing eligible target heads remain a refusal in the supplied-logit loss.
+
+`export_verifier_classifier` writes a fresh local artifact with `model.safetensors`, native
+config/tokenizer files, schema-2 `strata_verifier.json` and the distinct implementation ID
+`forge_auxiliary_verifier_v1` in `strata_classifier.json`. Nonempty destinations refuse.
+`load_verifier_classifier` uses fixed installed classes, local files only, no remote code,
+mandatory safetensors, bounded duplicate-safe metadata and strict loading diagnostics. It
+checks labels/family/geometry/declared head keys and shapes, retains tokenizer-file hashes,
+rejects external tokenizer-file pointers and reloads a native fast tokenizer. The restored
+object exposes that tokenizer. The self-contained fast-tokenizer JSON path is tested; native
+classes or auxiliary tokenizer assets outside the recorded bindings can refuse. Existing
+primary/worker readers reject this separate artifact implementation rather than adopting it.
+
+Native numerical forwards and pure geometry helpers are synchronous leaves. Public native
+CPU work and file operations are async over worker threads. Cancellation propagates to the
+caller but cannot interrupt arbitrary native thread work; a partial or completed local artifact
+may remain and must be handled explicitly. Saving does not certify training, select a checkpoint,
+publish a model or report a worker success. Complete-population preflight/streaming, training
+routing/authority, worker/scorer adoption, calibration and release remain separate consumers.

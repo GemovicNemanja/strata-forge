@@ -212,3 +212,16 @@ imports. Its bounded premise/hypothesis renderer is an explicit supported task s
 universal training constraint. Explicit eval overrides are validated and digested before use.
 Training checkpoint selection, head initialization and calibration writers have separate
 contracts; adding metadata does not silently enable those consumers.
+
+## Auxiliary verifier SDK
+
+`verifier_geometry.py`, `_verifier_heads.py` and `verifier_classifier.py` own the separate
+schema-2, `forge_auxiliary_verifier_v1` local SDK. Require explicit shared-primary ownership;
+retain exact parameter registration and the complete native primary path without a duplicate
+backbone or reinitialization. Auxiliary flag/bilinear heads use raw final states and actual
+sequence-aware offset markers. Only declared exact head keys may be newly initialized; all
+trained reloads remain strict-fatal on missing/mismatched/unexpected keys. No truncation,
+worker/scorer/spec registration, implicit objective change or metadata authority is added.
+Pure geometry and native differentiable forwards are sync leaves; public native CPU/file work
+is async. Preserve lazy ML imports, fixed errors, null head absence and schema-1 digests.
+Reference: `docs/modules/training.md` auxiliary verifier section.
