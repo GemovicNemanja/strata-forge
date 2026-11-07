@@ -71,7 +71,7 @@ for (const failure of [new Error("ERROR CANARY"), new PromptCaptureError("local_
 test("caller abort drains one uncooperative promise before slot reuse and ignores late body getters", async () => {
   const invocation = await prepared(), caller = new AbortController(); let release!: (value: LocalByteResponse) => void; let aborts = 0, calls = 0, lateReads = 0;
   const delegate: LocalByteTransport = {
-    exchange(_body, { signal }) { calls++; signal.addEventListener("abort", () => { aborts++; assert.equal(signal.reason, "local_cancelled"); }); return new Promise(resolve => { release = resolve; }); },
+    async exchange(_body, { signal }) { calls++; signal.addEventListener("abort", () => { aborts++; assert.equal(signal.reason, "local_cancelled"); }); return new Promise(resolve => { release = resolve; }); },
   };
   let settled = false;
   const promise = captureOnce(invocation, Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null, signal: caller.signal });
@@ -148,19 +148,13 @@ test("abort remains standard-name recognizable with closed error and fixed owned
   await assert.rejects(captureOnce(invocation, Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null, signal: controller.signal }), (error: unknown) => error instanceof PromptCaptureError && error.name === "AbortError" && error.code === "local_cancelled" && error.message === "local_cancelled" && error.cause === undefined);
   assert.equal(invocation.snapshot().attempts[0].outcome, "cancelled");
 });
-test("wrong promise/response shape and hostile thenables cannot execute getters or become success", async () => {
-  let reads = 0;
-  const thenable = Object.defineProperty({}, "then", { get() { reads++; throw new Error("THEN CANARY"); } });
-  for (const returned of [thenable, new LocalByteResponse(Buffer.from("sync"), 200), Promise.resolve({}), Promise.resolve(Object.create(LocalByteResponse.prototype))]) {
+test("genuine async exchange still refuses wrong closed response shapes", async () => {
+  for (const returned of [{}, Object.create(LocalByteResponse.prototype)]) {
     const invocation = await prepared();
-    const delegate = { exchange() { return returned; } } as unknown as LocalByteTransport;
+    const delegate = { async exchange() { return returned; } } as LocalByteTransport;
     await assert.rejects(captureOnce(invocation, Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null }), fixed("capture_response_invalid"));
     assert.equal(invocation.snapshot().attempts[0].outcome, "capture_error");
   }
-  const promise = Promise.resolve(new LocalByteResponse(Buffer.from("actual"), 200));
-  Object.defineProperty(promise, "then", { get() { reads++; throw new Error("THEN CANARY"); } });
-  const result = await captureOnce(await prepared(), Buffer.from("x"), { exchange() { return promise; } }, { parents: noParent, declaredBaseline: null });
-  assert.equal(Buffer.from(result.responseBody()).toString(), "actual"); assert.equal(reads, 0);
 });
 
 test("exact gap set and failure handoff facts reject coherent-looking impossible reports", async () => {
@@ -180,7 +174,7 @@ test("actual Python/Node recorder corpus preserves exact opaque bytes and canoni
   const actualIds: string[] = [], normalized: AttemptMetadata[] = [];
   for (const step of golden.steps) {
     const request = Buffer.from(step.request_utf8_hex, "hex"), controller = new AbortController(); let calls = 0;
-    const delegate: LocalByteTransport = { exchange(body, { signal }) {
+    const delegate: LocalByteTransport = { async exchange(body, { signal }) {
       calls++; assert.deepEqual(body, request);
       if (step.behavior === "timeout") return Promise.reject(new PromptCaptureError("local_transport_timeout"));
       if (step.behavior === "cancel") return new Promise((_resolve, reject) => { signal.addEventListener("abort", () => reject(new PromptCaptureError("local_cancelled")), { once: true }); });
@@ -207,7 +201,7 @@ test("late rejected delegate stays drained with no unhandled rejection and no re
   const diagnostics: unknown[] = []; const onUnhandled = (error: unknown) => diagnostics.push(error);
   process.on("unhandledRejection", onUnhandled);
   try {
-    const delegate: LocalByteTransport = { exchange() { return new Promise((_resolve, refusing) => { reject = refusing; }); } };
+    const delegate: LocalByteTransport = { async exchange() { return new Promise((_resolve, refusing) => { reject = refusing; }); } };
     const task = captureOnce(invocation, Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null, signal: controller.signal });
     const caught = assert.rejects(task, fixed("local_cancelled")); controller.abort("CALLER CANARY"); reject(new Error("LATE ERROR CANARY")); await caught;
     await new Promise(resolve => setImmediate(resolve));
@@ -219,4 +213,44 @@ test("metadata byte caps refuse complete over-budget input without truncation", 
   assert(canonicalBytes(result.attempt).length <= 4096); assert(canonicalBytes(invocation.snapshot()).length <= 256 * 1024);
   assert.throws(() => validateAttemptMetadata({ ...result.attempt, provider: "x".repeat(4096) }), fixed("capture_limit"));
   assert.throws(() => validateInvocationMetadata({ ...invocation.snapshot(), source_partition: "x".repeat(256 * 1024) }), fixed("capture_limit"));
+});
+
+test("declared exchange getter cannot close or start a call then overwrite its state", async () => {
+  const closed = await prepared(), forbidden = new Fake();
+  const closing = { get exchange() { closed.close(); return async (body: Uint8Array) => forbidden.exchange(body); } };
+  await assert.rejects(captureOnce(closed, Buffer.from("outer"), closing, { parents: noParent, declaredBaseline: null }), fixed("capture_closed"));
+  assert.equal(forbidden.calls.length, 0); assert.equal(closed.snapshot().attempts.length, 0);
+  const invocation = await prepared(), inner = new Fake(), outer = new Fake(); let nested: Promise<unknown> | undefined;
+  const reentrant = { get exchange() { nested = captureOnce(invocation, Buffer.from("inner"), inner, { parents: noParent, declaredBaseline: null }); void nested.catch(() => undefined); return async (body: Uint8Array) => outer.exchange(body); } };
+  try { await assert.rejects(captureOnce(invocation, Buffer.from("outer"), reentrant, { parents: noParent, declaredBaseline: null }), fixed("capture_in_progress")); }
+  finally { await nested?.catch(() => undefined); }
+  assert.equal(outer.calls.length, 0); assert.equal(inner.calls.length, 1); assert.equal(invocation.snapshot().attempts.length, 1);
+});
+
+test("promise factories refuse before invocation, allocation, species/getter access or diagnostics", async () => {
+  const diagnostics: unknown[] = []; const onUnhandled = (error: unknown) => diagnostics.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  let calls = 0, getters = 0;
+  class Derived<T> extends Promise<T> {}
+  try {
+    for (const shape of ["subclass", "own-constructor", "frozen-own-getter", "thenable"] as const) {
+      const invocation = await prepared();
+      const delegate = { exchange() {
+        calls++;
+        if (shape === "thenable") return Object.defineProperty({}, "then", { get() { getters++; throw new Error("THEN CANARY"); } });
+        const rejecting = (_resolve: (value: LocalByteResponse) => void, reject: (error: unknown) => void) => { setTimeout(() => reject(new Error("DELAYED ERROR CANARY")), 1); };
+        const promise = shape === "subclass" ? new Derived<LocalByteResponse>(rejecting) : new Promise<LocalByteResponse>(rejecting);
+        if (shape === "own-constructor") Object.defineProperty(promise, "constructor", { value: Promise });
+        if (shape === "frozen-own-getter") Object.defineProperty(promise, "constructor", { get() { getters++; throw new Error("CONSTRUCTOR CANARY"); }, configurable: false });
+        return promise;
+      } } as unknown as LocalByteTransport;
+      await assert.rejects(captureOnce(invocation, Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null }), fixed("capture_invalid"));
+      assert.equal(invocation.snapshot().attempts.length, 0);
+    }
+    const generator = { async *exchange() { calls++; yield new LocalByteResponse(Buffer.from("x"), 200); } } as unknown as LocalByteTransport;
+    const proxied = { exchange: new Proxy(async () => { calls++; return new LocalByteResponse(Buffer.from("x"), 200); }, { apply() { calls++; throw new Error("PROXY CANARY"); } }) };
+    for (const delegate of [generator, proxied]) await assert.rejects(captureOnce(await prepared(), Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null }), fixed("capture_invalid"));
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(calls, 0); assert.equal(getters, 0); assert.deepEqual(diagnostics, []);
+  } finally { process.removeListener("unhandledRejection", onUnhandled); }
 });

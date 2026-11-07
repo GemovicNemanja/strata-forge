@@ -358,6 +358,9 @@ noncallable or failed lookup refuses without a ticket. No other transport config
 is inspected. The child checks its exact active generation and owner cancellation before
 handoff, including cancellation queued before the child first runs. Owner cancellation
 is checked again before a returned response can become success.
+The exact state, closed/active status and Python owner are also rechecked after callable
+resolution, so a declared getter cannot close or reenter the invocation and then dispatch
+through stale preflight state.
 
 The owner waits through a private completion-notification Future rather than forwarding
 the child's exception to an abandoned shield Future. Its callback only signals completion
@@ -385,6 +388,14 @@ state. Under-limit byte bodies are copied. Oversize responses record known size 
 coverage without copying/hashing the oversize body. See the
 [private package reference](../../packages/prompt-sdk/README.md) for the exact native-carrier,
 promise and AbortSignal boundary.
+
+Node deliberately requires a genuine non-Proxy declared async exchange, excluding async
+generators and ordinary promise factories, before ticket creation or invocation. Its intrinsic
+outer promise is observed immediately; no caller constructor/species/then getter is executed
+to rescue a rejected pending shape. Refused factories create no owned work and are not claimed
+as drained. Delegate-internal detached/adopted work remains the application's responsibility.
+This narrows the historical proposal's general Promise-return behavior to a safe closed local
+boundary; it does not add a provider adapter or alter the portable rendering profile.
 
 Reported metadata enforces coherent exact gap sets: request_not_dispatched iff the request
 is absent, response_not_observed iff response is absent, and response_oversize iff the known

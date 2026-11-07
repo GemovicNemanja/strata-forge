@@ -522,6 +522,15 @@ async def capture_once(
     if len(body) > MAX_BODY_BYTES:
         _fail("capture_limit")
     exchange = _exchange_callable(transport)
+    # Resolving the single declared descriptor may itself close or reenter this invocation.
+    if _state(invocation, loop=True) is not state or asyncio.current_task() is not owner:
+        _fail("capture_scope_invalid")
+    if state.metadata.closed:
+        _fail("capture_closed")
+    if state.active is not None:
+        _fail("capture_in_progress")
+    if owner.cancelling():
+        raise asyncio.CancelledError
     checked, baseline = _inputs(parents, declared_baseline)
     known = {item.attempt_id for item in state.metadata.attempts}
     if any(

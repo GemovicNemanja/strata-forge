@@ -54,9 +54,8 @@ dependency is installed into the Python environment or added to its wheel/sdist.
 [`docs/modules/prompt-composition.md`](../../docs/modules/prompt-composition.md) for the exact
 types/check command. The fixture copy/provenance is in [`test/fixtures/`](test/fixtures/README.md).
 
-Request/response attempt capture, provider integration, remote service credentials, retention,
-server ingestion and MCP remain unavailable. This local source wrapper does not implement those
-capabilities or complete their product acceptance.
+Provider integration, remote service credentials, durable retention, server ingestion and MCP
+remain unavailable. The explicit local recorder below does not complete their product acceptance.
 
 ## Explicit local attempt metadata
 
@@ -77,9 +76,15 @@ refusing `toJSON` avoid accidental diagnostic serialization; `structuredClone` p
 an unusable empty object with no content, rather than another live handle. This is not
 hostile-process protection, zeroization or a guarantee about intentionally logged accessors.
 
-The exchange callable is resolved once before ticket allocation. Only a genuine native
-Promise return is supported (no subclass, custom constructor or arbitrary thenable).
-There is one active promise/controller per invocation. Caller abort retires the generation,
+The exchange callable is resolved once before ticket allocation and must be a genuine declared
+`async exchange(...)` method/function. A TypeScript Promise return annotation alone is not
+this runtime proof. Proxies, async generators and ordinary promise/thenable factories refuse
+before invocation or ticket allocation; the recorder never calls a factory just to reject its
+returned pending work. State/closed/active status is checked again after that one lookup.
+The declared async call issues a native intrinsic outer promise, observed immediately without
+executing caller then/constructor/species getters or mutating a caller Promise. The delegate's
+internal detached/adopted work remains application-owned; this is no hostile-process guarantee.
+There is one active outer promise/controller per invocation. Caller abort retires the generation,
 forwards one fixed reason and waits until the same promise settles; no `Promise.race` or
 background drain permits premature slot reuse. A late return is not inspected/hashed or
 accepted as success. Cancellation throws SDK-owned `PromptCaptureError` with fixed

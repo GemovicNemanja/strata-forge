@@ -444,3 +444,59 @@ async def test_reported_failure_cannot_assert_handoff_failure_without_a_request(
     }
     with pytest.raises(ValidationError):
         AttemptMetadata.model_validate(value)
+
+
+async def test_declared_exchange_lookup_cannot_close_then_dispatch_retired_invocation() -> None:
+    invocation = await prepared()
+    fake = Fake()
+
+    class Closing:
+        @property
+        def exchange(self) -> object:
+            invocation.close()
+            return fake.exchange
+
+    with pytest.raises(PromptCaptureError, match="capture_closed"):
+        await capture_once(
+            invocation,
+            b"x",
+            cast("LocalByteTransport", Closing()),
+            parents=NO_PARENT,
+            declared_baseline=None,
+        )
+    assert fake.calls == []
+    assert invocation.snapshot().closed
+    assert invocation.snapshot().attempts == ()
+
+
+async def test_declared_exchange_lookup_cannot_overwrite_reentrant_active_call() -> None:
+    invocation = await prepared()
+    inner, outer = Fake(), Fake()
+
+    class Reentrant:
+        child: asyncio.Task[runtime.CapturedExchange] | None = None
+
+        @property
+        def exchange(self) -> object:
+            self.child = asyncio.get_running_loop().create_task(
+                capture_once(
+                    invocation, b"inner", inner, parents=NO_PARENT, declared_baseline=None
+                ),
+                eager_start=True,
+            )
+            return outer.exchange
+
+    delegate = Reentrant()
+    with pytest.raises(PromptCaptureError, match="capture_in_progress"):
+        await capture_once(
+            invocation,
+            b"outer",
+            cast("LocalByteTransport", delegate),
+            parents=NO_PARENT,
+            declared_baseline=None,
+        )
+    assert delegate.child is not None
+    await delegate.child
+    assert outer.calls == []
+    assert inner.calls == [b"inner"]
+    assert len(invocation.snapshot().attempts) == 1

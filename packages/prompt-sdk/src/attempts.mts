@@ -228,6 +228,7 @@ export class CapturedExchange {
   toJSON(): never { return fail(); }
   [inspect.custom](): string { const value = exchangeStates.get(this); return value ? `CapturedExchange(attempt_id=${value.metadata.attempt_id}, status=${responseState(value.response).status})` : "CapturedExchange(unissued)"; }
 }
+/** Runtime additionally requires a genuine declared async method, not a promise factory/generator. */
 export interface LocalByteTransport { exchange(body: Uint8Array, options: { readonly signal: AbortSignal }): Promise<LocalByteResponse> }
 export async function prepareInvocation(build: PinnedBuild, values: unknown, retention: "metadata_only" = "metadata_only"): Promise<PreparedInvocation> {
   if (retention !== "metadata_only") fail();
@@ -283,7 +284,11 @@ export async function captureOnce(invocation: PreparedInvocation, body: Uint8Arr
   // Only the explicitly declared behavior is resolved, once; never inspect configuration/error fields.
   let exchange: unknown;
   try { exchange = transport.exchange; } catch { /* The fixed preflight error has no caller cause. */ }
-  if (typeof exchange !== "function") fail();
+  if (typeof exchange !== "function" || utilTypes.isProxy(exchange) || !utilTypes.isAsyncFunction(exchange) || utilTypes.isGeneratorFunction(exchange)) fail();
+  // The sole descriptor lookup may close or synchronously begin another capture.
+  if (invocationState(invocation) !== state) fail("capture_scope_invalid");
+  if (state.metadata.closed) fail("capture_closed"); if (state.active) fail("capture_in_progress");
+  if (isAborted(signal)) cancelled(null);
   const known = new Set(state.metadata.attempts.map(attempt => attempt.attempt_id));
   for (const id of Object.values(checkedParents)) if (id !== null && !known.has(id)) fail();
   if (known.size >= MAX_ATTEMPTS || canonicalBytes(state.metadata).length + MAX_ATTEMPT_METADATA_BYTES > MAX_INVOCATION_METADATA_BYTES) fail("capture_limit");
@@ -300,13 +305,10 @@ export async function captureOnce(invocation: PreparedInvocation, body: Uint8Arr
     if (ticket.retiredAt === null) {
       ticket.handed = true;
       // The single delegate promise remains owned and awaited through abort, even if it ignores its signal.
-      const returned: unknown = Reflect.apply(exchange, transport, [Buffer.from(requestBody), Object.freeze({ signal: ticket.controller.signal })]);
-      if (!utilTypes.isPromise(returned) || Object.getPrototypeOf(returned) !== Promise.prototype || Object.hasOwn(returned, "constructor")) {
-        error = "capture_response_invalid";
-      } else {
-        // Bypass a caller-owned then accessor; this native promise remains observed until settlement.
-        raw = await promiseThen.call(returned, (value: unknown) => value); fulfilled = true;
-      }
+      // The declared async call issues an intrinsic outer promise, observed synchronously
+      // before application code can modify it. Do not inspect arbitrary thenables/species.
+      const owned = Reflect.apply(exchange, transport, [Buffer.from(requestBody), Object.freeze({ signal: ticket.controller.signal })]) as Promise<unknown>;
+      raw = await promiseThen.call(owned, (value: unknown) => value); fulfilled = true;
     }
   } catch (failure: unknown) {
     error = failure !== null && typeof failure === "object" && !utilTypes.isProxy(failure) && errorCodes.get(failure as PromptCaptureError) === "local_transport_timeout" ? "local_transport_timeout" : "local_transport_failed";
@@ -316,7 +318,7 @@ export async function captureOnce(invocation: PreparedInvocation, body: Uint8Arr
   if (ticket.retiredAt !== null) {
     record(state, ticket, "cancelled", "local_cancelled", null, null, fulfilled); raw = undefined; cancelled(id);
   }
-  if (error !== null) { record(state, ticket, error === "capture_response_invalid" ? "capture_error" : "transport_error", error); fail(error, id); }
+  if (error !== null) { record(state, ticket, "transport_error", error); fail(error, id); }
   let response: ResponseState | undefined;
   try { response = responseState(raw); } catch { /* Native response data is never read on a wrong shape. */ }
   if (!response) { record(state, ticket, "capture_error", "capture_response_invalid"); fail("capture_response_invalid", id); }
