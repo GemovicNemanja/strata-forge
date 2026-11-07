@@ -378,13 +378,31 @@ async def _drain(child: asyncio.Task[object]) -> None:
     # Repeat parent cancellation must never cancel the same owned child again or release its slot.
     while not child.done():
         try:
-            await asyncio.shield(child)
+            await _wait_owned(child)
         except BaseException:
             if child.done():
                 break
     # Consume retired errors without logging content; the owner's cancellation still propagates.
     with suppress(BaseException):
         child.result()
+
+
+async def _wait_owned(child: asyncio.Task[object]) -> object:
+    # Python shield may log a late raw failure after outer cancellation. This owned
+    # notification never copies an exception and cancellation never reaches the child.
+    if not child.done():
+        notification: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def completed(_finished: asyncio.Task[object]) -> None:
+            if not notification.done():
+                notification.set_result(None)
+
+        child.add_done_callback(completed)
+        try:
+            await notification
+        finally:
+            child.remove_done_callback(completed)
+    return child.result()
 
 
 def _retire(ticket: _Ticket) -> None:
@@ -532,7 +550,7 @@ async def capture_once(
     interrupted: BaseException | None = None
     cancelled = False
     try:
-        raw = await asyncio.shield(child)
+        raw = await _wait_owned(child)
     except asyncio.CancelledError:
         cancelled = True
         _retire(ticket)

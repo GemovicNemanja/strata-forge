@@ -359,6 +359,12 @@ is inspected. The child checks its exact active generation and owner cancellatio
 handoff, including cancellation queued before the child first runs. Owner cancellation
 is checked again before a returned response can become success.
 
+The owner waits through a private completion-notification Future rather than forwarding
+the child's exception to an abandoned shield Future. Its callback only signals completion
+and is always removed. The owner alone consumes the actual settled result, including late
+failures during cancellation drain; the event loop receives no raw-error diagnostic from
+an abandoned observer Future.
+
 Limits are 64 attempts, 16 MiB per body, 4 KiB per attempt metadata and 256 KiB per
 invocation metadata, with reservation before dispatch. Oversized request refuses before
 calling; oversized response has an explicit omitted-coverage capture error. These are
