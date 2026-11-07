@@ -44,3 +44,8 @@ identity distinct from v1. Trusted Python execution is available through `infere
 and `eval_runner.run_population_evaluation`, with required outer-digest-bound read policy and
 private local receipts. Installed CLI/registered entrypoints do not accept these envelopes;
 see the population specification boundary in the module reference.
+
+`generation_spec` and `_generation_samples` define a separate exact-pin generation contract,
+strict source membership and lazy stable1–16 sample/seed planning. They perform no native
+execution or registration. Existing worker/spec defaults remain separate; see
+[the generation contract](../../../docs/modules/pipelines.md#separate-generation-contract).

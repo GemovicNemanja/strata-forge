@@ -1018,3 +1018,58 @@ before instantiating `RedisCache`.
 The dump is gated on `FORGE_DIAGNOSTIC_ENABLED=true`. Set the env var
 and rerun; the file appears at `FORGE_DIAGNOSTIC_PATH` (default
 `./forge-diagnostic.ndjson`).
+
+## Closed local-generation data
+
+`llm.generation` defines separate strict `GenerationControls`, `GenerationRequest`,
+`GenerationResponse` and typed seed/output/channel policies. These values do not establish
+native engine capability. The candidate profiles distinguish plain final text, Qwen3 thinking
+and gpt-oss Harmony effort; unknown or incompatible settings refuse. Existing `complete`,
+`stream`, `LLMResponse` and provider normalization retain their contracts.
+
+The finite `strata-json-schema-v1` dialect supports bounded closed objects, arrays, scalar
+constraints/enums and explicit nullable types. It refuses references, regex/composition,
+metadata/default keywords and unbounded structures without rewriting the supplied schema.
+`_generation_schema.parse_json` is the bounded wire decoder for duplicate-key, UTF-8 and
+finite-number validation; direct Pydantic convenience JSON parsing is not a substitute for
+that lexical boundary. Integer-schema values follow mathematical JSON Schema semantics
+(e.g.1.0 is integral), while booleans are never numbers. String lengths count Unicode code
+points and preserve normalization/newlines.
+
+`LLMClient.generate_one([UserMessage(content=text)], request=GenerationRequest(...))` is the
+additive one-sample entry. It requires a single explicit OpenAI-compatible route, no cache,
+one plain text user message and an exact provider implementation. The fixed endpoint observer
+is unavailable: neither the legacy provider config, requested profile, model name nor a caller
+URL establishes native support. No native worker/process capability is enabled. Tests privately
+replace this observation with fictional facts and exercise the actual installed SDK against
+owned HTTP fixtures; this is not vLLM/model conformance.
+
+The distinct raw provider operation snapshots request/message data before awaits, uses an
+absolute deadline, refuses redirects/compression/non-JSON/error status without draining their
+bodies and bounds unknown-length streams before full-body materialization. The 2MiB raw ceiling
+and 1MiB decoded-channel ceiling differ; escaped inner content need not fit both at its maximum.
+A network transport may deliver the first crossing chunk; it is not forwarded/materialized as
+a complete body and no subsequent chunk is read. All SDK error text is replaced with a fixed
+context-free code. Coroutine cancellation propagates and closes owned HTTP resources, without
+claiming native process termination.
+
+SDK credentials, organization/project/webhook settings and client/proxy configuration are
+explicit. SDK 2.36 always reads OPENAI_CUSTOM_HEADERS, so its presence refuses before SDK
+construction; the guard examines names only and never reads its value or mutates environment.
+Existing completion configuration/auth/redirect behavior is unchanged. No generation cache,
+provider fallback or automatic retry applies.
+
+Results preserve final/reasoning/refusal presence, null/empty text, bounded descriptive
+response ID/system fingerprint presence and nullable usage. These returned strings are not
+model identity authority. Exact raw fields are parsed without think-tag/Harmony regex or JSON
+repair. Final-only JSON validation retains wrong-schema arrays/null as parsed invalid output;
+length termination is incomplete even when its final JSON is valid. Unknown usage stays
+unknown. No zero-cost/GPU duration, research eligibility or native model support is inferred.
+
+The fixed raw-provider transport exception and remaining integration boundaries are defined by
+[ADR0029](../architecture/adr/0029-closed-local-generation-protocol.md).
+
+Owned response streams and HTTP pools are closed before cancellation returns to the caller.
+Repeated cancellation while closing is retained until that owned closure finishes; it cannot
+produce a later successful result. The request deadline does not promise a bound on resource
+closure itself.
