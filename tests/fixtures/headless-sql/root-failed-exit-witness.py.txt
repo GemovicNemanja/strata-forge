@@ -1,0 +1,19 @@
+from dataclasses import replace
+import pytest
+from test_sql import Container, inert_boundary, installation, query, source, _FIXTURE
+from strata_forge.datasets import sql
+from strata_forge.datasets.sql_types import SQLExecutionError
+
+@pytest.mark.asyncio
+async def test_complete_result_frame_followed_by_failed_actual_exit_is_not_success(monkeypatch):
+    actual=Container.run
+    async def failed_exit(self,**kwargs):
+        outcome=await actual(self,**kwargs)
+        return replace(outcome,exit_code=1)
+    monkeypatch.setattr(Container,'run',failed_exit)
+    with (_FIXTURE/'typed.parquet').open('rb') as opened:
+        async with sql.LocalSQLExecutor(installation=installation()) as executor:
+            with pytest.raises(SQLExecutionError):
+                await executor.query(spec=query(),source=source(opened.fileno()))
+    assert Container.instances[0].calls==1
+    assert all(not p.exists() for p in Container.instances[0].directories)

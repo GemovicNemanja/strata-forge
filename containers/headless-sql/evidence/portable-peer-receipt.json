@@ -1,0 +1,136 @@
+{
+  "cleanup": {
+    "attach_reaped": true,
+    "container_removed": true,
+    "container_waited": true,
+    "exit_code": 0,
+    "oom_killed": false,
+    "staging_removed": true,
+    "stopped_pid_zero": true
+  },
+  "container_ms": 763,
+  "elapsed_ms": 770,
+  "engine_id": "bcab2e88-3f7e-4573-af68-22ef9140c812",
+  "image_id": "sha256:05af70db10d7935a425621709a97b11607bfcb84370ec53b30444771770deb41",
+  "manifest": {
+    "declared_population": "complete_named_split",
+    "expected_rows": 3,
+    "part_count": 1,
+    "parts": [
+      {
+        "expected_rows": 3,
+        "ordinal": 0,
+        "sha256": "7b650b0a8b8225bfc15f4b171ce396f4d0f8f3b3ab5e7b3da7955672b824ec7a",
+        "size_bytes": 1461
+      }
+    ],
+    "schema": [
+      {
+        "name": "id",
+        "type": {
+          "bits": 64,
+          "kind": "integer",
+          "signed": true
+        }
+      },
+      {
+        "name": "text",
+        "type": {
+          "kind": "text"
+        }
+      },
+      {
+        "name": "amount",
+        "type": {
+          "kind": "decimal",
+          "precision": 12,
+          "scale": 2
+        }
+      },
+      {
+        "name": "day",
+        "type": {
+          "kind": "date"
+        }
+      },
+      {
+        "name": "stamp",
+        "type": {
+          "kind": "timestamp",
+          "timezone": "none",
+          "unit": "us"
+        }
+      },
+      {
+        "name": "zoned",
+        "type": {
+          "kind": "timestamp",
+          "timezone": "utc",
+          "unit": "us"
+        }
+      },
+      {
+        "name": "nested",
+        "type": {
+          "item": {
+            "bits": 64,
+            "kind": "integer",
+            "signed": true
+          },
+          "kind": "list"
+        }
+      },
+      {
+        "name": "details",
+        "type": {
+          "fields": [
+            {
+              "name": "__proto__",
+              "type": {
+                "kind": "text"
+              }
+            },
+            {
+              "name": "constructor",
+              "type": {
+                "bits": 64,
+                "kind": "integer",
+                "signed": true
+              }
+            }
+          ],
+          "kind": "struct"
+        }
+      }
+    ],
+    "schema_sha256": "ffa6064380b63f0a529ee66ab94a5823f1de47f5b67c40fbeebc7325536bcf88",
+    "source_assertion": {
+      "config": "default",
+      "name": "fixture",
+      "revision": {
+        "algorithm": "sha256",
+        "value": "7b650b0a8b8225bfc15f4b171ce396f4d0f8f3b3ab5e7b3da7955672b824ec7a"
+      },
+      "split": "train",
+      "system": "fictional_local"
+    },
+    "version": 1
+  },
+  "manifest_sha256": "15f76d1a3dbd3431c0c91a7114190a08bcde3d1bb9e03cb2afe166bdf6546e41",
+  "operation_id": "fb152eeebb624a749688ecee103be3f3",
+  "profile": "sql_local_arm64_v1",
+  "receipt_sha256": "2031f07c7c18b240ccf620c09595ec610e1faaf0e4f9fe6abe8771f70d2cfdee",
+  "request_sha256": "79d38b35a583d0e4c8627414a63187fa462ea5abeda317e65316a6e68bfd42d5",
+  "result_sha256": "9bd205f5b937ea986b3d59252ee7efe37ba4c01219cfb8bf6545dfe5e70eb51d",
+  "source_observed": {
+    "bytes": 1461,
+    "parts": 1,
+    "rows": 3,
+    "schema_sha256": "ffa6064380b63f0a529ee66ab94a5823f1de47f5b67c40fbeebc7325536bcf88"
+  },
+  "spec_sha256": "b52d9653292af40b7d7a1b57b6cdf5318d3a22a1b3fd490f28fe0e4d47582bef",
+  "sql_sha256": "b9986648052148a125cbc07d48fb9089fb35573ad14e31c655e7f802b4976016",
+  "staging_ms": 3,
+  "version": 1,
+  "worker_bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac"
+}

@@ -8,7 +8,22 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Fixed
+
+- Refuse SQL result frames after failed worker exits and bind each local executor to one
+  captured event loop before source or engine work. Retain engine-identity retirement
+  even when no container create was issued. Use canonical fixed Unix `/tmp` staging on
+  macOS and Linux parents.
+
 ### Added
+
+- Add a local isolated SQL SDK over pinned provided Parquet, bounded typed results and actual
+  container wait/removal with drained cancellation. No remote authority or wire is registered.
+- Add a pinned isolated SQL image worker and synthetic native Parquet/profile proof.
+
+
+- Immutable local SQL query/input/operator/file-description values and a bounded standalone
+  typed-value/frame codec, without native SQL, container execution or authority registration.
 
 - Bounded local paired cluster percentile math and current-policy analysis with exact paired
   populations, fixed seeded draws and drained cancellation; no issuer, worker or wire activation.

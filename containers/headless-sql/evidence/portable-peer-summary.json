@@ -1,0 +1,28 @@
+{
+  "source_pin": "41b9ae61735e68fd618f9689c874533b4e2132b2",
+  "installed_target": "/private/tmp/strata-headless-sql-installed-portable-20261107",
+  "actual_query_count": 1,
+  "returned_rows": 3,
+  "columns": 8,
+  "fictional_source_bytes": 1461,
+  "caller_fd_unchanged": true,
+  "caller_fd_position": 17,
+  "caller_fd_still_open": true,
+  "lazy_sql_imports": true,
+  "parent_duckdb_import_attempts": 0,
+  "parent_duckdb_loaded": false,
+  "engine_id": "bcab2e88-3f7e-4573-af68-22ef9140c812",
+  "image_id": "sha256:05af70db10d7935a425621709a97b11607bfcb84370ec53b30444771770deb41",
+  "worker_bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac",
+  "receipt_sha256": "2031f07c7c18b240ccf620c09595ec610e1faaf0e4f9fe6abe8771f70d2cfdee",
+  "result_canonical_sha256": "05532d4ab67fe07143c6810163678983f432056fe70c78d827206859451c1caa",
+  "cleanup": {
+    "attach_reaped": true,
+    "container_removed": true,
+    "container_waited": true,
+    "exit_code": 0,
+    "oom_killed": false,
+    "staging_removed": true,
+    "stopped_pid_zero": true
+  }
+}

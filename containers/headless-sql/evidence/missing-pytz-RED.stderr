@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/app/native_admission_probe.py", line 79, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/app/native_admission_probe.py", line 47, in main
+    tzvalue=conn.execute("SELECT TIMESTAMPTZ '2040-01-02 03:04:05.000006+00'").fetchone()[0]
+            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+_duckdb.InvalidInputException: Invalid Input Error: Required module 'pytz' failed to import, due to the following Python exception:
+ModuleNotFoundError: No module named 'pytz'
+

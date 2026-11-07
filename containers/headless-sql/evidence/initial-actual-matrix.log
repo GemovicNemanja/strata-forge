@@ -1,0 +1,65 @@
+...F............F...                                                     [100%]
+=================================== FAILURES ===================================
+__________ test_actual_decimal_utc_nested_golden_and_prefix_distinct ___________
+
+    async def test_actual_decimal_utc_nested_golden_and_prefix_distinct() -> None:
+        result = await execute(
+            "SELECT id,amount,zoned,nested,details FROM dataset ORDER BY id", limit=2
+        )
+        table = cast("dict[str,wire.JSON]", result["table"])
+        rows = cast("list[list[dict[str,wire.JSON]]]", table["rows"])
+        assert rows[0][1] == {"kind": "decimal", "value": "1.25"}
+        assert rows[0][2] == {"kind": "timestamp", "value": "2040-01-02T03:04:05.000006+00:00"}
+>       assert rows[0][3] == {
+            "kind": "list",
+            "items": [{"kind": "integer", "value": "1"}, {"kind": "null"}],
+        }
+E       AssertionError: assert {'kind': 'lis...nd': 'null'}]} == {'items': [{'...kind': 'list'}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Left contains 1 more item:
+E         {'values': [{'kind': 'integer', 'value': '1'}, {'kind': 'null'}]}
+E         Right contains 1 more item:
+E         {'items': [{'kind': 'integer', 'value': '1'}, {'kind': 'null'}]}
+E         Use -v to get more diff
+
+tests/integration/datasets/test_headless_sql.py:98: AssertionError
+_ test_actual_dynamic_mutation_external_and_codec_paths_refuse_whole[SELECT repeat('x',65537)] _
+
+query = "SELECT repeat('x',65537)"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "DELETE FROM dataset",
+            "SELECT 1; SELECT 2",
+            "SELECT * FROM query('DELETE FROM dataset RETURNING *')",
+            "SELECT * FROM query('UPDATE dataset SET id=2 RETURNING *')",
+            "SELECT * FROM query('CREATE TABLE changed AS SELECT 1')",
+            "SELECT * FROM query('PRAGMA enable_profiling')",
+            "SELECT * FROM query('SET TimeZone=''Europe/Belgrade''')",
+            "SELECT * FROM query_table('dataset; DELETE FROM dataset')",
+            "SELECT * FROM read_text('/etc/passwd')",
+            "SELECT repeat('x',65537)",
+            "SELECT repeat('x',30000) FROM range(1000)",
+            "SELECT 1::TIMESTAMP_NS",
+        ],
+    )
+    async def test_actual_dynamic_mutation_external_and_codec_paths_refuse_whole(query: str) -> None:
+        with pytest.raises(SQLExecutionError) as caught:
+            await execute(query)
+>       assert caught.value.code in {
+            "query_refused",
+            "query_failed",
+            "output_limit",
+            "result_type_unsupported",
+        }
+E       AssertionError: assert 'invalid_spec' in {'output_limit', 'query_failed', 'query_refused', 'result_type_unsupported'}
+E        +  where 'invalid_spec' = SQLExecutionError('sql_execution_refused').code
+E        +    where SQLExecutionError('sql_execution_refused') = <ExceptionInfo SQLExecutionError('sql_execution_refused') tblen=3>.value
+
+tests/integration/datasets/test_headless_sql.py:135: AssertionError
+=========================== short test summary info ============================
+FAILED tests/integration/datasets/test_headless_sql.py::test_actual_decimal_utc_nested_golden_and_prefix_distinct
+FAILED tests/integration/datasets/test_headless_sql.py::test_actual_dynamic_mutation_external_and_codec_paths_refuse_whole[SELECT repeat('x',65537)]
+2 failed, 18 passed in 14.83s

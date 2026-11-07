@@ -1,0 +1,200 @@
+{
+  "fixture_kind": "metadata_only_design_not_launchable",
+  "actual_parquet_bytes_provided": false,
+  "authority": "none",
+  "manifest": {
+    "version": 1,
+    "source_assertion": {
+      "system": "fictional_local",
+      "name": "sample",
+      "config": "default",
+      "split": "train",
+      "revision": {
+        "algorithm": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "parts": [
+      {
+        "ordinal": 0,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size_bytes": 256,
+        "expected_rows": 3
+      }
+    ],
+    "schema": [
+      {
+        "name": "id",
+        "type": {
+          "kind": "integer",
+          "bits": 64,
+          "signed": true
+        }
+      },
+      {
+        "name": "amount",
+        "type": {
+          "kind": "decimal",
+          "precision": 12,
+          "scale": 2
+        }
+      }
+    ],
+    "schema_sha256": "8f93842e11af2df04bcb7844789b343d98186dd54fe1a01d914008250e139891",
+    "declared_population": "complete_named_split",
+    "expected_rows": 3,
+    "part_count": 1
+  },
+  "manifest_sha256": "9bf8b89147281e2f38777f1f9f52d9690a22dbebb593354342a5eb61e4ac0530",
+  "query_spec": {
+    "version": 1,
+    "sql": "SELECT id, amount FROM dataset ORDER BY id",
+    "input_manifest_sha256": "9bf8b89147281e2f38777f1f9f52d9690a22dbebb593354342a5eb61e4ac0530",
+    "max_result_rows": 1000,
+    "timeout_ms": 5000
+  },
+  "query_sha256": "e68b183da1ae1f247fcfe2c3ef46663866cfc41c322e9341b15b2ce70d3fb27a",
+  "expected_result_shape": {
+    "version": 1,
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type": {
+          "kind": "integer",
+          "bits": 64,
+          "signed": true
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount",
+        "type": {
+          "kind": "decimal",
+          "precision": 12,
+          "scale": 2
+        }
+      }
+    ],
+    "rows": [
+      [
+        {
+          "kind": "integer",
+          "value": "1"
+        },
+        {
+          "kind": "decimal",
+          "value": "1.25"
+        }
+      ],
+      [
+        {
+          "kind": "integer",
+          "value": "3"
+        },
+        {
+          "kind": "decimal",
+          "value": "2.50"
+        }
+      ],
+      [
+        {
+          "kind": "integer",
+          "value": "9007199254740993"
+        },
+        {
+          "kind": "null"
+        }
+      ]
+    ],
+    "returned_rows": 3,
+    "result_total_rows": 3,
+    "result_truncated": false,
+    "coverage": {
+      "input_manifest_materialized_complete": true,
+      "upstream_inventory_verified": false,
+      "query_scan_coverage": "not_measured",
+      "result_state": "exhausted"
+    }
+  },
+  "adverse_cases": [
+    {
+      "case": "statement_multi",
+      "sql": "SELECT 1; SELECT 2",
+      "expected": "query_refused"
+    },
+    {
+      "case": "native_describe",
+      "sql": "DESCRIBE dataset",
+      "expected": "native_SELECT_admitted"
+    },
+    {
+      "case": "mutation",
+      "sql": "DELETE FROM dataset",
+      "expected": "query_refused"
+    },
+    {
+      "case": "external_function",
+      "sql": "SELECT * FROM read_text('/etc/passwd')",
+      "expected": "query_refused"
+    },
+    {
+      "case": "nan_and_negative_zero",
+      "sql": "SELECT 'NaN'::DOUBLE, '-0.0'::DOUBLE",
+      "expected_cells": [
+        {
+          "kind": "float",
+          "value": "nan"
+        },
+        {
+          "kind": "float",
+          "value": "-0x0.0p+0"
+        }
+      ]
+    },
+    {
+      "case": "timestamp_ns",
+      "sql": "SELECT CAST('2026-11-07 00:00:00.000000001' AS TIMESTAMP_NS)",
+      "expected": "result_type_unsupported"
+    },
+    {
+      "case": "interval_months",
+      "sql": "SELECT INTERVAL '1 month'",
+      "expected": "result_type_unsupported"
+    },
+    {
+      "case": "wrong_file_digest",
+      "expected": "source_mismatch",
+      "phase": "before_SQL"
+    },
+    {
+      "case": "row_prefix",
+      "max_result_rows": 1,
+      "returned_rows": 1,
+      "result_total_rows": null,
+      "result_truncated": true,
+      "result_state": "row_prefix"
+    },
+    {
+      "case": "output_bytes_overflow",
+      "expected": "output_limit",
+      "partial_result": false
+    },
+    {
+      "case": "lost_create_reply",
+      "expected": "cleanup_only_matching_ownership_no_query_retry"
+    },
+    {
+      "case": "missing_image",
+      "expected": "unavailable_no_pull"
+    },
+    {
+      "case": "late_result_after_deadline",
+      "expected": "deadline_no_result_after_wait_and_cleanup"
+    },
+    {
+      "case": "cancellation_repeated",
+      "expected": "cancel_once_and_drain_actual_container_before_admission"
+    }
+  ]
+}
