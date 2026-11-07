@@ -470,3 +470,59 @@ async def test_actual_client_cancellation_keeps_original_delegate_control_and_on
     assert caught.value is provider.cancelled
     assert len(provider.calls) == 1
     assert observation.snapshot().attempts[0].call_outcome == "cancelled"
+
+
+def test_cold_explicit_facade_import_and_fake_call_do_not_reach_network_assets_or_exporter() -> (
+    None
+):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    program = r"""
+import asyncio,importlib.abc,json,pathlib,socket,sys
+fixture=json.loads(pathlib.Path(sys.argv[1]).read_text())
+attempts=[]
+def denied(*args,**kwargs):
+    attempts.append("network_or_asset")
+    raise AssertionError("forbidden")
+socket.socket.connect=denied
+socket.socket.connect_ex=denied
+socket.create_connection=denied
+socket.getaddrinfo=denied
+class Guard(importlib.abc.MetaPathFinder):
+    def find_spec(self,fullname,path=None,target=None):
+        if fullname.split(".")[0] in {"torch","transformers","trl","peft","numpy","langfuse","pyarrow","skypilot"}:
+            attempts.append(fullname)
+            raise AssertionError("optional_import_forbidden")
+sys.meta_path.insert(0,Guard())
+import tiktoken
+tiktoken.get_encoding=denied
+tiktoken.encoding_for_model=denied
+from strata_forge.prompts import LocalBuildSource,consume_build
+from strata_forge.llm.providers.base import ProviderClient
+from strata_forge.tracing import prepare_invocation,prepare_provider_observation,wrap_provider
+class Fake(ProviderClient):
+    name="openai_compat"
+    litellm_prefix="fixture/"
+    def __init__(self):pass
+    def auth_kwargs(self):raise AssertionError("auth_unread")
+    async def acompletion(self,**kwargs):return {"choices":[]}
+async def main():
+    raw=bytes.fromhex(fixture["build_canonical_utf8_hex"])
+    consumed=consume_build(raw,expected_build_id=fixture["build_id"],expected_size_bytes=len(raw),source=LocalBuildSource(kind="caller_bytes",partition="fixture:cold",reference=None))
+    prepared=await prepare_invocation(consumed,fixture["values"])
+    observation=await prepare_provider_observation(prepared)
+    wrapped=wrap_provider(Fake(),observation=observation,provider_slot="openai_compat")
+    assert await wrapped.acompletion(provider_model_id="fixture",messages=[])=={"choices":[]}
+    assert observation.snapshot().attempts[0].call_outcome=="returned"
+asyncio.run(main())
+assert attempts==[],attempts
+print("provider-local-only")
+"""
+    fixture = Path(__file__).parents[3] / "tests/fixtures/prompts/local-attempts-v1.json"
+    result = subprocess.run(  # noqa: S603 - fixed local fake program and synthetic fixture only
+        [sys.executable, "-c", program, str(fixture)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "provider-local-only"
