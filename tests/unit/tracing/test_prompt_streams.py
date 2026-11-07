@@ -550,10 +550,10 @@ async def test_fixed_forwarding_keeps_auth_route_and_nonstreaming_objects_unobse
     model = object()
     original.auth_kwargs = lambda: auth
     original.responses_auth_kwargs = lambda: auth
-    original.litellm_model = lambda value: f"fixture/{value}"
+    original.litellm_model = lambda provider_model_id: f"fixture/{provider_model_id}"
 
-    def describe(identifier: str, actual: Model) -> None:
-        described.append((identifier, actual))
+    def describe(provider_model_id: str, model: Model) -> None:
+        described.append((provider_model_id, model))
 
     original.describe_to_litellm = describe
     observation = await prepare_stream_observation(await issued_invocation())
@@ -586,7 +586,9 @@ async def test_unissued_working_objects_and_source_claims_refuse_with_fixed_mana
         with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
             type(value)()
     with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
-        object.__new__(type(wrapper)).astream(provider_model_id="fixture", messages=[])
+        object.__new__(type(cast("ProviderClient", wrapper))).astream(
+            provider_model_id="fixture", messages=[]
+        )
     with pytest.raises(StreamObservationError, match="stream_observation_invalid"):
         wrap_streaming_provider(
             cast("ProviderClient", object()), observation=observation, provider_slot="openai_compat"
