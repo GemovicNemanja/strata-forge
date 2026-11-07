@@ -495,3 +495,56 @@ upstream normalization/mapping. The shared
 integer-versus-binary64 recipes explicitly; independent Node test vectors do not imply a Node
 provider adapter or universal numeric equivalence after arbitrary host JSON parsing. These
 controls use no actual provider/network/model execution or secret configuration.
+
+## Explicit native stream observation
+
+`await prepare_stream_observation(prepared_invocation)` creates a body-free partial metadata
+owner from the exact issued local PreparedInvocation. `wrap_streaming_provider(original,
+observation=observation, provider_slot=...)` is a separate explicit ProviderClient injection
+facade. It selects no provider/config, credentials, defaults or telemetry/export behavior.
+The existing `wrap_provider` retains its transparent, unobserved stream iterator identity.
+Nonstreaming calls/auth/route/description methods on the stream facade forward unchanged.
+
+The opt-in facade observes only exact native Python async generators. Unsupported custom
+iterators/values forward untouched with bounded loss and no admitted/native-iterator claim.
+Iterator and advance identity/type/introspection are intentionally different. The fixed
+views forward native anext/asend/athrow/aclose and advance await/next/send/throw/close operations.
+Genuine items, original exceptions/control instances, native overlap/reuse refusals and
+backpressure remain native. No observer task, shield, driver, retry, prefetch, buffering or
+implicit close is added. Low-level awaited Futures are not counted as raw stream items.
+
+Input uses the unchanged allowlisted structured-value projection, bound under a distinct
+StreamInputBinding domain to actual astream/aresponses_stream and the corresponding normalized
+acompletion/aresponses schema. The argument snapshot occurs before the first driven data
+advance attempt; construction alone reads no input. Mutable arguments may change before
+that point. An invalid native advance may refuse before the generator body executes, so
+neither construction nor driving proves a provider request. Closing before any data drive
+requires no input projection. Extra observer argument references release after the single
+projection attempt or retirement; native-bound arguments retain native ownership.
+
+Metadata records only bounded counts, operation outcomes and timestamps, never item content,
+item hashes, response buffers, usage/cost or raw errors. First raw item drive latency excludes
+construction delay but can include caller/manual-driving pauses and observer/scheduling
+work. It is not provider TTFT: a raw Responses status event may precede text and the client
+parser may emit later. Only observed StopAsyncIteration or normal native aclose completion
+establishes local iterator end. Cancellation, an error, garbage collection, retirement or
+inactivity establishes neither successful output nor confirmed provider/process death.
+
+snapshot() returns copied/frozen partial metadata during active work. close() retires only
+observation, freezes the ledger and clears extra input references through at most64 weak
+issued-view references and fixed internal slot access. It calls no user/native operation,
+cancels no work and waits for nothing. Late native items/controls still reach the caller
+without updating retired metadata. View-owned private slots and weak issuance introduce no
+global working-value root; keeping metadata does not retain abandoned generator/advance,
+argument/error/callback/task/loop cycles. Native GC/finalization remains unobserved. Working
+repr/copy/pickle controls are not protection against explicit host-level introspection.
+
+Admission reserves4KiB per record plus a4KiB header inside256KiB and at most64 lifetime
+entries; the aggregate reserve can fill before the count ceiling. Entry numbers are never
+reused. Saturating2^53-1 counters have an explicit saturation flag. Unsupported, overbudget,
+foreign-scope, closed or observer-failed capture never skips, retries or replaces the
+original factory/protocol call. Lost admitted metadata remains an explicit ledger hole.
+The SDK cannot infer cache/fallback/tool-loop causal links, served model/revision, remote
+source access, HTTP wire bytes or complete coverage from these local observations. Existing
+LLMClient parsing, tools and call policies stay authoritative; no alternate renderer/compiler,
+provider adapter, automatic ingestion or Node streaming implementation is supplied.

@@ -73,6 +73,29 @@ if TYPE_CHECKING:
     from strata_forge.tracing.prompt_provider_types import (
         ProviderProjectionMetadata as ProviderProjectionMetadata,
     )
+    from strata_forge.tracing.prompt_stream_types import (
+        ProviderStreamMetadata as ProviderStreamMetadata,
+    )
+    from strata_forge.tracing.prompt_stream_types import (
+        ProviderStreamObservationMetadata as ProviderStreamObservationMetadata,
+    )
+    from strata_forge.tracing.prompt_stream_types import StreamInputBinding as StreamInputBinding
+    from strata_forge.tracing.prompt_stream_types import (
+        StreamObservationCoverage as StreamObservationCoverage,
+    )
+    from strata_forge.tracing.prompt_stream_types import (
+        StreamObservationLoss as StreamObservationLoss,
+    )
+    from strata_forge.tracing.prompt_streams import (
+        ProviderStreamObservation as ProviderStreamObservation,
+    )
+    from strata_forge.tracing.prompt_streams import StreamObservationError as StreamObservationError
+    from strata_forge.tracing.prompt_streams import (
+        prepare_stream_observation as prepare_stream_observation,
+    )
+    from strata_forge.tracing.prompt_streams import (
+        wrap_streaming_provider as wrap_streaming_provider,
+    )
 
 from strata_forge.tracing.client import get_client, reset_client
 from strata_forge.tracing.decorator import traced
@@ -105,13 +128,21 @@ __all__ = [
     "ProviderObservationLoss",
     "ProviderObservationMetadata",
     "ProviderProjectionMetadata",
+    "ProviderStreamMetadata",
+    "ProviderStreamObservation",
+    "ProviderStreamObservationMetadata",
     "ScoreValue",
+    "StreamInputBinding",
+    "StreamObservationCoverage",
+    "StreamObservationError",
+    "StreamObservationLoss",
     "capture_once",
     "get_client",
     "install_litellm_callback",
     "is_litellm_callback_installed",
     "prepare_invocation",
     "prepare_provider_observation",
+    "prepare_stream_observation",
     "record_categorical_metric",
     "record_numeric_metric",
     "reset_client",
@@ -120,10 +151,30 @@ __all__ = [
     "traced",
     "traced_span",
     "wrap_provider",
+    "wrap_streaming_provider",
 ]
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "ProviderStreamObservation",
+        "StreamObservationError",
+        "prepare_stream_observation",
+        "wrap_streaming_provider",
+    }:
+        import strata_forge.tracing.prompt_streams as streams
+
+        return getattr(streams, name)
+    if name in {
+        "ProviderStreamMetadata",
+        "ProviderStreamObservationMetadata",
+        "StreamInputBinding",
+        "StreamObservationCoverage",
+        "StreamObservationLoss",
+    }:
+        import strata_forge.tracing.prompt_stream_types as stream_types
+
+        return getattr(stream_types, name)
     if name in {
         "ProviderObservation",
         "ProviderObservationError",

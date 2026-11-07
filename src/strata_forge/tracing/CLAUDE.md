@@ -29,7 +29,8 @@ Langfuse-based observability:
 
 - **Owns:** `client.py`, `litellm_callback.py`, `decorator.py`,
   `span.py`, `score.py`, `metrics.py`, `prompt_attempt_types.py`, `prompt_attempts.py`,
-  `prompt_provider_values.py`, `prompt_provider_types.py`, `prompt_provider.py`.
+  `prompt_provider_values.py`, `prompt_provider_types.py`, `prompt_provider.py`,
+  `prompt_stream_types.py`, `prompt_streams.py`.
 - **Imports from inside `forge`:** `strata_forge.core` (logger,
   correlation_id), `strata_forge.config` (LangfuseConfig), `strata_forge.llm`
   (message/response types — for serializing trace payloads),
@@ -144,3 +145,19 @@ portable prompt canon. Provider wrappers live above llm through explicit injecti
 llm/prompts must never import tracing. Unsupported/overbudget observation is loss, not a
 permission/spend decision or a reason to suppress/retry/replace an owning model call. Existing
 Langfuse/default/no-op behavior and provider/cache/fallback/generation sources stay separate.
+
+## Explicit native stream observation
+
+`prompt_streams.py` is an explicit offline-opt-in wrapper above the existing ProviderClient
+interface, with closed counts/timing metadata in `prompt_stream_types.py`. It selects no
+provider/config/default and installs no telemetry/export hook. It observes exact native
+async generators only; unsupported returns forward by identity with loss, not admitted facts.
+Do not change the accepted nonstreaming wrapper's transparent stream identity behavior.
+
+Native iterator/advance protocol views must preserve genuine outcomes and controls without
+new tasks, shields, read-ahead, item inspection/serialization or automatic native close.
+Working state is view-owned with weak issuance only, never rooted map values. Observation
+may keep only bounded weak view references for fixed-slot extra-argument retirement clearing;
+no user/native callback or process/terminal inference. Keep all lower llm/provider/prompts/
+portable modules independent of tracing. The source binding qualifies caller-provided local
+bytes; counts/first-item timing do not establish provider execution, wire, TTFT or model success.
