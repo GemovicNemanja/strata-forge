@@ -322,3 +322,44 @@ when you explicitly call `strata_forge.core.ids.set_correlation_id`).
 Outside those, log records emit with `correlation_id=null`. If you
 want a request-scoped correlation ID independent of Langfuse, set
 one manually at the start of your handler.
+
+## Explicit local prompt-attempt evidence
+
+`strata_forge.tracing.prompt_attempts` is an opt-in, local in-memory observer above the
+accepted prompt consumer. It never calls Langfuse/get_client, resolves credentials,
+installs callbacks, exports records or supplies a provider/HTTP transport. Existing
+Langfuse configuration and disabled no-op behavior remain unchanged.
+
+`await prepare_invocation(consumed, values)` revalidates supplied local bytes and uses
+the existing typed renderer. `await capture_once(invocation, body, transport,
+parents=AttemptParents(...), declared_baseline=pin_or_none)` invokes one explicitly
+supplied application byte behavior. It does not serialize request settings, route,
+retry, fall back, execute tools, or claim provider wire/model use. The first profile is
+qualified `caller_bytes` and `sdk_local_delegate_bytes/v1`; provider, model, revision,
+usage, cost and render projection are explicitly unknown. A caller baseline supports
+same/changed-byte comparison, not compiler or source attestation.
+
+Working invocation/response/exchange objects have body-safe repr and opaque private
+storage. Bodies are available through explicit accessors; only metadata snapshots
+serialize. The sole retention mode is metadata_only: no bindings, headers, raw bodies
+or raw exceptions enter the ledger. Original request/response byte hashes are distinct
+from the uncomputed redacted hash. A hash is not anonymization or a remote grant.
+
+Python creates exactly one owned child for each byte call, shields it, cancels once
+and drains before releasing its active slot under repeated parent cancellation. Late
+returns after retirement are discarded without body inspection or success. A supplied
+baseline with no handoff uses the explicit not_observed relation. Close and terminal
+snapshots refuse with capture_in_progress while the owned call is still active; this
+avoids fabricating an incomplete terminal ledger. Snapshot reads and repeated close
+are otherwise stable. Cancellation is not proof of provider/native process death.
+
+Limits are 64 attempts, 16 MiB per body, 4 KiB per attempt metadata and 256 KiB per
+invocation metadata, with reservation before dispatch. Oversized request refuses before
+calling; oversized response has an explicit omitted-coverage capture error. These are
+local prototype bounds, not scientific or production quotas. The metadata JSON fits
+the existing portable profile; arbitrary request JSON/fractional settings are opaque
+bytes and are never hashed by parsing/reserializing that integer-only profile.
+
+The Python local recorder provides no actual ProviderClient observation, streaming, trace
+export/ingestion or service authorization. Provider/remote trace provenance is unavailable
+through this API.
