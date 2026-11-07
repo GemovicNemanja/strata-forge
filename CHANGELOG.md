@@ -12,7 +12,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 - Refuse SQL result frames after failed worker exits and bind each local executor to one
   captured event loop before source or engine work. Retain engine-identity retirement
-  even when no container create was issued.
+  even when no container create was issued. Use canonical fixed Unix `/tmp` staging on
+  macOS and Linux parents.
 
 ### Added
 

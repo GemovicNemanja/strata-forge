@@ -103,7 +103,9 @@ never SQL or adoption of another epoch's resources.
 
 The original monotonic budget starts before staging. The SDK duplicates caller descriptors,
 checks read-only regular files and copies/hashes every part through bounded reads without
-moving the caller's file offsets. A private 0700 job directory contains a read-only `input`
+moving the caller's file offsets. A private 0700 job directory is created under the fixed Unix `/tmp` namespace, then
+resolved to its canonical path before mount/readback (including macOS `/private/tmp`).
+No ambient TMPDIR or caller path selects this staging location. It contains a read-only `input`
 child; only that child is mounted into the worker. Caller descriptors remain open. Source
 hash/count/schema mismatches, changed bytes or unknown cleanup never produce a result.
 Blocking copy/hash/removal work is owned and drained after repeated cancellation.

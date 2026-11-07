@@ -465,3 +465,28 @@ async def test_actual_stdlib_fault_child_result_then_exit_one_is_refused(
     assert caught.value.code == "worker_failed"
     assert observed == [1]
     assert Container.instances[0].calls == 1
+
+
+async def test_staging_uses_fixed_unix_tmp_and_canonical_mount_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tempfile
+
+    made: list[Path] = []
+    actual = tempfile.mkdtemp
+
+    def create(*, prefix: str, dir: str) -> str:  # noqa: A002 — preserve the stdlib keyword contract.
+        assert dir == "/tmp"  # noqa: S108 — exact namespace admission, not an unsafe file path.
+        result = actual(prefix=prefix, dir=dir)
+        made.append(Path(result))
+        return result
+
+    monkeypatch.setattr(sql.tempfile, "mkdtemp", create)
+    with (_FIXTURE / "typed.parquet").open("rb") as opened:
+        async with sql.LocalSQLExecutor(installation=installation()) as executor:
+            await executor.query(spec=query(), source=source(opened.fileno()))
+    assert len(made) == 1
+    directory = Container.instances[0].directories[0]
+    assert directory.parent == made[0].resolve()
+    assert directory == directory.resolve()
+    assert not made[0].exists()

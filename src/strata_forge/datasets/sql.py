@@ -301,7 +301,8 @@ class LocalSQLExecutor:
 
     async def _make_staging(self) -> None:
         def make() -> None:
-            self._staging = Path(tempfile.mkdtemp(prefix="strata-sql-input-", dir="/private/tmp"))
+            self._staging = Path(tempfile.mkdtemp(prefix="strata-sql-input-", dir="/tmp"))
+            self._staging = self._staging.resolve(strict=True)
             (self._staging / "input").mkdir(mode=0o700)
 
         await asyncio.to_thread(make)
