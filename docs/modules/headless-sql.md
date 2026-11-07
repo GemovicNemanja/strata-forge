@@ -45,3 +45,37 @@ remain separate ordinal descriptors.
 of DuckDB result conversion. Actual native Parquet/UTC/ICU/schema behavior and full SQL
 execution remain unavailable until the isolated worker and lifecycle pass their own tests.
 The committed JSON fixture is metadata-only, not an actual Parquet source or authority.
+
+
+## Fixed image worker
+
+`containers/headless-sql/setup.py` is an explicit operator setup operation, separate from
+query execution. It anonymously obtains only the hash-pinned public Python/DuckDB/pytz
+artifacts in `profile.json`, builds the fixed Linux ARM64 image with networking disabled,
+and writes its immutable image ID and exact two-source worker bundle hash. It does not
+install a native engine into Forge. Query execution must not invoke setup or pull an image.
+The retained notices cover the image-only distributions. Setup requires an explicit trusted
+Docker executable and Unix socket; no ambient Docker context or credential configuration is
+used. Image cache availability is not guaranteed by a prior successful build.
+
+The standalone worker requires its fixed UID/cgroups/limits/no-new-privileges/seccomp profile
+before READY. It disables Python replacement/frame scans, extension installation/loading,
+persistent secrets and logging. DuckDB reports disabled logging as `0`; the worker verifies
+that exact installed-version value. Every supplied Parquet part is hashed, inspected for
+physical casefold collisions and exact logical schema, materialized and counted before
+external access is disabled and configuration locked. Native parsing admits one SELECT-kind
+statement, including WITH/SUMMARIZE/DESCRIBE, rather than a second lexical SQL validator.
+SELECT-kind admission alone is not a purity or OS isolation guarantee.
+
+Results are fetched in batches at most 64, with one-row lookahead for prefix truncation.
+Cell/type/aggregate byte failures refuse the whole result. Image-only pytz is pinned because
+DuckDB needs it to fetch TIMESTAMPTZ: only exact builtin datetimes whose tzinfo **is** the
+installed pytz.UTC singleton are adapted to stdlib UTC. No arbitrary timezone callbacks or
+fuzzy conversions are accepted. The shared table validator checks closed type/cell/coverage
+metadata, not execution authority.
+
+`containers/headless-sql/worker-proof.json` retains the synthetic three-row worker proof,
+installed source/artifact/profile hashes, actual engine identity and cleanup receipt, plus
+its initial logging-readback refusal. Parent lifecycle sources used for that probe were
+uncommitted and are explicitly outside this worker checkpoint's acceptance. A complete SDK
+operation still requires independently checked parent admission, cancellation and cleanup.

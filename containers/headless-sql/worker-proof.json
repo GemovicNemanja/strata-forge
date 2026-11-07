@@ -1,0 +1,220 @@
+{
+  "version": 1,
+  "scope": "fixed_worker_known_result_only",
+  "public_sdk_acceptance": false,
+  "profile": {
+    "base_image": "python@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97",
+    "image_id": "sha256:a3446890e4ba557eb2b05e282b3d11f81dcec1c53163e516be65c243d5f82c3b",
+    "bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac",
+    "profile": {
+      "version": 1,
+      "profile": "sql_local_arm64_v1",
+      "platform": "linux/arm64",
+      "python": "3.14.5",
+      "base_image": "python@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97",
+      "artifacts": [
+        {
+          "version": "2.0.0",
+          "filename": "duckdb-2.0.0-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl",
+          "sha256": "e38daf0acbad9de7ce892d402b68409519291ee16af3c2cba85ace3b085c7eaa",
+          "bytes": 21655920,
+          "url": "https://files.pythonhosted.org/packages/92/4a/985fb9d93d7f9f8e82092ddfe05ec8c9a1d0df7bdb0f562a10ced30e3e8f/duckdb-2.0.0-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"
+        },
+        {
+          "version": "2026.6",
+          "filename": "pytz-2026.6-py2.py3-none-any.whl",
+          "sha256": "7fed3fee8fd6bd4a2b7b75a8d56021d0624127bf69bd5691f115db929ac570b3",
+          "bytes": 506321,
+          "url": "https://files.pythonhosted.org/packages/b6/25/564f3fc5b70c1398d706c51f2b1470d0ea0b1b2f96fee67877b6f5bdf3b6/pytz-2026.6-py2.py3-none-any.whl",
+          "metadata_url": "https://pypi.org/pypi/pytz/json",
+          "metadata_sha256": "91194f3ffa20e5660adc6ad901bfa77effd5ff1d0178f89b4c53fc76792b6795"
+        }
+      ],
+      "claim": "operator setup profile only; no cached image or runtime availability asserted"
+    },
+    "source_sha256": {
+      "_sql_worker.py": "d553bee93178137c89e4ab070c520b72324b74ca3ba928a841843a200bf65347",
+      "_sql_wire.py": "f9a3e01b2d02c2ba9a46caff340ebdd1faa53284daf93e23d2f6d1aea1d6e917",
+      "Dockerfile": "0c1b77e352a6151dba90ac0618f8168cb8632039a608b3e1b80c6d83338514b3"
+    }
+  },
+  "worker_ready": {
+    "bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac",
+    "cap_eff": "0000000000000000",
+    "core_bytes": 0,
+    "cpu_period": 100000,
+    "cpu_quota": 100000,
+    "duckdb": "2.0.0",
+    "file_bytes": 33554432,
+    "gid": 65532,
+    "kind": "ready",
+    "memory_bytes": 268435456,
+    "memory_swap_bytes": 0,
+    "no_new_privs": 1,
+    "nofile": 64,
+    "operation_id": "60652e4b0a2e49829be08e2dfaae5a3c",
+    "pids": 32,
+    "profile": "sql_local_arm64_v1",
+    "python": "3.14.5",
+    "python_enable_replacements": false,
+    "python_scan_all_frames": false,
+    "pytz": "2026.6",
+    "seccomp": 2,
+    "uid": 65532,
+    "version": 1
+  },
+  "actual_receipt": {
+    "cleanup": {
+      "attach_reaped": true,
+      "container_removed": true,
+      "container_waited": true,
+      "exit_code": 0,
+      "oom_killed": false,
+      "staging_removed": true,
+      "stopped_pid_zero": true
+    },
+    "container_ms": 683,
+    "elapsed_ms": 689,
+    "engine_id": "bcab2e88-3f7e-4573-af68-22ef9140c812",
+    "image_id": "sha256:a3446890e4ba557eb2b05e282b3d11f81dcec1c53163e516be65c243d5f82c3b",
+    "manifest": {
+      "declared_population": "complete_named_split",
+      "expected_rows": 3,
+      "part_count": 1,
+      "parts": [
+        {
+          "expected_rows": 3,
+          "ordinal": 0,
+          "sha256": "7b650b0a8b8225bfc15f4b171ce396f4d0f8f3b3ab5e7b3da7955672b824ec7a",
+          "size_bytes": 1461
+        }
+      ],
+      "schema": [
+        {
+          "name": "id",
+          "type": {
+            "bits": 64,
+            "kind": "integer",
+            "signed": true
+          }
+        },
+        {
+          "name": "text",
+          "type": {
+            "kind": "text"
+          }
+        },
+        {
+          "name": "amount",
+          "type": {
+            "kind": "decimal",
+            "precision": 12,
+            "scale": 2
+          }
+        },
+        {
+          "name": "day",
+          "type": {
+            "kind": "date"
+          }
+        },
+        {
+          "name": "stamp",
+          "type": {
+            "kind": "timestamp",
+            "timezone": "none",
+            "unit": "us"
+          }
+        },
+        {
+          "name": "zoned",
+          "type": {
+            "kind": "timestamp",
+            "timezone": "utc",
+            "unit": "us"
+          }
+        },
+        {
+          "name": "nested",
+          "type": {
+            "item": {
+              "bits": 64,
+              "kind": "integer",
+              "signed": true
+            },
+            "kind": "list"
+          }
+        },
+        {
+          "name": "details",
+          "type": {
+            "fields": [
+              {
+                "name": "__proto__",
+                "type": {
+                  "kind": "text"
+                }
+              },
+              {
+                "name": "constructor",
+                "type": {
+                  "bits": 64,
+                  "kind": "integer",
+                  "signed": true
+                }
+              }
+            ],
+            "kind": "struct"
+          }
+        }
+      ],
+      "schema_sha256": "ffa6064380b63f0a529ee66ab94a5823f1de47f5b67c40fbeebc7325536bcf88",
+      "source_assertion": {
+        "config": "default",
+        "name": "fixture",
+        "revision": {
+          "algorithm": "sha256",
+          "value": "7b650b0a8b8225bfc15f4b171ce396f4d0f8f3b3ab5e7b3da7955672b824ec7a"
+        },
+        "split": "train",
+        "system": "fictional_local"
+      },
+      "version": 1
+    },
+    "manifest_sha256": "15f76d1a3dbd3431c0c91a7114190a08bcde3d1bb9e03cb2afe166bdf6546e41",
+    "operation_id": "9169e16a765d4b77b466753451f2aa51",
+    "profile": "sql_local_arm64_v1",
+    "receipt_sha256": "3127791c8c3b241621927751c9ab7c111f871b173a919523db3d86df3484ff98",
+    "request_sha256": "8f359b01d1e7ba9e777408012d1df14a71d149de3ea201776eaacc9fb3b683c8",
+    "result_sha256": "0b437197078b7203731b8e1797943b1e1d104d3772819aae1294a2b534b3e651",
+    "source_observed": {
+      "bytes": 1461,
+      "parts": 1,
+      "rows": 3,
+      "schema_sha256": "ffa6064380b63f0a529ee66ab94a5823f1de47f5b67c40fbeebc7325536bcf88"
+    },
+    "spec_sha256": "1378ebe19124604880d2a03d5adab1341b57592e6a8505b8bf1328f244af1f47",
+    "sql_sha256": "8a55f876d4cc9e140495bbbb9694b0d9a6fe39c1f86e0e6ceaca78f0c33a002c",
+    "staging_ms": 3,
+    "version": 1,
+    "worker_bundle_sha256": "53bbc58ff31d5592666b97511fc010efb36e0f042a3a4b70ef75f48f9a632aac"
+  },
+  "known_checks": [
+    "bigint_9007199254740993",
+    "decimal_scale_2",
+    "UTC_microseconds",
+    "nested_prototype_names",
+    "caller_fd_retained"
+  ],
+  "initial_logging_readback_refusal": {
+    "code": "profile_refused",
+    "kind": "error",
+    "operation_id": "5ea1f027dff14a12977c4a377e90e319",
+    "request_sha256": null,
+    "version": 1
+  },
+  "parent_sources_uncommitted": {
+    "sql.py": "441059c41db2b929ca349eaab784760583a6fb5e66e10b048b00d4e7ad423d64",
+    "_sql_container.py": "a003843c93028a224098b8f83f9322ab1a78a964f6a5d93be775bcc122cf5871"
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "source_assertion": {
+    "system": "fictional_local",
+    "name": "fixture",
+    "config": "default",
+    "split": "train",
+    "revision": {
+      "algorithm": "sha256",
+      "value": "7b650b0a8b8225bfc15f4b171ce396f4d0f8f3b3ab5e7b3da7955672b824ec7a"
+    }
+  },
+  "parts": [
+    {
+      "ordinal": 0,
+      "sha256": "7b650b0a8b8225bfc15f4b171ce396f4d0f8f3b3ab5e7b3da7955672b824ec7a",
+      "size_bytes": 1461,
+      "expected_rows": 3
+    }
+  ],
+  "schema": [
+    {
+      "name": "id",
+      "type": {
+        "kind": "integer",
+        "bits": 64,
+        "signed": true
+      }
+    },
+    {
+      "name": "text",
+      "type": {
+        "kind": "text"
+      }
+    },
+    {
+      "name": "amount",
+      "type": {
+        "kind": "decimal",
+        "precision": 12,
+        "scale": 2
+      }
+    },
+    {
+      "name": "day",
+      "type": {
+        "kind": "date"
+      }
+    },
+    {
+      "name": "stamp",
+      "type": {
+        "kind": "timestamp",
+        "unit": "us",
+        "timezone": "none"
+      }
+    },
+    {
+      "name": "zoned",
+      "type": {
+        "kind": "timestamp",
+        "unit": "us",
+        "timezone": "utc"
+      }
+    },
+    {
+      "name": "nested",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "integer",
+          "bits": 64,
+          "signed": true
+        }
+      }
+    },
+    {
+      "name": "details",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "__proto__",
+            "type": {
+              "kind": "text"
+            }
+          },
+          {
+            "name": "constructor",
+            "type": {
+              "kind": "integer",
+              "bits": 64,
+              "signed": true
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schema_sha256": "ffa6064380b63f0a529ee66ab94a5823f1de47f5b67c40fbeebc7325536bcf88",
+  "declared_population": "complete_named_split",
+  "expected_rows": 3,
+  "part_count": 1
+}

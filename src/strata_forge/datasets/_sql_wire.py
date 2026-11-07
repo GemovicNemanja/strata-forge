@@ -629,3 +629,82 @@ class FrameDecoder:
         self.ended = True
         _need(self.expected is not None and len(self.buffer) == self.expected + 4)
         return parse(bytes(self.buffer[4:]), limit=self.limit)
+
+
+def result_table(value: object) -> dict[str, JSON]:
+    """Validate a complete bounded typed table, never an execution or access attestation."""
+    data = _obj(
+        value,
+        {
+            "version",
+            "columns",
+            "rows",
+            "returned_rows",
+            "result_total_rows",
+            "result_truncated",
+            "coverage",
+        },
+    )
+    _version(data["version"])
+    schema = columns(data["columns"], source=False)
+    values = _items(data["rows"], 0, 10000)
+    rows: list[JSON] = []
+    for item in values:
+        row = _items(item, len(schema), len(schema))
+        rows.append(
+            [
+                checked_cell(cast("dict[str, JSON]", column)["type"], cell)
+                for column, cell in zip(schema, row, strict=True)
+            ]
+        )
+    _need(_count(data["returned_rows"], 0, 10000) == len(rows))
+    _need(type(data["result_truncated"]) is bool)
+    truncated = data["result_truncated"] is True
+    if truncated:
+        _need(bool(rows) and data["result_total_rows"] is None)
+    else:
+        _need(_count(data["result_total_rows"], 0, 10000) == len(rows))
+    coverage = _obj(
+        data["coverage"],
+        {
+            "input_manifest_materialized_complete",
+            "upstream_inventory_verified",
+            "query_scan_coverage",
+            "result_state",
+        },
+    )
+    _need(coverage["input_manifest_materialized_complete"] is True)
+    _need(coverage["upstream_inventory_verified"] is False)
+    _need(
+        type(coverage["query_scan_coverage"]) is str
+        and coverage["query_scan_coverage"] == "not_measured"
+    )
+    _need(
+        type(coverage["result_state"]) is str
+        and coverage["result_state"] == ("row_prefix" if truncated else "exhausted")
+    )
+    result: dict[str, JSON] = {
+        "version": 1,
+        "columns": schema,
+        "rows": rows,
+        "returned_rows": len(rows),
+        "result_total_rows": None if truncated else len(rows),
+        "result_truncated": truncated,
+        "coverage": coverage.copy(),
+    }
+    canonical(result, limit=MAX_RESULT)
+    return result
+
+
+def source_bundle(files: object) -> str:
+    """Hash exactly the two fixed image sources; descriptive consistency, not authority."""
+    _need(type(files) is dict, "profile_refused")
+    sources = cast("dict[object, object]", files)
+    _need(len(sources) == 2 and all(type(key) is str for key in sources), "profile_refused")
+    _need(set(sources) == {"_sql_worker.py", "_sql_wire.py"}, "profile_refused")
+    hashed = hashlib.sha256()
+    for name in ("_sql_worker.py", "_sql_wire.py"):
+        raw = sources[name]
+        _need(type(raw) is bytes and len(raw) <= 131072, "profile_refused")
+        hashed.update(name.encode("ascii") + b"\0" + hashlib.sha256(cast("bytes", raw)).digest())
+    return hashed.hexdigest()

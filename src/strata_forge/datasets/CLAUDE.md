@@ -124,3 +124,11 @@ validation and schema selection must not trust mutable instance/class metadata. 
 exclude rejected inputs, native diagnostics and causes. Codec changes require known-value and
 malformed/hostile tests; integers/decimals/nonfinite values and unsupported temporal/nested
 types must not be silently coerced. Sync code here is pure validation only under ADR0032.
+
+
+`_sql_worker.py` is the fixed image-only entrypoint, not a registered Forge job. Its two-source
+bundle and pinned image recipe have no query-time setup fallback. Native DuckDB/pytz imports
+belong inside the image worker only. Parent SQL parsing, remote sources, arbitrary settings,
+source callbacks and a host-native fallback remain prohibited. Fixed native profile/readback,
+all-part Parquet/hash/schema/count and small-batch typed conversion changes require actual
+fictional image proof in addition to fake-native unit controls.
