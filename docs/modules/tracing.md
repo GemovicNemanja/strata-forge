@@ -430,11 +430,50 @@ objects stay opaque; no model_dump, credential configuration or error detail is 
 The closed metadata types qualify unknown served model, immutable revision, usage/cost,
 render placement, retry relationships and vendor acceptance. Count/hash/size fields remain
 null when unobserved, and settled admission holes require matching declared metadata loss.
-These parsers issue no live capture handle. The ProviderClient wrapper is a separate source
-unit; these pure projection/metadata helpers alone do not instrument LLMClient.
+These parsers issue no live capture handle. Only the explicitly injected facade below
+observes ProviderClient; pure projection/metadata helpers alone do not instrument LLMClient.
 
 Unknown top-level names are only checked to be exact built-in strings within the bounded
 map. Their content/length/Unicode is intentionally not scanned or validated as projected
 content, and unknown values are never read. Selected nested object keys retain charged
 scalar validation. Existing portable depth/byte/safe-integer capacity refusals map to
 projection_limit; malformed structure/Unicode/key/cycle refusals map to unsupported.
+
+## Explicit ProviderClient facade
+
+`await prepare_provider_observation(prepared_invocation)` accepts only the exact issued
+PreparedInvocation public handle; parsed metadata cannot substitute. `wrap_provider(original,
+observation=observation, provider_slot=...)` returns a fixed facade for explicit injection
+into a legacy `LLMClient(provider_clients=...)`. The slot is declared, not verified vendor
+identity. The facade copies no secret configuration, creates no default client and installs
+no callback/exporter. It observes only nonstreaming acompletion/aresponses; source native
+access and rendered-to-request placement remain unknown.
+
+The same caller task invokes the same original method once with original argument values
+and nested identities. The same raw response returns, and original exceptions/controls
+propagate unchanged. Observation never retries, serializes parallel calls, changes budget/
+cache/fallback policy, normalizes a response or vetoes a model return. Unsupported input,
+projection limits, observer construction/finalization failures and capacity exhaustion
+become bounded partial metadata/loss; they cannot replace the model call's outcome.
+
+Auth/Responses auth, route formatting, model description and both stream iterators forward
+unchanged without capture. Only those named methods are a supported facade: config/type
+identity and arbitrary provider extensions are not cloned. `generate_one` keeps its existing
+exact OpenAICompatProvider admission; use a separate original unwrapped client for generation.
+Streaming, provider retry/tool-loop causal links, served model/revision and usage/cost are
+not observed by this profile. A cache hit can return before the facade is entered.
+
+The observation admits at most64 entries and reserves4KiB per active record plus a4KiB
+header within256KiB; concurrent worst-case reservations may reach budget before count64.
+Completed records release unused reservation and retain entry order despite completion
+order. Overcapacity calls forward unobserved with a saturating loss count. Snapshot/close
+refuse while admitted calls are active; closed or foreign-scope calls still forward without
+content projection. Foreign scope sets only an explicit loss flag. Settled snapshots preserve
+admission holes as metadata loss and have no claim of complete model/cache/stream coverage.
+No recording lock is held over projection/delegation/await.
+
+A real caught cancellation is re-raised by identity. If the delegate itself swallows it and
+returns, that original return still reaches the caller; increased pending cancellation marks
+the observer's response retired and skips projection. Cancellation is not process death.
+Caller partitions and hashes stay sensitive local assertions, with no persistence/export,
+headless credentials, automatic ingestion or tenant grant implied.

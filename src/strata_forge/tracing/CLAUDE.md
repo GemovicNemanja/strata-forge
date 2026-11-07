@@ -29,7 +29,7 @@ Langfuse-based observability:
 
 - **Owns:** `client.py`, `litellm_callback.py`, `decorator.py`,
   `span.py`, `score.py`, `metrics.py`, `prompt_attempt_types.py`, `prompt_attempts.py`,
-  `prompt_provider_values.py`, `prompt_provider_types.py`.
+  `prompt_provider_values.py`, `prompt_provider_types.py`, `prompt_provider.py`.
 - **Imports from inside `forge`:** `strata_forge.core` (logger,
   correlation_id), `strata_forge.config` (LangfuseConfig), `strata_forge.llm`
   (message/response types — for serializing trace payloads),

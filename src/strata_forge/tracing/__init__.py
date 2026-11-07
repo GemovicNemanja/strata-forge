@@ -1,4 +1,4 @@
-"""Langfuse observability and explicit local byte-call recording, layered from above.
+"""Langfuse observability and explicit local prompt observations, layered from above.
 
 See `docs/architecture/adr/0008-tracing-as-cross-cutting.md` for the
 design and `docs/modules/tracing.md` for the user-facing reference.
@@ -46,6 +46,33 @@ if TYPE_CHECKING:
     from strata_forge.tracing.prompt_attempts import (
         prepare_invocation as prepare_invocation,
     )
+    from strata_forge.tracing.prompt_provider import (
+        ProviderObservation as ProviderObservation,
+    )
+    from strata_forge.tracing.prompt_provider import (
+        ProviderObservationError as ProviderObservationError,
+    )
+    from strata_forge.tracing.prompt_provider import (
+        prepare_provider_observation as prepare_provider_observation,
+    )
+    from strata_forge.tracing.prompt_provider import (
+        wrap_provider as wrap_provider,
+    )
+    from strata_forge.tracing.prompt_provider_types import (
+        ProviderAttemptMetadata as ProviderAttemptMetadata,
+    )
+    from strata_forge.tracing.prompt_provider_types import (
+        ProviderObservationCoverage as ProviderObservationCoverage,
+    )
+    from strata_forge.tracing.prompt_provider_types import (
+        ProviderObservationLoss as ProviderObservationLoss,
+    )
+    from strata_forge.tracing.prompt_provider_types import (
+        ProviderObservationMetadata as ProviderObservationMetadata,
+    )
+    from strata_forge.tracing.prompt_provider_types import (
+        ProviderProjectionMetadata as ProviderProjectionMetadata,
+    )
 
 from strata_forge.tracing.client import get_client, reset_client
 from strata_forge.tracing.decorator import traced
@@ -71,12 +98,20 @@ __all__ = [
     "LocalByteTransport",
     "PreparedInvocation",
     "PromptCaptureError",
+    "ProviderAttemptMetadata",
+    "ProviderObservation",
+    "ProviderObservationCoverage",
+    "ProviderObservationError",
+    "ProviderObservationLoss",
+    "ProviderObservationMetadata",
+    "ProviderProjectionMetadata",
     "ScoreValue",
     "capture_once",
     "get_client",
     "install_litellm_callback",
     "is_litellm_callback_installed",
     "prepare_invocation",
+    "prepare_provider_observation",
     "record_categorical_metric",
     "record_numeric_metric",
     "reset_client",
@@ -84,10 +119,30 @@ __all__ = [
     "score_trace",
     "traced",
     "traced_span",
+    "wrap_provider",
 ]
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "ProviderObservation",
+        "ProviderObservationError",
+        "prepare_provider_observation",
+        "wrap_provider",
+    }:
+        import strata_forge.tracing.prompt_provider as provider
+
+        return getattr(provider, name)
+    if name in {
+        "ProviderAttemptMetadata",
+        "ProviderObservationCoverage",
+        "ProviderObservationLoss",
+        "ProviderObservationMetadata",
+        "ProviderProjectionMetadata",
+    }:
+        import strata_forge.tracing.prompt_provider_types as provider_types
+
+        return getattr(provider_types, name)
     if name in {
         "AttemptFacts",
         "AttemptMetadata",
