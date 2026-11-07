@@ -830,7 +830,9 @@ range selection, seed, family, explicit codec and resource budgets. `PrimaryPopu
 uses `ClassifierExample` rows and ordinary explicitly labelled CE or the existing explicit
 Brier objective. `AuxiliaryPopulationTask` uses exactly `{example, targets}` rows: a
 `VerifierExample` plus explicit `ResearchLossRow` fields (`primary`, `flag_target`,
-`premise_ids`, `support_set`). Label spaces, class order and PIDs are explicit. Null auxiliary
+`premise_ids`, `support_set`). Label spaces, class order and PIDs are explicit. The fixed auxiliary population codec requires
+geometry labels to equal the E/C/U class order exactly; display-label aliases or a second
+semantic mapping are unsupported, and no label/logit swapping is inferred. Null auxiliary
 targets remain absent; false and empty support sets remain eligible. Missing required heads,
 unsupported weights/smoothing, unknown IDs and implicit binary interpretations refuse.
 
@@ -869,7 +871,12 @@ count in the objective. Confirmed row/step counts advance only after optimizer a
 The fixed effective optimizer is native fused AdamW with weight decay 0, betas (.9, .999),
 epsilon 1e-8 and maximum gradient norm 1; learning rate/scheduler/warmup remain explicitly configured.
 Installed native defaults that disagree refuse instead of silently selecting a different
-optimizer. No adapters, resume, checkpoint selection or calibration are added.
+optimizer. Before constructing AdamW, declared maximum length must fit both the configured
+and actual native BERT/GPT-2 position embedding capacity or ModernBERT decoder original rotary
+context. Missing/malformed/mismatched capacities refuse. Actual tokenizer vocabulary IDs must
+fit the actual resolved input embedding rows. No context extrapolation, resizing, token
+remapping or truncation is inferred. No adapters, resume, checkpoint selection or calibration
+are added.
 
 `epoch-receipt.json` records planned/applied order hashes, confirmed rows/steps and incomplete
 optimizer status on failure. A failing optimizer may already have mutated parameters; no

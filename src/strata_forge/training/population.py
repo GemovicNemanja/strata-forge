@@ -164,7 +164,7 @@ class AuxiliaryPopulationTask(_Data):
 
     @model_validator(mode="after")
     def _classes(self) -> AuxiliaryPopulationTask:
-        if len(self.geometry.labels) != 3 or set(self.class_order) != {"E", "C", "U"}:
+        if self.geometry.labels != self.class_order or set(self.class_order) != {"E", "C", "U"}:
             raise ValueError("population_class_order_invalid")
         return self
 

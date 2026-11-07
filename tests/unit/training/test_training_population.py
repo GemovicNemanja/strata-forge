@@ -368,6 +368,81 @@ class BytesSource:
         self.closed = True
 
 
+async def population_initialized(family: str) -> tuple[Any, Any, Any, Any]:
+    from strata_forge.training._classifier_heads import initialize_classifier
+    from strata_forge.training.verifier_classifier import initialize_verifier_classifier
+    from tests.unit.training.test_classifier import stack
+    from tests.unit.training.test_verifier_classifier import tokenizer
+    from tests.unit.training.test_verifier_geometry import geometry
+
+    torch, transformers = stack()
+    if torch is None:
+        return None, None, None, None
+    torch.set_num_threads(1)
+    if family == "bert":
+        base = transformers.BertModel(
+            transformers.BertConfig(
+                vocab_size=32,
+                hidden_size=8,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=16,
+                max_position_embeddings=256,
+            )
+        )
+    elif family == "gpt2":
+        base = transformers.GPT2LMHeadModel(
+            transformers.GPT2Config(
+                vocab_size=32,
+                n_embd=8,
+                n_layer=1,
+                n_head=2,
+                n_positions=256,
+                pad_token_id=0,
+                eos_token_id=0,
+            )
+        )
+    else:
+        base = transformers.ModernBertDecoderForCausalLM(
+            transformers.ModernBertDecoderConfig(
+                vocab_size=32,
+                hidden_size=8,
+                num_hidden_layers=2,
+                num_attention_heads=2,
+                num_key_value_heads=2,
+                intermediate_size=16,
+                max_position_embeddings=256,
+                pad_token_id=0,
+                eos_token_id=0,
+                decoder_bias=True,
+                attn_implementation="eager",
+            )
+        )
+        with torch.no_grad():
+            base.decoder.bias.copy_(torch.linspace(-3.0, 3.0, 32))
+    primary = await initialize_classifier(
+        base,
+        labels=("E", "C", "U"),
+        initializer_id="encoder_random_head" if family == "bert" else "decoder_logit_head",
+        verbalizer_ids=() if family == "bert" else (10, 11, 12),
+        seed=13,
+        equivalence_inputs=None
+        if family == "bert"
+        else {
+            "input_ids": torch.tensor([[7, 8, 0], [7, 0, 0]]),
+            "attention_mask": torch.tensor([[1, 1, 1], [1, 0, 0]]),
+        },
+    )
+    config = geometry("cls" if family == "bert" else "answer_position", labels=("E", "C", "U"))
+    auxiliary = await initialize_verifier_classifier(
+        primary, geometry=config, seed=13, ownership="share"
+    )
+    if family == "modernbert-decoder":
+        assert torch.equal(auxiliary.model.classifier.bias, base.decoder.bias[[10, 11, 12]])
+        assert bool((auxiliary.model.classifier.bias != 0).all())
+    return torch, primary, auxiliary, tokenizer(family == "bert")
+
+
 @pytest.mark.parametrize("family", ["bert", "gpt2", "modernbert-decoder"])
 @pytest.mark.asyncio
 async def test_tiny_auxiliary_actual_loss_optimizer_and_safe_reload(
@@ -381,9 +456,9 @@ async def test_tiny_auxiliary_actual_loss_optimizer_and_safe_reload(
         score_verifier_batch,
     )
     from strata_forge.training.verifier_loss import ResearchLossRow, ThreeWayTarget
-    from tests.unit.training.test_verifier_classifier import examples, initialized
+    from tests.unit.training.test_verifier_classifier import examples
 
-    torch, _, model, tokenizer = await initialized(family)
+    torch, _, model, tokenizer = await population_initialized(family)
     if torch is None:
         return
     rows = examples()
@@ -845,7 +920,9 @@ async def test_auxiliary_targets_never_guess_missing_or_ineligible_fields(
     if torch is None:
         return
     g = geometry(
-        "cls", outputs=("label",) if change == "heads" else ("label", "inconsistent", "support_set")
+        "cls",
+        labels=("E", "C", "U"),
+        outputs=("label",) if change == "heads" else ("label", "inconsistent", "support_set"),
     )
     p = TrainingPopulationPlanV2.model_validate(
         {
@@ -1224,3 +1301,108 @@ async def test_cancellation_during_final_cache_hash_rewrites_nonusable_receipt(
         await task
     assert receipt(tmp_path / "final")["status"] == "cancelled"
     assert receipt(tmp_path / "final")["cache_sha256"] is None
+
+
+def test_auxiliary_semantic_order_cannot_contradict_geometry_columns() -> None:
+    from pydantic import ValidationError
+
+    from strata_forge.training.population import AuxiliaryPopulationTask
+    from tests.unit.training.test_verifier_geometry import geometry
+
+    with pytest.raises(ValidationError):
+        AuxiliaryPopulationTask(
+            codec="auxiliary_verifier_v1",
+            geometry=geometry(labels=("E", "C", "U")),
+            class_order=("C", "E", "U"),
+        )
+
+
+@pytest.mark.parametrize("family", ["bert", "gpt2", "modernbert-decoder"])
+@pytest.mark.parametrize("limit", [63, 64, 65])
+@pytest.mark.asyncio
+async def test_aux_native_capacity_below_equal_and_above_before_optimizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str, limit: int
+) -> None:
+    from strata_forge.training import _population_native
+    from strata_forge.training.population import AuxiliaryPopulationTask
+
+    torch, _, model, tokenizer = await population_initialized(family)
+    if torch is None:
+        return
+    task = AuxiliaryPopulationTask(
+        codec="auxiliary_verifier_v1", geometry=model.geometry, class_order=("E", "C", "U")
+    )
+    p = TrainingPopulationPlanV2.model_validate(
+        {**plan(1).model_dump(), "family": family, "task": task}
+    )
+    body = model.model.bert if family == "bert" else model.model.backbone
+    if family == "bert":
+        model.model.config.max_position_embeddings = limit
+        body.embeddings.position_embeddings = torch.nn.Embedding(limit, 8)
+    elif family == "gpt2":
+        model.model.config.n_positions = limit
+        body.wpe = torch.nn.Embedding(limit, 8)
+    else:
+        model.model.config.max_position_embeddings = limit
+        body.rotary_emb.original_max_seq_len = limit
+    # Validate only: no forward/optimizer, even for intentionally reduced synthetic contexts.
+    if limit < 64:
+        with pytest.raises(PopulationError, match=r"^population_training_unsupported$"):
+            _population_native._validate_model(p, model, tokenizer)  # pyright: ignore[reportPrivateUsage] — fixed native compatibility boundary
+    else:
+        _population_native._validate_model(p, model, tokenizer)  # pyright: ignore[reportPrivateUsage] — equal/below capacity positive control
+
+
+@pytest.mark.parametrize("change", ["actual_limit", "config_lie", "missing_limit", "vocab"])
+@pytest.mark.asyncio
+async def test_primary_native_context_and_vocab_fail_before_adamw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    from strata_forge.training._classifier_heads import initialize_classifier
+    from tests.unit.training.test_classifier import stack
+    from tests.unit.training.test_verifier_classifier import tokenizer as native_tokenizer
+
+    torch, transformers = stack()
+    if torch is None:
+        return
+    torch.set_num_threads(1)
+    base = transformers.BertModel(
+        transformers.BertConfig(
+            vocab_size=32,
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            max_position_embeddings=8 if change in ("actual_limit", "config_lie") else 64,
+        )
+    )
+    model = await initialize_classifier(
+        base, labels=("yes", "no"), initializer_id="encoder_random_head", seed=13
+    )
+    tokenizer = native_tokenizer(True)
+    p = plan(1)
+    prepared = await prepare_training_population(
+        p,
+        source=Source(p),
+        tokenizer=resolved(tokenizer),
+        authority=Authority(),
+        attempt_dir=tmp_path / "native",
+    )
+    if change == "config_lie":
+        model.model.config.max_position_embeddings = 64
+    elif change == "missing_limit":
+        object.__setattr__(model.model.config, "max_position_embeddings", None)
+    elif change == "vocab":
+        model.model.bert.embeddings.word_embeddings = torch.nn.Embedding(4, 8)
+    calls = []
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        calls.append(True)
+        raise AssertionError("optimizer forbidden")
+
+    monkeypatch.setattr(torch.optim, "AdamW", refuse)
+    with pytest.raises(PopulationError, match=r"^population_training_unsupported$"):
+        await train_prepared_population(
+            prepared, initialized=model, tokenizer=resolved(tokenizer), authority=Authority()
+        )
+    assert calls == []

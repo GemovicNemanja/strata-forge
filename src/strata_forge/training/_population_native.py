@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from strata_forge.core.repro import set_seed
 from strata_forge.training._classifier_heads import (
@@ -93,6 +93,42 @@ def _validate_model(
         else plan.task.geometry.labels
     )
     if tuple(model.config.id2label[index] for index in range(len(labels))) != labels:
+        raise PopulationError("population_training_unsupported")
+    body = model.bert if plan.family == "bert" else model.backbone
+    configured = getattr(
+        model.config, "n_positions" if plan.family == "gpt2" else "max_position_embeddings", None
+    )
+    if plan.family == "bert":
+        actual = body.embeddings.position_embeddings.num_embeddings
+    elif plan.family == "gpt2":
+        actual = body.wpe.num_embeddings
+        if getattr(model.config, "max_position_embeddings", None) != configured:
+            raise PopulationError("population_training_unsupported")
+    else:
+        actual = body.rotary_emb.original_max_seq_len
+    if (
+        type(configured) is not int
+        or type(actual) is not int
+        or configured <= 0
+        or configured != actual
+        or plan.max_length > actual
+    ):
+        raise PopulationError("population_training_unsupported")
+    embedding = body.get_input_embeddings()
+    vocabulary = tokenizer.get_vocab()
+    if (
+        type(embedding.num_embeddings) is not int
+        or embedding.num_embeddings <= 0
+        or embedding.weight.shape[0] != embedding.num_embeddings
+        or type(vocabulary) is not dict
+        or not vocabulary
+        or any(
+            type(key) is not str
+            or type(value) is not int
+            or not 0 <= value < embedding.num_embeddings
+            for key, value in cast("dict[object, object]", vocabulary).items()
+        )
+    ):
         raise PopulationError("population_training_unsupported")
     parameters = tuple(model.parameters())
     if (
