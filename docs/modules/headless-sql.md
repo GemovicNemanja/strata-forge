@@ -91,6 +91,8 @@ async with LocalSQLExecutor(installation=installation) as executor:
     payload = result.wire_payload()
 ```
 
+Each executor captures its first async operation's event loop under a short thread lock.
+Cross-loop calls refuse before source/engine work; it is not a cross-thread executor.
 This is one active query with no queue **per executor instance**. Multiple caller-created
 instances are not constrained by a process/organization-wide quota. A future service must
 provide its own shared owner/admission and reviewed authorization; none is installed here.
@@ -125,7 +127,10 @@ No arbitrary name collision or foreign container is killed. There is no automati
 The parent reads READY, writes one request and incrementally reads one capped response through
 EOF. It verifies exact operation/request/source/bundle identities, observed population and
 closed typed table fields. A successful result returns only after actual wait/stoppedPID0,
-container removal, helper/attach process reap and staging removal. Its immutable canonical
+container removal, helper/attach process reap and staging removal. A result frame requires
+actual exit zero; a closed worker error is projected only with the fixed failure exit one.
+A plausible result frame after a failed/nonzero/OOM exit cannot mint a zero-exit receipt.
+Its immutable canonical
 receipt records those observed facts, asserted manifest, source/SQL/spec/result hashes,
 selected image/engine/bundle and elapsed stage/container/total milliseconds. Content and
 receipt digests do not certify source authority or a hostile host. `SQLResult` reconstruction

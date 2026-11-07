@@ -224,14 +224,18 @@ def _response(
     manifest: dict[str, wire.JSON],
     bundle: str,
     max_rows: int,
+    exit_code: int,
 ) -> dict[str, wire.JSON]:
     decoded = wire.parse(payload, limit=wire.MAX_RESULT)
     _need(type(decoded) is dict)
     data = cast("dict[str, wire.JSON]", decoded)
     if data.get("kind") == "error":
+        _need(exit_code == 1)
         _need(set(data) == {"version", "kind", "operation_id", "request_sha256", "code"})
+        _need(type(data["version"]) is int and data["version"] == 1)
         _need(data["operation_id"] == operation and data["request_sha256"] == request_sha)
         raise wire.WireError(data["code"])
+    _need(exit_code == 0)
     _need(
         set(data)
         == {
@@ -284,6 +288,16 @@ class LocalSQLExecutor:
         self._closed = False
         self._staging: Path | None = None
         self._closing: asyncio.Task[bool] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_lock = threading.Lock()
+
+    def _check_loop(self) -> None:
+        current = asyncio.get_running_loop()
+        with self._loop_lock:
+            if self._loop is None:
+                self._loop = current
+            elif self._loop is not current:
+                raise SQLExecutionError("unavailable")
 
     async def _make_staging(self) -> None:
         def make() -> None:
@@ -301,6 +315,7 @@ class LocalSQLExecutor:
         self._owner = await asyncio.to_thread(SQLContainerOwner, self._installation)
 
     async def __aenter__(self) -> LocalSQLExecutor:
+        self._check_loop()
         if self._owner is not None or self._closed or self._busy:
             raise SQLExecutionError("unavailable")
         self._busy = True
@@ -340,6 +355,7 @@ class LocalSQLExecutor:
         return failed
 
     async def aclose(self) -> None:
+        self._check_loop()
         if self._busy:
             raise SQLExecutionError("busy")
         self._closed = True
@@ -354,6 +370,7 @@ class LocalSQLExecutor:
             raise SQLExecutionError("cleanup_unresolved")
 
     async def query(self, *, spec: SQLQuerySpec, source: LocalParquetFiles) -> SQLResult:
+        self._check_loop()
         started = time.monotonic()
         if self._busy:
             raise SQLExecutionError("busy")
@@ -423,7 +440,11 @@ class LocalSQLExecutor:
                     deadline=deadline,
                 )
                 finished = time.monotonic()
-                _need(outcome.exit_code in (0, 1) and outcome.oom_killed is False)
+                _need(
+                    type(outcome.exit_code) is int
+                    and outcome.exit_code in (0, 1)
+                    and outcome.oom_killed is False
+                )
                 table = _response(
                     outcome.payload,
                     operation=operation,
@@ -431,6 +452,7 @@ class LocalSQLExecutor:
                     manifest=manifest,
                     bundle=bundle,
                     max_rows=cast("int", checked["max_result_rows"]),
+                    exit_code=outcome.exit_code,
                 )
                 removing = asyncio.create_task(self._clear_staging())
                 try:

@@ -8,6 +8,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Fixed
+
+- Refuse SQL result frames after failed worker exits and bind each local executor to one
+  captured event loop before source or engine work.
+
 ### Added
 
 - Add a local isolated SQL SDK over pinned provided Parquet, bounded typed results and actual

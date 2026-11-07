@@ -287,3 +287,21 @@ async def test_actual_case_colliding_physical_parquet_is_refused(tmp_path: Path)
                     ),
                 )
     assert caught.value.code == "source_mismatch"
+
+
+async def test_actual_missing_explicit_engine_refuses_without_fallback(tmp_path: Path) -> None:
+    profile = installed().wire_payload()
+    profile["engine_socket"] = str(tmp_path / "no-engine.sock")
+    with (_ROOT / "typed.parquet").open("rb") as opened:
+        async with LocalSQLExecutor(
+            installation=LocalSQLInstallation.from_wire(profile)
+        ) as executor:
+            with pytest.raises(SQLExecutionError) as caught:
+                await executor.query(
+                    spec=spec("SELECT 1"),
+                    source=LocalParquetFiles.from_open_fds(
+                        manifest=manifest(), fds=(opened.fileno(),)
+                    ),
+                )
+    assert caught.value.code == "unavailable"
+    assert caught.value.__context__ is None

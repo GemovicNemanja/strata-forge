@@ -269,3 +269,199 @@ async def test_result_reconstruction_refuses_coherent_boolean_cleanup_tamper() -
     forged = sql.SQLResult.model_construct(canonical=wire.canonical(payload, limit=wire.MAX_RESULT))
     with pytest.raises(SQLExecutionError):
         forged.wire_payload()
+
+
+async def test_concurrent_enter_never_creates_two_owners(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    entering, release = threading.Event(), threading.Event()
+
+    class Held(Container):
+        def __init__(self, profile: dict[str, wire.JSON]) -> None:
+            super().__init__(profile)
+            entering.set()
+            assert release.wait(2)
+
+    monkeypatch.setattr(sql, "SQLContainerOwner", Held)
+    executor = sql.LocalSQLExecutor(installation=installation())
+    first = asyncio.create_task(executor.__aenter__())
+    try:
+        assert await asyncio.to_thread(entering.wait, 2)
+        with pytest.raises(SQLExecutionError) as caught:
+            await executor.__aenter__()
+        assert caught.value.code == "unavailable"
+        with pytest.raises(SQLExecutionError) as caught:
+            await executor.aclose()
+        assert caught.value.code == "busy"
+    finally:
+        release.set()
+        await first
+        await executor.aclose()
+    assert len(Container.instances) == 1
+
+
+async def test_concurrent_close_joins_one_owned_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls: list[int] = []
+
+    async def close(self: Container) -> None:
+        calls.append(1)
+        entered.set()
+        await release.wait()
+        self.closed = True
+
+    monkeypatch.setattr(Container, "aclose", close)
+    executor = sql.LocalSQLExecutor(installation=installation())
+    await executor.__aenter__()
+    first = asyncio.create_task(executor.aclose())
+    await entered.wait()
+    second = asyncio.create_task(executor.aclose())
+    await asyncio.sleep(0)
+    try:
+        assert len(calls) == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, second)
+    await executor.aclose()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("exit_code", [1, 2, True])
+async def test_valid_result_frame_followed_by_failed_exit_is_never_success(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int
+) -> None:
+    from dataclasses import replace
+
+    actual = Container.run
+
+    async def failed(
+        self: Container, *, input_dir: Path, request: bytes, operation_id: str, deadline: float
+    ) -> ContainerOutcome:
+        return replace(
+            await actual(
+                self,
+                input_dir=input_dir,
+                request=request,
+                operation_id=operation_id,
+                deadline=deadline,
+            ),
+            exit_code=exit_code,
+        )
+
+    monkeypatch.setattr(Container, "run", failed)
+    with (_FIXTURE / "typed.parquet").open("rb") as opened:
+        async with sql.LocalSQLExecutor(installation=installation()) as executor:
+            with pytest.raises(SQLExecutionError) as caught:
+                await executor.query(spec=query(), source=source(opened.fileno()))
+    assert caught.value.code == "worker_failed"
+    assert caught.value.__context__ is None
+    assert Container.instances[0].calls == 1
+    assert all(not path.exists() for path in Container.instances[0].directories)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected"), [(0, "worker_failed"), (1, "query_refused"), (2, "worker_failed")]
+)
+async def test_error_frame_requires_exact_fixed_worker_failure_exit(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int, expected: str
+) -> None:
+    async def refused(
+        self: Container, *, input_dir: Path, request: bytes, operation_id: str, deadline: float
+    ) -> ContainerOutcome:
+        data = cast("dict[str,wire.JSON]", wire.parse(request, limit=wire.MAX_REQUEST))
+        frame = {
+            "version": 1,
+            "kind": "error",
+            "operation_id": operation_id,
+            "request_sha256": data["request_sha256"],
+            "code": "query_refused",
+        }
+        self.calls += 1
+        return ContainerOutcome(
+            wire.canonical(frame, limit=wire.MAX_RESULT),
+            "fictional-engine",
+            cast("str", self.profile["image_id"]),
+            cast("str", self.profile["worker_bundle_sha256"]),
+            exit_code,
+            False,
+        )
+
+    monkeypatch.setattr(Container, "run", refused)
+    with (_FIXTURE / "typed.parquet").open("rb") as opened:
+        async with sql.LocalSQLExecutor(installation=installation()) as executor:
+            with pytest.raises(SQLExecutionError) as caught:
+                await executor.query(spec=query(), source=source(opened.fileno()))
+    assert caught.value.code == expected
+    assert Container.instances[0].calls == 1
+
+
+async def test_captured_loop_refuses_cross_thread_loop_before_staging_or_dispatch() -> None:
+    with (_FIXTURE / "typed.parquet").open("rb") as opened:
+        async with sql.LocalSQLExecutor(installation=installation()) as executor:
+
+            async def other_loop() -> None:
+                for operation in (
+                    executor.__aenter__(),
+                    executor.query(spec=query(), source=source(opened.fileno())),
+                    executor.aclose(),
+                ):
+                    with pytest.raises(SQLExecutionError) as caught:
+                        await operation
+                    assert caught.value.code == "unavailable"
+
+            await asyncio.to_thread(lambda: asyncio.run(other_loop()))
+            assert Container.instances[0].calls == 0
+            result = await executor.query(spec=query(), source=source(opened.fileno()))
+            assert result.wire_payload()["table"] == table()
+
+
+async def test_actual_stdlib_fault_child_result_then_exit_one_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This controlled process is not the attested SQL image. It proves the failed-exit
+    # observation rather than pretending an actual SQL worker normally emits this pair.
+    import sys
+    from dataclasses import replace
+
+    actual = Container.run
+    observed: list[int] = []
+
+    async def failed(
+        self: Container, *, input_dir: Path, request: bytes, operation_id: str, deadline: float
+    ) -> ContainerOutcome:
+        outcome = await actual(
+            self, input_dir=input_dir, request=request, operation_id=operation_id, deadline=deadline
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import sys;sys.stdout.buffer.write(sys.stdin.buffer.read(2097153));sys.stdout.buffer.flush();raise SystemExit(1)",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+        )
+        output, _ = await process.communicate(
+            wire.frame(wire.parse(outcome.payload, limit=wire.MAX_RESULT), limit=wire.MAX_RESULT)
+        )
+        assert process.returncode == 1
+        observed.append(process.returncode)
+        decoder = wire.FrameDecoder(limit=wire.MAX_RESULT)
+        decoder.feed(output)
+        decoded = decoder.finish()
+        return replace(
+            outcome,
+            payload=wire.canonical(decoded, limit=wire.MAX_RESULT),
+            exit_code=process.returncode,
+        )
+
+    monkeypatch.setattr(Container, "run", failed)
+    with (_FIXTURE / "typed.parquet").open("rb") as opened:
+        async with sql.LocalSQLExecutor(installation=installation()) as executor:
+            with pytest.raises(SQLExecutionError) as caught:
+                await executor.query(spec=query(), source=source(opened.fileno()))
+    assert caught.value.code == "worker_failed"
+    assert observed == [1]
+    assert Container.instances[0].calls == 1
