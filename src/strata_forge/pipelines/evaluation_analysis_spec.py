@@ -45,7 +45,11 @@ class EvaluationAnalysisError(ValidationError):
     """A fixed content-free refusal; partial temperatures are never returned."""
 
     def __init__(self, code: str = "analysis_invalid") -> None:
-        super().__init__(code if code in _CODES else "analysis_invalid")
+        super().__init__(
+            code
+            if type(code) is str and len(code) <= max(map(len, _CODES)) and code in _CODES
+            else "analysis_invalid"
+        )
 
 
 def _text(value: str) -> str:
