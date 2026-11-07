@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
+# Fault controls inspect fixed private cleanup/worker boundaries without runtime bypasses.
 import io
 import time
 from datetime import date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,7 +77,11 @@ def test_csv_lexical_newline_and_quote_contract(
 ) -> None:
     path = tmp_path / "input.csv"
     path.write_bytes(content.encode())
-    monkeypatch.setattr(worker, "Path", lambda _: path)
+
+    def selected_path(_: object) -> Path:
+        return path
+
+    monkeypatch.setattr(worker, "Path", selected_path)
 
     class NativeText:
         id = "varchar"
@@ -91,7 +97,9 @@ def test_csv_lexical_newline_and_quote_contract(
         "schema": [{"name": "x", "type": {"kind": "text"}, "nullable": False}],
     }
     with pytest.raises(sql.WireError):
-        worker._text_input(Connection(), spec, time.monotonic() + 1)
+        worker._text_input(
+            cast("worker.native._Connection", Connection()), spec, time.monotonic() + 1
+        )
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
+# Fault controls inspect fixed private cleanup/worker boundaries without runtime bypasses.
 import asyncio
 import hashlib
 import os
