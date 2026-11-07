@@ -8,7 +8,7 @@ import hashlib
 import json
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -17,6 +17,7 @@ from strata_forge.tracing import prompt_attempts as runtime
 from strata_forge.tracing.prompt_attempt_types import AttemptParents, DeclaredBodyPin
 from strata_forge.tracing.prompt_attempts import (
     LocalByteResponse,
+    LocalByteTransport,
     PreparedInvocation,
     PromptCaptureError,
     capture_once,
@@ -309,3 +310,84 @@ async def test_child_can_neither_reenter_nor_close_its_active_invocation() -> No
 
     await capture_once(invocation, b"x", Reentrant(), parents=NO_PARENT, declared_baseline=None)
     assert len(invocation.snapshot().attempts) == 1
+
+
+@pytest.mark.parametrize("shape", ["missing", "noncallable", "raising"])
+async def test_invalid_delegate_refuses_without_ticket_or_raw_error(shape: str) -> None:
+    class Noncallable:
+        exchange = 42
+
+    class Raising:
+        @property
+        def exchange(self) -> object:
+            raise RuntimeError("LOOKUP CANARY")
+
+    value = (
+        object() if shape == "missing" else Noncallable() if shape == "noncallable" else Raising()
+    )
+    invocation = await prepared()
+    with pytest.raises(PromptCaptureError, match=r"^capture_invalid$") as caught:
+        await capture_once(
+            invocation,
+            b"fictional",
+            cast("LocalByteTransport", value),
+            parents=NO_PARENT,
+            declared_baseline=None,
+        )
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    assert caught.value.attempt_id is None
+    assert invocation.snapshot().attempts == ()
+
+
+async def test_declared_exchange_is_resolved_once_and_frozen_before_child_entry() -> None:
+    class Once:
+        lookups = 0
+        calls = 0
+
+        @property
+        def exchange(self) -> object:
+            self.lookups += 1
+            assert self.lookups == 1
+            return self.perform
+
+        async def perform(self, body: bytes) -> LocalByteResponse:
+            self.calls += 1
+            assert body == b"fictional"
+            return LocalByteResponse(b"response", 200)
+
+    delegate = Once()
+    invocation = await prepared()
+    result = await capture_once(
+        invocation,
+        b"fictional",
+        cast("LocalByteTransport", delegate),
+        parents=NO_PARENT,
+        declared_baseline=None,
+    )
+    assert delegate.lookups == delegate.calls == 1
+    assert result.attempt.facts.request_captured
+
+
+async def test_real_queued_owner_cancel_before_child_entry_never_dispatches() -> None:
+    invocation = await prepared()
+    fake = Fake()
+    pin = DeclaredBodyPin(sha256=hashlib.sha256(b"fictional").hexdigest(), size_bytes=9)
+
+    async def worker() -> None:
+        owner = asyncio.current_task()
+        assert owner is not None
+        asyncio.get_running_loop().call_soon(owner.cancel)
+        await capture_once(invocation, b"fictional", fake, parents=NO_PARENT, declared_baseline=pin)
+
+    task = asyncio.create_task(worker())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fake.calls == []
+    record = invocation.snapshot().attempts[0]
+    assert record.outcome == "cancelled"
+    assert record.request is None
+    assert not record.facts.request_captured
+    assert not record.facts.response_observed
+    assert record.baseline_relation == "not_observed"
+    assert "request_not_dispatched" in record.gaps

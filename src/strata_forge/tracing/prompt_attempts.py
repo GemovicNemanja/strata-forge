@@ -34,6 +34,8 @@ from strata_forge.tracing.prompt_attempt_types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from strata_forge.prompts.portable import PortableValue
 
 
@@ -348,11 +350,28 @@ def _inputs(parents: object, baseline: object) -> tuple[AttemptParents, Declared
     return checked, pin
 
 
-async def _delegate(ticket: _Ticket, transport: LocalByteTransport, body: bytes) -> object:
-    if ticket.retired_at is not None:
+def _exchange_callable(
+    transport: LocalByteTransport,
+) -> Callable[[bytes], Awaitable[LocalByteResponse]]:
+    exchange: object = None
+    with suppress(Exception):
+        exchange = transport.exchange
+    if not callable(exchange):
+        _fail("capture_invalid")
+    return cast("Callable[[bytes], Awaitable[LocalByteResponse]]", exchange)
+
+
+async def _delegate(
+    state: _Invocation,
+    ticket: _Ticket,
+    exchange: Callable[[bytes], Awaitable[LocalByteResponse]],
+    body: bytes,
+) -> object:
+    # A queued owner cancellation can run before this child, before the owner resumes its await.
+    if state.active is not ticket or ticket.retired_at is not None or ticket.owner.cancelling():
         raise asyncio.CancelledError
     ticket.handed = True
-    return await transport.exchange(body)
+    return await exchange(body)
 
 
 async def _drain(child: asyncio.Task[object]) -> None:
@@ -484,6 +503,7 @@ async def capture_once(
         _fail("capture_invalid")
     if len(body) > MAX_BODY_BYTES:
         _fail("capture_limit")
+    exchange = _exchange_callable(transport)
     checked, baseline = _inputs(parents, declared_baseline)
     known = {item.attempt_id for item in state.metadata.attempts}
     if any(
@@ -505,7 +525,7 @@ async def capture_once(
     )
     state.active = ticket
     # The only child owns the only application-delegate invocation. No transport is installed.
-    child = asyncio.create_task(_delegate(ticket, transport, body))
+    child = asyncio.create_task(_delegate(state, ticket, exchange, body))
     ticket.child = child
     raw: object = None
     error: ErrorCode | None = None
@@ -522,6 +542,9 @@ async def capture_once(
         error = "local_transport_failed"
     except BaseException as control:
         interrupted = control
+        _retire(ticket)
+    if owner.cancelling():
+        cancelled = True
         _retire(ticket)
     if cancelled or interrupted is not None:
         await _drain(child)

@@ -353,6 +353,12 @@ snapshots refuse with capture_in_progress while the owned call is still active; 
 avoids fabricating an incomplete terminal ledger. Snapshot reads and repeated close
 are otherwise stable. Cancellation is not proof of provider/native process death.
 
+The declared exchange callable is resolved once before reserving an attempt; missing,
+noncallable or failed lookup refuses without a ticket. No other transport configuration
+is inspected. The child checks its exact active generation and owner cancellation before
+handoff, including cancellation queued before the child first runs. Owner cancellation
+is checked again before a returned response can become success.
+
 Limits are 64 attempts, 16 MiB per body, 4 KiB per attempt metadata and 256 KiB per
 invocation metadata, with reservation before dispatch. Oversized request refuses before
 calling; oversized response has an explicit omitted-coverage capture error. These are
