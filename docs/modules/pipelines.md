@@ -308,3 +308,26 @@ scoring engines; existing ordinal artifacts are not reinterpreted as stable-ID e
 
 See [metrics](metrics.md), [training](training.md), [storage](storage.md) and
 [the worker boundary decision](../architecture/adr/0021-pinned-evaluation-workers.md).
+
+## Separate generation contract
+
+`generation_spec.GenerationRunSpecV2` uses protocol `strata.generation.v2`; it is independent
+of legacy `RunSpec` and the classification-evaluation/scoring population schemas. It carries
+exact model/dataset pins, one finite Selection, stable ID column, inert column mapping,
+explicit serving/generation controls and local-only output. `parse_generation_spec` performs
+bounded strict lexical JSON validation before Pydantic. `revalidate_generation_spec` copies
+mutable nested caller data before any future operation.
+
+`_generation_samples.plan_samples` validates all supplied IDs and selection/sample caps before
+returning a lazy ordered item/sample iterator. Each item has1–16 samples with its original ID
+and0-based sample_index. The domain-separated SHA256 seed policy includes source pin/config/
+split, base seed, item ID and sample index, independent of row order, run ID or model condition.
+Effective request seeds are decimal strings to preserve int64 precision in future JSON clients.
+The alternative engine_default policy leaves request seed unknown; it does not mean random.
+No deterministic model-output or independent-draw guarantee is made.
+
+These source primitives perform no source/model IO, engine preparation or generation, and do
+not register a CLI/worker/server capability. A logical sample or requested profile is not
+native evidence or read authority. See
+[ADR0029](../architecture/adr/0029-closed-local-generation-protocol.md) for the constrained
+provider path and separate installed-native, policy and operational gates.

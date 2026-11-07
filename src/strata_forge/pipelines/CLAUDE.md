@@ -4,6 +4,10 @@ Owns inert compute-target worker specs and orchestration. Imports may compose st
 compute, training, metrics and LLM primitives; pure metrics never import workers. Read
 `docs/modules/pipelines.md` and ADR0021 before changing the evaluation boundary.
 
+- Generation uses a separate exact-pin schema and finite controls, with stable item/sample
+  identity and explicit seed semantics. Sample planning grants no source/native capability.
+  Keep lexical JSON validation, full-selection caps and legacy serialized contracts separate;
+  no CLI/registry/process activation follows from the data types.
 - Specs reject extra fields. Fixed installed commands consume data, never executable imports,
   callbacks, shell strings or repo-supplied code. Preserve the engine-version handshake.
 - Primary classifier specs are separate from registry activation. Require an installed

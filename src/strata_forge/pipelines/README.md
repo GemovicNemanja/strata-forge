@@ -37,3 +37,8 @@ CLI exposes `eval schema`, `eval validate-spec`, `eval classify` and `eval score
 The launch commands use the same worker and deny without a trusted policy adapter.
 
 Reference: https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/pipelines.md
+
+`generation_spec` and `_generation_samples` define a separate exact-pin generation contract,
+strict source membership and lazy stable1–16 sample/seed planning. They perform no native
+execution or registration. Existing worker/spec defaults remain separate; see
+[the generation contract](../../../docs/modules/pipelines.md#separate-generation-contract).

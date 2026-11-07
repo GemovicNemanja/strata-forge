@@ -30,7 +30,12 @@ The `strata_forge.sync` namespace re-exports `complete`, `stream`, `complete_str
 
 ## Internal patterns
 
-- Every provider call routes through LiteLLM via the `ProviderClient` base. LiteLLM exceptions are normalized at the seam in `errors.py` (`map_litellm_exception`) — raw LiteLLM exceptions never bubble out.
+- Closed local-generation data lives in `generation.py` and `_generation_schema.py`. Keep
+  fixed controls/profiles and scalar/duplicate/byte bounds, no arbitrary passthrough, class
+  import or schema rewriting. Contract values grant no native capability. ADR0029 permits
+  only the separate fixed raw local-generation provider method through LLMClient; existing
+  complete/stream/cache/fallback/normalizers remain unchanged.
+- Every ordinary provider call routes through LiteLLM via the `ProviderClient` base. LiteLLM exceptions are normalized at the seam in `errors.py` (`map_litellm_exception`) — raw LiteLLM exceptions never bubble out.
 - A route's `wire_api` decides the API it speaks. `chat_completions` (the default, and the only option off `openai` / `azure`) goes through `litellm.acompletion` with Chat Completions messages; `responses` goes through `litellm.aresponses` with a body `responses_wire.build_request` builds and output `responses_wire` parses ([ADR 0018](../../../docs/architecture/adr/0018-openai-routes-speak-the-responses-api.md)). Never use LiteLLM's Chat Completions to Responses bridge (`openai/responses/<id>`): it drops preamble text and `phase` and hides incomplete and failed responses.
 - Responses API requests are stateless (`store: false`, `include: ["reasoning.encrypted_content"]`, no `previous_response_id`); `build_request` refuses `provider_extras` that set `store`, `previous_response_id`, `conversation` or `background`. A turn's output items ride on `AssistantMessage.provider_items` and are replayed verbatim only to the provider that produced them; anything else gets the turn's plain text and calls. The cache never stores them. A failure event inside the stream maps through `map_responses_error`, and a stream that ends without its terminal event raises — truncation never reads as a clean stop.
 - Before a Responses call the client registers a model LiteLLM's own map lacks (`ProviderClient.describe_to_litellm`, from the registry entry, never with a `mode`); LiteLLM otherwise fakes the stream for an unmapped model. A model LiteLLM already maps keeps LiteLLM's entry.

@@ -1018,3 +1018,25 @@ before instantiating `RedisCache`.
 The dump is gated on `FORGE_DIAGNOSTIC_ENABLED=true`. Set the env var
 and rerun; the file appears at `FORGE_DIAGNOSTIC_PATH` (default
 `./forge-diagnostic.ndjson`).
+
+## Closed local-generation data
+
+`llm.generation` defines separate strict `GenerationControls`, `GenerationRequest`,
+`GenerationResponse` and typed seed/output/channel policies. These values do not establish
+native engine capability. The candidate profiles distinguish plain final text, Qwen3 thinking
+and gpt-oss Harmony effort; unknown or incompatible settings refuse. Existing `complete`,
+`stream`, `LLMResponse` and provider normalization retain their contracts.
+
+The finite `strata-json-schema-v1` dialect supports bounded closed objects, arrays, scalar
+constraints/enums and explicit nullable types. It refuses references, regex/composition,
+metadata/default keywords and unbounded structures without rewriting the supplied schema.
+`_generation_schema.parse_json` is the bounded wire decoder for duplicate-key, UTF-8 and
+finite-number validation; direct Pydantic convenience JSON parsing is not a substitute for
+that lexical boundary. Integer-schema values follow mathematical JSON Schema semantics
+(e.g.1.0 is integral), while booleans are never numbers. String lengths count Unicode code
+points and preserve normalization/newlines.
+
+These are contract and validation primitives; no generation execution, native-profile
+availability or worker registration follows from constructing them. The fixed raw-provider
+transport exception and remaining integration boundaries are defined by
+[ADR0029](../architecture/adr/0029-closed-local-generation-protocol.md).
