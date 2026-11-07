@@ -17,6 +17,9 @@ launch denies access without installed authority. See [pipeline workers](docs/mo
 Primary classifier training has an async SDK over resolved objects, with ordinary CE defaults,
 exact trusted head initialization and complete local safetensors reload. It performs no Hub or
 remote operations; worker/adapter/calibration integration remains separate. See [training](docs/modules/training.md).
+A separate local auxiliary verifier SDK preserves the primary path while adding exact PID-offset
+geometry, independent flag/bilinear support heads and strict safe export/reload. It does not
+register a worker or change the primary training defaults.
 
 ## Install
 
