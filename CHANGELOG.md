@@ -10,6 +10,10 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Bounded scalar-logit temperature math and a local registered-source fit SDK with exact
+  named-population provenance, current policy checks and drained cancellation. No registry,
+  model call, worker, bootstrap or calibration-application capability is installed.
+
 - Bounded local classifier benchmark SDK with explicit CPU/FP32 scorer/verifier boundaries,
   warmup/row accounting, nearest-rank latency, whole-loop versus SDK-active throughput and
   drained cancellation. No loader, worker, artifact write or remote capability is added.

@@ -31,3 +31,8 @@ adjusts an explicitly named hypothesis family, retaining caller order without ch
 These comparisons need no numerical extra; resampling and research thresholds are not inferred.
 
 Reference: [metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).
+
+A separate bounded pure scalar-logit fitter returns numerical search provenance without
+claiming a registered fit source. The async local pipeline adds explicit trusted named-split
+policy, complete-population checks and an immutable fit receipt. It installs no registry,
+loader or worker; clustered uncertainty and verified application remain separate.

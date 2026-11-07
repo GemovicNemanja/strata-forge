@@ -1,5 +1,21 @@
 """Synchronous deterministic metrics and comparisons, shared by evaluation and training."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from strata_forge.metrics.temperature_fit import (
+        TemperatureFitBounds as TemperatureFitBounds,
+    )
+    from strata_forge.metrics.temperature_fit import (
+        TemperatureFitError as TemperatureFitError,
+    )
+    from strata_forge.metrics.temperature_fit import (
+        TemperatureFitSolution as TemperatureFitSolution,
+    )
+    from strata_forge.metrics.temperature_fit import (
+        fit_temperature_logits as fit_temperature_logits,
+    )
+
 from strata_forge.metrics.calibration import (
     CalibrationScores,
     TemperatureCalibration,
@@ -53,10 +69,14 @@ __all__ = [
     "ProbabilityKind",
     "ProportionInterval",
     "TemperatureCalibration",
+    "TemperatureFitBounds",
+    "TemperatureFitError",
+    "TemperatureFitSolution",
     "accuracy",
     "brier",
     "classification_report",
     "confusion_matrix",
+    "fit_temperature_logits",
     "holm_correction",
     "invalid_rate",
     "macro_f1",
@@ -65,3 +85,16 @@ __all__ = [
     "temperature_scale",
     "wilson_interval",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in {
+        "TemperatureFitBounds",
+        "TemperatureFitError",
+        "TemperatureFitSolution",
+        "fit_temperature_logits",
+    }:
+        import strata_forge.metrics.temperature_fit as temperature_fit
+
+        return getattr(temperature_fit, name)
+    raise AttributeError(name)

@@ -341,3 +341,32 @@ codes without echoing supplied item/rater/source values; input-model validation 
 The [synthetic agreement fixture](../../tests/unit/metrics/fixtures/agreement_point_v1.json)
 retains hand-counted rational results, including unequal marginals, negative coefficients
 and a declared unused category. It contains no research annotations or model outputs.
+
+## Scalar-temperature fit math
+
+`TemperatureFitBounds`, `TemperatureFitSolution` and `fit_temperature_logits` are separate
+lazy exports. The synchronous primitive consumes explicit tuples of finite exact raw logits
+and integer target-column indices. It does not read a dataset, infer label order, register a
+split or authorize calibration. Complete registered fitting belongs to the local
+[pipeline SDK](pipelines.md#registered-local-temperature-fitting).
+
+The objective is unweighted mean `logsumexp(beta*z)-beta*z_gold`, beta=1/T, computed in
+binary64 after row centering without clipping. Explicit bounds satisfy
+`0.001 <= T_min <= 1 <= T_max <= 1000` and `T_min < T_max`. There are 2..16 columns,
+at most 100,000 rows and absolute logits at most 1,000,000. Nonfinite/bool/coercible numeric
+objects, mismatched matrices/indices, weights, smoothing, missing targets and unsupported
+bounds refuse. No probability vector is inverted or repaired into logits.
+
+A bounded derivative search evaluates inverse-temperature endpoints and T=1, then at most 64
+bisection steps. Choose the smallest computed objective; exact ties prefer T closest to 1,
+then smaller T. Results retain the explicit bounds, pass/iteration counts, numerical status,
+derivative, final search-bracket width and selected underflowed-weight count. The bracket is
+not a confidence interval. `flat_unidentified` requires actual equal class logits in every
+row. `numerical_stationary` can mean rounded/underflowed zero and never proves identified or
+interior convergence. `identification="not_claimed"` is unconditional. Boundary candidates
+and exhausted brackets remain explicit; no hidden optimizer or scientific gate is supplied.
+
+The pure math uses no optional library; registered fitting's point-probability application
+lazily uses the existing scoring extra. Only the local pipeline can attach registered fit
+provenance. The old temperature component/application behavior is unchanged.
+See [ADR0030](../architecture/adr/0030-registered-local-temperature-fitting.md).

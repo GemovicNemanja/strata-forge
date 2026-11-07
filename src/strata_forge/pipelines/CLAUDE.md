@@ -82,3 +82,14 @@ benchmark admission only and never change scorer support or defaults. Native cal
 a soft budget; shield/drain cancellation and hold known alias claims until cleanup finishes.
 Do not add a serialized callable/import/factory, loader, publication or authority fallback.
 Private clock/operation fakes are test seams only. ADR0028 documents the pure-value exception.
+
+## Registered local temperature fitting
+
+The separate temperature-fit schema/SDK admits only raw exact logits, identity projection
+and complete registered named sources. Missing/unknown policy refuses; ordinary read access
+is not fit eligibility. Never fit ho_dev or aliases; preserve canonical typed refs, roles,
+registration revision, exact count/digest and current checks before rows/through final return.
+Adapters are trusted Python code, never serialized grants/imports. No default issuer/worker,
+model call, file output, bootstrap placeholder or verified-application claim. Owned reads/math
+are shielded/drained under repeated cancellation; cleanup faults cannot replace cancellation
+or emit late success. Bound all inputs/work/receipts and keep raw diagnostics out of errors.
