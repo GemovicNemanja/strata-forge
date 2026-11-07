@@ -516,3 +516,24 @@ async def test_admission_allocation_failure_keeps_reserved_loss_accounting_coher
         assert snapshot.loss.metadata_lost_count == 1
     finally:
         await returned.aclose()
+
+
+@pytest.mark.parametrize("index", range(4))
+def test_shared_recorded_metadata_fixture_preserves_canonical_bytes(index: int) -> None:
+    import json
+    from pathlib import Path
+
+    from strata_forge.tracing.prompt_stream_types import ProviderStreamObservationMetadata
+
+    fixture = json.loads(
+        (Path(__file__).parents[3] / "tests/fixtures/prompts/provider-stream-v1.json").read_text()
+    )
+    vector = fixture["vectors"][index]
+    metadata = ProviderStreamObservationMetadata.model_validate_json(json.dumps(vector["metadata"]))
+    assert metadata.canonical().hex() == vector["canonical_utf8_hex"]
+    assert metadata.metadata_sha256 == vector["metadata_sha256"]
+    assert metadata.source_kind == "caller_bytes"
+    assert all(
+        stream.output_projection is None and stream.served_model is None
+        for stream in metadata.streams
+    )

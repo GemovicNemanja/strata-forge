@@ -109,3 +109,7 @@ renderer and recorder with test-only fixed ID/time seams. Node runs the same del
 compares canonical metadata after normalizing only observer-generated IDs/timing. It includes
 changed messages/tool schema/fractional settings, empty bodies, error statuses, explicit retry/
 fallback/continuation, timeout and cancellation; raw hashes remain over the original bytes.
+
+The test-only provider-stream metadata corpus checks portable canonical bytes and hashes
+against Python's body-free fictional snapshots. It does not add a Node ProviderClient,
+stream observer, network loader or provider/wire provenance claim.

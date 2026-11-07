@@ -527,8 +527,10 @@ item hashes, response buffers, usage/cost or raw errors. First raw item drive la
 construction delay but can include caller/manual-driving pauses and observer/scheduling
 work. It is not provider TTFT: a raw Responses status event may precede text and the client
 parser may emit later. Only observed StopAsyncIteration or normal native aclose completion
-establishes local iterator end. Cancellation, an error, garbage collection, retirement or
-inactivity establishes neither successful output nor confirmed provider/process death.
+establishes local iterator end. Closing an advance awaitable is not an observed generator
+aclose; native effects may still exhaust the generator. Until exhaustion or aclose completion
+is actually observed, end remains unknown. Cancellation, an error, garbage collection,
+retirement or inactivity establishes neither successful output nor confirmed provider/process death.
 
 snapshot() returns copied/frozen partial metadata during active work. close() retires only
 observation, freezes the ledger and clears extra input references through at most64 weak
@@ -549,3 +551,12 @@ The SDK cannot infer cache/fallback/tool-loop causal links, served model/revisio
 source access, HTTP wire bytes or complete coverage from these local observations. Existing
 LLMClient parsing, tools and call policies stay authoritative; no alternate renderer/compiler,
 provider adapter, automatic ingestion or Node streaming implementation is supplied.
+
+Synthetic conformance also drives the unchanged LLMClient Chat/Responses parsers and tool
+loop through explicitly injected native fake streams. These controls preserve missing-final
+Responses refusal, upstream error mapping, streaming cache/retry/fallback bypass, executable
+tools, declaration suspension with caller-owned resumption, loop errors and iteration limits.
+That client behavior is distinct from direct facade value/control identity. The
+[shared metadata fixture](../../tests/fixtures/prompts/provider-stream-v1.json) records only
+fictional body-free snapshots; Python checks closed DTOs while private Node tests check the
+same portable bytes/hashes. Those vectors supply no Node streaming/provider implementation.
