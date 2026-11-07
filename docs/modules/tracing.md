@@ -404,3 +404,31 @@ handoff. Cancel/interruption may precede handoff; optional late_return_discarded
 separately observed retired return, not inferred from the other DTO fields. The shared
 [synthetic conformance fixture](../../tests/fixtures/prompts/local-attempts-v1.json) compares
 actual local Python/Node calls, with only observer ID/time normalization for golden bytes.
+
+## Structured ProviderClient projection values
+
+`tracing.prompt_provider_values` and `prompt_provider_types` define a separate local
+`forge-provider-client-input/v1` profile. They do not invoke a provider or install an observer.
+Fixed Chat/Responses field tables preserve present-versus-absent values and omit/count
+unselected top-level fields without reading their values. This is an allowlisted structured
+projection, never a complete kwargs/HTTP-body hash or model/credential identity attestation.
+
+Exact builtins become tagged values: null, bool, string, canonical decimal integer,
+big-endian IEEE754 binary64 hex, ordered arrays and insertion-ordered object entry pairs.
+Finite float1.0 differs from integer1 and negative float zero remains distinct. Nonfinite,
+custom, cyclic and non-scalar Unicode values refuse projection without serializing them.
+The modular portable encoder and its integer-only profile remain unchanged.
+
+Effective ceilings combine native depth32, weighted tagged depth56 with8 levels reserved
+for fixed framing,65,536 native value/key nodes,4,096 map fields,1,024 integer digits and
+16MiB complete encoded projection. Native bounds do not promise every native shape fits
+its tagged expansion. The existing portable JSON depth64/64MiB/scalar-string/ASCII-object-key
+limits still apply; user keys become string values in entry pairs. Portable limit refusals
+remain projection_limit, not unsupported content or a truncated/prefix hash. Returned opaque
+objects stay opaque; no model_dump, credential configuration or error detail is read.
+
+The closed metadata types qualify unknown served model, immutable revision, usage/cost,
+render placement, retry relationships and vendor acceptance. Count/hash/size fields remain
+null when unobserved, and settled admission holes require matching declared metadata loss.
+These parsers issue no live capture handle. The ProviderClient wrapper is a separate source
+unit; these pure projection/metadata helpers alone do not instrument LLMClient.

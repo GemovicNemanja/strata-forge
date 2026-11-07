@@ -28,11 +28,12 @@ Langfuse-based observability:
 ## Boundaries
 
 - **Owns:** `client.py`, `litellm_callback.py`, `decorator.py`,
-  `span.py`, `score.py`, `metrics.py`, `prompt_attempt_types.py`, `prompt_attempts.py`.
+  `span.py`, `score.py`, `metrics.py`, `prompt_attempt_types.py`, `prompt_attempts.py`,
+  `prompt_provider_values.py`, `prompt_provider_types.py`.
 - **Imports from inside `forge`:** `strata_forge.core` (logger,
   correlation_id), `strata_forge.config` (LangfuseConfig), `strata_forge.llm`
   (message/response types — for serializing trace payloads),
-  `strata_forge.prompts` (later — for prompt metadata on traces).
+  `strata_forge.prompts` (typed local consumption and body-free prompt metadata).
 - **Imports of `langfuse`** happen lazily inside the functions that
   need them. The package is behind the `[langfuse]` extra; importing
   `strata_forge.tracing` without the extra MUST work.
@@ -133,3 +134,13 @@ No model/provider, remote loader, automatic retry, exporter or trace ingestion i
 - Changing what counts as "configured" (currently `enabled` on
   `LangfuseConfig`).
 - Adding a new dependency to the `[langfuse]` extra.
+
+## Structured provider observation boundary
+
+`prompt_provider_values.py` and `prompt_provider_types.py` own fixed allowlisted tagged
+value projections and closed metadata, independent of the opaque-byte profile. They do not
+invoke providers, inspect unselected values/config/credentials, install callbacks or alter
+portable prompt canon. Provider wrappers live above llm through explicit injection only;
+llm/prompts must never import tracing. Unsupported/overbudget observation is loss, not a
+permission/spend decision or a reason to suppress/retry/replace an owning model call. Existing
+Langfuse/default/no-op behavior and provider/cache/fallback/generation sources stay separate.
