@@ -41,3 +41,8 @@ checks. A schema or synthetic protocol fixture is insufficient to claim native m
 Separate worker/process, policy/custody, release/dispatch and app/tool integration gates remain.
 Existing inference/scoring/evaluation serialized defaults, digests and result models do not
 inherit these controls or sampling semantics.
+
+Owned response streams and HTTP pools are closed before cancellation returns to the caller.
+Repeated cancellation while closing is retained until that owned closure finishes; it cannot
+produce a later successful result. The request deadline does not promise a bound on resource
+closure itself.

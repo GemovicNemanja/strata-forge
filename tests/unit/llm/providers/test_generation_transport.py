@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
@@ -361,3 +361,127 @@ async def test_sdk_custom_header_guard_observes_only_variable_names(
             await caller.generate_one([UserMessage(content="Synthetic")], request=request())
     assert environment.value_reads == 0
     assert state["requests"] == []
+
+
+@pytest.mark.parametrize("phase", ["response", "refusal", "transport"])
+async def test_repeated_cancellation_drains_owned_close_before_return(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    release, started, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class DelayedCloseStream(Stream):
+        async def aclose(self) -> None:
+            started.set()
+            await release.wait()
+            self.closed += 1
+            closed.set()
+
+    stream = (
+        Stream([json.dumps(response()).encode()])
+        if phase == "transport"
+        else DelayedCloseStream([], asyncio.Event() if phase == "response" else None)
+    )
+    install(monkeypatch, stream=stream, status=500 if phase == "refusal" else 200)
+    if phase == "transport":
+        # The body closes normally; hold the actual SDK-owned HTTP pool instead.
+        original_factory = httpx.AsyncHTTPTransport
+
+        def factory(**kwargs: Any) -> httpx.MockTransport:
+            inner = cast("httpx.MockTransport", original_factory(**kwargs))
+            original_close = inner.aclose
+
+            async def close() -> None:
+                started.set()
+                await release.wait()
+                await original_close()
+                closed.set()
+
+            monkeypatch.setattr(inner, "aclose", close)
+            return inner
+
+        monkeypatch.setattr(httpx, "AsyncHTTPTransport", factory)
+    task = asyncio.create_task(
+        client().generate_one([UserMessage(content="Synthetic")], request=request())
+    )
+    try:
+        if phase == "response":
+            await asyncio.wait_for(stream.entered.wait(), 5)
+            task.cancel()
+        await asyncio.wait_for(started.wait(), 5)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert closed.is_set()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_expired_deadline_after_synchronous_validation_never_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = install(monkeypatch)
+    original = provider._matching_generation_endpoint  # pyright: ignore[reportPrivateUsage] — fixed observer validation seam under adverse timing.
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    offset = 0.0
+
+    def delayed(*args: Any) -> bool:
+        nonlocal offset
+        matched = original(*args)
+        offset += 1.0
+        return matched
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(loop, "time", lambda: clock() + offset)
+        scoped.setattr(provider, "_matching_generation_endpoint", delayed)
+        value = request().model_copy(update={"deadline_seconds": 0.5})
+        with pytest.raises(GenerationError, match="generation_timeout"):
+            await client().generate_one([UserMessage(content="Synthetic")], request=value)
+    assert state["requests"] == []
+
+
+async def test_expired_deadline_at_transport_dispatch_never_calls_inner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = install(monkeypatch)
+    transport = provider._GenerationTransport(0.0)  # pyright: ignore[reportPrivateUsage] — actual final dispatch guard, not a native capability claim.
+    try:
+        with pytest.raises(TimeoutError):
+            await transport.handle_async_request(httpx.Request("POST", "http://127.0.0.1:54321/v1"))
+    finally:
+        await transport.aclose()
+    assert state["requests"] == []
+
+
+async def test_expired_deadline_after_synchronous_response_parse_refuses_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.llm import generation
+
+    state = install(monkeypatch)
+    original = generation.parse_generation_response
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    offset = 0.0
+
+    def delayed(*args: Any, **kwargs: Any) -> generation.GenerationResponse:
+        nonlocal offset
+        result = original(*args, **kwargs)
+        offset += 1.0
+        return result
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(loop, "time", lambda: clock() + offset)
+        scoped.setattr(generation, "parse_generation_response", delayed)
+        value = request().model_copy(update={"deadline_seconds": 0.5})
+        with pytest.raises(GenerationError, match="generation_timeout"):
+            await client().generate_one([UserMessage(content="Synthetic")], request=value)
+    assert len(state["requests"]) == 1
+    assert state["stream"].closed >= 1

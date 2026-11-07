@@ -1068,3 +1068,8 @@ unknown. No zero-cost/GPU duration, research eligibility or native model support
 
 The fixed raw-provider transport exception and remaining integration boundaries are defined by
 [ADR0029](../architecture/adr/0029-closed-local-generation-protocol.md).
+
+Owned response streams and HTTP pools are closed before cancellation returns to the caller.
+Repeated cancellation while closing is retained until that owned closure finishes; it cannot
+produce a later successful result. The request deadline does not promise a bound on resource
+closure itself.

@@ -37,7 +37,8 @@ The `strata_forge.sync` namespace re-exports `complete`, `stream`, `complete_str
   complete/stream/cache/fallback/normalizers remain unchanged. The fixed native endpoint
   observation defaults unavailable; no caller-configured URL/model/profile grants support.
   Bound raw success/error streams before SDK body materialization, refuse redirects/compression,
-  and keep fixed errors without raw context. Preserve exact channel/metadata presence and
+  and keep fixed errors without raw context. Drain owned resource closure before propagating
+  cancellation, including repeated cancellation during closure. Preserve exact channel/metadata presence and
   validate only final JSON. Tests may privately patch observation, never enable a test flag.
 - Every ordinary provider call routes through LiteLLM via the `ProviderClient` base. LiteLLM exceptions are normalized at the seam in `errors.py` (`map_litellm_exception`) — raw LiteLLM exceptions never bubble out.
 - A route's `wire_api` decides the API it speaks. `chat_completions` (the default, and the only option off `openai` / `azure`) goes through `litellm.acompletion` with Chat Completions messages; `responses` goes through `litellm.aresponses` with a body `responses_wire.build_request` builds and output `responses_wire` parses ([ADR 0018](../../../docs/architecture/adr/0018-openai-routes-speak-the-responses-api.md)). Never use LiteLLM's Chat Completions to Responses bridge (`openai/responses/<id>`): it drops preamble text and `phase` and hides incomplete and failed responses.

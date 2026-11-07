@@ -48,7 +48,7 @@ from strata_forge.llm.providers.base import ProviderClient
 from strata_forge.llm.providers.config import OpenAICompatConfig
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Coroutine
 
     from openai.types.chat.completion_create_params import ResponseFormat
 
@@ -133,14 +133,35 @@ def _matching_generation_endpoint(
         return False
 
 
+async def _drain_generation_close(close: Coroutine[object, object, None]) -> None:
+    # Cancellation must not transfer ownership of an open response or HTTP pool to the caller.
+    closing = asyncio.create_task(close)
+    cancelled = False
+    while not closing.done():
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        if not closing.cancelled():
+            closing.exception()
+        raise asyncio.CancelledError
+    closing.result()
+
+
 class _GenerationTransport(httpx.AsyncBaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
         self.inner = httpx.AsyncHTTPTransport(retries=0, trust_env=False)
         self.refusal_code: str | None = None
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         from strata_forge.llm.generation import MAX_GENERATION_RESPONSE_BYTES, GenerationError
 
+        if asyncio.get_running_loop().time() >= self.deadline:
+            raise TimeoutError
         response = await self.inner.handle_async_request(request)
         code: str | None = None
         if 300 <= response.status_code < 400:
@@ -166,17 +187,17 @@ class _GenerationTransport(httpx.AsyncBaseTransport):
                 code = "generation_response_limit_exceeded"
         if code is not None:
             self.refusal_code = code
-            await response.aclose()
+            await _drain_generation_close(response.aclose())
             raise GenerationError(code)
         if not isinstance(response.stream, httpx.AsyncByteStream):
             self.refusal_code = "generation_response_invalid"
-            await response.aclose()
+            await _drain_generation_close(response.aclose())
             raise GenerationError(self.refusal_code)
         response.stream = _GenerationStream(response.stream, self)
         return response
 
     async def aclose(self) -> None:
-        await self.inner.aclose()
+        await _drain_generation_close(self.inner.aclose())
 
 
 class _GenerationStream(httpx.AsyncByteStream):
@@ -195,12 +216,12 @@ class _GenerationStream(httpx.AsyncByteStream):
             self.count += len(chunk)
             if self.count > MAX_GENERATION_RESPONSE_BYTES:
                 self.transport.refusal_code = "generation_response_limit_exceeded"
-                await self.source.aclose()
+                await _drain_generation_close(self.source.aclose())
                 raise GenerationError(self.transport.refusal_code)
             yield chunk
 
     async def aclose(self) -> None:
-        await self.source.aclose()
+        await _drain_generation_close(self.source.aclose())
 
 
 class OpenAICompatProvider(ProviderClient):
@@ -280,13 +301,15 @@ class OpenAICompatProvider(ProviderClient):
                 raise GenerationError("generation_profile_unavailable")
             if not _matching_generation_endpoint(observed, current):
                 raise GenerationError("generation_profile_unavailable")
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError
             # SDK2.36 consumes this variable even when default_headers are explicit.
             if any(name == "OPENAI_CUSTOM_HEADERS" for name in os.environ):
                 raise GenerationError("generation_sdk_configuration_unsupported")
             body = request_body(current, user_text=user_text, served_model=observed.served_model)
             from openai import AsyncOpenAI, omit
 
-            transport = _GenerationTransport()
+            transport = _GenerationTransport(deadline)
             http = httpx.AsyncClient(
                 transport=transport,
                 trust_env=False,
@@ -343,8 +366,10 @@ class OpenAICompatProvider(ProviderClient):
                             result = parse_generation_response(
                                 current, bytes(raw), served_model=observed.served_model
                             )
+                            if asyncio.get_running_loop().time() >= deadline:
+                                raise TimeoutError
             finally:
-                await http.aclose()
+                await _drain_generation_close(http.aclose())
         except asyncio.CancelledError:
             raise
         except Exception as error:
