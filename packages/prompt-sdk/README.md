@@ -57,3 +57,43 @@ types/check command. The fixture copy/provenance is in [`test/fixtures/`](test/f
 Request/response attempt capture, provider integration, remote service credentials, retention,
 server ingestion and MCP remain unavailable. This local source wrapper does not implement those
 capabilities or complete their product acceptance.
+
+## Explicit local attempt metadata
+
+`prepareInvocation(pinnedBuild, values)` revalidates caller-provided bytes and uses the
+existing modular renderer. `captureOnce(invocation, requestBytes, transport,
+{parents, declaredBaseline, signal?})` invokes only the explicitly supplied
+`transport.exchange(bytes, {signal})` behavior. It does not install a provider/HTTP client,
+read credentials, fetch a build or export a trace. Retrieval is qualified `caller_bytes`,
+not remote retrieval or native access. Provider/model/usage/cost and the relationship
+between the render and opaque request bytes remain unknown. Request JSON (including
+fractional settings) is never parsed or reserialized by the recorder.
+
+The sole retention mode is `metadata_only`. `snapshot()` returns a copied/frozen closed
+metadata DTO; `validateAttemptMetadata`/`validateInvocationMetadata` only parse reported
+metadata and cannot issue a live handle or authority. `rendered()` and `responseBody()`
+explicitly return working content. Weak-map working state, safe `util.inspect` and a
+refusing `toJSON` avoid accidental diagnostic serialization; `structuredClone` produces
+an unusable empty object with no content, rather than another live handle. This is not
+hostile-process protection, zeroization or a guarantee about intentionally logged accessors.
+
+The exchange callable is resolved once before ticket allocation. Only a genuine native
+Promise return is supported (no subclass, custom constructor or arbitrary thenable).
+There is one active promise/controller per invocation. Caller abort retires the generation,
+forwards one fixed reason and waits until the same promise settles; no `Promise.race` or
+background drain permits premature slot reuse. A late return is not inspected/hashed or
+accepted as success. Cancellation throws SDK-owned `PromptCaptureError` with fixed
+`name='AbortError'`, `code='local_cancelled'`; caller signal.reason and raw errors are
+never propagated. Already-aborted preflight allocates no attempt. Close and settled
+snapshots refuse while active; closing is otherwise idempotent.
+
+Limits are 64 attempts, 16 MiB request/response, 4 KiB canonical attempt metadata and
+256 KiB invocation metadata. Preflight reserves metadata budget. Requests use native
+byte-brand validation and copies; the delegate receives a separate copy. Under-limit
+returned bodies are copied. Oversize response working objects retain only the caller's
+existing byte reference/size without copying or hashing it during capture; metadata
+records explicit omitted coverage and a fixed capture error. Bodies never enter the
+ledger. A declared baseline is an assertion: `not_observed` applies if it exists but no
+handoff occurred, `not_supplied` if absent, and same/changed only to captured hash+size.
+Retries/fallback/continuation are explicit calls linked only to prior terminal attempts
+in this invocation. No model success, spend permission or process-death claim follows.

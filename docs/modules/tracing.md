@@ -369,3 +369,13 @@ bytes and are never hashed by parsing/reserializing that integer-only profile.
 The Python local recorder provides no actual ProviderClient observation, streaming, trace
 export/ingestion or service authorization. Provider/remote trace provenance is unavailable
 through this API.
+
+The private Node package exposes the equivalent explicit local wrapper, without importing
+Python tracing or configuring an exporter. It owns one native delegate promise/controller
+until settlement after abort, throws a fixed standard-name AbortError, and discards late
+returns without inspection. Its pure DTO validators cannot create live handles. Working
+objects refuse JSON; structured cloning yields an unusable empty object, not copied private
+state. Under-limit byte bodies are copied. Oversize responses record known size with omitted
+coverage without copying/hashing the oversize body. See the
+[private package reference](../../packages/prompt-sdk/README.md) for the exact native-carrier,
+promise and AbortSignal boundary.
