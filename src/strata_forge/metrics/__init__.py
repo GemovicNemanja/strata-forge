@@ -94,7 +94,7 @@ def __getattr__(name: str) -> object:
         "TemperatureFitSolution",
         "fit_temperature_logits",
     }:
-        from strata_forge.metrics import temperature_fit
+        import strata_forge.metrics.temperature_fit as temperature_fit
 
         return getattr(temperature_fit, name)
     raise AttributeError(name)

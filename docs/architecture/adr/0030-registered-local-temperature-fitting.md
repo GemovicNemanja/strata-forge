@@ -13,7 +13,9 @@ external dataset, model or registry.
 Expose a separate pure bounded scalar-logit fitter and an async local registered-source fit
 SDK. The numerical leaf imports only core/metrics and ordinary dependencies. It uses owned
 binary64 buffers, stable logsumexp and an explicit positive bounded inverse-temperature
-search. Its synchronous stepping is within ADR0020's numerical exception. Execution, trusted
+search. Its synchronous stepping is within ADR0020's numerical exception. Bounded schema
+canonicalization, normalized row-codec and content-hash helpers are also synchronous pure
+leaves: they perform no I/O, model execution or authority resolution. Execution, trusted
 source/policy calls and expensive numerical passes stay async/off-loop.
 
 The local schema admits only implemented temperature fitting with raw exact full-class or
