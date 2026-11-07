@@ -379,3 +379,11 @@ state. Under-limit byte bodies are copied. Oversize responses record known size 
 coverage without copying/hashing the oversize body. See the
 [private package reference](../../packages/prompt-sdk/README.md) for the exact native-carrier,
 promise and AbortSignal boundary.
+
+Reported metadata enforces coherent exact gap sets: request_not_dispatched iff the request
+is absent, response_not_observed iff response is absent, and response_oversize iff the known
+response has omitted oversize coverage. Transport/capture failures require a real request
+handoff. Cancel/interruption may precede handoff; optional late_return_discarded is a
+separately observed retired return, not inferred from the other DTO fields. The shared
+[synthetic conformance fixture](../../tests/fixtures/prompts/local-attempts-v1.json) compares
+actual local Python/Node calls, with only observer ID/time normalization for golden bytes.

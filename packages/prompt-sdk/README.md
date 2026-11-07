@@ -97,3 +97,10 @@ ledger. A declared baseline is an assertion: `not_observed` applies if it exists
 handoff occurred, `not_supplied` if absent, and same/changed only to captured hash+size.
 Retries/fallback/continuation are explicit calls linked only to prior terminal attempts
 in this invocation. No model success, spend permission or process-death claim follows.
+
+The shared `tests/fixtures/prompts/local-attempts-v1.json` is synthetic conformance evidence,
+not a remote/provider receipt. It is generated through the actual local Python consumer,
+renderer and recorder with test-only fixed ID/time seams. Node runs the same delegates and
+compares canonical metadata after normalizing only observer-generated IDs/timing. It includes
+changed messages/tool schema/fractional settings, empty bodies, error statuses, explicit retry/
+fallback/continuation, timeout and cancellation; raw hashes remain over the original bytes.

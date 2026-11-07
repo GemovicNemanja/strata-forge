@@ -171,3 +171,52 @@ test("exact gap set and failure handoff facts reject coherent-looking impossible
     assert.throws(() => validateAttemptMetadata(impossible), fixed("capture_invalid"));
   }
 });
+
+test("actual Python/Node recorder corpus preserves exact opaque bytes and canonical metadata", async () => {
+  interface Step { name: string; request_utf8_hex: string; response_utf8_hex: string | null; returned_status: number | null; parent: { kind: keyof AttemptParents; index: number } | null; behavior: "response" | "timeout" | "cancel"; declared_baseline: { sha256: string; size_bytes: number } | null; attempt: AttemptMetadata; attempt_canonical_utf8_hex: string; attempt_sha256: string }
+  const golden = JSON.parse(readFileSync(new URL("../../../tests/fixtures/prompts/local-attempts-v1.json", import.meta.url), "utf8")) as { build_id: string; build_canonical_utf8_hex: string; values: unknown; render_id: string; render_canonical_utf8_hex: string; source_partition: string; steps: Step[]; invocation: import("../src/index.mts").InvocationMetadata; invocation_canonical_utf8_hex: string; invocation_sha256: string };
+  const raw = Buffer.from(golden.build_canonical_utf8_hex, "hex"), invocation = await prepareInvocation(consumePinnedBuild(raw, { expectedBuildId: golden.build_id, expectedSizeBytes: raw.length, source: { kind: "caller_bytes", partition: golden.source_partition, reference: null } }), golden.values);
+  assert.equal(invocation.rendered().render_id, golden.render_id); assert.equal(Buffer.from(invocation.rendered().canonical).toString("hex"), golden.render_canonical_utf8_hex);
+  const actualIds: string[] = [], normalized: AttemptMetadata[] = [];
+  for (const step of golden.steps) {
+    const request = Buffer.from(step.request_utf8_hex, "hex"), controller = new AbortController(); let calls = 0;
+    const delegate: LocalByteTransport = { exchange(body, { signal }) {
+      calls++; assert.deepEqual(body, request);
+      if (step.behavior === "timeout") return Promise.reject(new PromptCaptureError("local_transport_timeout"));
+      if (step.behavior === "cancel") return new Promise((_resolve, reject) => { signal.addEventListener("abort", () => reject(new PromptCaptureError("local_cancelled")), { once: true }); });
+      return Promise.resolve(new LocalByteResponse(Buffer.from(step.response_utf8_hex!, "hex"), step.returned_status));
+    } };
+    const link = step.parent === null ? noParent : { ...noParent, [step.parent.kind]: actualIds[step.parent.index] };
+    const promise = captureOnce(invocation, request, delegate, { parents: link, declaredBaseline: step.declared_baseline, signal: controller.signal });
+    if (step.behavior === "cancel") controller.abort("FICTIONAL ABORT CANARY");
+    if (step.behavior === "response") { const result = await promise; assert.equal(Buffer.from(result.responseBody()).toString("hex"), step.response_utf8_hex); }
+    else await assert.rejects(promise, fixed(step.behavior === "timeout" ? "local_transport_timeout" : "local_cancelled"));
+    assert.equal(calls, 1);
+    const actual = invocation.snapshot().attempts.at(-1)!; actualIds.push(actual.attempt_id);
+    const value = validateAttemptMetadata({ ...actual, invocation_id: golden.invocation.invocation_id, attempt_id: step.attempt.attempt_id, parents: step.attempt.parents, started_at: step.attempt.started_at, retired_at: actual.retired_at === null ? null : step.attempt.retired_at, ended_at: step.attempt.ended_at, duration_us: step.attempt.duration_us });
+    assert.equal(canonicalBytes(value).toString("hex"), step.attempt_canonical_utf8_hex, step.name); assert.equal(sha(canonicalBytes(value)), step.attempt_sha256, step.name); normalized.push(value);
+  }
+  const ledger = validateInvocationMetadata({ ...invocation.snapshot(), invocation_id: golden.invocation.invocation_id, verified_at: golden.invocation.verified_at, attempts: normalized });
+  assert.equal(canonicalBytes(ledger).toString("hex"), golden.invocation_canonical_utf8_hex); assert.equal(sha(canonicalBytes(ledger)), golden.invocation_sha256);
+  const firstRequest = JSON.parse(Buffer.from(golden.steps[0].request_utf8_hex, "hex").toString()) as { messages: unknown; settings: { temperature: number }; tools: { function: { parameters: { properties: unknown } } }[] };
+  assert.deepEqual(firstRequest.messages, JSON.parse(invocation.rendered().canonical).output.messages); assert.equal(firstRequest.settings.temperature, 0.7); assert.deepEqual(firstRequest.tools[0].function.parameters.properties, { value: { type: "string" } });
+});
+
+test("late rejected delegate stays drained with no unhandled rejection and no response fact", async () => {
+  const invocation = await prepared(), controller = new AbortController(); let reject!: (error: unknown) => void;
+  const diagnostics: unknown[] = []; const onUnhandled = (error: unknown) => diagnostics.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const delegate: LocalByteTransport = { exchange() { return new Promise((_resolve, refusing) => { reject = refusing; }); } };
+    const task = captureOnce(invocation, Buffer.from("x"), delegate, { parents: noParent, declaredBaseline: null, signal: controller.signal });
+    const caught = assert.rejects(task, fixed("local_cancelled")); controller.abort("CALLER CANARY"); reject(new Error("LATE ERROR CANARY")); await caught;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(diagnostics, []); const record = invocation.snapshot().attempts[0]; assert.equal(record.response, null); assert.equal(record.outcome, "cancelled"); assert(!record.gaps.includes("late_return_discarded"));
+  } finally { process.removeListener("unhandledRejection", onUnhandled); }
+});
+test("metadata byte caps refuse complete over-budget input without truncation", async () => {
+  const invocation = await prepared(), result = await captureOnce(invocation, Buffer.from("x"), new Fake(), { parents: noParent, declaredBaseline: null });
+  assert(canonicalBytes(result.attempt).length <= 4096); assert(canonicalBytes(invocation.snapshot()).length <= 256 * 1024);
+  assert.throws(() => validateAttemptMetadata({ ...result.attempt, provider: "x".repeat(4096) }), fixed("capture_limit"));
+  assert.throws(() => validateInvocationMetadata({ ...invocation.snapshot(), source_partition: "x".repeat(256 * 1024) }), fixed("capture_limit"));
+});
