@@ -143,6 +143,10 @@ actual successful wait and stoppedPID0 are required after a possible start. Reso
 retains the unavailable owner and staged source. Actual integration tests require separately
 prepared image installation and fail a missing prerequisite; they must not silently pass.
 
+Parent monotonic deadlines schedule only remaining durations on the captured event loop.
+Never pass a time.monotonic absolute timestamp to asyncio.timeout_at or renew the original
+eligibility budget during staging, CLI dispatch, reading or adoption.
+
 ## Native dataset transformation profile
 
 `_dataset_wire.py`, `dataset_execution_types.py` and `_dataset_worker.py` own the separate fixed

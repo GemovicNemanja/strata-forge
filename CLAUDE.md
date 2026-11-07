@@ -62,6 +62,7 @@ These apply everywhere in `src/strata_forge/`. Code that violates them is wrong 
 - Sync wrappers live **only** in `strata_forge.sync` and exist for CLI / notebook ergonomics. They wrap async functions via `asyncio.run`.
 - Internal calls are async end-to-end. Do not mix `requests` / sync `httpx` with async code paths.
 - HTTP I/O uses `httpx.AsyncClient` (often indirectly through LiteLLM).
+- Absolute asyncio deadlines belong to the current loop's clock. For retained `time.monotonic` or nanosecond budgets, schedule only their original remaining duration with `asyncio.timeout`; a different loop can have another origin. Never renew eligibility across staging, worker dispatch or result adoption.
 
 ### 3.2 Strict typing
 - pyright runs in `strict` mode on `src/strata_forge/`. New code must be strict-clean.

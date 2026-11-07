@@ -68,6 +68,11 @@ Close refuses active work; cancel/await that operation first. No automatic query
 terminal inference from elapsed time exists. The original deadline limits result adoption,
 not the time required to prove process death.
 
+The original deadline remains in the parent monotonic clock domain. Loop cancellation is
+scheduled from its remaining duration, including CLI setup and cleanup; arbitrary event-loop
+clock origins are not interchangeable absolute timestamps. The read-SQL executor shares this
+rule without changing its worker, wire, image or resource limits.
+
 Immutable output bytes may require transient copies; callers must account for them in their
 own global quota/admission and stream chunks respecting their actual storage adapter limits.
 The package does not silently enlarge a store's chunk or object cap. Parent DuckDB/Arrow,

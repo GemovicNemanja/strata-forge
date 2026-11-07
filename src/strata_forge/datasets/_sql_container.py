@@ -181,7 +181,7 @@ class SQLContainerOwner:
         result: bytes | None = None
         failed = False
         try:
-            async with asyncio.timeout_at(deadline):
+            async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
                 process = await self._spawn(args)
                 if process.stdout is None:
                     raise wire.WireError("unavailable")
@@ -428,7 +428,7 @@ class SQLContainerOwner:
         code = "unavailable"
         cancelled = False
         try:
-            async with asyncio.timeout_at(deadline):
+            async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
                 self._engine = await self._engine_id(deadline)
                 image_raw = await self._command(
                     "image",

@@ -396,7 +396,7 @@ class LocalSQLExecutor:
         code = "worker_failed"
         result: SQLResult | None = None
         try:
-            async with asyncio.timeout_at(deadline):
+            async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
                 hashing = asyncio.create_task(asyncio.to_thread(bundle_sha256))
                 try:
                     bundle = await asyncio.shield(hashing)
