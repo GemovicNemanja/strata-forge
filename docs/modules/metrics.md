@@ -370,3 +370,25 @@ The pure math uses no optional library; registered fitting's point-probability a
 lazily uses the existing scoring extra. Only the local pipeline can attach registered fit
 provenance. The old temperature component/application behavior is unchanged.
 See [ADR0030](../architecture/adr/0030-registered-local-temperature-fitting.md).
+
+## Reports from validated counts
+
+`classification_report_from_confusion(matrix)` accepts the exact `ConfusionMatrix` class
+and returns the same `ClassificationReport` as the ordinary row-based API. It reconstructs
+every original field through the existing matrix validators before calling the shared report
+math, even when an instance was created with model_construct or manually changed. Matrix
+subclasses, hidden extra/missing fields and nonnative mutable/coercible values refuse. Labels
+and integer counts must use their explicit immutable tuple shape; bool/float counts are not
+integer multiplicities. No class order or missing population is inferred.
+
+Rows are gold, columns predicted. `invalid_by_gold` stays in gold support and N; invalid
+outputs remain wrong/false negatives. Absent declared classes contribute zero F1. Empty
+populations keep undefined metrics and their existing reasons. Integer count multiplicities
+are supported without expanding rows: the returned n is the actual summed count, not an
+assertion of unique/independent examples or sample weights. No confidence interval, bootstrap,
+source eligibility or completeness attestation follows from a valid matrix.
+
+The returned report owns a newly validated matrix; changing an input instance's storage
+afterward does not change it. Invalid inputs raise core ValidationError with fixed message
+`confusion matrix is invalid` and no retained native diagnostic context. Existing row-based
+functions, formulas, metric version and probability-metric behavior are unchanged.

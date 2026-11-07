@@ -45,3 +45,9 @@ This is a pure deterministic numerical leaf. Read
   rounding/underflow; identification is never claimed, and flat_unidentified requires actual
   equal logits. Preserve unclipped objective versus existing clipped point NLL, bounds and
   deterministic candidate/tie rules. Async registered-source orchestration stays in pipelines.
+
+- `classification_report_from_confusion` requires the exact matrix class and native immutable
+  field shapes, then reconstructs all original fields through matrix validation before shared
+  report math. Never trust model_construct, manual mutation, subclasses or coercion hooks.
+  Preserve integer multiplicities, invalid false negatives, absent/empty policies and existing
+  row behavior. Validated counts are not population/independence or bootstrap attestation.

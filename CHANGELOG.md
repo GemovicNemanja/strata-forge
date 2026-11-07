@@ -10,6 +10,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Count-based classification reports revalidate the complete confusion matrix and reuse the
+  existing point definitions without expanding integer row multiplicities.
+
 - Bounded scalar-logit temperature math and a local registered-source fit SDK with exact
   named-population provenance, current policy checks and drained cancellation. No registry,
   model call, worker, bootstrap or calibration-application capability is installed.

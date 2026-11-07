@@ -36,3 +36,7 @@ A separate bounded pure scalar-logit fitter returns numerical search provenance 
 claiming a registered fit source. The async local pipeline adds explicit trusted named-split
 policy, complete-population checks and an immutable fit receipt. It installs no registry,
 loader or worker; clustered uncertainty and verified application remain separate.
+
+`classification_report_from_confusion` revalidates a complete explicit integer-count matrix
+and reuses the row API's report definitions, including invalid false negatives, absent classes
+and empty populations. It does not establish data provenance, independence or uncertainty.
