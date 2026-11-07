@@ -350,3 +350,9 @@ Install it with: pip install 'ai-forge[hf]'.
 - **`distill` raises**: the teacher's `LLMClient.complete` exception
   propagates verbatim. Inspect via `strata_forge.llm.errors` —
   `ProviderError` subclasses tell you exactly what failed.
+
+## Local SQL value contracts
+
+`SQLQuerySpec`, `SQLInputManifest`, `LocalSQLInstallation`, `LocalParquetFiles` and the fixed
+`SQLExecutionError` are lazy exports for closed local SQL values. They perform no SQL execution,
+source file reads, container operations or authority resolution. See [the detailed contract](headless-sql.md).

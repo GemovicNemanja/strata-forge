@@ -10,6 +10,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Immutable local SQL query/input/operator/file-description values and a bounded standalone
+  typed-value/frame codec, without native SQL, container execution or authority registration.
+
 - Bounded local paired cluster percentile math and current-policy analysis with exact paired
   populations, fixed seeded draws and drained cancellation; no issuer, worker or wire activation.
 

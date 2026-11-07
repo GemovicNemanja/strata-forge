@@ -108,3 +108,19 @@ Anything raised from this module is a `ForgeError` subclass.
   version — needs an ADR).
 - Changing what's content-addressed in `DatasetItem.from_input`.
 - Adding a new synthetic-data primitive.
+
+## Local SQL value boundary
+
+`sql_types.py` exposes immutable closed query/manifest/operator/file-description values only;
+`_sql_wire.py` is the shared stdlib-only canonical frame/type/cell codec. No local executor,
+DuckDB import, Docker inspection/start, source read or capability registration follows from
+constructing these values. Origin assertions, hashes and descriptors do not confer platform
+access. SQL syntax is not parsed by the parent. See
+[the value reference](../../../docs/modules/headless-sql.md) and
+[ADR0032](../../../docs/architecture/adr/0032-isolated-local-dataset-sql.md).
+
+The public values retain canonical bytes and return independent payload copies. Exact-class
+validation and schema selection must not trust mutable instance/class metadata. Fixed errors
+exclude rejected inputs, native diagnostics and causes. Codec changes require known-value and
+malformed/hostile tests; integers/decimals/nonfinite values and unsupported temporal/nested
+types must not be silently coerced. Sync code here is pure validation only under ADR0032.

@@ -20,3 +20,10 @@ Langfuse store + HF bridge (2.3.2) and synthetic-data primitives
 
 Module rules: [`CLAUDE.md`](CLAUDE.md). Full reference once shipped:
 `docs/modules/datasets.md`.
+
+## Local SQL value contracts
+
+Closed query, pinned input-manifest and trusted operator/file-description values are available
+without DuckDB or Docker. They do not execute SQL or grant source access. The standalone shared
+codec preserves supported values and refuses lossy/unknown types. See
+[the reference](../../../docs/modules/headless-sql.md) for the implemented boundary.
