@@ -10,6 +10,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- Separate local schema-2 complete-source classifier preflight, bounded disk cache and exact
+  one-epoch consumer, with private complete overflow/count/order receipts. Primary CE and
+  explicit auxiliary verifier codecs share the consumer without changing v1 worker limits,
+  defaults or dispatch capabilities.
+
 - Immutable modular prompt composition provides an explicit literal/variable/pinned-module
   AST, exact-version snapshot registry, deterministic domain-separated build/render identities,
   typed chat/artifact targets and UTF-8 byte source maps. Declared constraint conflicts refuse;

@@ -188,6 +188,28 @@ async def initialize_verifier_classifier(
     return result
 
 
+def _tokenize_verifier_geometry(
+    tokenizer: _ML,
+    rendered: tuple[_ML, ...],
+    geometry: VerifierGeometryConfig,
+    *,
+    padding: bool,
+    return_tensors: str | None,
+) -> _ML:
+    kwargs: dict[str, _ML] = {
+        "padding": padding,
+        "truncation": False,
+        "return_offsets_mapping": True,
+        "return_special_tokens_mask": True,
+    }
+    if return_tensors is not None:
+        kwargs["return_tensors"] = return_tensors
+    texts = [row.text for row in rendered]
+    if geometry.pooling == "cls":
+        return tokenizer(texts, text_pair=[row.text_pair for row in rendered], **kwargs)
+    return tokenizer(texts, **kwargs)
+
+
 def _encode(
     tokenizer: _ML, examples: tuple[VerifierExample, ...], geometry: VerifierGeometryConfig
 ) -> VerifierBatch:
@@ -203,18 +225,9 @@ def _encode(
     if len({row.item_id for row in examples}) != len(examples):
         raise VerifierGeometryError("verifier_batch_invalid")
     rendered = tuple(render_verifier_geometry(geometry, example) for example in examples)
-    kwargs: dict[str, _ML] = {
-        "padding": True,
-        "truncation": False,
-        "return_offsets_mapping": True,
-        "return_special_tokens_mask": True,
-        "return_tensors": "pt",
-    }
-    texts = [row.text for row in rendered]
-    if geometry.pooling == "cls":
-        encoded = tokenizer(texts, text_pair=[row.text_pair for row in rendered], **kwargs)
-    else:
-        encoded = tokenizer(texts, **kwargs)
+    encoded = _tokenize_verifier_geometry(
+        tokenizer, rendered, geometry, padding=True, return_tensors="pt"
+    )
     ids, attention = encoded["input_ids"], encoded["attention_mask"]
     if (
         ids.ndim != 2

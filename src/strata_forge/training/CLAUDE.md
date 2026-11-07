@@ -225,3 +225,16 @@ worker/scorer/spec registration, implicit objective change or metadata authority
 Pure geometry and native differentiable forwards are sync leaves; public native CPU/file work
 is async. Preserve lazy ML imports, fixed errors, null head absence and schema-1 digests.
 Reference: `docs/modules/training.md` auxiliary verifier section.
+
+## Local population profile
+
+`population.py`, `_population_store.py`, `_population_native.py` and `population_runner.py`
+own the separate schema-2 local population/preflight consumer. Preserve all v1 caps/digests,
+worker/spec/registry/defaults and the two exact canonical row codecs. Whole named-source
+preflight applies outside pilot ranges; no optimizer construction precedes complete zero
+source overflow. Stable IDs are global, selection is explicit, padding is recorded/right-only
+and cached unpadded inputs are consumed exactly once through batch32 including its partial.
+Use bounded indexed SQLite statements, safe packed arrays and a single drained writer, never
+pickle, caller SQL or a hidden full row list. Hashes/receipts and injected trusted policy
+objects are not remote authority. Public I/O stays async; internal native/file leaves run off
+loop and drain before cancellation returns. ADR0027 describes the narrow pure-value exception.

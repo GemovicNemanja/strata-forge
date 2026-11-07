@@ -817,3 +817,71 @@ caller but cannot interrupt arbitrary native thread work; a partial or completed
 may remain and must be handled explicitly. Saving does not certify training, select a checkpoint,
 publish a model or report a worker success. Complete-population preflight/streaming, training
 routing/authority, worker/scorer adoption, calibration and release remain separate consumers.
+
+## Complete local population training
+
+`TrainingPopulationPlanV2`, `prepare_training_population` and `train_prepared_population`
+provide a separate local disk-backed path over caller-resolved objects. They do not widen the
+primary SDK's materialization limits or register a remote worker. See
+[the population decision](../architecture/adr/0027-complete-local-training-populations.md).
+
+Declare separate exact dataset/model/tokenizer refs, config/split, expected source rows, complete or half-open
+range selection, seed, family, explicit codec and resource budgets. `PrimaryPopulationTask`
+uses `ClassifierExample` rows and ordinary explicitly labelled CE or the existing explicit
+Brier objective. `AuxiliaryPopulationTask` uses exactly `{example, targets}` rows: a
+`VerifierExample` plus explicit `ResearchLossRow` fields (`primary`, `flag_target`,
+`premise_ids`, `support_set`). Label spaces, class order and PIDs are explicit. The fixed auxiliary population codec requires
+geometry labels to equal the E/C/U class order exactly; display-label aliases or a second
+semantic mapping are unsupported, and no label/logit swapping is inferred. Null auxiliary
+targets remain absent; false and empty support sets remain eligible. Missing required heads,
+unsupported weights/smoothing, unknown IDs and implicit binary interpretations refuse.
+
+Both SDK calls require `ResolvedPopulationTokenizer(identity, tokenizer)`. Its trusted resolver
+metadata must match the separately declared tokenizer pin before native use; no same-model
+default is inferred. The canonical backend/special-token SHA is recorded independently. Neither
+the declared ref nor the content SHA attests external origin, resolution or custody.
+
+`TrustedPopulationSource.read(maximum)` returns at most 64 KiB of UTF-8 NDJSON. The source object
+must declare the exact pinned named split and enumerate it completely, without receiving the
+pilot range. These are trusted Python objects, never serialized imports/callbacks or a dataset
+mapper. Real source mappings require a separate metadata review. `PopulationAuthority.check`
+is a trusted caller seam at before/after read and before/after train boundaries; it is not a
+remote credential or an installed custody policy. There is no standalone authorized fallback.
+
+Preparation requires a fresh absolute private attempt directory with a resolved parent and
+sufficient free scratch space. It never adopts an existing attempt. It scans every source row
+to EOF, checks exact count/global IDs and tokenizes without truncation, even outside a pilot.
+Right-padding, a fast tokenizer and an existing pad ID are required without mutation. The
+cache stores exact unpadded inputs/marker geometry and explicit targets; training never
+re-reads or re-tokenizes the dataset. Native tokenizer allocations are outside the application
+spool bound. No optimizer is constructed before complete zero-overflow preparation.
+
+The private `preflight-receipt.json` records expected/observed source/selected counts, complete
+overflow counts and first offending stable ID in source order, hashes, serialized/cache bytes
+and disk/buffer high-water bounds. Incomplete, malformed or cancelled scans do not claim a
+complete population. It contains private metadata and is not automatic tool grounding.
+`prepared_complete` is local consistency status, not provenance, authorization, evaluation,
+checkpoint eligibility or publication. Only an issued in-process handle is consumable.
+
+The consumer exclusively claims the attempt, verifies its hashes/tokenizer again and uses
+`torch_cpu_randperm_v1` with the explicit seed, one process, FP32, batch size 32, one epoch, no AMP,
+accumulation, early stop or secondary shuffle. Record runtime versions for reproducibility;
+cross-version permutations are not promised. The final partial batch uses its actual row
+count in the objective. Confirmed row/step counts advance only after optimizer application.
+The fixed effective optimizer is native fused AdamW with weight decay 0, betas (.9, .999),
+epsilon 1e-8 and maximum gradient norm 1; learning rate/scheduler/warmup remain explicitly configured.
+Installed native defaults that disagree refuse instead of silently selecting a different
+optimizer. Before constructing AdamW, declared maximum length must fit both the configured
+and actual native BERT/GPT-2 position embedding capacity or ModernBERT decoder original rotary
+context. Missing/malformed/mismatched capacities refuse. Actual tokenizer vocabulary IDs must
+fit the actual resolved input embedding rows. No context extrapolation, resizing, token
+remapping or truncation is inferred. No adapters, resume, checkpoint selection or calibration
+are added.
+
+`epoch-receipt.json` records planned/applied order hashes, confirmed rows/steps and incomplete
+optimizer status on failure. A failing optimizer may already have mutated parameters; no
+rollback is claimed. A final authority refusal changes the receipt and cannot return success.
+Callers own final safe export after a successful result using the appropriate existing SDK.
+Native model aliases/mode/device/optimizer operations must be serialized by the caller.
+Cancellation drains owned native/file work; an uninterruptible native call has no hard thread
+termination deadline. Aborted attempts stay private and unavailable rather than being reused.
