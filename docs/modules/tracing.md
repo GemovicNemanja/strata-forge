@@ -472,6 +472,14 @@ content projection. Foreign scope sets only an explicit loss flag. Settled snaps
 admission holes as metadata loss and have no claim of complete model/cache/stream coverage.
 No recording lock is held over projection/delegation/await.
 
+Each opaque observation/facade owns its private working state. Global issuance tracking
+holds only weak references, and metadata state keeps weak loop/task references. Keeping a
+metadata handle therefore does not root abandoned delegates, clients, callbacks or task/loop
+cycles. Active calls still belong to the caller's native task; observation introduces no
+finalizer, implicit close/cancel or fabricated terminal record when work is abandoned.
+Safe repr/copy/pickle behavior does not make host-level private-slot introspection a security
+boundary. Settled metadata contains no delegate configuration or original request/response.
+
 A real caught cancellation is re-raised by identity. If the delegate itself swallows it and
 returns, that original return still reaches the caller; increased pending cancellation marks
 the observer's response retired and skips projection. Cancellation is not process death.

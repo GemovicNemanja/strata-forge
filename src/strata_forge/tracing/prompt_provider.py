@@ -95,7 +95,7 @@ def _id() -> str:
 class _Ticket:
     identifier: str
     index: int
-    owner: asyncio.Task[object]
+    owner: weakref.ReferenceType[asyncio.Task[object]]
     cancelling: int
     method: ProviderMethod
     provider_slot: ProviderSlot
@@ -109,7 +109,7 @@ class _Ticket:
 @dataclass(slots=True, repr=False)
 class _State:
     initial: ProviderObservationMetadata
-    loop: asyncio.AbstractEventLoop
+    loop: weakref.ReferenceType[asyncio.AbstractEventLoop]
     thread: int
     lock: LockType = field(default_factory=threading.Lock)
     active: dict[int, _Ticket] = field(default_factory=lambda: dict[int, _Ticket]())
@@ -126,15 +126,17 @@ class _State:
     counter_saturated: bool = False
 
 
-_states: weakref.WeakKeyDictionary[ProviderObservation, _State] = weakref.WeakKeyDictionary()
+# Issuance has no strong working values: delegates, callbacks and task frames can point
+# back to an opaque handle through ordinary application cycles.
+_observations: weakref.WeakSet[ProviderObservation] = weakref.WeakSet()
 
 
 def _state(value: object, *, explicit: bool = False) -> _State:
     if type(value) is not ProviderObservation:
         _fail()
-    result = _states.get(value)
-    if result is None:
+    if value not in _observations:
         _fail()
+    result = cast("_State", object.__getattribute__(value, "_observation_state"))
     if explicit and result.thread != threading.get_ident():
         _fail("observation_scope_invalid")
     return result
@@ -143,7 +145,7 @@ def _state(value: object, *, explicit: bool = False) -> _State:
 class ProviderObservation:
     """Issued body-free local observer; source labels confer no provider or native authority."""
 
-    __slots__ = ("__weakref__",)
+    __slots__ = ("__weakref__", "_observation_state")
 
     def __init__(self) -> None:
         _fail()
@@ -192,7 +194,7 @@ class ProviderObservation:
     def __repr__(self) -> str:
         return (
             "ProviderObservation(local_metadata_only)"
-            if self in _states
+            if self in _observations
             else "ProviderObservation(unissued)"
         )
 
@@ -252,7 +254,12 @@ async def prepare_provider_observation(invocation: PreparedInvocation) -> Provid
     if len(initial.canonical()) > _HEADER_RESERVATION:
         _fail()
     result = object.__new__(ProviderObservation)
-    _states[result] = _State(initial, asyncio.get_running_loop(), threading.get_ident())
+    object.__setattr__(
+        result,
+        "_observation_state",
+        _State(initial, weakref.ref(asyncio.get_running_loop()), threading.get_ident()),
+    )
+    _observations.add(result)
     return result
 
 
@@ -286,7 +293,7 @@ def _begin(
             return None
         if (
             state.thread != threading.get_ident()
-            or state.loop is not asyncio.get_running_loop()
+            or state.loop() is not asyncio.get_running_loop()
             or owner is None
         ):
             state.scope_mismatch_seen = True
@@ -303,7 +310,7 @@ def _begin(
         ticket = _Ticket(
             _id(),
             state.admitted,
-            owner,
+            weakref.ref(owner),
             owner.cancelling(),
             method,
             slot,
@@ -320,7 +327,7 @@ def _start_loss(state: _State) -> None:
     with state.lock:
         if state.closed:
             return
-        if state.thread != threading.get_ident() or state.loop is not asyncio.get_running_loop():
+        if state.thread != threading.get_ident() or state.loop() is not asyncio.get_running_loop():
             state.scope_mismatch_seen = True
         elif state.admitted < MAX_PROVIDER_ATTEMPTS:
             state.admitted += 1
@@ -349,7 +356,10 @@ def _metadata(
 ) -> ProviderAttemptMetadata:
     if ticket.projection_failed or ticket.request is None:
         _fail()
-    retired = outcome == "returned" and ticket.owner.cancelling() > ticket.cancelling
+    owner = ticket.owner()
+    if owner is None:
+        _fail()
+    retired = outcome == "returned" and owner.cancelling() > ticket.cancelling
     response = (
         unavailable_projection("not_returned")
         if outcome != "returned"
@@ -437,7 +447,7 @@ def _finish(state: _State, ticket: _Ticket | None, outcome: _Outcome, raw: objec
     record: ProviderAttemptMetadata | None = None
     size = 0
     try:
-        if asyncio.current_task() is ticket.owner:
+        if asyncio.current_task() is ticket.owner():
             record = _metadata(state, ticket, outcome, raw)
             size = len(record.canonical()) + 1
     except Exception:
@@ -478,20 +488,21 @@ class _Wrapper:
     provider_slot: ProviderSlot
 
 
-_wrappers: weakref.WeakKeyDictionary[_ObservedProvider, _Wrapper] = weakref.WeakKeyDictionary()
+_wrappers: weakref.WeakSet[_ObservedProvider] = weakref.WeakSet()
 
 
 def _wrapper(value: _ObservedProvider) -> _Wrapper:
     if type(value) is not _ObservedProvider:
         _fail()
-    result = _wrappers.get(value)
-    if result is None:
+    if value not in _wrappers:
         _fail()
-    return result
+    return cast("_Wrapper", object.__getattribute__(value, "_wrapper_state"))
 
 
 class _ObservedProvider(ProviderClient):
     """Fixed named-method facade; never a secret config clone or generic attribute proxy."""
+
+    __slots__ = ("_wrapper_state",)
 
     def __init__(self) -> None:
         _fail()
@@ -617,5 +628,8 @@ def wrap_provider(
     result = object.__new__(_ObservedProvider)
     # ProviderClient annotates name as ClassVar; this facade's value is only the declared slot.
     object.__setattr__(result, "name", provider_slot)
-    _wrappers[result] = _Wrapper(delegate, state, cast("ProviderSlot", provider_slot))
+    object.__setattr__(
+        result, "_wrapper_state", _Wrapper(delegate, state, cast("ProviderSlot", provider_slot))
+    )
+    _wrappers.add(result)
     return result
