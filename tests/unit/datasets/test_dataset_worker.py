@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import io
+import time
 from datetime import date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import pytest
 
+from strata_forge.datasets import _dataset_worker as worker
 from strata_forge.datasets import _sql_wire as sql
 from strata_forge.datasets._dataset_worker import _scalar
 
@@ -60,3 +67,50 @@ def test_null_marker_and_json_native_types() -> None:
         _scalar(r"\N", {"kind": "text"}, is_csv=True, nullable=False)
     with pytest.raises(sql.WireError):
         _scalar(True, {"kind": "integer", "bits": 64, "signed": True}, is_csv=False, nullable=False)
+
+
+@pytest.mark.parametrize("content", ['x\na"b\n', "x\rhello\r"])
+def test_csv_lexical_newline_and_quote_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    path = tmp_path / "input.csv"
+    path.write_bytes(content.encode())
+    monkeypatch.setattr(worker, "Path", lambda _: path)
+
+    class NativeText:
+        id = "varchar"
+
+    class Connection:
+        description: ClassVar[list[tuple[str, NativeText]]] = [("x", NativeText())]
+
+        def execute(self, statement: str, parameters: object = None) -> Connection:
+            return self
+
+    spec: dict[str, sql.JSON] = {
+        "format": "csv",
+        "schema": [{"name": "x", "type": {"kind": "text"}, "nullable": False}],
+    }
+    with pytest.raises(sql.WireError):
+        worker._text_input(Connection(), spec, time.monotonic() + 1)
+
+
+@pytest.mark.parametrize(
+    "content", ['x\r\n"a""b"\r\n', 'x\n"a\nb"\n', 'x\r\n"a\r\nb"\r\n', 'x\n""\n', "x\nhello"]
+)
+def test_csv_grammar_keeps_escaped_and_embedded_text(content: str) -> None:
+    worker._csv_grammar(io.StringIO(content), time.monotonic() + 1)
+
+
+@pytest.mark.parametrize(
+    "content", ['x\na"b\n', "x\rhello\r", 'x\n"a"x\n', 'x\n"unclosed', 'x\n"a\rb"\n']
+)
+def test_csv_grammar_refuses_malformed_records(content: str) -> None:
+    with pytest.raises(sql.WireError):
+        worker._csv_grammar(io.StringIO(content), time.monotonic() + 1)
+
+
+def test_csv_grammar_handles_chunk_boundary() -> None:
+    valid = 'x\n"' + ("a" * 65531) + '\r\nb"\n'
+    worker._csv_grammar(io.StringIO(valid), time.monotonic() + 1)
+    with pytest.raises(sql.WireError):
+        worker._csv_grammar(io.StringIO(valid.replace("\r\n", "\rx", 1)), time.monotonic() + 1)

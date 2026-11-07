@@ -24,3 +24,9 @@ The dataset worker composes unchanged fixed native type/schema/settings helpers 
 read-SQL worker. It never invokes or modifies that worker's profile/preload/entrypoint.
 This internal reuse requires no parent native engine import. Source/profile consistency
 hashes remain descriptive evidence, not source permission or hostile-host attestation.
+
+CSV lexical validation rejects quotes inside unquoted fields and lone CR separators before
+stdlib CSV parsing; it preserves quoted doubled quotes and embedded LF/CRLF without rewriting
+the source. The dataset worker sets engine memory to192 MB and temp storage to64 MB and checks
+DuckDB2.0's reported `183.1 MiB`/`61.0 MiB` both before READY and after configuration lock.
+These are engine settings inside the independent512 MiB OS memory/128 MiB scratch profile.

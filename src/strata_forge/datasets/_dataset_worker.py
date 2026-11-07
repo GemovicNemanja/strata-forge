@@ -19,7 +19,10 @@ import time
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from typing import TextIO
 
 if __package__:
     from strata_forge.datasets import _dataset_wire as wire
@@ -166,6 +169,55 @@ def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return dict(pairs)
 
 
+def _csv_grammar(source: TextIO, deadline: float) -> None:
+    state = "start"
+    pending_cr = False
+    count = 0
+    while chunk := source.read(65536):
+        count += len(chunk)
+        wire.need(count <= wire.MAX_TEXT_BYTES, "source_limit")
+        wire.need(time.monotonic() < deadline, "deadline")
+        for char in chunk:
+            if pending_cr:
+                wire.need(char == "\n", "source_mismatch")
+                pending_cr = False
+                continue
+            if char == "\r":
+                pending_cr = True
+                if state != "quoted":
+                    state = "start"
+            elif char == "\n":
+                if state != "quoted":
+                    state = "start"
+            elif state == "quoted":
+                if char == '"':
+                    state = "after_quote"
+            elif state == "after_quote":
+                if char == '"':
+                    state = "quoted"
+                else:
+                    wire.need(char == ",", "source_mismatch")
+                    state = "start"
+            elif char == ",":
+                state = "start"
+            elif char == '"':
+                wire.need(state == "start", "source_mismatch")
+                state = "quoted"
+            else:
+                state = "unquoted"
+    wire.need(not pending_cr and state != "quoted", "source_mismatch")
+
+
+def _memory_settings(conn: native._Connection) -> None:
+    row = conn.execute(
+        "SELECT current_setting('memory_limit'), current_setting('max_temp_directory_size')"
+    ).fetchone()
+    wire.need(
+        type(row) is tuple and len(row) == 2 and all(type(v) is str for v in row), "profile_refused"
+    )
+    wire.need(row == ("183.1 MiB", "61.0 MiB"), "profile_refused")
+
+
 def _text_input(conn: native._Connection, spec: dict[str, sql.JSON], deadline: float) -> None:
     schema = cast("list[dict[str, sql.JSON]]", spec["schema"])
     names = [cast("str", col["name"]) for col in schema]
@@ -181,6 +233,8 @@ def _text_input(conn: native._Connection, spec: dict[str, sql.JSON], deadline: f
         wire.need(source.read(1) != "\ufeff", "source_mismatch")
         source.seek(0)
         if spec["format"] == "csv":
+            _csv_grammar(source, deadline)
+            source.seek(0)
             reader = csv.reader(source, strict=True)
             wire.need(next(reader, None) == names, "source_mismatch")
             for row in reader:
@@ -329,6 +383,7 @@ def main() -> int:
         conn = native._configured(engine)
         conn.execute("SET memory_limit='192MB'")
         conn.execute("SET max_temp_directory_size='64MB'")
+        _memory_settings(conn)
         bundle = bundle_sha256()
         sys.stdout.buffer.write(sql.frame(expected_ready(operation, bundle), limit=8192))
         sys.stdout.buffer.flush()
@@ -392,6 +447,7 @@ def main() -> int:
         conn.execute("SET enable_external_access=false")
         conn.execute("SET lock_configuration=true")
         native._settings(conn, locked=True)
+        _memory_settings(conn)
         row = conn.execute("SELECT current_setting('allowed_paths')").fetchone()
         wire.need(row is not None and row[0] == ["/output/data.parquet"], "profile_refused")
         query = "SELECT * FROM dataset" if kind == "convert" else cast("str", spec["sql"])
