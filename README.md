@@ -20,6 +20,9 @@ remote operations; worker/adapter/calibration integration remains separate. See 
 A separate local auxiliary verifier SDK preserves the primary path while adding exact PID-offset
 geometry, independent flag/bilinear support heads and strict safe export/reload. It does not
 register a worker or change the primary training defaults.
+The separate local population profile scans a complete named source before optimizer use,
+caches selected unpadded inputs on disk and consumes exactly one recorded epoch. Its trusted
+Python policy seam does not enable remote dispatch or change v1 worker limits.
 
 ## Install
 
