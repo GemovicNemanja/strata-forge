@@ -59,7 +59,7 @@ function sourceSnapshot(value: unknown): LocalBuildSource {
 export function consumePinnedBuild(raw: Uint8Array, options: ConsumeOptions): PinnedBuild {
   const selected = fields(options, ["expectedBuildId", "expectedSizeBytes", "source"]);
   if (!hex(selected.expectedBuildId, 64) || typeof selected.expectedSizeBytes !== "number" || !Number.isSafeInteger(selected.expectedSizeBytes) || selected.expectedSizeBytes < 1 || selected.expectedSizeBytes > MAX_CONSUMED_BUILD_BYTES) fail();
-  if (raw === null || typeof raw !== "object" || utilTypes.isProxy(raw) || ![Uint8Array.prototype, Buffer.prototype].includes(Object.getPrototypeOf(raw))) fail();
+  if (raw === null || typeof raw !== "object" || utilTypes.isProxy(raw) || !utilTypes.isUint8Array(raw) || ![Uint8Array.prototype, Buffer.prototype].includes(Object.getPrototypeOf(raw))) fail();
   if (arrayBytes.call(raw) !== selected.expectedSizeBytes) fail("consumption_pin_mismatch");
   const source = sourceSnapshot(selected.source), snapshot = new Uint8Array(selected.expectedSizeBytes);
   Uint8Array.prototype.set.call(snapshot, raw);

@@ -21,8 +21,10 @@ const rendered = renderConsumed(build, { question: "Explain {{literal braces}}."
 
 The application supplies bytes, both exact expectations and the explicit descriptive source.
 Maximum build size is 8 MiB. The wrapper verifies size/hash, existing closed schema and canonical
-bytes; it snapshots mutable byte input and metadata. A caller-declared native reference is not
-an authorized server read or source attestation. Partitions are caller assertions, not tenant
+bytes; it snapshots mutable byte input and metadata. Byte carriers require a genuine native
+Uint8Array/Buffer brand; a matching prototype alone refuses through the fixed consumption
+error before any native byte accessor. A caller-declared native reference is not an authorized
+server read or source attestation. Partitions are caller assertions, not tenant
 grants. There is no URL/token/default/latest/offline fallback or content cache.
 
 `renderConsumed` rechecks the snapshot and delegates to the existing `renderBuild`. Missing/extra

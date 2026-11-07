@@ -59,6 +59,19 @@ test("byte-carrier own accessors cannot replace native bounds or execute during 
   const build = consumePinnedBuild(raw, { expectedBuildId: server.body_sha256, expectedSizeBytes: server.body_size_bytes, source });
   assert.equal(build.build_id, server.body_sha256); assert.equal(reads, 0);
 });
+test("forged byte-carrier prototypes refuse with the fixed error before native accessors", () => {
+  let reads = 0;
+  for (const prototype of [Uint8Array.prototype, Buffer.prototype]) {
+    const forged = Object.create(prototype) as Uint8Array;
+    Object.defineProperty(forged, Symbol.toStringTag, { get() { reads++; return "Uint8Array"; } });
+    assert.throws(() => consumePinnedBuild(forged, { expectedBuildId: "0".repeat(64), expectedSizeBytes: 1, source }),
+      (error: unknown) => error instanceof Error && error.constructor === Error && error.message === "consumption_invalid" && error.cause === undefined);
+  }
+  assert.equal(reads, 0);
+});
+for (const [kind, raw] of [["Buffer", Buffer.from(server.body_utf8)], ["Uint8Array", new Uint8Array(Buffer.from(server.body_utf8))]] as const) test(`genuine native ${kind} retains exact pinned content`, () => {
+  assert.equal(consumePinnedBuild(raw, { expectedBuildId: server.body_sha256, expectedSizeBytes: server.body_size_bytes, source }).canonical, server.body_utf8);
+});
 for (const ending of ["\n", "\r", "\u2028", "\u2029"]) test(`complete scalar/locator grammar rejects trailing line ending ${JSON.stringify(ending)}`, () => {
   assert.throws(() => consume(Buffer.from(server.body_utf8), { expectedBuildId: server.body_sha256 + ending }));
   assert.throws(() => consume(Buffer.from(server.body_utf8), { source: { ...source, partition: "local" + ending } }));
