@@ -192,6 +192,8 @@ class AttemptMetadata(_Metadata):
             raise ValueError("capture_invalid")
         if self.response is not None and self.request is None:
             raise ValueError("capture_invalid")
+        if self.outcome in {"transport_error", "capture_error"} and self.request is None:
+            raise ValueError("capture_invalid")
         expected_relation = "not_supplied" if self.declared_baseline is None else "not_observed"
         if self.declared_baseline is not None and self.request is not None:
             expected_relation = (
@@ -213,7 +215,10 @@ class AttemptMetadata(_Metadata):
             required.add("response_not_observed")
         if self.response is not None and self.response.coverage == "omitted_oversize":
             required.add("response_oversize")
-        if len(set(self.gaps)) != len(self.gaps) or not required <= set(self.gaps):
+        if (
+            len(set(self.gaps)) != len(self.gaps)
+            or set(self.gaps) - {"late_return_discarded"} != required
+        ):
             raise ValueError("capture_invalid")
         if self.outcome == "observed_response":
             valid = (

@@ -391,3 +391,56 @@ async def test_real_queued_owner_cancel_before_child_entry_never_dispatches() ->
     assert not record.facts.response_observed
     assert record.baseline_relation == "not_observed"
     assert "request_not_dispatched" in record.gaps
+
+
+@pytest.mark.parametrize(
+    "extra", ["request_not_dispatched", "response_not_observed", "response_oversize"]
+)
+async def test_reported_metadata_refuses_contradictory_extra_gap(extra: str) -> None:
+    from pydantic import ValidationError
+
+    from strata_forge.tracing.prompt_attempt_types import AttemptMetadata
+
+    invocation = await prepared()
+    result = await capture_once(invocation, b"x", Fake(), parents=NO_PARENT, declared_baseline=None)
+    record = result.attempt
+    with pytest.raises(ValidationError):
+        AttemptMetadata.model_validate({**record.model_dump(), "gaps": (*record.gaps, extra)})
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [("transport_error", "local_transport_failed"), ("capture_error", "capture_response_invalid")],
+)
+async def test_reported_failure_cannot_assert_handoff_failure_without_a_request(
+    outcome: str, error: str
+) -> None:
+    from pydantic import ValidationError
+
+    from strata_forge.tracing.prompt_attempt_types import AttemptMetadata
+
+    invocation = await prepared()
+    result = await capture_once(invocation, b"x", Fake(), parents=NO_PARENT, declared_baseline=None)
+    value = {
+        **result.attempt.model_dump(),
+        "request": None,
+        "response": None,
+        "delegate_status": None,
+        "facts": {
+            "retrieved": True,
+            "rendered": True,
+            "request_captured": False,
+            "response_observed": False,
+        },
+        "outcome": outcome,
+        "error_code": error,
+        "gaps": (
+            "render_projection_unobserved",
+            "provider_boundary_unobserved",
+            "body_not_retained",
+            "request_not_dispatched",
+            "response_not_observed",
+        ),
+    }
+    with pytest.raises(ValidationError):
+        AttemptMetadata.model_validate(value)
