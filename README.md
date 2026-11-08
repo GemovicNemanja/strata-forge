@@ -127,4 +127,5 @@ The opt-in `strata_forge.datasets.LocalDatasetExecutor` validates supplied CSV/J
 Parquet, queries exact named Parquet inputs and returns bounded immutable materialized
 Parquet with execution receipts. It requires explicit pinned operator image setup and has
 no platform grants, background job scheduler or parent native-engine fallback. See
-[the execution contract](docs/modules/native-dataset-execution.md).
+[the execution contract](docs/modules/native-dataset-execution.md). Materialized columns
+require explicit distinct names; ambiguous projections refuse instead of silently renaming.

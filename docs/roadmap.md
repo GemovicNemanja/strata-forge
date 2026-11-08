@@ -704,6 +704,8 @@ none of it requires re-opening the phase plan.
 
 The [native dataset executor](modules/native-dataset-execution.md) supports explicit isolated
 conversion, named-table read SQL and bounded Parquet materialization with owned cleanup.
+Materialization preserves exact bound column names/types and refuses ambiguous names
+before CTAS; read-only indexed query results can retain duplicate names.
 Native server versioning/source authority, durable background jobs and larger distributed
 inputs require their separate service/lifecycle implementation; local receipts do not
 complete those platform capabilities.

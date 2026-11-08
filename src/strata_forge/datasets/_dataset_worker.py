@@ -19,7 +19,7 @@ import time
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from typing import TextIO
@@ -37,6 +37,15 @@ else:
 
 # These fixed native helpers are shared with the unchanged read-only worker;
 # its profile, preload and entrypoint are never invoked by the writer.
+
+
+class _Projection(Protocol):
+    @property
+    def description(self) -> list[tuple[object, ...]]: ...
+
+
+class _DatasetConnection(native._Connection, Protocol):
+    def sql(self, query: str) -> _Projection: ...
 
 
 def bundle_sha256() -> str:
@@ -357,6 +366,26 @@ def _validated_output(
     return columns, total
 
 
+def _materialized_output(
+    conn: native._Connection, query: str, utc: object, deadline: float
+) -> tuple[list[sql.JSON], int]:
+    wire.need(time.monotonic() < deadline, "deadline")
+    projection = cast("_DatasetConnection", conn).sql(query)
+    try:
+        # The shared validator reads only description. Binding a lazy relation
+        # exposes original names before CTAS can silently deduplicate them.
+        expected = native._columns(cast("native._Connection", projection), source=True)
+    except sql.WireError as error:
+        if error.code != "invalid_spec":
+            raise
+        raise sql.WireError("query_refused") from None
+    wire.need(time.monotonic() < deadline, "deadline")
+    conn.execute("CREATE TABLE strata_result AS " + query)
+    schema, rows = _validated_output(conn, utc, deadline)
+    wire.need(schema == expected, "result_type_unsupported")
+    return schema, rows
+
+
 def _read_request() -> dict[str, sql.JSON]:
     import struct
 
@@ -469,8 +498,7 @@ def main() -> int:
             )
             result: dict[str, sql.JSON] = {"table": table, "output": None}
         else:
-            conn.execute("CREATE TABLE strata_result AS " + query)
-            schema, rows = _validated_output(conn, pytz.UTC, deadline)
+            schema, rows = _materialized_output(conn, query, pytz.UTC, deadline)
             conn.execute(
                 "COPY strata_result TO '/output/data.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)"
             )

@@ -156,6 +156,13 @@ internal SQL/dataset enum profiles; preserve old SQL wire/image/worker/default b
 The new profile has no remote source, durable job or platform grant. See
 [the reference](../../../docs/modules/native-dataset-execution.md).
 
+Conversion/materialization validates the original lazy SELECT projection with the existing
+source-schema codec before CTAS, then compares exact output names/types. Duplicate or
+Unicode-casefold-colliding names refuse; no auto-renamed snapshot is accepted. Read-only
+query columns remain indexed and can duplicate. Preserve the old SQL worker/codec bytes,
+profile and parser; a dataset worker change requires a fresh matching installed bundle and
+actual fictional image conformance, never query-time setup or a parent native import.
+
 Failure observations are privately issued metadata for the exact real error,
 call, executor, task and loop. Do not trust caller-constructed flags or later
 mutable exception fields. Correlated worker refusal, actual wait/PID-zero/removal/

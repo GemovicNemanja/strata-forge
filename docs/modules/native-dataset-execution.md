@@ -46,6 +46,15 @@ A server adapter must supply its own shared admission and current native source 
   more than one million output rows before the cell scan. Result-row preview limits do not
   silently truncate materialized data.
 
+Conversion/materialization binds the SELECT's original schema before creating its fixed
+internal table. It refuses duplicate or Unicode-casefold-colliding output names rather than
+accepting CTAS automatic renaming; use explicit distinct aliases. The final schema must also
+match the bound names and logical types exactly. Query previews remain indexed arrays and
+may preserve duplicate result names. The fixed image uses the lazy relation's
+[description metadata](https://duckdb.org/docs/2.0/clients/python/relational_api), not a second
+execution or a parent SQL parser. The native worker bundle identity includes this behavior;
+an existing installation is not silently upgraded or reused with different worker bytes.
+
 All options are explicit canonical v1 values; supplied descriptors are read-only regular
 files, duplicated and copied through bounded `pread` without changing caller offsets. Raw
 imports bind exact part hashes/sizes. Named inputs bind complete existing SQLInputManifest
