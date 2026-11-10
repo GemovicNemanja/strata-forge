@@ -111,6 +111,9 @@ Reference docs live in the repository:
 
 ## Development
 
+Maintained by [Nemanja Gemovic](https://github.com/GemovicNemanja), with package
+contact [gemovic.nemanja@gmail.com](mailto:gemovic.nemanja@gmail.com).
+
 ```bash
 uv sync        # materialize the venv + lockfile
 make check     # lint (ruff) + type-check (pyright strict)
