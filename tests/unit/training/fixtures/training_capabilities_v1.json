@@ -1,0 +1,487 @@
+{
+  "catalog": {
+    "adapters": [
+      "none",
+      "lora",
+      "qlora"
+    ],
+    "distribution": "unspecified",
+    "environment": "unknown",
+    "formats": [
+      {
+        "name": "conversational",
+        "optional_roles": [],
+        "required_roles": [
+          "messages"
+        ]
+      },
+      {
+        "name": "preference",
+        "optional_roles": [
+          "prompt"
+        ],
+        "required_roles": [
+          "chosen",
+          "rejected"
+        ]
+      },
+      {
+        "name": "prompt_completion",
+        "optional_roles": [],
+        "required_roles": [
+          "prompt",
+          "completion"
+        ]
+      },
+      {
+        "name": "text",
+        "optional_roles": [],
+        "required_roles": [
+          "text"
+        ]
+      },
+      {
+        "name": "unpaired_preference",
+        "optional_roles": [],
+        "required_roles": [
+          "prompt",
+          "completion",
+          "label"
+        ]
+      }
+    ],
+    "hardware": "unknown",
+    "initialization": "pretrained",
+    "installed": "unknown",
+    "methods": [
+      {
+        "code": "declared",
+        "disabled_reason": "",
+        "formats": [
+          "preference"
+        ],
+        "label": "Direct Preference Optimization",
+        "name": "dpo",
+        "status": "declared",
+        "task_type": "CAUSAL_LM",
+        "tuning_knobs": [
+          "beta",
+          "loss_type",
+          "max_length"
+        ]
+      },
+      {
+        "code": "method_disabled",
+        "disabled_reason": "GRPO needs a reward function, which cannot be supplied from a job specification. Use strata_forge.training.PreferenceRunner directly with reward_funcs=",
+        "formats": [],
+        "label": "Group Relative Policy Optimization",
+        "name": "grpo",
+        "status": "refused",
+        "task_type": "CAUSAL_LM",
+        "tuning_knobs": []
+      },
+      {
+        "code": "declared",
+        "disabled_reason": "",
+        "formats": [
+          "unpaired_preference"
+        ],
+        "label": "Kahneman-Tversky Optimization",
+        "name": "kto",
+        "status": "declared",
+        "task_type": "CAUSAL_LM",
+        "tuning_knobs": [
+          "beta",
+          "desirable_weight",
+          "undesirable_weight",
+          "max_length"
+        ]
+      },
+      {
+        "code": "declared",
+        "disabled_reason": "",
+        "formats": [
+          "preference"
+        ],
+        "label": "Odds-Ratio Preference Optimization",
+        "name": "orpo",
+        "status": "declared",
+        "task_type": "CAUSAL_LM",
+        "tuning_knobs": [
+          "beta",
+          "max_length"
+        ]
+      },
+      {
+        "code": "declared",
+        "disabled_reason": "",
+        "formats": [
+          "conversational",
+          "prompt_completion",
+          "text"
+        ],
+        "label": "Supervised fine-tuning",
+        "name": "sft",
+        "status": "declared",
+        "task_type": "CAUSAL_LM",
+        "tuning_knobs": [
+          "max_seq_length",
+          "packing"
+        ]
+      }
+    ],
+    "profile": "inert_finetune_declaration",
+    "required_extras": [
+      "finetuning"
+    ],
+    "schema_sha256": "ccb5be4e552c6e3e542f282835566af31b3dfd157f1c361dd517a37ba8b50b8c",
+    "schema_version": 1,
+    "task_type": "CAUSAL_LM"
+  },
+  "catalog_sha256": "a3d41914c887df59ec0457ff013f104f5f2f47dd58548774204e81a0d25aae90",
+  "schemas": {
+    "catalog": {
+      "$defs": {
+        "_Format": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/_Name"
+            },
+            "optional_roles": {
+              "items": {
+                "$ref": "#/$defs/_Name"
+              },
+              "maxItems": 16,
+              "title": "Optional Roles",
+              "type": "array"
+            },
+            "required_roles": {
+              "items": {
+                "$ref": "#/$defs/_Name"
+              },
+              "maxItems": 16,
+              "title": "Required Roles",
+              "type": "array"
+            }
+          },
+          "required": [
+            "name",
+            "required_roles",
+            "optional_roles"
+          ],
+          "title": "_Format",
+          "type": "object"
+        },
+        "_Method": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "enum": [
+                "declared",
+                "method_disabled",
+                "task_outside_profile"
+              ],
+              "title": "Code",
+              "type": "string"
+            },
+            "disabled_reason": {
+              "maxLength": 1024,
+              "title": "Disabled Reason",
+              "type": "string"
+            },
+            "formats": {
+              "items": {
+                "$ref": "#/$defs/_Name"
+              },
+              "maxItems": 32,
+              "title": "Formats",
+              "type": "array"
+            },
+            "label": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "Label",
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/_Name"
+            },
+            "status": {
+              "enum": [
+                "declared",
+                "refused"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "task_type": {
+              "$ref": "#/$defs/_Name"
+            },
+            "tuning_knobs": {
+              "items": {
+                "$ref": "#/$defs/_Name"
+              },
+              "maxItems": 64,
+              "title": "Tuning Knobs",
+              "type": "array"
+            }
+          },
+          "required": [
+            "name",
+            "label",
+            "task_type",
+            "formats",
+            "tuning_knobs",
+            "status",
+            "code",
+            "disabled_reason"
+          ],
+          "title": "_Method",
+          "type": "object"
+        },
+        "_Name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "A detached registry snapshot; a declared cell is not permission to launch.",
+      "properties": {
+        "adapters": {
+          "default": [
+            "none",
+            "lora",
+            "qlora"
+          ],
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "const": "none",
+              "type": "string"
+            },
+            {
+              "const": "lora",
+              "type": "string"
+            },
+            {
+              "const": "qlora",
+              "type": "string"
+            }
+          ],
+          "title": "Adapters",
+          "type": "array"
+        },
+        "distribution": {
+          "const": "unspecified",
+          "default": "unspecified",
+          "title": "Distribution",
+          "type": "string"
+        },
+        "environment": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Environment",
+          "type": "string"
+        },
+        "formats": {
+          "items": {
+            "$ref": "#/$defs/_Format"
+          },
+          "maxItems": 32,
+          "title": "Formats",
+          "type": "array"
+        },
+        "hardware": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Hardware",
+          "type": "string"
+        },
+        "initialization": {
+          "const": "pretrained",
+          "default": "pretrained",
+          "title": "Initialization",
+          "type": "string"
+        },
+        "installed": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Installed",
+          "type": "string"
+        },
+        "methods": {
+          "items": {
+            "$ref": "#/$defs/_Method"
+          },
+          "maxItems": 64,
+          "title": "Methods",
+          "type": "array"
+        },
+        "profile": {
+          "const": "inert_finetune_declaration",
+          "default": "inert_finetune_declaration",
+          "title": "Profile",
+          "type": "string"
+        },
+        "required_extras": {
+          "default": [
+            "finetuning"
+          ],
+          "maxItems": 1,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "const": "finetuning",
+              "type": "string"
+            }
+          ],
+          "title": "Required Extras",
+          "type": "array"
+        },
+        "schema_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Schema Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "task_type": {
+          "const": "CAUSAL_LM",
+          "default": "CAUSAL_LM",
+          "title": "Task Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_sha256",
+        "methods",
+        "formats"
+      ],
+      "title": "TrainingCapabilityCatalog",
+      "type": "object"
+    },
+    "decision": {
+      "$defs": {
+        "_Code": {
+          "enum": [
+            "declared",
+            "invalid_request",
+            "task_outside_profile",
+            "initialization_outside_profile",
+            "distribution_outside_profile",
+            "unknown_method",
+            "method_disabled",
+            "format_unsupported",
+            "adapter_unsupported",
+            "merge_requires_adapter"
+          ],
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Fixed, content-free classification that never asserts runtime eligibility.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/_Code"
+        },
+        "environment": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Environment",
+          "type": "string"
+        },
+        "hardware": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Hardware",
+          "type": "string"
+        },
+        "installed": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Installed",
+          "type": "string"
+        },
+        "profile": {
+          "const": "inert_finetune_declaration",
+          "default": "inert_finetune_declaration",
+          "title": "Profile",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "declared",
+            "refused"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "code"
+      ],
+      "title": "TrainingCapabilityDecision",
+      "type": "object"
+    },
+    "request": {
+      "$defs": {
+        "_Name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Bounded selectors for the existing inert declaration path, without execution inputs.",
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/_Name",
+          "default": "lora"
+        },
+        "dataset_format": {
+          "$ref": "#/$defs/_Name"
+        },
+        "distribution": {
+          "$ref": "#/$defs/_Name",
+          "default": "unspecified"
+        },
+        "initialization": {
+          "$ref": "#/$defs/_Name",
+          "default": "pretrained"
+        },
+        "merge_adapter": {
+          "default": false,
+          "title": "Merge Adapter",
+          "type": "boolean"
+        },
+        "method": {
+          "$ref": "#/$defs/_Name"
+        },
+        "task_type": {
+          "$ref": "#/$defs/_Name",
+          "default": "CAUSAL_LM"
+        }
+      },
+      "required": [
+        "method",
+        "dataset_format"
+      ],
+      "title": "TrainingCapabilityRequest",
+      "type": "object"
+    }
+  }
+}

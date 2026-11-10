@@ -157,6 +157,11 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   split's real columns BEFORE any model is downloaded, and
   :func:`build_training_rows` drops every column outside the
   roles (a stray column changes what TRL infers).
+- `capabilities.py` projects those registries into frozen, bounded declaration metadata.
+  Preserve unknown installed/environment/hardware eligibility and fixed, non-echoing
+  selector refusals. It neither admits work nor activates task heads, initialization or
+  distribution choices. It must not import pipelines or optional ML packages, and its
+  canonical schema/body identities are covered by exact fixtures in the module tests.
 
 ## Test expectations
 

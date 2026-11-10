@@ -3,6 +3,12 @@
 Fine-tuning primitives: SFT via TRL `SFTTrainer`; preference tuning (DPO, ORPO, KTO, GRPO); PEFT
 (LoRA, QLoRA); chat-template formatting; sequence packing; and progress telemetry.
 
+`capabilities` supplies immutable method/dataset-role declaration snapshots and fixed-code
+selector refusals. Declared pretrained fine-tuning choices retain unknown installed,
+environment and hardware eligibility; they do not admit a run or enable another task head.
+See [declaration capability metadata](../../../docs/modules/training.md#declaration-capability-metadata)
+for its exact scope and canonical identities.
+
 `loading` supplies explicit Hub credentials, safetensors-only model loads, and no remote code.
 The private `_load_guard` checks bounded checkpoint-completeness reports for trained-artifact
 consumers. HF scoring consumes that guard; training initialization and merge integration have
