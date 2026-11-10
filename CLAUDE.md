@@ -256,7 +256,7 @@ unrelated PyPI project.
 
 **An sdist is public and permanent.** The build config is an allow-list, not a filter:
 `[tool.hatch.build.targets.sdist] only-include` ships **only** `src/strata_forge` (hatchling adds
-the readme, licence, `NOTICE`, and `pyproject.toml`), and both targets exclude `CLAUDE.md` /
+the readme, licence, `NOTICE`, `pyproject.toml`, and its standard root `.gitignore`), and both targets exclude `CLAUDE.md` /
 `AGENTS.md` / `.env*`. If you add a build `include`/`force-include`, re-check what lands in the
 archive — `.env` holds live provider keys and is kept out only by the allow-list plus VCS ignores.
 `release.yml` re-asserts this before every upload and fails the job rather than publishing.

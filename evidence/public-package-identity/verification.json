@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "source_parent": "7bd39a382834817240d0d6dea6a12f5b884a8ec3",
+  "offline_build_exit": 0,
+  "wheel": {
+    "sha256": "fbaa9f6cbbbc883efad8762e2781439ea49ccbe4afc6350e2467bb65d0f292b7",
+    "files": 240
+  },
+  "sdist": {
+    "sha256": "1a19e37c63520d3c7745d367f713ed65198ab619ef9f1e417aef5108b71ae797",
+    "files": 240,
+    "standard_builder_root_files": [
+      ".gitignore",
+      "LICENSE",
+      "NOTICE",
+      "PKG-INFO",
+      "README.md",
+      "pyproject.toml"
+    ]
+  },
+  "author_email": "Nemanja Gemovic <gemovic.nemanja@gmail.com>",
+  "package": "strata-forge",
+  "version": "0.3.0",
+  "license": "Apache-2.0",
+  "archive_allowlist_passed": true,
+  "published": false,
+  "qualification": "Initial ad-hoc archive audit stopped at AssertionError because Hatch also includes the root .gitignore. Corrected audit acknowledges that existing standard builder file; runtime/source exclusions remain required."
+}
