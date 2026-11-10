@@ -1,0 +1,12 @@
+RUF043 Pattern passed to `match=` contains metacharacters but is neither escaped nor raw
+  --> tests/unit/core/test_runtime_environment.py:29:42
+   |
+28 | def refusal(value):
+29 |     with pytest.raises(ValueError, match="^runtime_environment_invalid$") as caught:
+   |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+30 |         runtime.canonical_environment_bytes(value)
+31 |     assert caught.value.args == ("runtime_environment_invalid",)
+   |
+help: Use a raw string or `re.escape()` to make the intention explicit
+
+Found 1 error.

@@ -1,0 +1,57 @@
+S110 `try`-`except`-`pass` detected, consider logging the exception
+   --> src/strata_forge/core/runtime_environment.py:185:5
+    |
+183 |               if len(encoded) <= MAX_OBSERVATION_BYTES:
+184 |                   raw = encoded
+185 | /     except Exception:
+186 | |         pass
+    | |____________^
+187 |       if raw is None:
+188 |           raise ValueError("runtime_environment_invalid") from None
+    |
+
+PT011 `pytest.raises(ValueError)` is too broad, set the `match` parameter or use a more specific exception
+  --> tests/unit/core/test_runtime_environment.py:28:24
+   |
+27 | def refusal(value):
+28 |     with pytest.raises(ValueError) as caught:
+   |                        ^^^^^^^^^^
+29 |         runtime.canonical_environment_bytes(value)
+30 |     assert caught.value.args == ("runtime_environment_invalid",)
+   |
+
+PT018 Assertion should be broken down into multiple parts
+   --> tests/unit/core/test_runtime_environment.py:112:5
+    |
+110 |         fixed
+111 |     )
+112 |     assert b"cwd" not in raw and b"direct_url" not in raw and b"executable" not in raw
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+113 |     with pytest.raises(ValueError):
+114 |         fixed.distributions[0].version = "2.0"
+    |
+help: Break down assertion into multiple parts
+
+PT011 `pytest.raises(ValueError)` is too broad, set the `match` parameter or use a more specific exception
+   --> tests/unit/core/test_runtime_environment.py:113:24
+    |
+111 |     )
+112 |     assert b"cwd" not in raw and b"direct_url" not in raw and b"executable" not in raw
+113 |     with pytest.raises(ValueError):
+    |                        ^^^^^^^^^^
+114 |         fixed.distributions[0].version = "2.0"
+    |
+
+S603 `subprocess` call: check for execution of untrusted input
+   --> tests/unit/core/test_runtime_environment.py:187:17
+    |
+185 | print(json.dumps({"counters":counts,"distribution_count":19,"canonical_bytes":len(raw)}))
+186 | """
+187 |     completed = subprocess.run(
+    |                 ^^^^^^^^^^^^^^
+188 |         [sys.executable, "-I", "-B", "-c", program, str(source)],
+189 |         env={},
+    |
+
+Found 5 errors.
+No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).
