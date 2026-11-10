@@ -8,7 +8,7 @@ Cross-cutting concerns that every module needs: exception hierarchy, retry decor
 
 ## Boundaries
 
-- **Owns:** `errors.py`, `retry.py`, `logging.py`, `budget.py`, `repro.py`, `ids.py`, `redact.py`, `types.py`.
+- **Owns:** `errors.py`, `retry.py`, `logging.py`, `budget.py`, `repro.py`, `runtime_environment.py`, `ids.py`, `redact.py`, `types.py`.
 - **Imports from inside `forge`:** nothing. This is a hard rule.
 - **Allowed external deps:** `pydantic`, `pydantic-settings`, `structlog`, `tenacity`, anyio, `uuid7` (or equivalent), stdlib. Anything heavier (numpy, torch) must be lazily imported inside the function that needs it.
 - **Does NOT:** know about LLMs, read config (it accepts values; `strata_forge.config` produces them), make network calls.
@@ -33,7 +33,8 @@ The module's `__init__.py` re-exports a curated surface. Treat the following as 
 - structlog setup: pretty renderer when stdout is a TTY, JSON renderer otherwise. `correlation_id` is a `ContextVar[str | None]` in `ids.py` — `logging.py`'s `_add_correlation_id` processor injects it into every record; it propagates across `await` without explicit passing.
 - `BudgetContext` is an async context manager. Nested budgets share the parent's accumulated spend unless `isolated=True`.
 - `content_hash` hashes a JSON-canonical form (sorted keys, no whitespace) to remain stable across logically-equivalent inputs.
-- `env_snapshot` captures: installed package versions, git SHA (if in a repo), Python version, OS info. Lazy imports for `numpy` / `torch` versions when present.
+- `env_snapshot` captures interpreter/platform/CWD and fixed installed distribution versions using metadata lookups. It does not inspect Git or import NumPy/Torch.
+- Internal `runtime_environment` captures a bounded closed distribution-metadata observation without changing legacy snapshots or public exports. Metadata presence does not establish importability, source/image/lock identity, hardware or execution eligibility. Keep its fixed profile, copied-value revalidation and cold no-effect controls in sync with [the core reference](../../../docs/modules/core.md#runtime-observations).
 - `Redactor` computes the union of every span any value form, token pattern or private-key block covers, joins two runs separated only by up to 8 whitespace characters, and replaces each resulting run with one `PLACEHOLDER`. `RedactingStream` runs the same computation with a "decided" bound: a match starting at least `max_len - 1` characters before the end of what has arrived is final, and whitespace right after a run is held back until a later run can no longer join it. The stream keeps one character before the undecided text so a pattern may look one character back. That is what makes streamed output equal one-shot output, and it holds only because every `TokenPattern` declares a true `max_chars`, looks back at most one character and never tests where the text ends.
 
 ## Test expectations

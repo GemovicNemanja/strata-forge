@@ -2,6 +2,12 @@
 
 Cross-cutting utilities every other module depends on: exception hierarchy (`ForgeError` and subclasses), `@retry` decorator, structlog setup with `trace_id` correlation via contextvars, `BudgetContext` for cost/token ceilings, reproducibility helpers (seeds, content hashing, environment snapshots), UUIDv7-based correlation IDs, secret redaction, and shared type aliases. Strictly upstream — never imports from other `strata_forge.*` modules.
 
+The internal `runtime_environment` observation profile records fixed distribution
+version metadata without importing optional engines. Presence, absence and lookup
+failure stay distinct; hardware, source/image/lock identity and execution eligibility
+remain unobserved. It has no runner or transport consumer. See
+[the core reference](../../../docs/modules/core.md#runtime-observations).
+
 ## Secret redaction
 
 `strata_forge.core.redact` is the one implementation every surfaced string goes through, so a process that holds credentials and a process that relays its output apply the same rules:

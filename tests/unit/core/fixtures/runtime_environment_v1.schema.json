@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "_Distribution": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "observed",
+            "metadata_not_found",
+            "metadata_invalid",
+            "metadata_unavailable"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "present",
+            "absent",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Version"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "version",
+        "reason"
+      ],
+      "title": "_Distribution",
+      "type": "object"
+    },
+    "_Interpreter": {
+      "additionalProperties": false,
+      "properties": {
+        "implementation": {
+          "enum": [
+            "cpython",
+            "pypy",
+            "other"
+          ],
+          "title": "Implementation",
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "darwin",
+            "linux",
+            "win32",
+            "other"
+          ],
+          "title": "Platform",
+          "type": "string"
+        },
+        "pointer_bits": {
+          "enum": [
+            32,
+            64
+          ],
+          "title": "Pointer Bits",
+          "type": "integer"
+        },
+        "python_version": {
+          "maxLength": 32,
+          "minLength": 5,
+          "title": "Python Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "implementation",
+        "python_version",
+        "platform",
+        "pointer_bits"
+      ],
+      "title": "_Interpreter",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A detached observation of metadata; no field asserts installed runtime usability.",
+  "properties": {
+    "distributions": {
+      "items": {
+        "$ref": "#/$defs/_Distribution"
+      },
+      "maxItems": 19,
+      "minItems": 19,
+      "title": "Distributions",
+      "type": "array"
+    },
+    "execution": {
+      "const": "not_assessed",
+      "default": "not_assessed",
+      "title": "Execution",
+      "type": "string"
+    },
+    "hardware": {
+      "const": "not_observed",
+      "default": "not_observed",
+      "title": "Hardware",
+      "type": "string"
+    },
+    "image_digest": {
+      "const": "not_observed",
+      "default": "not_observed",
+      "title": "Image Digest",
+      "type": "string"
+    },
+    "importability": {
+      "const": "not_observed",
+      "default": "not_observed",
+      "title": "Importability",
+      "type": "string"
+    },
+    "interpreter": {
+      "$ref": "#/$defs/_Interpreter"
+    },
+    "lock_digest": {
+      "const": "not_observed",
+      "default": "not_observed",
+      "title": "Lock Digest",
+      "type": "string"
+    },
+    "observed_at": {
+      "maxLength": 27,
+      "minLength": 27,
+      "title": "Observed At",
+      "type": "string"
+    },
+    "profile": {
+      "const": "distribution_metadata_v1",
+      "default": "distribution_metadata_v1",
+      "title": "Profile",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_revision": {
+      "const": "not_observed",
+      "default": "not_observed",
+      "title": "Source Revision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "observed_at",
+    "interpreter",
+    "distributions"
+  ],
+  "title": "RuntimeEnvironmentObservation",
+  "type": "object"
+}
