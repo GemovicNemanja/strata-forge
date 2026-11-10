@@ -1,0 +1,62 @@
+{
+    "version": "1.1.410",
+    "time": "1794319189079",
+    "generalDiagnostics": [
+        {
+            "file": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/runtime-distribution-observations/src/strata_forge/core/runtime_environment.py",
+            "severity": "error",
+            "message": "Argument of type \"str\" cannot be assigned to parameter \"implementation\" of type \"Literal['cpython', 'pypy', 'other']\" in function \"__init__\"\n  Type \"str\" is not assignable to type \"Literal['cpython', 'pypy', 'other']\"\n    \"str\" is not assignable to type \"Literal['cpython']\"\n    \"str\" is not assignable to type \"Literal['pypy']\"\n    \"str\" is not assignable to type \"Literal['other']\"",
+            "range": {
+                "start": {
+                    "line": 160,
+                    "character": 27
+                },
+                "end": {
+                    "line": 160,
+                    "character": 95
+                }
+            },
+            "rule": "reportArgumentType"
+        },
+        {
+            "file": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/runtime-distribution-observations/src/strata_forge/core/runtime_environment.py",
+            "severity": "error",
+            "message": "Argument of type \"LiteralString | Literal['other']\" cannot be assigned to parameter \"platform\" of type \"Literal['darwin', 'linux', 'win32', 'other']\" in function \"__init__\"\n  Type \"LiteralString | Literal['other']\" is not assignable to type \"Literal['darwin', 'linux', 'win32', 'other']\"\n    Type \"LiteralString\" is not assignable to type \"Literal['darwin', 'linux', 'win32', 'other']\"\n      \"str\" is not assignable to \"Literal['darwin']\"\n      \"str\" is not assignable to \"Literal['linux']\"\n      \"str\" is not assignable to \"Literal['win32']\"\n      \"str\" is not assignable to \"Literal['other']\"",
+            "range": {
+                "start": {
+                    "line": 162,
+                    "character": 21
+                },
+                "end": {
+                    "line": 162,
+                    "character": 86
+                }
+            },
+            "rule": "reportArgumentType"
+        },
+        {
+            "file": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/runtime-distribution-observations/src/strata_forge/core/runtime_environment.py",
+            "severity": "error",
+            "message": "Argument of type \"int\" cannot be assigned to parameter \"pointer_bits\" of type \"Literal[32, 64]\" in function \"__init__\"\n  Type \"int\" is not assignable to type \"Literal[32, 64]\"\n    \"int\" is not assignable to type \"Literal[32]\"\n    \"int\" is not assignable to type \"Literal[64]\"",
+            "range": {
+                "start": {
+                    "line": 163,
+                    "character": 25
+                },
+                "end": {
+                    "line": 163,
+                    "character": 49
+                }
+            },
+            "rule": "reportArgumentType"
+        }
+    ],
+    "summary": {
+        "filesAnalyzed": 1,
+        "errorCount": 3,
+        "warningCount": 0,
+        "informationCount": 0,
+        "timeInSec": 0.378
+    }
+}
+
