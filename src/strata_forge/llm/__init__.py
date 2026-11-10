@@ -1,75 +1,10 @@
-"""Provider-abstracted async LLM client with tools, structured output, and fallback."""
+"""Provider-abstracted types and clients, with transport imports deferred until requested."""
 
-from strata_forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
-from strata_forge.llm.client import LLMClient, StructuredResponse
-from strata_forge.llm.cost import compute_cost
-from strata_forge.llm.diagnostic import (
-    DiagnosticRecord,
-    make_error_field,
-    utcnow_iso,
-    write_diagnostic_record,
-)
-from strata_forge.llm.errors import (
-    map_litellm_exception,
-    map_responses_error,
-    raise_as_provider_error,
-)
-from strata_forge.llm.fallback import (
-    FallbackEntry,
-    ModelFallback,
-    normalize_fallback_chain,
-    run_with_fallback,
-)
-from strata_forge.llm.loop_events import (
-    Done,
-    IterationStart,
-    LoopError,
-    LoopEvent,
-    PendingToolCalls,
-    TextDelta,
-    ToolCallStarted,
-    ToolResult,
-)
-from strata_forge.llm.messages import (
-    AnyMessage,
-    AssistantMessage,
-    CallRef,
-    ContentPart,
-    Message,
-    ProviderItem,
-    ProviderItems,
-    ReasoningItem,
-    ResponsesProvider,
-    Role,
-    SystemMessage,
-    TextItem,
-    TextPart,
-    ToolCall,
-    ToolResultMessage,
-    UserMessage,
-    validate_conversation,
-)
-from strata_forge.llm.multimodal import ImageContent, downscale_image
-from strata_forge.llm.providers import (
-    AnthropicConfig,
-    AnthropicProvider,
-    AzureConfig,
-    AzureProvider,
-    BedrockConfig,
-    BedrockProvider,
-    OpenAICompatConfig,
-    OpenAICompatProvider,
-    OpenAIConfig,
-    OpenAIProvider,
-    ProviderClient,
-    ProviderConfig,
-    VertexConfig,
-    VertexProvider,
-    to_anthropic_tool_schema,
-    to_gemini_tool_schema,
-    to_openai_responses_tool_schema,
-    to_openai_tool_schema,
-)
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING
+
 from strata_forge.llm.registry import (
     Capabilities,
     Modality,
@@ -83,38 +18,201 @@ from strata_forge.llm.registry import (
     WireApi,
     registry,
 )
-from strata_forge.llm.responses import (
-    FinishReason,
-    LLMResponse,
-    ResponseChunk,
-    ToolCallDelta,
-    Usage,
-)
-from strata_forge.llm.routing import ModelRoute, resolve
-from strata_forge.llm.schemas import (
-    StructuredOutputError,
-    make_reprompt_instruction,
-    parse_json_response,
-    pydantic_to_json_schema,
-    to_anthropic_forced_tool_schema,
-    to_gemini_response_schema,
-    to_openai_response_format,
-)
-from strata_forge.llm.streaming import (
-    JSONAccumulator,
-    StreamingToolCallAccumulator,
-    accumulate_text,
-    accumulate_tool_calls,
-)
-from strata_forge.llm.tokens import count_tokens
-from strata_forge.llm.tools import (
-    AnyTool,
-    Tool,
-    ToolDeclaration,
-    ToolFunc,
-    ToolLoopExceededError,
-    tool,
-)
+
+if TYPE_CHECKING:
+    from strata_forge.llm.cache import CacheBackend, InMemoryCache, RedisCache, cache_key
+    from strata_forge.llm.client import LLMClient, StructuredResponse
+    from strata_forge.llm.cost import compute_cost
+    from strata_forge.llm.diagnostic import (
+        DiagnosticRecord,
+        make_error_field,
+        utcnow_iso,
+        write_diagnostic_record,
+    )
+    from strata_forge.llm.errors import (
+        map_litellm_exception,
+        map_responses_error,
+        raise_as_provider_error,
+    )
+    from strata_forge.llm.fallback import (
+        FallbackEntry,
+        ModelFallback,
+        normalize_fallback_chain,
+        run_with_fallback,
+    )
+    from strata_forge.llm.loop_events import (
+        Done,
+        IterationStart,
+        LoopError,
+        LoopEvent,
+        PendingToolCalls,
+        TextDelta,
+        ToolCallStarted,
+        ToolResult,
+    )
+    from strata_forge.llm.messages import (
+        AnyMessage,
+        AssistantMessage,
+        CallRef,
+        ContentPart,
+        Message,
+        ProviderItem,
+        ProviderItems,
+        ReasoningItem,
+        ResponsesProvider,
+        Role,
+        SystemMessage,
+        TextItem,
+        TextPart,
+        ToolCall,
+        ToolResultMessage,
+        UserMessage,
+        validate_conversation,
+    )
+    from strata_forge.llm.multimodal import ImageContent, downscale_image
+    from strata_forge.llm.providers import (
+        AnthropicConfig,
+        AnthropicProvider,
+        AzureConfig,
+        AzureProvider,
+        BedrockConfig,
+        BedrockProvider,
+        OpenAICompatConfig,
+        OpenAICompatProvider,
+        OpenAIConfig,
+        OpenAIProvider,
+        ProviderClient,
+        ProviderConfig,
+        VertexConfig,
+        VertexProvider,
+        to_anthropic_tool_schema,
+        to_gemini_tool_schema,
+        to_openai_responses_tool_schema,
+        to_openai_tool_schema,
+    )
+    from strata_forge.llm.responses import (
+        FinishReason,
+        LLMResponse,
+        ResponseChunk,
+        ToolCallDelta,
+        Usage,
+    )
+    from strata_forge.llm.routing import ModelRoute, resolve
+    from strata_forge.llm.schemas import (
+        StructuredOutputError,
+        make_reprompt_instruction,
+        parse_json_response,
+        pydantic_to_json_schema,
+        to_anthropic_forced_tool_schema,
+        to_gemini_response_schema,
+        to_openai_response_format,
+    )
+    from strata_forge.llm.streaming import (
+        JSONAccumulator,
+        StreamingToolCallAccumulator,
+        accumulate_text,
+        accumulate_tool_calls,
+    )
+    from strata_forge.llm.tokens import count_tokens
+    from strata_forge.llm.tools import (
+        AnyTool,
+        Tool,
+        ToolDeclaration,
+        ToolFunc,
+        ToolLoopExceededError,
+        tool,
+    )
+
+_EXPORT_MODULES: dict[str, str] = {
+    "CacheBackend": "strata_forge.llm.cache",
+    "InMemoryCache": "strata_forge.llm.cache",
+    "RedisCache": "strata_forge.llm.cache",
+    "cache_key": "strata_forge.llm.cache",
+    "LLMClient": "strata_forge.llm.client",
+    "StructuredResponse": "strata_forge.llm.client",
+    "compute_cost": "strata_forge.llm.cost",
+    "DiagnosticRecord": "strata_forge.llm.diagnostic",
+    "make_error_field": "strata_forge.llm.diagnostic",
+    "utcnow_iso": "strata_forge.llm.diagnostic",
+    "write_diagnostic_record": "strata_forge.llm.diagnostic",
+    "map_litellm_exception": "strata_forge.llm.errors",
+    "map_responses_error": "strata_forge.llm.errors",
+    "raise_as_provider_error": "strata_forge.llm.errors",
+    "FallbackEntry": "strata_forge.llm.fallback",
+    "ModelFallback": "strata_forge.llm.fallback",
+    "normalize_fallback_chain": "strata_forge.llm.fallback",
+    "run_with_fallback": "strata_forge.llm.fallback",
+    "Done": "strata_forge.llm.loop_events",
+    "IterationStart": "strata_forge.llm.loop_events",
+    "LoopError": "strata_forge.llm.loop_events",
+    "LoopEvent": "strata_forge.llm.loop_events",
+    "PendingToolCalls": "strata_forge.llm.loop_events",
+    "TextDelta": "strata_forge.llm.loop_events",
+    "ToolCallStarted": "strata_forge.llm.loop_events",
+    "ToolResult": "strata_forge.llm.loop_events",
+    "AnyMessage": "strata_forge.llm.messages",
+    "AssistantMessage": "strata_forge.llm.messages",
+    "CallRef": "strata_forge.llm.messages",
+    "ContentPart": "strata_forge.llm.messages",
+    "Message": "strata_forge.llm.messages",
+    "ProviderItem": "strata_forge.llm.messages",
+    "ProviderItems": "strata_forge.llm.messages",
+    "ReasoningItem": "strata_forge.llm.messages",
+    "ResponsesProvider": "strata_forge.llm.messages",
+    "Role": "strata_forge.llm.messages",
+    "SystemMessage": "strata_forge.llm.messages",
+    "TextItem": "strata_forge.llm.messages",
+    "TextPart": "strata_forge.llm.messages",
+    "ToolCall": "strata_forge.llm.messages",
+    "ToolResultMessage": "strata_forge.llm.messages",
+    "UserMessage": "strata_forge.llm.messages",
+    "validate_conversation": "strata_forge.llm.messages",
+    "ImageContent": "strata_forge.llm.multimodal",
+    "downscale_image": "strata_forge.llm.multimodal",
+    "AnthropicConfig": "strata_forge.llm.providers",
+    "AnthropicProvider": "strata_forge.llm.providers",
+    "AzureConfig": "strata_forge.llm.providers",
+    "AzureProvider": "strata_forge.llm.providers",
+    "BedrockConfig": "strata_forge.llm.providers",
+    "BedrockProvider": "strata_forge.llm.providers",
+    "OpenAICompatConfig": "strata_forge.llm.providers",
+    "OpenAICompatProvider": "strata_forge.llm.providers",
+    "OpenAIConfig": "strata_forge.llm.providers",
+    "OpenAIProvider": "strata_forge.llm.providers",
+    "ProviderClient": "strata_forge.llm.providers",
+    "ProviderConfig": "strata_forge.llm.providers",
+    "VertexConfig": "strata_forge.llm.providers",
+    "VertexProvider": "strata_forge.llm.providers",
+    "to_anthropic_tool_schema": "strata_forge.llm.providers",
+    "to_gemini_tool_schema": "strata_forge.llm.providers",
+    "to_openai_responses_tool_schema": "strata_forge.llm.providers",
+    "to_openai_tool_schema": "strata_forge.llm.providers",
+    "FinishReason": "strata_forge.llm.responses",
+    "LLMResponse": "strata_forge.llm.responses",
+    "ResponseChunk": "strata_forge.llm.responses",
+    "ToolCallDelta": "strata_forge.llm.responses",
+    "Usage": "strata_forge.llm.responses",
+    "ModelRoute": "strata_forge.llm.routing",
+    "resolve": "strata_forge.llm.routing",
+    "StructuredOutputError": "strata_forge.llm.schemas",
+    "make_reprompt_instruction": "strata_forge.llm.schemas",
+    "parse_json_response": "strata_forge.llm.schemas",
+    "pydantic_to_json_schema": "strata_forge.llm.schemas",
+    "to_anthropic_forced_tool_schema": "strata_forge.llm.schemas",
+    "to_gemini_response_schema": "strata_forge.llm.schemas",
+    "to_openai_response_format": "strata_forge.llm.schemas",
+    "JSONAccumulator": "strata_forge.llm.streaming",
+    "StreamingToolCallAccumulator": "strata_forge.llm.streaming",
+    "accumulate_text": "strata_forge.llm.streaming",
+    "accumulate_tool_calls": "strata_forge.llm.streaming",
+    "count_tokens": "strata_forge.llm.tokens",
+    "AnyTool": "strata_forge.llm.tools",
+    "Tool": "strata_forge.llm.tools",
+    "ToolDeclaration": "strata_forge.llm.tools",
+    "ToolFunc": "strata_forge.llm.tools",
+    "ToolLoopExceededError": "strata_forge.llm.tools",
+    "tool": "strata_forge.llm.tools",
+}
 
 __all__ = [
     "AnthropicConfig",
@@ -217,3 +315,16 @@ __all__ = [
     "validate_conversation",
     "write_diagnostic_record",
 ]
+
+
+def __getattr__(name: str) -> object:
+    module = _EXPORT_MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value: object = getattr(import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

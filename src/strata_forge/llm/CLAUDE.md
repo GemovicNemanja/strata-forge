@@ -17,6 +17,13 @@ Provider-abstracted async LLM client built on LiteLLM ([ADR 0001](../../../docs/
 
 The module's `__init__.py` re-exports a curated surface:
 
+The local registry group is eager to preserve the `registry` singleton/submodule name
+collision. Other exports use lazy module attribute resolution with direct static imports
+under `TYPE_CHECKING`; retain exact defining-module identity, caching and `__all__` order.
+Package/message/training-declaration imports must not initialize LiteLLM, providers or ML
+extras, require offline flags, or attempt socket/DNS/process work. A caught denial remains
+a failed import-contract check. Full namespace imports intentionally resolve the transport.
+
 - `LLMClient` — the main async client.
 - Message types: `Message`, `SystemMessage`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`. `AssistantMessage.provider_items` (`ProviderItems` of `ReasoningItem` / `TextItem` / `CallRef`) carries a Responses API turn's replayable output ([ADR 0018](../../../docs/architecture/adr/0018-openai-routes-speak-the-responses-api.md)).
 - Response types: `LLMResponse`, `ResponseChunk`, `ToolCall`, `FinishReason`.

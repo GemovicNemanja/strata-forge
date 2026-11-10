@@ -504,8 +504,8 @@ changes generated JSON Schema changes this identity and requires compatibility r
 digest is not an engine version, an execution receipt or a cross-repository wire approval.
 
 The library leaf adds no import of optional ML packages. Its containing training package
-retains its existing core LLM imports. For offline inspection, configure LiteLLM's
-`LITELLM_LOCAL_MODEL_COST_MAP=True` to prevent its existing import-time cost-map lookup.
+uses message types through the LLM package's lazy import boundary; inspection does not load
+LiteLLM or providers and requires no offline cost-map flag.
 
 ## The upstream contract
 

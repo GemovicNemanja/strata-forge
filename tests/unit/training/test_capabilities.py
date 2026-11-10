@@ -279,7 +279,8 @@ class Denied(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split('.')[0] in {
             'torch', 'transformers', 'trl', 'peft', 'datasets', 'accelerate', 'bitsandbytes',
-            'numpy', 'pyarrow', 'asyncssh', 'skypilot',
+            'numpy', 'pyarrow', 'asyncssh', 'skypilot', 'litellm', 'httpx', 'openai',
+            'anthropic', 'boto3', 'botocore', 'google',
         }:
             raise AssertionError('optional import: ' + fullname)
 sys.meta_path.insert(0, Denied())
@@ -302,8 +303,6 @@ print(json.dumps({'methods':len(catalog.methods),'catalog_sha256':catalog_sha256
         "PYTHONPATH": str(_ROOT / "src"),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHON_DOTENV_DISABLED": "1",
-        "LITELLM_MODE": "PRODUCTION",
-        "LITELLM_LOCAL_MODEL_COST_MAP": "True",
         "OTEL_SDK_DISABLED": "true",
     }
     result = subprocess.run(  # noqa: S603 - fixed interpreter and literal script, no caller code

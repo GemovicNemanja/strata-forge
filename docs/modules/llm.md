@@ -47,6 +47,25 @@ agent rules live in [`src/strata_forge/llm/CLAUDE.md`](../../src/strata_forge/ll
 
 ---
 
+## Import behavior
+
+The package preserves its curated `__all__` exports and their original defining-module
+identities. Message-only imports and importing `strata_forge.llm` do not load LiteLLM,
+HTTP transports, provider implementations or optional ML packages. No offline cost-map flag
+is required to inspect messages or the training method/capability declarations.
+
+The local YAML registry and its typed exports load eagerly. This keeps the package's
+`registry` singleton identical to `strata_forge.llm.registry.registry`, including when the
+submodule is imported first. Other curated exports resolve through module `__getattr__` and
+cache the actual object on first access. `dir(strata_forge.llm)` lists the public surface
+without loading those exports; `from strata_forge.llm import *` deliberately resolves all of it.
+Static type checkers retain the direct imports under `TYPE_CHECKING`.
+
+Requesting a transport-dependent export such as `LLMClient` loads its real dependencies;
+this does not change their initialization or network behavior. Offline programs that
+intentionally import the full transport can select LiteLLM's
+`LITELLM_LOCAL_MODEL_COST_MAP=True`. Lazy loading is an import boundary, not a network sandbox.
+
 ## Quickstart
 
 ```python
