@@ -50,6 +50,7 @@ Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
 - [Chat-template formatting](#chat-template-formatting)
 - [Sequence packing](#sequence-packing)
 - [Driving training from a declaration](#driving-training-from-a-declaration)
+- [Declaration capability metadata](#declaration-capability-metadata)
 - [Lazy-import contract](#lazy-import-contract)
 - [Troubleshooting](#troubleshooting)
 
@@ -449,6 +450,62 @@ This bounds only the **declaration** path. `extra_trainer_args` remains an unres
 hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — there the caller *is* the
 operator, and Forge does not block access to the underlying TRL surface. The distinction is who
 submitted the values, not what they are.
+
+## Declaration capability metadata
+
+`strata_forge.training.capabilities` provides a pure, bounded projection of `METHODS` and
+`FORMATS`. Import its names directly from that leaf; it adds no CLI, HTTP, MCP, worker or
+top-level training export. It does not replace the method registry or the fine-tuning spec.
+
+```python
+from strata_forge.training.capabilities import (
+    assess_training_capability, catalog_sha256, training_capabilities,
+)
+
+catalog = training_capabilities()
+identity = catalog_sha256(catalog)
+decision = assess_training_capability({
+    "method": "sft", "dataset_format": "text", "adapter": "none",
+})
+assert decision.code == "declared"
+```
+
+`declared` means only that these selectors match the existing inert fine-tuning declaration.
+The profile covers pretrained causal-LM SFT/DPO/ORPO/KTO, their actual registered dataset
+formats and the existing `none`/`lora`/`qlora` adapter choices. `none` means pretrained
+full-weight fine-tuning; it does not mean training from scratch. A merge requires an adapter.
+GRPO remains visible as refused metadata with its registry explanation. Other heads,
+from-scratch initialization and explicit distribution choices return fixed `*_outside_profile`
+refusal codes, scoped by the result's `profile="inert_finetune_declaration"`. This scope does
+not describe the separate trusted-Python/custom task interfaces or research implementations.
+`distribution="unspecified"` makes no single-GPU, multi-GPU, DDP or FSDP claim.
+
+Every result reports `installed`, `environment` and `hardware` as `unknown`. The declared
+`finetuning` extra is the training primitive's packaging requirement; it is not an installation
+check or a complete deployment profile for optional publication/storage. Model/architecture
+compatibility, data roles against actual columns, parameters, permissions, trusted source pins,
+output authority, dependency versions, runtime/GPU eligibility, budgets and launch admission
+remain separate checks. A valid projection is never permission to allocate or execute work.
+
+Catalogs and their nested descriptors are frozen models containing tuples, detached from the
+mutable registries. Method/format entries and method format sets sort by name; required and
+optional role order and tuning-knob order are preserved. Requests are strict, reject extra
+keys, limit each selector to 1–64 codepoints and require an actual boolean for `merge_adapter`.
+Malformed requests, including copied models containing invalid fields, return `invalid_request`
+without raw validation diagnostics or rejected-value echo. Refusal precedence is invalid input,
+task, initialization, distribution, unknown/disabled/mismatched method, format, adapter, merge.
+
+`canonical_catalog_bytes` emits the complete body as UTF-8 JSON, with sorted keys, compact
+separators, unescaped Unicode, no NaN and no trailing newline. `catalog_sha256` hashes those exact
+bytes, including `schema_sha256`. The schema hash covers a sorted-key canonical object named
+`catalog`, `request`, `decision`, each containing that model's `model_json_schema()` output.
+The golden fixture retains all three schemas and both identities. A dependency change that
+changes generated JSON Schema changes this identity and requires compatibility review; the
+digest is not an engine version, an execution receipt or a cross-repository wire approval.
+
+The library leaf adds no import of optional ML packages. Its containing training package
+retains its existing core LLM imports. For offline inspection, configure LiteLLM's
+`LITELLM_LOCAL_MODEL_COST_MAP=True` to prevent its existing import-time cost-map lookup.
 
 ## The upstream contract
 
