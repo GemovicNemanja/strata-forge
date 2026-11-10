@@ -1,0 +1,36 @@
+{
+  "qualification": "Flag-free lightweight SDK import proof; explicit transport exports retain their provider dependencies. No model/provider/service execution.",
+  "files": [
+    {
+      "path": "HANDOFF.md",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/lazy-llm-imports-evidence/HANDOFF.md",
+      "sha256": "3b0d97d7f641b9ec86f438c72479553c42500b480df23e23b8f83a5ed5101a6e",
+      "bytes": 6306
+    },
+    {
+      "path": "source-manifest.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/lazy-llm-imports-evidence/source-manifest.json",
+      "sha256": "8d51bbb692a46cfc137ee568dd1b20133ba5e25eb9796b523fcc810d841bb51f",
+      "bytes": 3613
+    },
+    {
+      "path": "baseline-effects.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/lazy-llm-imports-evidence/baseline-effects.json",
+      "sha256": "d5781f6866fffe0ce99bdee7c975461c24c8b75dd68c97930ad3fe1e3458d7c5",
+      "bytes": 260
+    },
+    {
+      "path": "frozen-effects.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/lazy-llm-imports-evidence/frozen-effects.json",
+      "sha256": "81361aeb51023ce79ea422d0dd724303788fd7b8b83211b8e33e4e8e1e526726",
+      "bytes": 213
+    },
+    {
+      "path": "successor-denied.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/lazy-llm-imports-evidence/successor-denied.json",
+      "sha256": "5678ac4e2fed06468218e3dfb67ed44e6fa7961f14cd8b47703d9009a05819e6",
+      "bytes": 210
+    }
+  ],
+  "paired_consumer_check": "3 actual Server organization/Trace/Connections controls passed against currentServer+currentForge source in0.62s."
+}
