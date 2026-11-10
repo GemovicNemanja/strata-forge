@@ -1,0 +1,17 @@
+{
+  "environment_reused_readonly": true,
+  "interpreter": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/rework-20261109/strata-server/.venv/bin/python",
+  "litellm_flag_source": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/rework-20261109/strata-server/.venv/lib/python3.14/site-packages/litellm/litellm_core_utils/get_model_cost_map.py",
+  "litellm_flag_source_sha256": "fa48c8d9620e84b4451888ccdd3849580fef68910f73c57262ebd3e47cfc9d07",
+  "python": "3.14.5 (main, May 10 2026, 10:21:34) [Clang 21.0.0 (clang-2100.0.123.102)]",
+  "source_priority": "explicit PYTHONPATH pointing only at isolated checkout/src",
+  "verified_flag": "LITELLM_LOCAL_MODEL_COST_MAP=True",
+  "versions": {
+    "litellm": "1.87.0",
+    "pydantic": "2.13.4",
+    "pyright": "1.1.410",
+    "pytest": "9.0.3",
+    "ruff": "0.15.15",
+    "strata-forge": "0.3.0"
+  }
+}
