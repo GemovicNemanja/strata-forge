@@ -2,7 +2,7 @@
 
 ## GitHub identity
 
-All Strata GitHub operations must authenticate as **GemovicNemanja**. Before a GitHub write, verify `gh api user --jq .login` returns `GemovicNemanja`; if it does not, select the already configured personal account and verify again. Never use `GemovicWonder` as a fallback, and do not restore it after Strata work. Do not read or print credential values. This identity requirement applies to every agent and to GitHub PR, issue and repository operations. Git commit authorship must also map to `GemovicNemanja`: explicitly set repo-local `user.name` and `user.email` to the personal identity in temporary clones, which can otherwise inherit the work account. Verify the pushed commit’s GitHub author before opening its PR.
+All Strata GitHub operations must authenticate as **GemovicNemanja** through an isolated personal GitHub CLI configuration. Unset `GH_TOKEN` and `GITHUB_TOKEN` for the command and set `GH_CONFIG_DIR` to that personal profile; on the maintainer's workstation it is `/Users/nemanjagemovic/.config/gh-strata-personal`. Before every GitHub write, verify the same scoped `gh api user --jq .login` returns `GemovicNemanja`; stop if it does not. Never switch the shared/default CLI account, which other agents use as `GemovicWonder`, and never use that account as a Strata fallback. For HTTPS Git, use a command-local credential helper with inherited helpers cleared and the same scoped environment; do not change global authentication or credential-helper configuration. Do not read or print credential values. This applies to every agent and all GitHub repository, PR and issue operations. Set repo-local commit authorship to `Nemanja Gemovic` / `gemovic.nemanja@gmail.com` in isolated checkouts, and verify the pushed commit's GitHub author before opening its PR.
 
 This file is the single source of truth for cross-cutting conventions that every contributor (human or agent — Claude Code, Cursor, Codex, Copilot, …) follows in this codebase. Tools that read `AGENTS.md` get the same content via the symlink at the repo root.
 
@@ -10,7 +10,7 @@ Module-specific rules live in `src/strata_forge/<module>/CLAUDE.md`. If a module
 
 Glob-scoped reinforcement of specific patterns lives in `.cursor/rules/*.mdc` for Cursor's rule engine, mirroring the relevant sections of this file.
 
-For the user-requested platform rework, start at [`plans/strata-rework/README.md`](plans/strata-rework/README.md), then read the central task registry, shared contracts and coordination rules before claiming work. This internal execution packet is user-authorized planning material; public API documentation continues to describe implemented behavior. Codex owns platform implementation and redesign; all custom-model data and experiments are reserved for Claude Code. Preserve module rules, secret boundaries and the existing exact tool-design sign-off gate before integration merges.
+For the user-requested platform rework, start at [`plans/strata-platform/README.md`](plans/strata-platform/README.md), then read the central task registry, shared contracts and coordination rules before claiming work. This internal execution packet is user-authorized planning material; public API documentation continues to describe implemented behavior. Codex owns platform implementation and redesign; all custom-model data and experiments are reserved for Claude Code. Preserve module rules, secret boundaries and the existing exact tool-design sign-off gate before integration merges.
 
 ---
 

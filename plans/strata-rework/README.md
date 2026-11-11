@@ -1,3 +1,7 @@
+<!-- BEGIN STRATA PLATFORM SUPERSESSION -->
+> Historical execution plan. Future platform work uses the [canonical delivery plan entrypoint](../strata-platform/README.md), its single task registry and current design map. This historical body is retained unchanged; its completion statements do not establish replacement-plan acceptance. Accepted scientific/custody restrictions and exact wire approvals retain their original scope.
+<!-- END STRATA PLATFORM SUPERSESSION -->
+
 # Forge execution plan for the Strata rework
 
 Internal execution handoff, prepared 2026-11-03 for agents starting 2026-11-04. This is a
