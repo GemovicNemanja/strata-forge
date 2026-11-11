@@ -1,5 +1,9 @@
 # strata-forge
 
+## Platform delivery planning
+
+The [platform delivery plan](plans/strata-platform/README.md) governs the platform restructure and current design direction. It specifies intended work and source-qualified evidence, not shipped capabilities. The first release prioritizes a supported self-hosted installation; Strata-operated company hosting is available only by request. Actual custom-model data, experiments and weights remain Claude Code-owned.
+
 Typed, async-first toolkit for AI/LLM work — inference, evaluation, fine-tuning, retrieval, and
 remote compute orchestration across the major foundation-model providers.
 
