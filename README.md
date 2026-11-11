@@ -77,6 +77,11 @@ asyncio.run(main())
 Provider credentials are read from the environment (for example `OPENAI_API_KEY`). A CLI is
 installed as `strata-forge`.
 
+Run `strata-forge doctor --offline` for a redacted configuration/package-presence
+report without service probes. The default `strata-forge doctor` also checks TCP
+reachability. See [CLI diagnostics](docs/modules/cli.md#doctor) for the scope and
+limitations of both modes.
+
 ## What's in it
 
 | Module | Purpose |

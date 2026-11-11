@@ -23,7 +23,7 @@ workflow surfaces a command here: ``doctor``, ``chat``,
 - **Owns:** ``main.py``, ``helpers.py``, ``doctor.py``,
   ``chat.py``, ``prompts.py``, ``datasets.py``, ``eval_cmd.py``,
   ``experiments.py``, ``compute.py``, ``train.py``, ``serve.py``.
-- **Imports from inside ``forge``:** every other module —
+- **Imports from inside ``strata_forge``:** every other module —
   ``strata_forge.cli`` is the top of the dependency arrow.
 - **Does NOT** carry business logic, persistence layers other
   than the small ``~/.forge`` state directory, or its own type
@@ -33,7 +33,7 @@ workflow surfaces a command here: ``doctor``, ``chat``,
 ## Public API
 
 The only public surface is :data:`app` (the Typer entry point
-registered as the ``forge`` script). Subcommand groups are
+registered as the ``strata-forge`` script). Subcommand groups are
 private implementation detail — users invoke them via the CLI,
 not as Python imports.
 
@@ -66,6 +66,11 @@ Helpers exposed for tests / cross-command reuse:
 - **Rich for output formatting.** Use :class:`Console` /
   :class:`Table` for human-facing output; structured JSON is
   available via specific subcommands when needed.
+- **Doctor is presence/reachability only.** The default preserves bounded TCP
+  checks; ``--offline`` / ``--presence-only`` must never probe a service.
+  All modes print fixed labels/statuses rather than URLs, profile names,
+  credentials, paths or local version suffixes. Package metadata must not import
+  optional ML libraries. A presence/reachability report is not execution authority.
 
 ## Test expectations
 

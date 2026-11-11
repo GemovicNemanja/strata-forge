@@ -111,11 +111,11 @@ type, test, docs, agent rules, and the cross-cutting `strata_forge.core` +
 
 **`strata_forge.cli`** — Typer entry point and the `doctor` command
 
-- `strata-forge doctor` validates env-var presence, runs lightweight provider
-  auth probes (stubbed where the LLM module didn't exist yet), reports
-  package versions and service reachability (Langfuse/Redis/Qdrant). It
-  *skips* unconfigured providers cleanly instead of failing — a missing
-  Anthropic key reports "skipped: missing env" and moves on.
+- [`strata-forge doctor`](modules/cli.md#doctor) reports redacted configuration
+  and tracked package presence, plus bounded TCP reachability for
+  Langfuse/Redis/Qdrant by default. `--offline` / `--presence-only` skips every
+  service probe. Both modes preserve diagnostic exit 0; neither verifies
+  provider authentication, model compatibility or execution readiness.
 - The other CLI commands (`chat`, `eval`, `experiments`, `prompts`,
   `datasets`, `train`, `serve`, `compute`) are stubbed with "not yet
   implemented (phase X)" messages so the entry-point shape is committed.
