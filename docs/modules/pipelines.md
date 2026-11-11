@@ -7,6 +7,11 @@ file, checks the exact engine version, emits JSONL progress, redacts surfaced fa
 handles cancellation. Models and datasets use the explicitly delivered credential or `False`,
 which prevents ambient-token fallback.
 
+The [task-profile inventory](task-capabilities.md) describes these entrypoints and
+the separate trusted-Python/schema-only profiles without registering another
+worker. Its source declarations and schema identities are not installed-target
+eligibility or authorization.
+
 ## Primary classifier execution
 
 `classifier_spec.ClassifierTrainSpec` is a strict, frozen inert primary-training specification.

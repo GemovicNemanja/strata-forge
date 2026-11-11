@@ -457,6 +457,10 @@ submitted the values, not what they are.
 `FORMATS`. Import its names directly from that leaf; it adds no CLI, HTTP, MCP, worker or
 top-level training export. It does not replace the method registry or the fine-tuning spec.
 
+The [task-profile inventory](task-capabilities.md) composes this exact v1 value
+alongside existing worker/SDK schemas. It does not reinterpret `declared` as an
+installed or authorized training capability.
+
 ```python
 from strata_forge.training.capabilities import (
     assess_training_capability, catalog_sha256, training_capabilities,

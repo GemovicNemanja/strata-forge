@@ -14,6 +14,10 @@ policy; the installed adapter consumes a run/spec-bound private Task authority f
 additionally requires a separate destination fence and accepted actual-commit receipt. Standalone
 launch denies access without installed authority. See [pipeline workers](docs/modules/pipelines.md).
 
+The [task-profile inventory](docs/modules/task-capabilities.md) distinguishes
+existing inert workers, trusted Python SDKs and schema-only experimental profiles.
+Source declarations remain separate from installed dependency/target eligibility.
+
 Primary classifier training has an async SDK over resolved objects, with ordinary CE defaults,
 exact trusted head initialization and complete local safetensors reload. It performs no Hub or
 remote operations; worker/adapter/calibration integration remains separate. See [training](docs/modules/training.md).

@@ -702,6 +702,10 @@ none of it requires re-opening the phase plan.
 
 ## Provided-file dataset execution boundary
 
+The [task-profile inventory](modules/task-capabilities.md) composes existing
+worker/SDK schemas with training declaration v1. It adds no task dispatcher or
+installed-target approval; cross-repository consumers retain their own gates.
+
 The [native dataset executor](modules/native-dataset-execution.md) supports explicit isolated
 conversion, named-table read SQL and bounded Parquet materialization with owned cleanup.
 Materialization preserves exact bound column names/types and refuses ambiguous names
