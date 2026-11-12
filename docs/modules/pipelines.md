@@ -582,3 +582,14 @@ no raw diagnostics/context. Receipts contain metadata/checksums/points/intervals
 never raw row/group labels, vectors, draws or replicate arrays. Their hashes are consistency,
 not source/custody/independence attestation. Existing fit/EvalSpec/population/scorer behavior
 and worker purpose/wire remain separate and unchanged.
+
+## Private native immutable payload reads
+
+The injected `pipelines._immutable_input.ImmutableInputReader` binds complete native
+version/manifest identity and explicit principal/project/run/attempt/purpose/spec scope
+before resolving bounded bytes or a held regular FD. A mandatory installed authority
+rechecks actual current rights/custody in the caller task; operational children retain
+actual resolver/FD/cleanup ownership through cancellation and the original deadline.
+This private primitive supplies no authority producer, export, worker registration or
+native consumer, and does not widen legacy Hub refs or registered fit/population policy.
+See [Immutable inputs](immutable-inputs.md) for its exact profile and source obligations.

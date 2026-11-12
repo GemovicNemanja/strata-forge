@@ -104,3 +104,15 @@ implicit projection, raw-row receipts, issuer, remote-purpose or artifact/worker
 Shield/drain repeated cancellation, close streams and recheck current policy through final return;
 no partial10000-run, late success, hard thread timeout, independence or gate claim. ADR0031 owns
 the fixed numerical profile and source-codec pure-value exception.
+
+## Private native immutable input reader
+
+`_immutable_input.py` and `immutable_input_types.py` provide a private injected byte/held-FD
+port, not a worker, authority producer or native consumer. Keep complete request/manifest
+binding, exact supported purposes, actual caller-task current rights/custody checks and
+the original deadline through final disclosure. Operational children carry no policy
+proof and remain owned through actual resolver/thread/close completion. Never replace
+current policy with a digest, URL, caller flag or prior result; never retry an uncertain
+FD number after close. Source leases must own delayed resolution before it begins and
+provide idempotent cleanup. Preserve the bounded profile and qualification documented in
+[`docs/modules/immutable-inputs.md`](../../../docs/modules/immutable-inputs.md).
