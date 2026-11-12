@@ -2,8 +2,9 @@
 
 `pipelines._immutable_input.ImmutableInputReader` is an injected asynchronous byte reader
 for an exact native model, dataset or prompt-build manifest payload. It is private: no
-package export, worker registration, CLI, legacy Hub-reference change or native pipeline
-consumer is installed. Existing [pipeline policies](pipelines.md) remain independent.
+package export, worker registration, CLI or legacy Hub-reference change is installed.
+The separate private [human prompt consumer](native-prompt-inputs.md) uses the explicit
+human-render variant. Existing [pipeline policies](pipelines.md) remain independent.
 
 The installed caller supplies both an `ImmutableInputAuthority` and an
 `ImmutableInputSource`. Missing or malformed authority refuses before source resolution.
@@ -27,6 +28,15 @@ The supported purposes are exactly `evaluation`, `inference`, `classifier_traini
 are not interchangeable grants. Generic `read` or `training`, temperature-calibration
 fitting and paired cluster uncertainty are unsupported. This reader neither supplies a
 checkpoint/population registration nor authorizes fitting, scoring or execution.
+
+`HumanRenderInputRequest` is a separate closed variant for a live human operation. It
+binds `admission="human_render"`, operation and attempt IDs in place of a durable run,
+and permits only `purpose="prompt_render"` with `kind="prompt_build"`. Its separate
+reader, authority, source and delivery types use the same physical byte/FD owner but
+cannot enter the run-bound reader or relabel operation IDs as Run records. The complete
+human intent digest also binds the surface reference and frozen scalar values through
+the private prompt consumer. Its receipt describes live rendering, not a durable job,
+trace, invocation, provider use or transferable authorization.
 
 The mandatory trusted authority performs actual current rights and custody checks for
 the complete request in the original caller task. Its descriptive decision must return

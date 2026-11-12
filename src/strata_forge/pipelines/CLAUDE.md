@@ -116,3 +116,11 @@ current policy with a digest, URL, caller flag or prior result; never retry an u
 FD number after close. Source leases must own delayed resolution before it begins and
 provide idempotent cleanup. Preserve the bounded profile and qualification documented in
 [`docs/modules/immutable-inputs.md`](../../../docs/modules/immutable-inputs.md).
+
+The private human prompt consumer uses the separate `human_render` admission variant,
+never operation IDs in durable-run fields. It stages verified bytes through the existing
+prompt consumer around the Server's actual retained dependency-pin validation. The
+original caller, exact frozen intent and original deadline survive both stages; the
+Server must recheck current authority after rendering and physical cleanup. Descriptive
+source metadata, local candidates and live-operation receipts grant no native access or
+durable execution. See [`docs/modules/native-prompt-inputs.md`](../../../docs/modules/native-prompt-inputs.md).

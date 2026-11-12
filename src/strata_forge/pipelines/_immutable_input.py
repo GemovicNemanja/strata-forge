@@ -22,13 +22,19 @@ from strata_forge.pipelines.immutable_input_types import (
     MAX_LIVE_READS,
     MAX_PAYLOAD_BYTES,
     READ_SECONDS,
+    HumanRenderInputDecision,
+    HumanRenderInputRequest,
     ImmutableInputDecision,
     ImmutableInputError,
     ImmutableInputRequest,
     InputCode,
+    ResolvedHumanRenderPayload,
     ResolvedInputPayload,
+    VerifiedHumanRenderPayload,
     VerifiedInputPayload,
     checked_decision,
+    checked_human_render_decision,
+    checked_human_render_request,
     checked_request,
 )
 
@@ -53,6 +59,37 @@ class ImmutableInputSource(Protocol):
     """Construct a fresh operational lease without I/O, paths or serialized policy selectors."""
 
     def lease(self, request: ImmutableInputRequest, /) -> ImmutableInputLease | None: ...
+
+
+class HumanRenderInputAuthority(Protocol):
+    """Installed human-operation authority; no durable-run grant is inferred."""
+
+    async def decide(self, request: HumanRenderInputRequest, /) -> HumanRenderInputDecision: ...
+
+
+class HumanRenderInputLease(Protocol):
+    """A live human source owns all delayed resolution and original descriptors."""
+
+    async def resolve(self) -> ResolvedHumanRenderPayload: ...
+    async def aclose(self) -> None: ...
+
+
+class HumanRenderInputSource(Protocol):
+    """Construct only a fresh human operational lease, with no I/O or permission fallback."""
+
+    def lease(self, request: HumanRenderInputRequest, /) -> HumanRenderInputLease | None: ...
+
+
+type _InputRequest = ImmutableInputRequest | HumanRenderInputRequest
+type _InputDecision = ImmutableInputDecision | HumanRenderInputDecision
+type _InputLease = ImmutableInputLease | HumanRenderInputLease
+type _InputDelivery = ResolvedInputPayload | ResolvedHumanRenderPayload
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _ReadValue:
+    request: _InputRequest
+    data: bytes
 
 
 class _UnwindError(Exception):
@@ -140,13 +177,13 @@ def _close_descriptor(owned: _Descriptor) -> None:
 
 @dataclass(eq=False, slots=True, repr=False)
 class _Call:
-    reader: ImmutableInputReader
+    reader: _InputReaderCore
     owner: asyncio.Task[object]
-    request: ImmutableInputRequest
+    request: _InputRequest
     deadline: float
     done: asyncio.Event = field(default_factory=asyncio.Event)
     descriptor: _Descriptor = field(default_factory=_Descriptor)
-    lease: ImmutableInputLease | None = None
+    lease: _InputLease | None = None
     policy: tuple[str, int] | None = None
     cancelled: bool = False
     control: type[KeyboardInterrupt] | type[SystemExit] | None = None
@@ -167,14 +204,11 @@ class _Call:
 
     async def current(self) -> None:
         self.check()
-        authority = self.reader._authority
-        if authority is None:
-            raise _UnwindError("input_authority_unavailable")
         decision = None
         try:
             # Actual domain checks stay in the parent task; no proof enters I/O children.
             async with asyncio.timeout(max(0.0, self.deadline - time.monotonic())):
-                decision = checked_decision(await authority.decide(checked_request(self.request)))
+                decision = await self.reader._decision(self.request)
         except asyncio.CancelledError:
             raise
         except TimeoutError:
@@ -236,11 +270,17 @@ class _Call:
         finally:
             self.reader._children.discard(task)
 
-    async def materialize(self, delivery: ResolvedInputPayload) -> bytes:
-        if (
-            type(delivery) is not ResolvedInputPayload
-            or checked_request(delivery.request) != self.request
-        ):
+    async def materialize(self, delivery: _InputDelivery) -> bytes:
+        valid = (
+            type(self.request) is ImmutableInputRequest
+            and type(delivery) is ResolvedInputPayload
+            and checked_request(delivery.request) == self.request
+        ) or (
+            type(self.request) is HumanRenderInputRequest
+            and type(delivery) is ResolvedHumanRenderPayload
+            and checked_human_render_request(delivery.request) == self.request
+        )
+        if not valid:
             raise _UnwindError("input_changed")
         size = self.request.payload.size_bytes
         if (delivery.data is None) == (delivery.fd is None):
@@ -315,35 +355,39 @@ class _Call:
                 self.reader._leases.discard(id(lease))
 
 
-class ImmutableInputReader:
-    """One loop-owned bounded reader; authority and source are installed code, never defaults."""
+class _InputReaderCore:
+    """The physical byte/FD owner is shared without relabeling one admission as another."""
 
-    def __init__(
-        self, authority: ImmutableInputAuthority | None, source: ImmutableInputSource | None
-    ) -> None:
+    def __init__(self) -> None:
         loop = None
         with suppress(RuntimeError):
             loop = asyncio.get_running_loop()
         if loop is None:
             raise ImmutableInputError("input_closed")
         self._loop = loop
-        self._authority, self._source = authority, source
         self._calls: set[_Call] = set()
         self._children: set[asyncio.Task[_Outcome]] = set()
         self._leases: set[int] = set()
-        self._retained: list[ImmutableInputLease] = []
+        self._retained: list[_InputLease] = []
         self._closed = self._poisoned = self._unknown_fd_close = self._closing = False
 
-    async def read(
-        self, request: ImmutableInputRequest, *, deadline: float | None = None
-    ) -> VerifiedInputPayload:
+    def _require_ports(self) -> None:
+        raise ImmutableInputError("input_authority_unavailable")
+
+    def _checked(self, value: object) -> _InputRequest:
+        raise ImmutableInputError("input_invalid")
+
+    async def _decision(self, request: _InputRequest) -> _InputDecision:
+        raise ImmutableInputError("input_authority_unavailable")
+
+    def _source_lease(self, request: _InputRequest) -> _InputLease | None:
+        raise ImmutableInputError("input_source_unavailable")
+
+    async def _read(self, request: _InputRequest, *, deadline: float | None = None) -> _ReadValue:
         if asyncio.get_running_loop() is not self._loop or self._closed or self._poisoned:
             raise ImmutableInputError("input_closed")
-        if self._authority is None:
-            raise ImmutableInputError("input_authority_unavailable")
-        if self._source is None:
-            raise ImmutableInputError("input_source_unavailable")
-        request = checked_request(request)
+        self._require_ports()
+        request = self._checked(request)
         owner = asyncio.current_task()
         if owner is None or owner.cancelling():
             raise asyncio.CancelledError
@@ -363,14 +407,14 @@ class ImmutableInputReader:
         try:
             try:
                 await call.current()
-                lease = self._source.lease(checked_request(request))
+                lease = self._source_lease(request)
                 if lease is None or id(lease) in self._leases:
                     raise _UnwindError("input_source_invalid")
                 call.lease = lease
                 self._leases.add(id(lease))
                 stop, original_deadline = call.descriptor.stop, call.deadline
 
-                async def resolve() -> ResolvedInputPayload:
+                async def resolve() -> _InputDelivery:
                     if (
                         stop.is_set()
                         or owner.done()
@@ -382,7 +426,7 @@ class ImmutableInputReader:
 
                 delivery = await call.owned(resolve())
                 await call.current()
-                data = await call.materialize(cast("ResolvedInputPayload", delivery))
+                data = await call.materialize(cast("_InputDelivery", delivery))
             except _UnwindError as error:
                 call.failure = call.failure or error.code
             except asyncio.CancelledError:
@@ -413,7 +457,7 @@ class ImmutableInputReader:
             raise asyncio.CancelledError from None
         if call.failure is not None or data is None:
             raise ImmutableInputError(call.failure or "input_source_unavailable") from None
-        return VerifiedInputPayload(checked_request(request), data)
+        return _ReadValue(self._checked(request), data)
 
     async def aclose(self) -> None:
         if (
@@ -447,7 +491,7 @@ class ImmutableInputReader:
             failed |= outcome.failed
             for lease in tuple(self._retained):
 
-                async def close(target: ImmutableInputLease = lease) -> None:
+                async def close(target: _InputLease = lease) -> None:
                     await target.aclose()
 
                 outcome, interrupted = await _drain(
@@ -468,3 +512,77 @@ class ImmutableInputReader:
             raise asyncio.CancelledError from None
         if failed or self._retained:
             raise ImmutableInputError("input_cleanup_failed") from None
+
+
+class ImmutableInputReader(_InputReaderCore):
+    """Exact run-bound reads; live human operations cannot enter this variant."""
+
+    def __init__(
+        self, authority: ImmutableInputAuthority | None, source: ImmutableInputSource | None
+    ) -> None:
+        super().__init__()
+        self._authority, self._source = authority, source
+
+    def _require_ports(self) -> None:
+        if self._authority is None:
+            raise ImmutableInputError("input_authority_unavailable")
+        if self._source is None:
+            raise ImmutableInputError("input_source_unavailable")
+
+    def _checked(self, value: object) -> ImmutableInputRequest:
+        return checked_request(value)
+
+    async def _decision(self, request: _InputRequest) -> ImmutableInputDecision:
+        self._require_ports()
+        if self._authority is None:
+            raise ImmutableInputError("input_authority_unavailable")
+        return checked_decision(await self._authority.decide(checked_request(request)))
+
+    def _source_lease(self, request: _InputRequest) -> ImmutableInputLease | None:
+        if self._source is None:
+            raise ImmutableInputError("input_source_unavailable")
+        return self._source.lease(checked_request(request))
+
+    async def read(
+        self, request: ImmutableInputRequest, *, deadline: float | None = None
+    ) -> VerifiedInputPayload:
+        value = await self._read(request, deadline=deadline)
+        return VerifiedInputPayload(checked_request(value.request), value.data)
+
+
+class HumanRenderInputReader(_InputReaderCore):
+    """Only explicitly admitted live human prompt-render reads, with no durable run claim."""
+
+    def __init__(
+        self, authority: HumanRenderInputAuthority | None, source: HumanRenderInputSource | None
+    ) -> None:
+        super().__init__()
+        self._authority, self._source = authority, source
+
+    def _require_ports(self) -> None:
+        if self._authority is None:
+            raise ImmutableInputError("input_authority_unavailable")
+        if self._source is None:
+            raise ImmutableInputError("input_source_unavailable")
+
+    def _checked(self, value: object) -> HumanRenderInputRequest:
+        return checked_human_render_request(value)
+
+    async def _decision(self, request: _InputRequest) -> HumanRenderInputDecision:
+        self._require_ports()
+        if self._authority is None:
+            raise ImmutableInputError("input_authority_unavailable")
+        return checked_human_render_decision(
+            await self._authority.decide(checked_human_render_request(request))
+        )
+
+    def _source_lease(self, request: _InputRequest) -> HumanRenderInputLease | None:
+        if self._source is None:
+            raise ImmutableInputError("input_source_unavailable")
+        return self._source.lease(checked_human_render_request(request))
+
+    async def read(
+        self, request: HumanRenderInputRequest, *, deadline: float | None = None
+    ) -> VerifiedHumanRenderPayload:
+        value = await self._read(request, deadline=deadline)
+        return VerifiedHumanRenderPayload(checked_human_render_request(value.request), value.data)

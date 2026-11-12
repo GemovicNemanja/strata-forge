@@ -199,3 +199,95 @@ class VerifiedInputPayload:
 
     request: ImmutableInputRequest
     data: bytes
+
+
+class HumanRenderInputRequest(_Closed):
+    """A live human operation is explicitly distinct from a durable run admission."""
+
+    version: Literal[1]
+    admission: Literal["human_render"]
+    principal_id: Id
+    project_id: Id
+    operation_id: Id
+    attempt_id: Id
+    purpose: Literal["prompt_render"]
+    spec_sha256: Digest
+    kind: Literal["prompt_build"]
+    version_ref: NativeVersionRef
+    payload: NativeManifestPayload
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _version(cls, value: object) -> object:
+        if type(value) is not int or value != 1:
+            raise ValueError("input_invalid")
+        return value
+
+
+class HumanRenderInputDecision(_Closed):
+    """An actual installed human authority's observation, never a transferable grant."""
+
+    request: HumanRenderInputRequest
+    effect: Literal["allow", "deny", "unavailable"]
+    custody: Literal["unsealed", "sealed", "locked", "fresh", "unknown"]
+    policy_identity: Id
+    policy_revision: int = Field(ge=1, le=2**53 - 1)
+    expires_at_ms: int = Field(ge=0, le=2**53 - 1)
+
+
+def checked_human_render_request(value: object) -> HumanRenderInputRequest:
+    """Detach only the closed human variant without relabeling it as a durable run."""
+    result = None
+    unsupported = False
+    try:
+        row = _fields(value, HumanRenderInputRequest)
+        version = _fields(row.pop("version_ref"), NativeVersionRef)
+        payload = _fields(row.pop("payload"), NativeManifestPayload)
+        _scalar_fields(version)
+        _scalar_fields(payload, ("size_bytes",))
+        _scalar_fields(row, ("version",))
+        if row["purpose"] != "prompt_render":
+            unsupported = True
+        else:
+            result = HumanRenderInputRequest.model_validate(
+                {**row, "version_ref": version, "payload": payload}
+            )
+    except Exception:
+        result = None
+    if unsupported:
+        raise ImmutableInputError("input_purpose_unsupported") from None
+    if result is None:
+        raise ImmutableInputError("input_invalid") from None
+    return result
+
+
+def checked_human_render_decision(value: object) -> HumanRenderInputDecision:
+    """Revalidate current human scope and fixed observations without exception diagnostics."""
+    result = None
+    try:
+        row = _fields(value, HumanRenderInputDecision)
+        request = checked_human_render_request(row.pop("request"))
+        _scalar_fields(row, ("policy_revision", "expires_at_ms"))
+        result = HumanRenderInputDecision.model_validate({**row, "request": request})
+    except Exception:
+        result = None
+    if result is None:
+        raise ImmutableInputError("input_authority_unavailable") from None
+    return result
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ResolvedHumanRenderPayload:
+    """Human operation source output; its lease owns any original FD through cleanup."""
+
+    request: HumanRenderInputRequest
+    data: bytes | None = None
+    fd: int | None = None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class VerifiedHumanRenderPayload:
+    """Already disclosed bounded human bytes, without durable-run or reusable authority claims."""
+
+    request: HumanRenderInputRequest
+    data: bytes
