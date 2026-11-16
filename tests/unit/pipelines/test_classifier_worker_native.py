@@ -7,8 +7,8 @@ import hashlib
 import json
 import os
 import shlex
-import signal
 import sys
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -165,14 +165,21 @@ async def test_installed_fixed_module_refusal_preserves_outer_private_file_clean
         env={"PATH": os.defpath, "HOME": str(tmp_path), "STRATA_RUN_CONFIG": json.dumps(intent)},
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
     finally:
         if process.returncode is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            await process.communicate()
+            with suppress(ProcessLookupError):
+                process.terminate()
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=2)
+            except TimeoutError:
+                with suppress(ProcessLookupError):
+                    process.kill()
+                # A still-held pipe is an outer-owner failure; never detach a new group.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(process.communicate(), timeout=2)
     assert process.returncode == 1
     assert stdout == b""
     assert stderr == b"run failed: classifier_preflight_refused\n"
