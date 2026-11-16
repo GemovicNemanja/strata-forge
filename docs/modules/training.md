@@ -749,7 +749,12 @@ the wrapper. No calibration or end-to-end worker claim follows from a local arti
 
 Cancellation requests cooperative stop at the next optimizer step and withholds artifact
 export if observed before export; an in-flight native operation cannot be forcibly terminated
-by cancelling its coroutine. Process supervision remains necessary. SDK seeds are process-wide;
+by cancelling its coroutine. Primary native load, decoder tokenization, head initialization, train and reload calls
+retain their physical thread until it returns, including under repeated cancellation; the
+caller cannot proceed to a later optimizer or cleanup while a cancelled call still runs.
+The trainer's cancellation event is set immediately, without a timed early ownership release.
+Native control exceptions are contained inside the thread rather than escaping the event loop.
+Process supervision remains necessary for a native call that does not return. SDK seeds are process-wide;
 concurrent training jobs should use isolated processes for reproducible RNG streams.
 
 ## Supplied-logit verifier loss

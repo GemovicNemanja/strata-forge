@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -19,6 +18,7 @@ from strata_forge.pipelines.classifier_spec import ClassifierWorkerError, parse_
 from strata_forge.training._classifier_heads import (
     HeadInitializationReceipt,  # noqa: TC001 — Pydantic resolves this field at runtime
 )
+from strata_forge.training._classifier_native import owned_native
 from strata_forge.training._load_guard import _guard_loading_result
 from strata_forge.training.classifier import (
     ClassifierConfig,
@@ -199,7 +199,7 @@ def _base(path: Path) -> NativeClassifierBase:
 
 
 async def load_classifier_base(path: Path) -> NativeClassifierBase:
-    return await asyncio.to_thread(_base, path)
+    return await owned_native(lambda: _base(path))
 
 
 def _saved(path: Path) -> NativeClassifierBase:
@@ -288,7 +288,7 @@ def validate_single_sequence_rendering(
 
 
 async def reload_classifier(path: Path) -> NativeClassifierBase:
-    return await asyncio.to_thread(_saved, path)
+    return await owned_native(lambda: _saved(path))
 
 
 def _preflight(hub: _ML, model_id: str, name: str, revision: str, token: _ML) -> int:

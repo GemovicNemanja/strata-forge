@@ -19,6 +19,7 @@ from strata_forge.training._classifier_heads import (
     initialize_classifier,
     validate_classifier_labels,
 )
+from strata_forge.training._classifier_native import owned_native
 from strata_forge.training._load_guard import _guard_loading_result
 from strata_forge.training.verifier_config import VerifierConfig, render_verifier_input
 
@@ -237,6 +238,8 @@ def _train(
     output_dir: Path,
     cancelled: threading.Event,
 ) -> ClassifierRunResult:
+    if cancelled.is_set():
+        raise asyncio.CancelledError
     config = ClassifierConfig.model_validate(config.model_dump())
     rows = tuple(ClassifierExample.model_validate(row.model_dump()) for row in rows)
     if initialized.receipt.family != "bert" and any(row.text_pair is not None for row in rows):
@@ -346,6 +349,8 @@ def _train(
         data_collator=collate,
         callbacks=[CancellationCallback()],
     )
+    if cancelled.is_set():
+        raise asyncio.CancelledError
     trainer.train()
     if cancelled.is_set():
         raise asyncio.CancelledError
@@ -387,20 +392,11 @@ class ClassifierRunner:
     ) -> ClassifierRunResult:
         """Run Trainer off-loop and save only the final safe artifact in a fresh local directory."""
         cancelled = threading.Event()
-        work = asyncio.create_task(
-            asyncio.to_thread(
-                _train, self.config, initialized, tokenizer, rows, output_dir, cancelled
-            )
-        )
         try:
-            return await asyncio.shield(work)
-        except asyncio.CancelledError:
-            cancelled.set()
-            try:
-                await asyncio.wait_for(asyncio.shield(work), timeout=10)
-            except Exception, asyncio.CancelledError:
-                cancelled.set()
-            raise
+            return await owned_native(
+                lambda: _train(self.config, initialized, tokenizer, rows, output_dir, cancelled),
+                cancelled=cancelled,
+            )
         except ValidationError, ImportError:
             raise
         except Exception:
@@ -472,7 +468,7 @@ def _load(path: Path) -> InitializedClassifier:
 async def load_classifier(path: Path) -> InitializedClassifier:
     """Reload only a complete local safetensors artifact through fixed installed classes."""
     try:
-        return await asyncio.to_thread(_load, path)
+        return await owned_native(lambda: _load(path))
     except ValidationError, ImportError:
         raise
     except Exception:

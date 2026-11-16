@@ -41,6 +41,12 @@ helpers as well as core errors; no training-to-evals/pipelines dependency is per
 Never treat a receipt as a fresh-head inference exemption or a caller-supplied provenance grant.
 Preserve decoder dense/norm/output bias and last-attended pooling, including pad=EOS. Keep
 unsupported registry/worker/adapter/calibration capabilities unavailable rather than enums-only.
+Primary native operations use `_classifier_native.owned_native`: contain native control
+exceptions inside the thread, set the existing trainer stop event on cancellation, and drain
+the actual operation through repeated cancellation before propagating. No timed early return
+may release staged inputs or admit a later optimizer. Process termination remains the
+transport's responsibility when native work will not return; numerical/objective semantics
+are unchanged by this ownership helper.
 
 ## Boundaries
 

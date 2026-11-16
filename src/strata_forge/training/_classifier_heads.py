@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
@@ -15,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from strata_forge.core.errors import ValidationError
 from strata_forge.core.repro import set_seed
+from strata_forge.training._classifier_native import owned_native
 
 # Native ML classes are optional, dynamically imported and version-dependent at this seam.
 type _ML = Any
@@ -274,14 +274,15 @@ async def initialize_classifier(
 ) -> InitializedClassifier:
     """Initialize supported native in-memory objects; never fetch a model or accept remote code."""
     try:
-        return await asyncio.to_thread(
-            _initialize,
-            source,
-            labels=labels,
-            initializer_id=initializer_id,
-            verbalizer_ids=verbalizer_ids,
-            seed=seed,
-            equivalence_inputs=equivalence_inputs,
+        return await owned_native(
+            lambda: _initialize(
+                source,
+                labels=labels,
+                initializer_id=initializer_id,
+                verbalizer_ids=verbalizer_ids,
+                seed=seed,
+                equivalence_inputs=equivalence_inputs,
+            )
         )
     except ValidationError, ImportError:
         raise

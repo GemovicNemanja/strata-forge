@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from strata_forge.pipelines.classifier_spec import (
     DecoderInitialization,
     parse_json,
 )
+from strata_forge.training._classifier_native import owned_native
 from strata_forge.training.classifier import (
     ClassifierExample,
     ClassifierRunner,
@@ -35,6 +37,8 @@ from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from strata_forge.pipelines._classifier_checkpoint import NativeClassifierBase
 
 _SAFE_ERRORS = frozenset(
     {
@@ -236,6 +240,47 @@ def _inventory(path: Path) -> dict[str, dict[str, str | int]]:
     return result
 
 
+def _decoder_preparation(
+    spec: ClassifierTrainSpec,
+    base: NativeClassifierBase,
+    rows: tuple[ClassifierExample, ...],
+    initialization: DecoderInitialization,
+    cancelled: threading.Event,
+) -> tuple[tuple[int, ...], dict[str, object]]:
+    if any(row.text_pair is not None for row in rows):
+        raise ClassifierWorkerError("classifier_row_invalid")
+    tokens: list[list[int]] = []
+    for label in spec.training.labels:
+        if cancelled.is_set():
+            raise asyncio.CancelledError
+        tokens.append(
+            base.tokenizer.encode(initialization.label_tokens[label], add_special_tokens=False)
+        )
+    if any(len(token) != 1 for token in tokens):
+        raise ClassifierWorkerError("classifier_row_invalid")
+    ids = tuple(token[0] for token in tokens)
+    probes: list[str] = []
+    for row in rows:
+        if cancelled.is_set():
+            raise asyncio.CancelledError
+        encoded = base.tokenizer(row.text, truncation=False)
+        if len(encoded["input_ids"]) > spec.training.max_length:
+            if spec.training.overflow == "error":
+                raise ClassifierWorkerError("classifier_row_invalid")
+            continue
+        probes.append(row.text)
+        if len(probes) == 2:
+            break
+    if not probes:
+        raise ClassifierWorkerError("classifier_population_invalid")
+    if cancelled.is_set():
+        raise asyncio.CancelledError
+    equivalence: dict[str, object] = dict(
+        base.tokenizer(probes, padding=True, truncation=False, return_tensors="pt")
+    )
+    return ids, equivalence
+
+
 async def _execute(
     spec: ClassifierTrainSpec,
     authority: TrainingReadAuthority,
@@ -258,29 +303,10 @@ async def _execute(
     ids: tuple[int, ...] = ()
     equivalence = None
     if isinstance(initialization, DecoderInitialization):
-        if any(row.text_pair is not None for row in rows):
-            raise ClassifierWorkerError("classifier_row_invalid")
-        tokens = [
-            base.tokenizer.encode(initialization.label_tokens[label], add_special_tokens=False)
-            for label in spec.training.labels
-        ]
-        if any(len(token) != 1 for token in tokens):
-            raise ClassifierWorkerError("classifier_row_invalid")
-        ids = tuple(token[0] for token in tokens)
-        probes: list[str] = []
-        for row in rows:
-            encoded = base.tokenizer(row.text, truncation=False)
-            if len(encoded["input_ids"]) > spec.training.max_length:
-                if spec.training.overflow == "error":
-                    raise ClassifierWorkerError("classifier_row_invalid")
-                continue
-            probes.append(row.text)
-            if len(probes) == 2:
-                break
-        if not probes:
-            raise ClassifierWorkerError("classifier_population_invalid")
-        equivalence = dict(
-            base.tokenizer(probes, padding=True, truncation=False, return_tensors="pt")
+        cancelled = threading.Event()
+        ids, equivalence = await owned_native(
+            lambda: _decoder_preparation(spec, base, rows, initialization, cancelled),
+            cancelled=cancelled,
         )
     initialized = await initialize_classifier(
         base.model,
@@ -301,7 +327,7 @@ async def _execute(
     await _authorize(spec, authority)
     artifact = Path(trained.artifact_dir)
     await reload_classifier(artifact)
-    inventory = await asyncio.to_thread(_inventory, artifact)
+    inventory = await owned_native(lambda: _inventory(artifact))
     await _authorize(spec, authority)
     receipt = {
         "version": 1,
