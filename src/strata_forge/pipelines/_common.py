@@ -55,7 +55,11 @@ from strata_forge import __version__
 from strata_forge.compute.serving import format_elapsed
 from strata_forge.compute.task import SECRETS_FILE_ENV, SECRETS_FILE_NAME
 from strata_forge.core.redact import Redactor
-from strata_forge.pipelines import EVAL_AUTHORITY_SECRET, HF_TOKEN_SECRET
+from strata_forge.pipelines import (
+    CLASSIFIER_AUTHORITY_SECRET,
+    EVAL_AUTHORITY_SECRET,
+    HF_TOKEN_SECRET,
+)
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
@@ -176,7 +180,7 @@ UNCHECKED_ENGINE_MESSAGE = (
 _MAX_ECHOED_CLAIM_CHARS = 100
 # The keys a runner reads from its secrets file. Anything else is refused by name: a key this
 # engine does not know means the orchestrator was built against a different contract.
-_KNOWN_SECRETS = frozenset({HF_TOKEN_SECRET, EVAL_AUTHORITY_SECRET})
+_KNOWN_SECRETS = frozenset({HF_TOKEN_SECRET, EVAL_AUTHORITY_SECRET, CLASSIFIER_AUTHORITY_SECRET})
 # A handful of tokens is a few hundred bytes. The bound keeps a malformed or hostile file from
 # being read into memory whole.
 MAX_SECRETS_FILE_BYTES = 64 * 1024
@@ -231,6 +235,7 @@ class RunSecrets(BaseModel):
 
     hf_token: SecretStr | None = None
     eval_authority: SecretStr | None = None
+    classifier_authority: SecretStr | None = None
     from_environment: bool = False
 
     def hf_token_value(self) -> str | None:
@@ -253,8 +258,10 @@ class RunSecrets(BaseModel):
     def sensitive_values(self) -> tuple[str, ...]:
         """Register delivered values and the nested worker credential before surfacing errors."""
         values = [self.hf_token_value()] if self.hf_token is not None else []
-        if self.eval_authority is not None:
-            raw = self.eval_authority.get_secret_value()
+        for authority in (self.eval_authority, self.classifier_authority):
+            if authority is None:
+                continue
+            raw = authority.get_secret_value()
             values.append(raw)
             decoded: object = None
             try:
@@ -287,6 +294,7 @@ def load_secrets() -> RunSecrets:
     cannot be steered back to the environment by a stray variable.
     """
     os.environ.pop(EVAL_AUTHORITY_SECRET, None)
+    os.environ.pop(CLASSIFIER_AUTHORITY_SECRET, None)
     configured = os.environ.get(SECRETS_FILE_ENV, "")
     if not configured:
         legacy = os.environ.pop(LEGACY_TOKEN_ENV, "")
@@ -365,9 +373,11 @@ def _parse_secrets(raw: bytes) -> RunSecrets:
         raise RunError(msg)
     token = values.get(HF_TOKEN_SECRET) or None
     authority = values.get(EVAL_AUTHORITY_SECRET) or None
+    classifier = values.get(CLASSIFIER_AUTHORITY_SECRET) or None
     return RunSecrets(
         hf_token=SecretStr(token) if token else None,
         eval_authority=SecretStr(authority) if authority else None,
+        classifier_authority=SecretStr(classifier) if classifier else None,
     )
 
 

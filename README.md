@@ -19,8 +19,11 @@ existing inert workers, trusted Python SDKs and schema-only experimental profile
 Source declarations remain separate from installed dependency/target eligibility.
 
 Primary classifier training has an async SDK over resolved objects, with ordinary CE defaults,
-exact trusted head initialization and complete local safetensors reload. It performs no Hub or
-remote operations; worker/adapter/calibration integration remains separate. See [training](docs/modules/training.md).
+exact trusted head initialization and complete local safetensors reload. The SDK performs no
+Hub or remote operations. A separate [fixed installed HF worker](docs/modules/classifier-worker.md)
+uses pinned inputs and a distinct training-purpose authority channel within the existing
+100,000-row / 64 MiB pilot bounds; its safe outputs remain worker-local, without publication
+or resume. See [training](docs/modules/training.md) for the separate local SDK profiles.
 A separate local auxiliary verifier SDK preserves the primary path while adding exact PID-offset
 geometry, independent flag/bilinear support heads and strict safe export/reload. It does not
 register a worker or change the primary training defaults.

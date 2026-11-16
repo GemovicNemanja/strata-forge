@@ -1,8 +1,8 @@
 # Compute-target pipeline workers
 
 `strata_forge.pipelines` contains fixed installed entrypoints for inert JSON run specs:
-`inference_runner`, `finetune_runner` and `eval_runner`. They compose Forge primitives rather
-than executing code supplied in a spec. Common execution loads/deletes the private secrets
+`inference_runner`, `finetune_runner`, `eval_runner` and `classifier_worker`. They compose
+Forge primitives rather than executing code supplied in a spec. Common execution loads/deletes the private secrets
 file, checks the exact engine version, emits JSONL progress, redacts surfaced failures and
 handles cancellation. Models and datasets use the explicitly delivered credential or `False`,
 which prevents ambient-token fallback.
@@ -16,7 +16,10 @@ eligibility or authorization.
 
 `classifier_spec.ClassifierTrainSpec` is a strict, frozen inert primary-training specification.
 `classifier_runner.run_classifier_training(spec, *, authority, source, attempt_dir, writer=None)`
-requires installed trusted Python objects; it has no registry/CLI/server/Task-secret activation.
+requires installed trusted Python objects. The separate fixed installed
+[`classifier_worker`](classifier-worker.md) composes these objects through an HF-only
+pilot profile and its distinct training-purpose private Task channel; the SDK itself
+does not discover authority or activate the causal-LM method registry.
 It does not accept an Eval authority frame, discover a policy from the environment, publish a
 model, or authorize reads from a caller flag. The method name inside this schema does not make
 `seq_cls` a registered causal fine-tuning method.
@@ -24,7 +27,7 @@ model, or authorize reads from a caller flag. The method name inside this schema
 `TrainingReadAuthority.decide(TrainingReadRequest)` returns a typed decision bound to
 `purpose=classifier_training`, run ID, complete spec digest, exact model/dataset ref and domain.
 Only matching authorized/unsealed decisions permit reads. Unknown, positive, expired/revoked
-adapter decisions and mismatches refuse; the eventual installed adapter owns actual expiry,
+adapter decisions and mismatches refuse; the installed policy service owns actual expiry,
 registry/marker/lineage freshness and live fences. The worker repeats decisions at strict
 boundaries; synthetic test adapters are not production authentication infrastructure.
 

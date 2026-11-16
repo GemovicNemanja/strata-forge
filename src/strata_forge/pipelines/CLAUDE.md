@@ -14,6 +14,12 @@ compute, training, metrics and LLM primitives; pure metrics never import workers
   training-purpose authority and streamed row bytes; enforce count/byte/range bounds BEFORE
   parsing later rows. No Eval credential or environment policy fallback. Keep prototype bounds
   distinct from scientific populations and preserve final-only/no-adapter/no-publication scope.
+- `classifier_worker` uses the unchanged primary spec and its own private
+  `FORGE_CLASSIFIER_AUTHORITY` frame, never evaluation credentials. Preflight the installed
+  engine before the canonical secret loader; rely on the backend outer shell for unread-file
+  cleanup. Fixed preinstalled commands use `-I -B` and no job-time setup/install. The HF pilot's
+  bounds and worker-local safe outputs are documented in `docs/modules/classifier-worker.md`;
+  they do not establish native publication, resume or large-population readiness.
 - Recognized pinned Forge classifiers reload complete SDK state. Stored single-sequence render
   metadata must match original/effective/SDK digests, labels, family and length; stored tokens
   are initialization provenance, never label-logit evaluation parameters. Do not loosen native

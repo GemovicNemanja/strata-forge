@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "CLASSIFIER_AUTHORITY_SECRET",
     "EVAL_AUTHORITY_SECRET",
     "HF_TOKEN_SECRET",
     "SPEC_VERSION",
@@ -161,3 +162,4 @@ SPEC_VERSION = __version__
 HF_TOKEN_SECRET = "HF_TOKEN"  # noqa: S105 — a key name, not a credential
 # Evaluation authority is a masked JSON frame, never an environment/argv fallback.
 EVAL_AUTHORITY_SECRET = "STRATA_EVAL_AUTHORITY"  # noqa: S105 — a private-file key name
+CLASSIFIER_AUTHORITY_SECRET = "FORGE_CLASSIFIER_AUTHORITY"  # noqa: S105 — a private-file key name
