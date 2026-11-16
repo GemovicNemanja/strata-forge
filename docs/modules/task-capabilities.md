@@ -28,6 +28,7 @@ for profile in catalog.profiles:
 | `evaluation_population_v2` | `trusted_python` | Explicit Python SDK callable; its population schema does not activate the ordinary worker entrypoint. |
 | `scoring_population_v2` | `trusted_python` | Explicit scoring SDK callable; trusted read policy and full population conditions remain required. |
 | `primary_classifier_v1` | `trusted_python` | Explicit training SDK callable with installed training authority/source objects; `seq_cls` is not an enabled causal method. |
+| `primary_classifier_hf_worker_v1` | `inert_worker` | Fixed installed HF primary-classifier entrypoint over the same `ClassifierTrainSpec`; current training-purpose authority and the Server's configured-profile gate remain required. |
 | `generation_v2` | `schema_only` | `experimental` data contract with `no_worker_entrypoint`; validating it cannot launch generation. |
 
 The inventory is deliberately finite. A profile absent from it has no support
@@ -56,6 +57,13 @@ table. Existing training selectors are assessed through
 `assess_training_capability`; complete runtime specifications still use their
 own actual schemas and semantic validators.
 
+The fixed HF worker and the trusted primary SDK share the exact classifier spec
+schema while retaining distinct entrypoints and surfaces. Its descriptive
+profile/result marker creates no dispatcher or causal-training method. The
+Server enables that fixed profile only through its operator-configured worker
+interpreter and actual admission/policy path; a catalog row cannot enable it or
+establish that a selected remote target is ready.
+
 ## Schemas, dependencies and identity
 
 Each `spec_schema_sha256` hashes the actual source class's generated JSON Schema,
@@ -75,6 +83,13 @@ generation, scoring or publication needs. `dependency_profile`, `installed`,
 `environment` and `hardware` are always `unknown` until a separate qualified
 installation/target observation establishes them. The inventory neither probes
 packages nor fills unknowns from the machine running the control plane.
+
+The HF classifier row names `finetuning` and `storage`: the former declares the
+training stack and Arrow/datasets, and the latter declares the Hub client. These
+broad extras are not the separately qualified CPU environment or a minimal
+installation recipe; they do not imply adapter/causal-method support or actual
+dependency compatibility. The source inventory keeps all readiness values
+unknown even when one specific operator environment has been qualified.
 
 ## Values and compatibility
 

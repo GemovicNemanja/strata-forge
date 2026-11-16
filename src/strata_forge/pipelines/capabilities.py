@@ -214,6 +214,14 @@ def task_capabilities() -> TaskCapabilityCatalog:
             (),
         ),
         _profile(
+            "primary_classifier_hf_worker_v1",
+            "training",
+            ClassifierTrainSpec,
+            "inert_worker",
+            "strata_forge.pipelines.classifier_worker:main",
+            ("finetuning", "storage"),
+        ),
+        _profile(
             "primary_classifier_v1",
             "training",
             ClassifierTrainSpec,

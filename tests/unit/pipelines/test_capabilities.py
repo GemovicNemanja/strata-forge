@@ -34,6 +34,7 @@ _SURFACES = {
     "classification_evaluation_v1": ("inert_worker", "eval_runner", "main"),
     "evaluation_population_v2": ("trusted_python", "eval_runner", "run_population_evaluation"),
     "generation_v2": ("schema_only", "generation_spec", None),
+    "primary_classifier_hf_worker_v1": ("inert_worker", "classifier_worker", "main"),
     "primary_classifier_v1": ("trusted_python", "classifier_runner", "run_classifier_training"),
     "scoring_population_v2": ("trusted_python", "inference_runner", "execute_population_scoring"),
 }
@@ -118,6 +119,20 @@ def test_selectors_come_from_real_schema_literals() -> None:
     assert rows["causal_finetune_v1"].selectors == ()
 
 
+def test_installed_primary_hf_descriptor_preserves_the_separate_sdk_contract() -> None:
+    rows = {row.profile: row for row in task_capabilities().profiles}
+    worker = rows["primary_classifier_hf_worker_v1"]
+    sdk = rows["primary_classifier_v1"]
+    assert worker.task_family == sdk.task_family == "training"
+    assert worker.spec_type == sdk.spec_type
+    assert worker.spec_schema_sha256 == sdk.spec_schema_sha256
+    assert worker.primitive_extras == ("finetuning", "storage")
+    assert worker.selectors == ()
+    assert sdk.surface == "trusted_python"
+    assert sdk.entrypoint == "strata_forge.pipelines.classifier_runner:run_classifier_training"
+    assert sdk.primitive_extras == ("finetuning",)
+
+
 def test_no_profile_claims_runtime_availability_or_complete_installation() -> None:
     for row in task_capabilities().profiles:
         assert row.installed == row.environment == row.hardware == "unknown"
@@ -193,15 +208,17 @@ import importlib.abc
 import json
 import sys
 blocked = {"torch", "transformers", "trl", "peft", "datasets", "pyarrow", "numpy", "vllm", "sky", "asyncssh", "langfuse"}
+worker = "strata_forge.pipelines.classifier_worker"
 class Refuse(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in blocked:
+        if fullname == worker or fullname.split(".")[0] in blocked:
             raise AssertionError("unexpected_optional_import")
 sys.meta_path.insert(0, Refuse())
 from strata_forge.pipelines.capabilities import canonical_task_catalog_bytes, task_capabilities
 value = task_capabilities()
-assert len(value.profiles) == 7
+assert len(value.profiles) == 8
 assert not blocked.intersection(sys.modules)
+assert worker not in sys.modules
 print(json.dumps({"profiles": len(value.profiles), "bytes": len(canonical_task_catalog_bytes(value))}))
 """
     environment = {
@@ -211,6 +228,7 @@ print(json.dumps({"profiles": len(value.profiles), "bytes": len(canonical_task_c
     }
     environment["PYTHONPATH"] = str(_ROOT / "src")
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     result = subprocess.run(  # noqa: S603 — fixed trusted script and selected current interpreter
         [sys.executable, "-B", "-c", script],
         cwd=_ROOT,
@@ -221,4 +239,4 @@ print(json.dumps({"profiles": len(value.profiles), "bytes": len(canonical_task_c
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["profiles"] == 7
+    assert json.loads(result.stdout)["profiles"] == 8
