@@ -1,0 +1,22 @@
+{
+  "status": "passed",
+  "scope": "installed_target_base_only_cold_lazy_constructor",
+  "python": "3.14.4",
+  "wheel_sha256": "9c1043e74aad57df5381560cc2f9ce8fa5754af4cd7851e206e06554af4280dc",
+  "wheel_bytes": 655766,
+  "runtime_sources": {
+    "sql.py": "a3f4309ef0eae60f363fd0fd510f8d759ec88ce5a9ece8f2c046bc6b75880920",
+    "sql_types.py": "0cb8d6e208320ec57188a28c26c9dc60bf78c2469f468970d786d24f148dea12",
+    "_sql_container.py": "bef722d13135520d99e91029169f39b53d57a8352e7aff4b0fecde663e339087",
+    "_sql_worker.py": "d553bee93178137c89e4ab070c520b72324b74ca3ba928a841843a200bf65347",
+    "_sql_wire.py": "f9a3e01b2d02c2ba9a46caff340ebdd1faa53284daf93e23d2f6d1aea1d6e917",
+    "__init__.py": "da7240f438c63e0a03d0d43b8eb39fc4b6659a84ae58cab37203eafc014c6d41"
+  },
+  "parent_absent_packages": [
+    "duckdb",
+    "torch",
+    "numpy"
+  ],
+  "native_parent_imports": [],
+  "network_attempts": 0
+}

@@ -1,0 +1,16 @@
+{
+  "runtime_source": "199eab3fcb22d7ebc54989dd1ece238daa5ea21b",
+  "parent": "6efaeb1b8a2d28015cd449b0ffab10acaa3db4d6",
+  "changed_files": {
+    "docs/modules/core.md": "12b7d81700dac72b35cdd0358a942e4cba599e969e81ecf3c1436ef429ee4f00",
+    "src/strata_forge/core/CLAUDE.md": "be01ce72ac404bbe9cd15714b232107337735ad3ae37b4119d08d2eb0a36870c",
+    "src/strata_forge/core/README.md": "22e854d0d4dcbb88ec5d06b3ee453c70f37012fbc3f18ac302fbe849d40f7db5",
+    "src/strata_forge/core/runtime_environment.py": "45fb2e3db0121f0d774f499246e4477ccf04d152ad37f9636c9300975a162c70",
+    "tests/unit/core/fixtures/runtime_environment_v1.canonical.json": "ad775254062bfc4e3eedcf07f3b4d7488363d30dd6b943c547694b769a74af08",
+    "tests/unit/core/fixtures/runtime_environment_v1.schema.json": "8ea15278bb39428a56da5764ce8674e927b20f30f1c082e3e3bfc339a2fc6d19",
+    "tests/unit/core/fixtures/runtime_environment_v1.sha256": "9e3b5a8582bc5c6b1cbf1f4c481973fde5e64a2c84a23cebcee2aa640cdfa6b1",
+    "tests/unit/core/test_runtime_environment.py": "06632423ced8fe0f564dcd66e7feebab37e3b01568b482af99311a0f82c616cf"
+  },
+  "preexisting_runtime_leaves_unchanged": 219,
+  "only_added_runtime": "src/strata_forge/core/runtime_environment.py"
+}

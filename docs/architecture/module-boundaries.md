@@ -20,6 +20,7 @@ Authoritative rules for what each `strata_forge.*` module owns, what it imports,
 | `strata_forge.compute` | `core`, `config`, `llm`, `storage`, `tracing` | `evals`, `agents`, `training` (other way around) |
 | `strata_forge.training` | `core`, `metrics`, `config`, `llm` (typing only), `datasets`, `storage`, `tracing`, `compute` | `evals`, `agents`, `rag` |
 | `strata_forge.cli` | any module | (no inverse rule — cli is a sink) |
+| `strata_forge.pipelines` | core, config, metrics, llm, compute, training, datasets, storage | server/application packages, spec-controlled executable imports |
 | `strata_forge.sync` | any async public surface | provider SDKs directly |
 
 Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`, `numpy`) are imported **inside** functions that use them, never at module load.
@@ -91,7 +92,7 @@ this leaf without introducing a training-to-evaluation dependency.
 **Does NOT:** Implement the trainer scripts themselves — those live in `strata_forge.training` and are shipped as artifacts to remote machines.
 
 ### `strata_forge.training`
-**Owns:** TRL `SFTTrainer` wrapper, preference tuning (DPO/ORPO/KTO/GRPO), PEFT (LoRA/QLoRA), chat-template formatting, sequence packing, trainer entry-point scripts.
+**Owns:** TRL `SFTTrainer` wrapper, preference tuning (DPO/ORPO/KTO/GRPO), PEFT (LoRA/QLoRA), chat-template formatting, sequence packing, and the primary-classifier SDK over resolved objects with fixed head initialization and complete safe local reload. Compute-target workers compose these primitives in `pipelines`; training never imports those workers or evaluation runners.
 
 **Does NOT:** Launch remote jobs — that's `strata_forge.compute`.
 

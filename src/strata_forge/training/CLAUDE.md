@@ -31,7 +31,41 @@ until ``train()`` is called.
   JSON job spec (an orchestrator, a CLI, a launch form) drive
   training without writing Python.
 
+## Primary classifier SDK
+
+`classifier.py` and `_classifier_heads.py` own async primary training over caller-resolved
+objects. Heavy objects cross a documented dynamic native-library seam; imports remain lazy.
+Default CE, explicit Brier, strict labels/soft targets, exact head initialization, safe local
+export and complete reload are the supported boundary. The SDK imports core reproducibility
+helpers as well as core errors; no training-to-evals/pipelines dependency is permitted.
+Never treat a receipt as a fresh-head inference exemption or a caller-supplied provenance grant.
+Preserve decoder dense/norm/output bias and last-attended pooling, including pad=EOS. Keep
+unsupported registry/worker/adapter/calibration capabilities unavailable rather than enums-only.
+Primary native operations use `_classifier_native.owned_native`: contain native control
+exceptions inside the thread, set the existing trainer stop event on cancellation, and drain
+the actual operation through repeated cancellation before propagating. No timed early return
+may release staged inputs or admit a later optimizer. Process termination remains the
+transport's responsibility when native work will not return; numerical/objective semantics
+are unchanged by this ownership helper.
+
 ## Boundaries
+
+- `verifier_loss.py` is a synchronous, deterministic numerical leaf: fixed
+  `verifier_grouped_aux_v1` over caller-supplied tensors and strict resolved targets. This
+  pure differentiable calculation is synchronous so a caller's optimizer can consume its
+  graph; it performs no I/O or scheduling. Import Torch only inside numerical operations,
+  never Transformers. Preserve null-derived masks, explicit E/C/U order, complete-batch
+  denominators, graph-connected empty auxiliary zeros and row-first support means. Do not
+  infer dataset roles, marker positions, model heads or distributed reductions here. The
+  existing generic classifier and its primary CE/Brier paths remain independent.
+
+- `_load_guard.py` is a private pure checkpoint-report leaf, importing only core errors and
+  Pydantic. Trained-artifact consumers request `output_loading_info=True`, unpack and validate
+  its tuple, and refuse every structural diagnostic before executing a model. Never add a
+  head exemption to inference. Its bounded audit contains names/counts/fixed codes, never raw
+  warning or error text. `HeadKeyDecision` is only an exact comparison; training still needs
+  a trusted registry initializer and receipt. Decoder initialization requires
+  `decoder_logit_head`. Keep the helper's contract in `docs/modules/training.md` synchronized.
 
 - **Owns:** ``sft.py``, ``preference.py``, ``peft.py``,
   ``chat_template.py``, ``packing.py``, ``methods.py``,
@@ -39,8 +73,8 @@ until ``train()`` is called.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
   for the conversation shapes consumed by
   :mod:`strata_forge.training.chat_template`, and
-  :mod:`strata_forge.core.errors` for the ``ForgeError`` base of
-  :class:`MissingBitsAndBytesError`. Nothing else.
+  :mod:`strata_forge.core.errors` for shared errors and
+  :mod:`strata_forge.core.repro` for classifier seed/environment records. Nothing else.
 - **Does NOT import** :mod:`strata_forge.tracing`, :mod:`strata_forge.agents`,
   :mod:`strata_forge.evals`, :mod:`strata_forge.rag`, :mod:`strata_forge.datasets`,
   :mod:`strata_forge.compute`. Trainer scripts that ride on
@@ -129,6 +163,11 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   split's real columns BEFORE any model is downloaded, and
   :func:`build_training_rows` drops every column outside the
   roles (a stray column changes what TRL infers).
+- `capabilities.py` projects those registries into frozen, bounded declaration metadata.
+  Preserve unknown installed/environment/hardware eligibility and fixed, non-echoing
+  selector refusals. It neither admits work nor activates task heads, initialization or
+  distribution choices. It must not import pipelines or optional ML packages, and its
+  canonical schema/body identities are covered by exact fixtures in the module tests.
 
 ## Test expectations
 
@@ -137,6 +176,9 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   ``datasets`` are faked via ``sys.modules`` injection — no
   real ML imports in unit tests.
 - Coverage target: ≥ 90 % line.
+- Supplied-logit loss tests may use fabricated CPU tensors and autograd directly, with no
+  model/tokenizer/checkpoint or training run. Prove the declared numbers and gradients,
+  fixed errors and ML-free module imports separately from any model/worker acceptance.
 - Live integration tests (``@pytest.mark.live``) that exercise
   TRL against a tiny model can land in Phase 9.
 
@@ -172,3 +214,38 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
 - Adding a new heavy dep to the ``[finetuning]`` extra.
 - Adding a vision-aware training path (it would need its own
   module, not a chat-template extension).
+
+## Shared verifier metadata
+
+`verifier_config.py` owns pure `VerifierConfig`, `RenderedVerifierInput` and
+`render_verifier_input`, exported by this module. It has no I/O/heavy imports or execution
+imports. Its bounded premise/hypothesis renderer is an explicit supported task shape, not a
+universal training constraint. Explicit eval overrides are validated and digested before use.
+Training checkpoint selection, head initialization and calibration writers have separate
+contracts; adding metadata does not silently enable those consumers.
+
+## Auxiliary verifier SDK
+
+`verifier_geometry.py`, `_verifier_heads.py` and `verifier_classifier.py` own the separate
+schema-2, `forge_auxiliary_verifier_v1` local SDK. Require explicit shared-primary ownership;
+retain exact parameter registration and the complete native primary path without a duplicate
+backbone or reinitialization. Auxiliary flag/bilinear heads use raw final states and actual
+sequence-aware offset markers. Only declared exact head keys may be newly initialized; all
+trained reloads remain strict-fatal on missing/mismatched/unexpected keys. No truncation,
+worker/scorer/spec registration, implicit objective change or metadata authority is added.
+Pure geometry and native differentiable forwards are sync leaves; public native CPU/file work
+is async. Preserve lazy ML imports, fixed errors, null head absence and schema-1 digests.
+Reference: `docs/modules/training.md` auxiliary verifier section.
+
+## Local population profile
+
+`population.py`, `_population_store.py`, `_population_native.py` and `population_runner.py`
+own the separate schema-2 local population/preflight consumer. Preserve all v1 caps/digests,
+worker/spec/registry/defaults and the two exact canonical row codecs. Whole named-source
+preflight applies outside pilot ranges; no optimizer construction precedes complete zero
+source overflow. Stable IDs are global, selection is explicit, padding is recorded/right-only
+and cached unpadded inputs are consumed exactly once through batch32 including its partial.
+Use bounded indexed SQLite statements, safe packed arrays and a single drained writer, never
+pickle, caller SQL or a hidden full row list. Hashes/receipts and injected trusted policy
+objects are not remote authority. Public I/O stays async; internal native/file leaves run off
+loop and drain before cancellation returns. ADR0027 describes the narrow pure-value exception.

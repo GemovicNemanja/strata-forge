@@ -1,0 +1,113 @@
+{
+  "description": "Synthetic protocol fixture only; all IDs, hashes and credential are fabricated. Substitute a real admitted synthetic spec digest in ASGI integration.",
+  "authority": {
+    "version": 1,
+    "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policy_origin": "https://policy.example",
+    "worker_credential": "strata_worker_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "exchanges": [
+    {
+      "path": "/api/internal/evaluation-policy/read",
+      "request": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "repo_type": "dataset",
+        "ref": "example/source@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "response": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_version": "custody-v1",
+        "repo_type": "dataset",
+        "ref": "example/source@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "authorized": true,
+        "custody": "unsealed"
+      }
+    },
+    {
+      "path": "/api/internal/evaluation-policy/output/plan",
+      "request": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": {
+          "repo_type": "dataset",
+          "repo_id": "example/alias"
+        }
+      },
+      "response": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_version": "custody-v1",
+        "output": {
+          "requested": {
+            "repo_type": "dataset",
+            "repo_id": "example/alias"
+          },
+          "canonical_id": "example/results",
+          "known_aliases": [
+            "example/alias"
+          ],
+          "mode": "existing_private",
+          "expected_parent": "cccccccccccccccccccccccccccccccccccccccc",
+          "privacy": "required_private"
+        }
+      }
+    },
+    {
+      "path": "/api/internal/evaluation-policy/output/ready",
+      "request": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": {
+          "repo_type": "dataset",
+          "repo_id": "example/alias"
+        }
+      },
+      "response": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_version": "custody-v1",
+        "repo_type": "dataset",
+        "requested_id": "example/alias",
+        "canonical_id": "example/results",
+        "mode": "existing_private",
+        "expected_parent": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    {
+      "path": "/api/internal/evaluation-policy/output/receipt",
+      "request": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": {
+          "repo_type": "dataset",
+          "repo_id": "example/results"
+        },
+        "expected_parent": "cccccccccccccccccccccccccccccccccccccccc",
+        "commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
+      },
+      "response": {
+        "version": 1,
+        "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "target": {
+          "repo_type": "dataset",
+          "repo_id": "example/results"
+        },
+        "expected_parent": "cccccccccccccccccccccccccccccccccccccccc",
+        "commit_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "policy_version": "custody-v1",
+        "accepted": true
+      }
+    }
+  ]
+}

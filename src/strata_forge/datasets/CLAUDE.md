@@ -108,3 +108,66 @@ Anything raised from this module is a `ForgeError` subclass.
   version — needs an ADR).
 - Changing what's content-addressed in `DatasetItem.from_input`.
 - Adding a new synthetic-data primitive.
+
+## Local SQL value boundary
+
+`sql_types.py` exposes immutable closed query/manifest/operator/file-description values only;
+`_sql_wire.py` is the shared stdlib-only canonical frame/type/cell codec. No DuckDB import,
+Docker inspection/start, source read or capability registration follows from constructing
+these values. Origin assertions, hashes and descriptors do not confer platform
+access. SQL syntax is not parsed by the parent. See
+[the value reference](../../../docs/modules/headless-sql.md) and
+[ADR0032](../../../docs/architecture/adr/0032-isolated-local-dataset-sql.md).
+
+The public values retain canonical bytes and return independent payload copies. Exact-class
+validation and schema selection must not trust mutable instance/class metadata. Fixed errors
+exclude rejected inputs, native diagnostics and causes. Codec changes require known-value and
+malformed/hostile tests; integers/decimals/nonfinite values and unsupported temporal/nested
+types must not be silently coerced. Sync code here is pure validation only under ADR0032.
+
+
+`_sql_worker.py` is the fixed image-only entrypoint, not a registered Forge job. Its two-source
+bundle and pinned image recipe have no query-time setup fallback. Native DuckDB/pytz imports
+belong inside the image worker only. Parent SQL parsing, remote sources, arbitrary settings,
+source callbacks and a host-native fallback remain prohibited. Fixed native profile/readback,
+all-part Parquet/hash/schema/count and small-batch typed conversion changes require actual
+fictional image proof in addition to fake-native unit controls.
+
+
+`sql.py` owns the async local executor, FD staging and immutable result/receipt; `_sql_container.py`
+owns fixed CLI/image/engine/profile and actual container lifecycle. Admission is one active query
+per executor, not a global quota. No raw native errors/SQL/paths enter diagnostics, no setup or
+pull follows from a query, and no native SQL runs in the parent. Source bytes and cleanup remain
+owned through repeated cancellation. Never infer stopped work from missing engine/container:
+actual successful wait and stoppedPID0 are required after a possible start. Resource uncertainty
+retains the unavailable owner and staged source. Actual integration tests require separately
+prepared image installation and fail a missing prerequisite; they must not silently pass.
+
+Parent monotonic deadlines schedule only remaining durations on the captured event loop.
+Never pass a time.monotonic absolute timestamp to asyncio.timeout_at or renew the original
+eligibility budget during staging, CLI dispatch, reading or adoption.
+
+## Native dataset transformation profile
+
+`_dataset_wire.py`, `dataset_execution_types.py` and `_dataset_worker.py` own the separate fixed
+conversion/named-table/materialization profile. Sync validation remains pure under ADR0032;
+all native parsing/execution stays in the image. `_sql_container.py` selects only its closed
+internal SQL/dataset enum profiles; preserve old SQL wire/image/worker/default behavior.
+The new profile has no remote source, durable job or platform grant. See
+[the reference](../../../docs/modules/native-dataset-execution.md).
+
+Conversion/materialization validates the original lazy SELECT projection with the existing
+source-schema codec before CTAS, then compares exact output names/types. Duplicate or
+Unicode-casefold-colliding names refuse; no auto-renamed snapshot is accepted. Read-only
+query columns remain indexed and can duplicate. Preserve the old SQL worker/codec bytes,
+profile and parser; a dataset worker change requires a fresh matching installed bundle and
+actual fictional image conformance, never query-time setup or a parent native import.
+
+Failure observations are privately issued metadata for the exact real error,
+call, executor, task and loop. Do not trust caller-constructed flags or later
+mutable exception fields. Correlated worker refusal, actual wait/PID-zero/removal/
+attach settlement and staging drain precede issuance; uncertainty and cancellation
+provide no reusable witness. Preserve legacy direct-Python cancellation/reuse and
+default exception behavior. Inspection is bounded and performs no I/O or hashing;
+it returns independent metadata, retains no raw exception/source/FD/credential,
+and cannot grant source access or justify automatic retry/reconstruction.

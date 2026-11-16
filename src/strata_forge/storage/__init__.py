@@ -19,9 +19,10 @@ without them.
 """
 
 from strata_forge.storage.gateway import FileInfo, StorageGateway
-from strata_forge.storage.hf_hub import HFHubClient, RepoType
+from strata_forge.storage.hf_hub import CommitRef, HFHubClient, RepoType
 
 __all__ = [
+    "CommitRef",
     "FileInfo",
     "HFHubClient",
     "RepoType",

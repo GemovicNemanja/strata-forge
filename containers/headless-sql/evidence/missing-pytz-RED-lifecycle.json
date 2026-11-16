@@ -1,0 +1,10 @@
+{
+  "image_id": "sha256:0c1d999dce9f36fbcc3ef620c3bf08405b98bea7f7d87e01c008f2a1c9483876",
+  "exit_code": 1,
+  "attached_reaped": true,
+  "stopped": true,
+  "pid_after_wait": 0,
+  "oom_killed": false,
+  "elapsed_ms": 648,
+  "log_driver": "none"
+}

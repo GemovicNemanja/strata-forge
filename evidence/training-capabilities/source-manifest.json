@@ -1,0 +1,93 @@
+{
+  "author": "Nemanja Gemovic <gemovic.nemanja@gmail.com>",
+  "base": "86ed9d2bdb6a8be49f7e811cbbdbf010264a50fa",
+  "branch": "feat/training-capabilities",
+  "changed": {
+    "docs/modules/training.md": {
+      "bytes": 54486,
+      "sha256": "4a33aae0ad7a1c4b9009baa7405e7b3ee1d86ab1a23ef1247c80b192a11379bb"
+    },
+    "src/strata_forge/training/CLAUDE.md": {
+      "bytes": 13879,
+      "sha256": "af049a082c4dc0481f6b70fdaf997bf70c28906b426da1b11f22f36c7c127a15"
+    },
+    "src/strata_forge/training/README.md": {
+      "bytes": 2307,
+      "sha256": "2c516ba4274f5b3351b47f1c4b90baa9c85592ea93758be45113313c023218df"
+    },
+    "src/strata_forge/training/capabilities.py": {
+      "bytes": 7129,
+      "sha256": "1855d72f5e100d798057de5752ec413171dbbf22a87d733edb55318949e17390"
+    },
+    "tests/unit/training/fixtures/training_capabilities_v1.json": {
+      "bytes": 12139,
+      "sha256": "8c3f2fb1fd074534bc7d976975ef811db53867c6e34d709a2339be2de162c2a2"
+    },
+    "tests/unit/training/test_capabilities.py": {
+      "bytes": 12730,
+      "sha256": "cd991436ccf0d6968eba95f36a8f5930669a69166221062aa5a6a1df3264c8b1"
+    }
+  },
+  "clean": true,
+  "committer": "Nemanja Gemovic <gemovic.nemanja@gmail.com>",
+  "head": "d3d618983e08cc1ff3fc6bb3e1dc9d242c4bff15",
+  "remotes": [],
+  "retained": {
+    "pyproject.toml": {
+      "bytes": 10451,
+      "exact_base_bytes": true,
+      "sha256": "96eb698b0cca20f17870aa289f9074ab4ab281b183cacc5a0d187fc69c939645"
+    },
+    "src/strata_forge/datasets/_dataset_worker.py": {
+      "bytes": 21932,
+      "exact_base_bytes": true,
+      "sha256": "379036bbbda209ece35f973fbee63fb59d911810adb30e54c2215803b8504f9b"
+    },
+    "src/strata_forge/pipelines/__init__.py": {
+      "bytes": 6573,
+      "exact_base_bytes": true,
+      "sha256": "0511b1d21d93f245db85bb170e008309160f0fa84b01fc6dfc1ce974d240ced8"
+    },
+    "src/strata_forge/pipelines/_common.py": {
+      "bytes": 37139,
+      "exact_base_bytes": true,
+      "sha256": "d1e3a1979aa355752212de4ab06caf61db80fc691e7b58fbdd587b8065fd560e"
+    },
+    "src/strata_forge/pipelines/finetune_runner.py": {
+      "bytes": 25573,
+      "exact_base_bytes": true,
+      "sha256": "2faea127f3dc30aa0f4eba158425bcc297b7807515b797bbe2fb91939de8384e"
+    },
+    "src/strata_forge/training/__init__.py": {
+      "bytes": 6590,
+      "exact_base_bytes": true,
+      "sha256": "958a1053375de846b3c6aa4d1d2a017e114c55e9aa5b6463a14270e7cab48a32"
+    },
+    "src/strata_forge/training/dataset_format.py": {
+      "bytes": 9077,
+      "exact_base_bytes": true,
+      "sha256": "b752e561dd14fa939f31f3e6465466af0d99f2bb7273167055d8001a8ebbacaa"
+    },
+    "src/strata_forge/training/methods.py": {
+      "bytes": 6832,
+      "exact_base_bytes": true,
+      "sha256": "7c0fe266288c9bb7e3e922703881c437fd2fe3bb7eb4893a66ef61c228b138f0"
+    },
+    "src/strata_forge/training/peft.py": {
+      "bytes": 7710,
+      "exact_base_bytes": true,
+      "sha256": "08aba05b5df0cfd04d9d040fc67c802136d987afd65e1ab2759bb2f6b90ad1c6"
+    },
+    "src/strata_forge/training/preference.py": {
+      "bytes": 14555,
+      "exact_base_bytes": true,
+      "sha256": "07f185af843a7e4e5c6f96a9300e5caba17bdc8a288b20be8a956d103f3c7b29"
+    },
+    "src/strata_forge/training/sft.py": {
+      "bytes": 11285,
+      "exact_base_bytes": true,
+      "sha256": "88e092b1b590c12a31094bb5c6d6ca5b5d3080b75c1b8b16e3b5951feaf30ad3"
+    }
+  },
+  "tree": "16e54f219add8500985005f5bdeffaeaec21083b"
+}

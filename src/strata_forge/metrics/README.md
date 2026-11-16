@@ -31,3 +31,17 @@ adjusts an explicitly named hypothesis family, retaining caller order without ch
 These comparisons need no numerical extra; resampling and research thresholds are not inferred.
 
 Reference: [metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).
+
+A separate bounded pure scalar-logit fitter returns numerical search provenance without
+claiming a registered fit source. The async local pipeline adds explicit trusted named-split
+policy, complete-population checks and an immutable fit receipt. It installs no registry,
+loader or worker; clustered uncertainty and verified application remain separate.
+
+`classification_report_from_confusion` revalidates a complete explicit integer-count matrix
+and reuses the row API's report definitions, including invalid false negatives, absent classes
+and empty populations. It does not establish data provenance, independence or uncertainty.
+
+A separate lazy `paired_cluster_percentile` leaf implements the explicit PCG64/10000/seed 20261104
+row-pooled cluster profile over supplied paired observations. It reuses point math and keeps
+variable cluster-multiplicity denominators, invalid outputs and absent categories. Its percentile
+intervals confer no source authority, independence, p-value or gate. Expensive work belongs off-loop.

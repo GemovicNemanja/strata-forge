@@ -1,0 +1,96 @@
+{
+  "author": "Nemanja Gemovic <gemovic.nemanja@gmail.com>",
+  "base": "cffa0ff813bb61c4cd104fbb3384b9f9cf54635b",
+  "branch": "perf/lazy-llm-imports",
+  "catalog_sha256": "a3d41914c887df59ec0457ff013f104f5f2f47dd58548774204e81a0d25aae90",
+  "changed": {
+    "docs/modules/llm.md": {
+      "bytes": 50792,
+      "sha256": "220012bf038dcc61637efc80e6d9852e84684b5af10c79fcce3abd57dd0825d7"
+    },
+    "docs/modules/training.md": {
+      "bytes": 54466,
+      "sha256": "03c3ce147584fab74827d5f0a030ce2b748c1cfcff1666f0b16efce9d63b9262"
+    },
+    "src/strata_forge/llm/CLAUDE.md": {
+      "bytes": 13190,
+      "sha256": "d292e57b2d87a40c8950fd9b713580d0a8e75963e62e8d2b3a1b00b142693cfd"
+    },
+    "src/strata_forge/llm/README.md": {
+      "bytes": 1231,
+      "sha256": "c157375e25e49d4cd199210fc8c9701deb5c3b59eac5ef891994c77055a6d578"
+    },
+    "src/strata_forge/llm/__init__.py": {
+      "bytes": 10330,
+      "sha256": "2030bfcb97d7eacde69cf224c5f131dc28bef3733df753be88ff5bd6b3e7287e"
+    },
+    "tests/unit/llm/fixtures/public_exports.json": {
+      "bytes": 13252,
+      "sha256": "a1e7d7ba4415e9fae48e078f5c12658e301f5c7558a72a27be2fb2020c590758"
+    },
+    "tests/unit/llm/test_import_contract.py": {
+      "bytes": 6482,
+      "sha256": "1f57ce91fb14520d193b8a426cb385e37151a5920ba26dd4e1f3448ad09abbf5"
+    },
+    "tests/unit/training/test_capabilities.py": {
+      "bytes": 12730,
+      "sha256": "5cf8f7a2b65a3cf9617d5b5c7ad5fa080d3600575b227d7b6b011dfc349dcd0b"
+    }
+  },
+  "clean": true,
+  "committer": "Nemanja Gemovic <gemovic.nemanja@gmail.com>",
+  "eager_registry_exports": 11,
+  "head": "55c1ae892434d3d2eb755cfe0ec93b0875ca6dae",
+  "lazy_exports": 88,
+  "public_exports": 99,
+  "remotes": [],
+  "retained": {
+    "pyproject.toml": {
+      "bytes": 10451,
+      "exact_base_bytes": true,
+      "sha256": "96eb698b0cca20f17870aa289f9074ab4ab281b183cacc5a0d187fc69c939645"
+    },
+    "src/strata_forge/datasets/_dataset_worker.py": {
+      "bytes": 21932,
+      "exact_base_bytes": true,
+      "sha256": "379036bbbda209ece35f973fbee63fb59d911810adb30e54c2215803b8504f9b"
+    },
+    "src/strata_forge/llm/registry.py": {
+      "bytes": 9373,
+      "exact_base_bytes": true,
+      "sha256": "a109e0f2024198d804fd480116651996a4f188b4990239efb8535060e3319cf0"
+    },
+    "src/strata_forge/llm/registry_data.yaml": {
+      "bytes": 17479,
+      "exact_base_bytes": true,
+      "sha256": "9522f215fdf4b66f432ae45862f9bd4948a28c284d087a37a012f92bba83df0e"
+    },
+    "src/strata_forge/pipelines/finetune_runner.py": {
+      "bytes": 25573,
+      "exact_base_bytes": true,
+      "sha256": "2faea127f3dc30aa0f4eba158425bcc297b7807515b797bbe2fb91939de8384e"
+    },
+    "src/strata_forge/training/capabilities.py": {
+      "bytes": 7129,
+      "exact_base_bytes": true,
+      "sha256": "1855d72f5e100d798057de5752ec413171dbbf22a87d733edb55318949e17390"
+    },
+    "src/strata_forge/training/dataset_format.py": {
+      "bytes": 9077,
+      "exact_base_bytes": true,
+      "sha256": "b752e561dd14fa939f31f3e6465466af0d99f2bb7273167055d8001a8ebbacaa"
+    },
+    "src/strata_forge/training/methods.py": {
+      "bytes": 6832,
+      "exact_base_bytes": true,
+      "sha256": "7c0fe266288c9bb7e3e922703881c437fd2fe3bb7eb4893a66ef61c228b138f0"
+    },
+    "tests/unit/training/fixtures/training_capabilities_v1.json": {
+      "bytes": 12139,
+      "exact_base_bytes": true,
+      "sha256": "8c3f2fb1fd074534bc7d976975ef811db53867c6e34d709a2339be2de162c2a2"
+    }
+  },
+  "schema_sha256": "ccb5be4e552c6e3e542f282835566af31b3dfd157f1c361dd517a37ba8b50b8c",
+  "tree": "acb00b73050d1c35d110cc53c817d4fd74594fef"
+}

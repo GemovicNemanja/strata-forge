@@ -114,6 +114,7 @@ def _pattern(name: str, regex: str, max_chars: int) -> TokenPattern:
 
 
 DEFAULT_PATTERNS: tuple[TokenPattern, ...] = (
+    _pattern("strata-worker", r"strata_worker_[A-Za-z0-9_-]{43}", 57),
     _pattern("huggingface", r"hf_[A-Za-z0-9]{8,256}", 3 + 256),
     # OpenAI (`sk-`, `sk-proj-`) and Anthropic (`sk-ant-`) keys share the prefix. A word ending
     # in "sk" (`flask-`, `task-`, `mask-`) is not one, and a real key is random mixed-case text,

@@ -1,0 +1,1 @@
+{"denied_imports": [], "effects": ["socket.getaddrinfo"], "failure": null, "loaded_optional_roots": [], "loaded_transport_roots": ["httpx", "litellm", "openai"], "mode": "observe", "seconds": 1.5149495829973603, "target": "strata_forge.training.capabilities"}

@@ -1,0 +1,403 @@
+{
+  "jobs": {
+    "inference": {
+      "schema_version": 2,
+      "protocol": "strata.scoring.population.v2",
+      "overflow": "drop",
+      "job": {
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "model_id": "example/synthetic-model",
+        "model_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dataset_config": "default",
+        "id_column": "item_id",
+        "split": "test",
+        "column_mapping": {
+          "p": "premise_text",
+          "h": "hypothesis"
+        },
+        "template": "{p}",
+        "hyperparams": {
+          "engine": "hf_classify",
+          "max_model_len": 16,
+          "pair_template": "{h}",
+          "label_alias": null,
+          "label_tokens": null,
+          "scoring_batch_size": 2,
+          "dtype": "float32"
+        },
+        "output_repo_id": null,
+        "progress_path": "progress.jsonl",
+        "run_id": "synthetic-population-v2"
+      },
+      "selection": {
+        "row_start": 0,
+        "row_end": null,
+        "row_limit": 10
+      },
+      "population": {
+        "tier_column": "tier",
+        "within_limits_column": "within_limits"
+      }
+    },
+    "native_evaluation": {
+      "schema_version": 2,
+      "protocol": "strata.eval.population.v2",
+      "overflow": "drop",
+      "job": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-population-v2",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": null,
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "classify",
+        "model_id": "example/synthetic-model",
+        "model_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "engine": "hf_classify",
+        "model_labels": [
+          "E",
+          "C",
+          "U"
+        ],
+        "label_aliases": {},
+        "label_tokens": null,
+        "rendering": {
+          "source": "override",
+          "template": "{premises}",
+          "pair_template": "{hypothesis}",
+          "premise_format": "numbered_lines",
+          "max_length": 16,
+          "max_premises": 20
+        },
+        "scoring_batch_size": 2,
+        "dtype": "float32",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "default",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 10
+            },
+            "slice_columns": [],
+            "cluster_column": null,
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "column_mapping": {
+              "premises": "premises",
+              "hypothesis": "hypothesis"
+            }
+          }
+        ]
+      },
+      "populations": [
+        {
+          "evaluation_id": "threeway",
+          "tier_column": "tier",
+          "within_limits_column": "within_limits"
+        }
+      ]
+    },
+    "external_prediction_evaluation": {
+      "schema_version": 2,
+      "protocol": "strata.eval.population.v2",
+      "overflow": "drop",
+      "job": {
+        "schema_version": 1,
+        "engine_version": "0.0.0+ffffffffffffffffffffffffffffffffffffffff",
+        "run_id": "synthetic-import-v2",
+        "progress_path": "progress.jsonl",
+        "dataset_id": "example/synthetic-gold",
+        "dataset_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_repo_id": null,
+        "sealed": false,
+        "echo_columns": [],
+        "apply_calibration": "none",
+        "bootstrap": null,
+        "holm_families": [],
+        "mode": "score_predictions",
+        "evaluation_sets": [
+          {
+            "evaluation_id": "threeway",
+            "dataset_config": "default",
+            "split": "test",
+            "id_column": "item_id",
+            "gold_column": "gold",
+            "gold_index_map": {},
+            "label_space": "3way",
+            "labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "projection": null,
+            "selection": {
+              "row_start": 0,
+              "row_end": null,
+              "row_limit": 10
+            },
+            "slice_columns": [],
+            "cluster_column": null,
+            "sampling_unit": "independent_items",
+            "declared_diagnostic": false,
+            "truncation_policy": "count_as_invalid",
+            "compare_to": [],
+            "source_labels": [
+              "E",
+              "C",
+              "U"
+            ],
+            "predictions_ref": "example/synthetic-predictions@cccccccccccccccccccccccccccccccccccccccc",
+            "predictions_config": "threeway",
+            "predictions_split": "train",
+            "prediction_id_column": "item_id",
+            "prediction_manifest_path": null,
+            "parse": "probability_columns",
+            "parse_config": {
+              "probability_columns": {
+                "E": "p_E",
+                "C": "p_C",
+                "U": "p_U"
+              },
+              "probability_kind": "class_probabilities",
+              "prediction_rule": "column",
+              "prediction_column": "pred",
+              "label_aliases": {},
+              "index_map": {},
+              "mass_outside_column": null
+            }
+          }
+        ]
+      },
+      "populations": [
+        {
+          "evaluation_id": "threeway",
+          "tier_column": "tier",
+          "within_limits_column": "within_limits"
+        }
+      ]
+    }
+  },
+  "accounting": {
+    "rows": [
+      {
+        "item_id": "a1",
+        "tier": "alpha",
+        "within_limits": true,
+        "outcome": "scored",
+        "gold": "E",
+        "pred": "E",
+        "probabilities": [
+          0.8,
+          0.1,
+          0.1
+        ],
+        "metric_eligible": true,
+        "token_count": 8,
+        "model_limit": 16,
+        "model_sent": true,
+        "error_code": null
+      },
+      {
+        "item_id": "a2",
+        "tier": "alpha",
+        "within_limits": true,
+        "outcome": "scored",
+        "gold": "C",
+        "pred": "E",
+        "probabilities": [
+          0.7,
+          0.2,
+          0.1
+        ],
+        "metric_eligible": true,
+        "token_count": 8,
+        "model_limit": 16,
+        "model_sent": true,
+        "error_code": null
+      },
+      {
+        "item_id": "a3",
+        "tier": "alpha",
+        "within_limits": true,
+        "outcome": "scored",
+        "gold": "U",
+        "pred": "U",
+        "probabilities": [
+          0.1,
+          0.1,
+          0.8
+        ],
+        "metric_eligible": true,
+        "token_count": 8,
+        "model_limit": 16,
+        "model_sent": true,
+        "error_code": null
+      },
+      {
+        "item_id": "a4",
+        "tier": "alpha",
+        "within_limits": true,
+        "outcome": "invalid",
+        "gold": "E",
+        "pred": null,
+        "probabilities": null,
+        "metric_eligible": true,
+        "token_count": null,
+        "model_limit": 16,
+        "model_sent": false,
+        "error_code": "render_refused"
+      },
+      {
+        "item_id": "a5",
+        "tier": "alpha",
+        "within_limits": true,
+        "outcome": "overflow",
+        "gold": "C",
+        "pred": null,
+        "probabilities": null,
+        "metric_eligible": false,
+        "token_count": 17,
+        "model_limit": 16,
+        "model_sent": false,
+        "error_code": "input_too_long"
+      },
+      {
+        "item_id": "a6",
+        "tier": "alpha",
+        "within_limits": false,
+        "outcome": "suite_excluded",
+        "gold": "U",
+        "pred": null,
+        "probabilities": null,
+        "metric_eligible": false,
+        "token_count": null,
+        "model_limit": 16,
+        "model_sent": false,
+        "error_code": null
+      },
+      {
+        "item_id": "b1",
+        "tier": "beta",
+        "within_limits": true,
+        "outcome": "scored",
+        "gold": "C",
+        "pred": "C",
+        "probabilities": [
+          0.1,
+          0.8,
+          0.1
+        ],
+        "metric_eligible": true,
+        "token_count": 8,
+        "model_limit": 16,
+        "model_sent": true,
+        "error_code": null
+      },
+      {
+        "item_id": "b2",
+        "tier": "beta",
+        "within_limits": true,
+        "outcome": "invalid",
+        "gold": "U",
+        "pred": null,
+        "probabilities": null,
+        "metric_eligible": true,
+        "token_count": null,
+        "model_limit": 16,
+        "model_sent": false,
+        "error_code": "render_refused"
+      },
+      {
+        "item_id": "b3",
+        "tier": "beta",
+        "within_limits": true,
+        "outcome": "overflow",
+        "gold": "E",
+        "pred": null,
+        "probabilities": null,
+        "metric_eligible": false,
+        "token_count": 17,
+        "model_limit": 16,
+        "model_sent": false,
+        "error_code": "input_too_long"
+      },
+      {
+        "item_id": "b4",
+        "tier": "beta",
+        "within_limits": false,
+        "outcome": "suite_excluded",
+        "gold": "C",
+        "pred": null,
+        "probabilities": null,
+        "metric_eligible": false,
+        "token_count": null,
+        "model_limit": 16,
+        "model_sent": false,
+        "error_code": null
+      }
+    ],
+    "per_tier": {
+      "alpha": {
+        "rows_in": 6,
+        "rows_suite_excluded": 1,
+        "rows_overflow_dropped": 1,
+        "rows_scored_success": 3,
+        "rows_failed_or_invalid": 1,
+        "rows_metric_population": 4
+      },
+      "beta": {
+        "rows_in": 4,
+        "rows_suite_excluded": 1,
+        "rows_overflow_dropped": 1,
+        "rows_scored_success": 1,
+        "rows_failed_or_invalid": 1,
+        "rows_metric_population": 2
+      }
+    },
+    "total": {
+      "rows_in": 10,
+      "rows_suite_excluded": 2,
+      "rows_overflow_dropped": 2,
+      "rows_scored_success": 4,
+      "rows_failed_or_invalid": 2,
+      "rows_metric_population": 6
+    },
+    "metrics_expected": {
+      "accuracy": 0.5,
+      "invalid_rate": 0.3333333333333333,
+      "macro_f1": 0.6111111111111112,
+      "brier_raw": 0.33,
+      "nll_raw": 0.5697171415941824,
+      "probability_n": 4,
+      "metric_n": 6
+    }
+  },
+  "digests": {
+    "inference": "54208498e133ee14df43f5f1cb09569799306cca0322d97a65478721e2519ab2",
+    "native_evaluation": "bd3682549351317f913809449396d41ce43bd890c89e20f0775293122dfd109a",
+    "external_prediction_evaluation": "9c93a64fd645a1d00ce2d6ac35684f84a208afe90e094d3cde39f21c36395e17"
+  }
+}

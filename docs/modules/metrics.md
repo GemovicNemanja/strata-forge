@@ -341,3 +341,85 @@ codes without echoing supplied item/rater/source values; input-model validation 
 The [synthetic agreement fixture](../../tests/unit/metrics/fixtures/agreement_point_v1.json)
 retains hand-counted rational results, including unequal marginals, negative coefficients
 and a declared unused category. It contains no research annotations or model outputs.
+
+## Scalar-temperature fit math
+
+`TemperatureFitBounds`, `TemperatureFitSolution` and `fit_temperature_logits` are separate
+lazy exports. The synchronous primitive consumes explicit tuples of finite exact raw logits
+and integer target-column indices. It does not read a dataset, infer label order, register a
+split or authorize calibration. Complete registered fitting belongs to the local
+[pipeline SDK](pipelines.md#registered-local-temperature-fitting).
+
+The objective is unweighted mean `logsumexp(beta*z)-beta*z_gold`, beta=1/T, computed in
+binary64 after row centering without clipping. Explicit bounds satisfy
+`0.001 <= T_min <= 1 <= T_max <= 1000` and `T_min < T_max`. There are 2..16 columns,
+at most 100,000 rows and absolute logits at most 1,000,000. Nonfinite/bool/coercible numeric
+objects, mismatched matrices/indices, weights, smoothing, missing targets and unsupported
+bounds refuse. No probability vector is inverted or repaired into logits.
+
+A bounded derivative search evaluates inverse-temperature endpoints and T=1, then at most 64
+bisection steps. Choose the smallest computed objective; exact ties prefer T closest to 1,
+then smaller T. Results retain the explicit bounds, pass/iteration counts, numerical status,
+derivative, final search-bracket width and selected underflowed-weight count. The bracket is
+not a confidence interval. `flat_unidentified` requires actual equal class logits in every
+row. `numerical_stationary` can mean rounded/underflowed zero and never proves identified or
+interior convergence. `identification="not_claimed"` is unconditional. Boundary candidates
+and exhausted brackets remain explicit; no hidden optimizer or scientific gate is supplied.
+
+The pure math uses no optional library; registered fitting's point-probability application
+lazily uses the existing scoring extra. Only the local pipeline can attach registered fit
+provenance. The old temperature component/application behavior is unchanged.
+See [ADR0030](../architecture/adr/0030-registered-local-temperature-fitting.md).
+
+## Reports from validated counts
+
+`classification_report_from_confusion(matrix)` accepts the exact `ConfusionMatrix` class
+and returns the same `ClassificationReport` as the ordinary row-based API. It reconstructs
+every original field through the existing matrix validators before calling the shared report
+math, even when an instance was created with model_construct or manually changed. Matrix
+subclasses, hidden extra/missing fields and nonnative mutable/coercible values refuse. Labels
+and integer counts must use their explicit immutable tuple shape; bool/float counts are not
+integer multiplicities. No class order or missing population is inferred.
+
+Rows are gold, columns predicted. `invalid_by_gold` stays in gold support and N; invalid
+outputs remain wrong/false negatives. Absent declared classes contribute zero F1. Empty
+populations keep undefined metrics and their existing reasons. Integer count multiplicities
+are supported without expanding rows: the returned n is the actual summed count, not an
+assertion of unique/independent examples or sample weights. No confidence interval, bootstrap,
+source eligibility or completeness attestation follows from a valid matrix.
+
+The returned report owns a newly validated matrix; changing an input instance's storage
+afterward does not change it. Invalid inputs raise core ValidationError with fixed message
+`confusion matrix is invalid` and no retained native diagnostic context. Existing row-based
+functions, formulas, metric version and probability-metric behavior are unchanged.
+
+## Paired cluster percentile math
+
+`paired_cluster_percentile(observations, profile=...)` is a pure synchronous bounded local
+function. `PairedClusterObservation` holds exact item/group IDs, explicit gold/prediction
+indexes and optional ordered probabilities; `PairedClusterProfile` requires all fixed
+settings. It does not resolve sources or attest data access, independence or completeness.
+Package exports load the leaf lazily; numerical execution uses the existing scoring extra.
+
+The supported profile draws C clusters with replacement in each of 10000 replicates using
+private NumPy Generator/PCG64 seed 20261104. Canonical UTF-8 ID/group order fixes the input
+sequence. Both arms and all requested metrics share each draw. Cluster multiplicities weight
+all rows, so unequal cluster sizes change the denominator. Existing count-report math supplies
+accuracy/macro-F1/invalid rate, keeping invalid predictions wrong and absent classes zero-F1.
+Existing sum-form Brier and clipped NLL supply per-cluster sufficient statistics. Requested
+probability metrics require complete compatible vectors across all rows, without normalization
+or one-hot repair. Floating regrouping agrees with expanded point calls to 1e-12 abs/rel.
+
+Candidate-minus-baseline delta is retained for every metric, including losses. Each baseline,
+candidate and paired-delta distribution uses exact nearest-rank 95% indexes 249/9749. Delta
+intervals are not marginal-endpoint subtraction. No p-value, BCa, gate or simultaneous claim
+is produced. M0 returns undefined metrics; C1 retains points without intervals/draws. A complete
+result requires all 10000 finite replicates. Constant outputs can yield an empirical zero-width
+interval without proving cluster independence.
+
+M<=100000, K 2..16, C<=10000 and B*C<=100M are admission limits; the work count is cluster
+draws, not machine instructions. Planned numerical arrays are capped at 256 MiB, with one
+draw/multiplicity and B*Q*3 values, never B*M row replicas. The pure API blocks its caller;
+use the async pipeline for current-policy checks, soft elapsed budget and drained cancellation.
+Frozen result consistency/hashes do not attest the underlying observations. See
+[ADR0031](../architecture/adr/0031-paired-local-cluster-percentiles.md).

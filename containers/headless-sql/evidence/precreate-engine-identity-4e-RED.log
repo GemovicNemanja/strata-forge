@@ -1,0 +1,25 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____ test_precreate_engine_identity_mismatch_does_not_restore_availability _____
+
+    async def test_precreate_engine_identity_mismatch_does_not_restore_availability() -> None:
+        import time
+    
+        owner = Owner()
+        vars(owner).update(_create_issued=False, _start_issued=False, _cid="")
+        owner.engine = "engine-B"
+        same = cast(
+            "Callable[[SQLContainerOwner,float],Awaitable[None]]",
+            vars(SQLContainerOwner)["_same_engine"],
+        )
+        try:
+            with pytest.raises(wire.WireError) as caught:
+                await same(owner, time.monotonic() + 1)
+            assert caught.value.code == "cleanup_unresolved"
+>           assert await owner.cleanup() is False
+E           assert True is False
+
+tests/unit/datasets/test_sql_container.py:224: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/datasets/test_sql_container.py::test_precreate_engine_identity_mismatch_does_not_restore_availability
+1 failed in 0.78s

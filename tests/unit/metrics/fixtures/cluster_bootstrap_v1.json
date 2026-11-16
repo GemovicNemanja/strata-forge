@@ -1,0 +1,179 @@
+{
+  "purpose": "fictional design conformance; no source authorization or research result",
+  "source_base": "4fbbc08abec7b8aeb29b117c24e99399b1d2c27b",
+  "labels": [
+    "A",
+    "B",
+    "C"
+  ],
+  "cluster_order": [
+    "a-small",
+    "b-large"
+  ],
+  "rows": [
+    {
+      "item_id": "a",
+      "base_problem_id": "a-small",
+      "gold": "A",
+      "baseline_pred": "A",
+      "candidate_pred": "B",
+      "baseline_probabilities": [
+        0.75,
+        0.25,
+        0.0
+      ],
+      "candidate_probabilities": [
+        0.25,
+        0.75,
+        0.0
+      ]
+    },
+    {
+      "item_id": "b",
+      "base_problem_id": "b-large",
+      "gold": "A",
+      "baseline_pred": "B",
+      "candidate_pred": "A",
+      "baseline_probabilities": [
+        0.25,
+        0.75,
+        0.0
+      ],
+      "candidate_probabilities": [
+        0.75,
+        0.25,
+        0.0
+      ]
+    },
+    {
+      "item_id": "c",
+      "base_problem_id": "b-large",
+      "gold": "B",
+      "baseline_pred": null,
+      "candidate_pred": "B",
+      "baseline_probabilities": [
+        0.25,
+        0.75,
+        0.0
+      ],
+      "candidate_probabilities": [
+        0.25,
+        0.75,
+        0.0
+      ]
+    },
+    {
+      "item_id": "d",
+      "base_problem_id": "b-large",
+      "gold": "B",
+      "baseline_pred": "B",
+      "candidate_pred": null,
+      "baseline_probabilities": [
+        0.25,
+        0.75,
+        0.0
+      ],
+      "candidate_probabilities": [
+        0.25,
+        0.75,
+        0.0
+      ]
+    }
+  ],
+  "explicit_draw_controls": [
+    {
+      "draw": [
+        0,
+        0
+      ],
+      "n": 2,
+      "baseline": {
+        "accuracy": "1",
+        "macro_f1": "1/3",
+        "invalid_rate": "0",
+        "brier": "1/8"
+      },
+      "candidate": {
+        "accuracy": "0",
+        "macro_f1": "0",
+        "invalid_rate": "0",
+        "brier": "9/8"
+      },
+      "delta": {
+        "accuracy": "-1",
+        "macro_f1": "-1/3",
+        "invalid_rate": "0",
+        "brier": "1"
+      },
+      "nll_delta": "log(3)"
+    },
+    {
+      "draw": [
+        0,
+        1
+      ],
+      "n": 4,
+      "baseline": {
+        "accuracy": "1/2",
+        "macro_f1": "7/18",
+        "invalid_rate": "1/4",
+        "brier": "3/8"
+      },
+      "candidate": {
+        "accuracy": "1/2",
+        "macro_f1": "7/18",
+        "invalid_rate": "1/4",
+        "brier": "3/8"
+      },
+      "delta": {
+        "accuracy": "0",
+        "macro_f1": "0",
+        "invalid_rate": "0",
+        "brier": "0"
+      },
+      "nll_delta": "0"
+    },
+    {
+      "draw": [
+        1,
+        1
+      ],
+      "n": 6,
+      "baseline": {
+        "accuracy": "1/3",
+        "macro_f1": "1/6",
+        "invalid_rate": "1/3",
+        "brier": "11/24"
+      },
+      "candidate": {
+        "accuracy": "2/3",
+        "macro_f1": "5/9",
+        "invalid_rate": "1/3",
+        "brier": "1/8"
+      },
+      "delta": {
+        "accuracy": "1/3",
+        "macro_f1": "7/18",
+        "invalid_rate": "0",
+        "brier": "-1/3"
+      },
+      "nll_delta": "-log(3)/3"
+    }
+  ],
+  "incorrect_equal_cluster_point_accuracy": {
+    "baseline": "2/3",
+    "candidate": "1/3",
+    "delta": "-1/3"
+  },
+  "correct_row_pooled_point_accuracy": {
+    "baseline": "1/2",
+    "candidate": "1/2",
+    "delta": "0"
+  },
+  "nearest_rank_sorted_values_0_through_9999": {
+    "lower_rank": 250,
+    "lower_value": 249,
+    "upper_rank": 9750,
+    "upper_value": 9749
+  }
+}

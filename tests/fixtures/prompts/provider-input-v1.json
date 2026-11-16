@@ -1,0 +1,598 @@
+{
+  "profile": "strata-provider-value-conformance/v1",
+  "synthetic_only": true,
+  "provenance": "Actual Python typed-value encoder/projection output over synthetic data and the accepted local chat render. Native recipes declare int versus binary64 explicitly; no claim that arbitrary host JSON parsing preserves numeric type. Node is an independent test-only recipe/bit/vector check, not a production provider adapter or HTTP-wire capture.",
+  "vectors": [
+    {
+      "name": "null",
+      "native_recipe": {
+        "kind": "null"
+      },
+      "tagged_utf8_hex": "5b226e756c6c225d",
+      "tagged_sha256": "53b41ab0dae62befcb8708620b6d14794a24fedad6c24c03dd01e51fa698ff0b"
+    },
+    {
+      "name": "false",
+      "native_recipe": {
+        "kind": "boolean",
+        "value": false
+      },
+      "tagged_utf8_hex": "5b22626f6f6c222c66616c73655d",
+      "tagged_sha256": "38d36ce273c7be1c4d771030a94ce9d9760ca762732855090017581928dacb85"
+    },
+    {
+      "name": "true",
+      "native_recipe": {
+        "kind": "boolean",
+        "value": true
+      },
+      "tagged_utf8_hex": "5b22626f6f6c222c747275655d",
+      "tagged_sha256": "b15e5dc2d0858d7d9f2afcad8bf251f5b807810b68219e7ebcc645cb09c2474c"
+    },
+    {
+      "name": "integer-zero",
+      "native_recipe": {
+        "kind": "integer",
+        "decimal": "0"
+      },
+      "tagged_utf8_hex": "5b22696e7465676572222c2230225d",
+      "tagged_sha256": "47cf593f757269a67b947a1b2fef1cb992458ed1158648e1d8bff863b6d31e09"
+    },
+    {
+      "name": "integer-one",
+      "native_recipe": {
+        "kind": "integer",
+        "decimal": "1"
+      },
+      "tagged_utf8_hex": "5b22696e7465676572222c2231225d",
+      "tagged_sha256": "5189bab51971ab777fe9e709a7297ebd2591a066ff7b0c64c31f985daf49d9d5"
+    },
+    {
+      "name": "integer-negative",
+      "native_recipe": {
+        "kind": "integer",
+        "decimal": "-1"
+      },
+      "tagged_utf8_hex": "5b22696e7465676572222c222d31225d",
+      "tagged_sha256": "5489db66a286d4f4a47f0508dfc99b60fcd6d1e2d057389fb9d97d6b96e8f629"
+    },
+    {
+      "name": "integer-above-js-safe",
+      "native_recipe": {
+        "kind": "integer",
+        "decimal": "1208925819614629174706176"
+      },
+      "tagged_utf8_hex": "5b22696e7465676572222c2231323038393235383139363134363239313734373036313736225d",
+      "tagged_sha256": "93a3f2a6a2383d1baa87c959d1427af01dbce06e42db2574bc9b80390bc52ad2"
+    },
+    {
+      "name": "float-one",
+      "native_recipe": {
+        "kind": "binary64",
+        "bits": "3ff0000000000000"
+      },
+      "tagged_utf8_hex": "5b2262696e6172793634222c2233666630303030303030303030303030225d",
+      "tagged_sha256": "f8c48085ba94f1b5a560788c5a43d3167cc8870ca519377623a9f4994dc67757"
+    },
+    {
+      "name": "float-positive-zero",
+      "native_recipe": {
+        "kind": "binary64",
+        "bits": "0000000000000000"
+      },
+      "tagged_utf8_hex": "5b2262696e6172793634222c2230303030303030303030303030303030225d",
+      "tagged_sha256": "6bf7e7a844dc5118245f9fed4828f010776b2a8e02fa0700f326bd1619c8ed28"
+    },
+    {
+      "name": "float-negative-zero",
+      "native_recipe": {
+        "kind": "binary64",
+        "bits": "8000000000000000"
+      },
+      "tagged_utf8_hex": "5b2262696e6172793634222c2238303030303030303030303030303030225d",
+      "tagged_sha256": "52c25004e235cc737d6a75d71638531852300ac9c6d55dc43022dade37b2a778"
+    },
+    {
+      "name": "float-fraction",
+      "native_recipe": {
+        "kind": "binary64",
+        "bits": "3fe6666666666666"
+      },
+      "tagged_utf8_hex": "5b2262696e6172793634222c2233666536363636363636363636363636225d",
+      "tagged_sha256": "38a618310ca112d36273d4ce429a3cd9dfa19eb6956493a81199fcd5324ec101"
+    },
+    {
+      "name": "float-smallest-positive",
+      "native_recipe": {
+        "kind": "binary64",
+        "bits": "0000000000000001"
+      },
+      "tagged_utf8_hex": "5b2262696e6172793634222c2230303030303030303030303030303031225d",
+      "tagged_sha256": "f2294b8ab3d20731241d315533ae1ace536580096ea44300904a964defc50974"
+    },
+    {
+      "name": "float-largest",
+      "native_recipe": {
+        "kind": "binary64",
+        "bits": "7fefffffffffffff"
+      },
+      "tagged_utf8_hex": "5b2262696e6172793634222c2237666566666666666666666666666666225d",
+      "tagged_sha256": "30cce591b34125874c54ce0b9c64f3781c72ba4b863255a654c55874e6b18782"
+    },
+    {
+      "name": "literal-unicode",
+      "native_recipe": {
+        "kind": "string",
+        "value": "{{literal}} 😀é\r\n\u0000"
+      },
+      "tagged_utf8_hex": "5b22737472696e67222c227b7b6c69746572616c7d7d20f09f988065cc815c725c6e5c7530303030225d",
+      "tagged_sha256": "cbb70b6a571ed3d3ce35ff03fc098b61ea31c7030b88bf8c776446a79a37ee99"
+    },
+    {
+      "name": "ordered-object",
+      "native_recipe": {
+        "kind": "object",
+        "entries": [
+          [
+            "注記",
+            {
+              "kind": "integer",
+              "decimal": "1"
+            }
+          ],
+          [
+            "a",
+            {
+              "kind": "binary64",
+              "bits": "3fe6666666666666"
+            }
+          ]
+        ]
+      },
+      "tagged_utf8_hex": "5b226f626a656374222c5b5b22e6b3a8e8a898222c5b22696e7465676572222c2231225d5d2c5b2261222c5b2262696e6172793634222c2233666536363636363636363636363636225d5d5d5d",
+      "tagged_sha256": "6d98b6158146da06d97342d2f1b39fb1443a3a19e3477e8f7d8bad9135cdff9d"
+    },
+    {
+      "name": "reversed-object",
+      "native_recipe": {
+        "kind": "object",
+        "entries": [
+          [
+            "a",
+            {
+              "kind": "binary64",
+              "bits": "3fe6666666666666"
+            }
+          ],
+          [
+            "注記",
+            {
+              "kind": "integer",
+              "decimal": "1"
+            }
+          ]
+        ]
+      },
+      "tagged_utf8_hex": "5b226f626a656374222c5b5b2261222c5b2262696e6172793634222c2233666536363636363636363636363636225d5d2c5b22e6b3a8e8a898222c5b22696e7465676572222c2231225d5d5d5d",
+      "tagged_sha256": "b2dbbdf36b12ef3e6a46481f3b13aca8a407dc9b46e3a5a841724749f56fc027"
+    },
+    {
+      "name": "nested-array",
+      "native_recipe": {
+        "kind": "array",
+        "items": [
+          {
+            "kind": "null"
+          },
+          {
+            "kind": "boolean",
+            "value": false
+          },
+          {
+            "kind": "integer",
+            "decimal": "0"
+          },
+          {
+            "kind": "binary64",
+            "bits": "0000000000000000"
+          },
+          {
+            "kind": "object",
+            "entries": [
+              [
+                "nested",
+                {
+                  "kind": "string",
+                  "value": "synthetic"
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "tagged_utf8_hex": "5b226172726179222c5b5b226e756c6c225d2c5b22626f6f6c222c66616c73655d2c5b22696e7465676572222c2230225d2c5b2262696e6172793634222c2230303030303030303030303030303030225d2c5b226f626a656374222c5b5b226e6573746564222c5b22737472696e67222c2273796e746865746963225d5d5d5d5d5d",
+      "tagged_sha256": "715a19d901cc8541fe4a811b27567d96fe836bfc4ce4b1468f226e28794ef63e"
+    }
+  ],
+  "projections": [
+    {
+      "name": "chat-complete",
+      "method": "acompletion",
+      "model_recipe": {
+        "kind": "string",
+        "value": "fixture:model"
+      },
+      "arguments_recipe": {
+        "kind": "object",
+        "entries": [
+          [
+            "messages",
+            {
+              "kind": "array",
+              "items": [
+                {
+                  "kind": "object",
+                  "entries": [
+                    [
+                      "content",
+                      {
+                        "kind": "string",
+                        "value": "A😀é\r\n{x} {{x}}"
+                      }
+                    ],
+                    [
+                      "role",
+                      {
+                        "kind": "string",
+                        "value": "system"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "kind": "object",
+                  "entries": [
+                    [
+                      "content",
+                      {
+                        "kind": "string",
+                        "value": "{{not_parsed}}\n\b\t\n\f\r\u0000\u001f/\\\""
+                      }
+                    ],
+                    [
+                      "role",
+                      {
+                        "kind": "string",
+                        "value": "user"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "kind": "object",
+                  "entries": [
+                    [
+                      "content",
+                      {
+                        "kind": "string",
+                        "value": ""
+                      }
+                    ],
+                    [
+                      "role",
+                      {
+                        "kind": "string",
+                        "value": "assistant"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          [
+            "temperature",
+            {
+              "kind": "binary64",
+              "bits": "3fe6666666666666"
+            }
+          ],
+          [
+            "top_p",
+            {
+              "kind": "binary64",
+              "bits": "3ff0000000000000"
+            }
+          ],
+          [
+            "tools",
+            {
+              "kind": "array",
+              "items": [
+                {
+                  "kind": "object",
+                  "entries": [
+                    [
+                      "type",
+                      {
+                        "kind": "string",
+                        "value": "function"
+                      }
+                    ],
+                    [
+                      "function",
+                      {
+                        "kind": "object",
+                        "entries": [
+                          [
+                            "name",
+                            {
+                              "kind": "string",
+                              "value": "fixture_echo"
+                            }
+                          ],
+                          [
+                            "parameters",
+                            {
+                              "kind": "object",
+                              "entries": [
+                                [
+                                  "type",
+                                  {
+                                    "kind": "string",
+                                    "value": "object"
+                                  }
+                                ],
+                                [
+                                  "properties",
+                                  {
+                                    "kind": "object",
+                                    "entries": [
+                                      [
+                                        "text",
+                                        {
+                                          "kind": "object",
+                                          "entries": [
+                                            [
+                                              "type",
+                                              {
+                                                "kind": "string",
+                                                "value": "string"
+                                              }
+                                            ]
+                                          ]
+                                        }
+                                      ]
+                                    ]
+                                  }
+                                ]
+                              ]
+                            }
+                          ]
+                        ]
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          [
+            "response_format",
+            {
+              "kind": "object",
+              "entries": [
+                [
+                  "type",
+                  {
+                    "kind": "string",
+                    "value": "json_object"
+                  }
+                ]
+              ]
+            }
+          ],
+          [
+            "extra_headers",
+            {
+              "kind": "object",
+              "entries": [
+                [
+                  "x-fixture",
+                  {
+                    "kind": "string",
+                    "value": "OMITTED SYNTHETIC VALUE"
+                  }
+                ]
+              ]
+            }
+          ]
+        ]
+      },
+      "projection": {
+        "profile": "forge-provider-client-input/v1",
+        "status": "observed",
+        "canonical_tagged_sha256": "953d9a3487d2c0c8046a950d3d86d800cfc6f58d86a60876b51a52053af3a35c",
+        "encoded_size_bytes": 1074,
+        "selected_present_fields_count": 5,
+        "omitted_fields_count": 1
+      },
+      "framed_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f76696465722d696e7075742d70726f6a656374696f6e2d7631222c226669656c6473223a5b5b226d65737361676573222c5b2270726573656e74222c5b226172726179222c5b5b226f626a656374222c5b5b22636f6e74656e74222c5b22737472696e67222c2241f09f988065cc815c725c6e7b787d207b7b787d7d225d5d2c5b22726f6c65222c5b22737472696e67222c2273797374656d225d5d5d5d2c5b226f626a656374222c5b5b22636f6e74656e74222c5b22737472696e67222c227b7b6e6f745f7061727365647d7d5c6e5c625c745c6e5c665c725c75303030305c75303031662f5c5c5c22225d5d2c5b22726f6c65222c5b22737472696e67222c2275736572225d5d5d5d2c5b226f626a656374222c5b5b22636f6e74656e74222c5b22737472696e67222c22225d5d2c5b22726f6c65222c5b22737472696e67222c22617373697374616e74225d5d5d5d5d5d5d5d2c5b2274656d7065726174757265222c5b2270726573656e74222c5b2262696e6172793634222c2233666536363636363636363636363636225d5d5d2c5b226d61785f746f6b656e73222c5b22616273656e74225d5d2c5b22746f705f70222c5b2270726573656e74222c5b2262696e6172793634222c2233666630303030303030303030303030225d5d5d2c5b22746f6f6c73222c5b2270726573656e74222c5b226172726179222c5b5b226f626a656374222c5b5b2274797065222c5b22737472696e67222c2266756e6374696f6e225d5d2c5b2266756e6374696f6e222c5b226f626a656374222c5b5b226e616d65222c5b22737472696e67222c22666978747572655f6563686f225d5d2c5b22706172616d6574657273222c5b226f626a656374222c5b5b2274797065222c5b22737472696e67222c226f626a656374225d5d2c5b2270726f70657274696573222c5b226f626a656374222c5b5b2274657874222c5b226f626a656374222c5b5b2274797065222c5b22737472696e67222c22737472696e67225d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d2c5b22726573706f6e73655f666f726d6174222c5b2270726573656e74222c5b226f626a656374222c5b5b2274797065222c5b22737472696e67222c226a736f6e5f6f626a656374225d5d5d5d5d5d2c5b2273656564222c5b22616273656e74225d5d2c5b2273746f70222c5b22616273656e74225d5d2c5b22746f6f6c5f63686f696365222c5b22616273656e74225d5d2c5b22706172616c6c656c5f746f6f6c5f63616c6c73222c5b22616273656e74225d5d5d2c226d6574686f64223a2261636f6d706c6574696f6e222c2270726f66696c65223a22666f7267652d70726f76696465722d636c69656e742d696e7075742f7631222c2270726f76696465725f6d6f64656c5f6964223a5b22737472696e67222c22666978747572653a6d6f64656c225d7d"
+    },
+    {
+      "name": "chat-absent",
+      "method": "acompletion",
+      "model_recipe": {
+        "kind": "string",
+        "value": "fixture:model"
+      },
+      "arguments_recipe": {
+        "kind": "object",
+        "entries": [
+          [
+            "messages",
+            {
+              "kind": "array",
+              "items": []
+            }
+          ]
+        ]
+      },
+      "projection": {
+        "profile": "forge-provider-client-input/v1",
+        "status": "observed",
+        "canonical_tagged_sha256": "8656c33d18a5c4c0191646e1b64895adce7f82dae7229745e1e414c71c07e394",
+        "encoded_size_bytes": 438,
+        "selected_present_fields_count": 1,
+        "omitted_fields_count": 0
+      },
+      "framed_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f76696465722d696e7075742d70726f6a656374696f6e2d7631222c226669656c6473223a5b5b226d65737361676573222c5b2270726573656e74222c5b226172726179222c5b5d5d5d5d2c5b2274656d7065726174757265222c5b22616273656e74225d5d2c5b226d61785f746f6b656e73222c5b22616273656e74225d5d2c5b22746f705f70222c5b22616273656e74225d5d2c5b22746f6f6c73222c5b22616273656e74225d5d2c5b22726573706f6e73655f666f726d6174222c5b22616273656e74225d5d2c5b2273656564222c5b22616273656e74225d5d2c5b2273746f70222c5b22616273656e74225d5d2c5b22746f6f6c5f63686f696365222c5b22616273656e74225d5d2c5b22706172616c6c656c5f746f6f6c5f63616c6c73222c5b22616273656e74225d5d5d2c226d6574686f64223a2261636f6d706c6574696f6e222c2270726f66696c65223a22666f7267652d70726f76696465722d636c69656e742d696e7075742f7631222c2270726f76696465725f6d6f64656c5f6964223a5b22737472696e67222c22666978747572653a6d6f64656c225d7d"
+    },
+    {
+      "name": "chat-null",
+      "method": "acompletion",
+      "model_recipe": {
+        "kind": "string",
+        "value": "fixture:model"
+      },
+      "arguments_recipe": {
+        "kind": "object",
+        "entries": [
+          [
+            "messages",
+            {
+              "kind": "array",
+              "items": []
+            }
+          ],
+          [
+            "temperature",
+            {
+              "kind": "null"
+            }
+          ]
+        ]
+      },
+      "projection": {
+        "profile": "forge-provider-client-input/v1",
+        "status": "observed",
+        "canonical_tagged_sha256": "d51e1795822b67574ba66a23c8e7c1674812d7925f36c91259082ed667159716",
+        "encoded_size_bytes": 448,
+        "selected_present_fields_count": 2,
+        "omitted_fields_count": 0
+      },
+      "framed_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f76696465722d696e7075742d70726f6a656374696f6e2d7631222c226669656c6473223a5b5b226d65737361676573222c5b2270726573656e74222c5b226172726179222c5b5d5d5d5d2c5b2274656d7065726174757265222c5b2270726573656e74222c5b226e756c6c225d5d5d2c5b226d61785f746f6b656e73222c5b22616273656e74225d5d2c5b22746f705f70222c5b22616273656e74225d5d2c5b22746f6f6c73222c5b22616273656e74225d5d2c5b22726573706f6e73655f666f726d6174222c5b22616273656e74225d5d2c5b2273656564222c5b22616273656e74225d5d2c5b2273746f70222c5b22616273656e74225d5d2c5b22746f6f6c5f63686f696365222c5b22616273656e74225d5d2c5b22706172616c6c656c5f746f6f6c5f63616c6c73222c5b22616273656e74225d5d5d2c226d6574686f64223a2261636f6d706c6574696f6e222c2270726f66696c65223a22666f7267652d70726f76696465722d636c69656e742d696e7075742f7631222c2270726f76696465725f6d6f64656c5f6964223a5b22737472696e67222c22666978747572653a6d6f64656c225d7d"
+    },
+    {
+      "name": "responses",
+      "method": "aresponses",
+      "model_recipe": {
+        "kind": "string",
+        "value": "fixture:model"
+      },
+      "arguments_recipe": {
+        "kind": "object",
+        "entries": [
+          [
+            "input",
+            {
+              "kind": "array",
+              "items": [
+                {
+                  "kind": "object",
+                  "entries": [
+                    [
+                      "type",
+                      {
+                        "kind": "string",
+                        "value": "message"
+                      }
+                    ],
+                    [
+                      "role",
+                      {
+                        "kind": "string",
+                        "value": "user"
+                      }
+                    ],
+                    [
+                      "content",
+                      {
+                        "kind": "string",
+                        "value": "{{literal}} 😀é\r\n"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          [
+            "instructions",
+            {
+              "kind": "string",
+              "value": "synthetic"
+            }
+          ],
+          [
+            "store",
+            {
+              "kind": "boolean",
+              "value": false
+            }
+          ],
+          [
+            "include",
+            {
+              "kind": "array",
+              "items": [
+                {
+                  "kind": "string",
+                  "value": "reasoning.encrypted_content"
+                }
+              ]
+            }
+          ],
+          [
+            "max_output_tokens",
+            {
+              "kind": "integer",
+              "decimal": "8"
+            }
+          ],
+          [
+            "temperature",
+            {
+              "kind": "binary64",
+              "bits": "3fe6666666666666"
+            }
+          ],
+          [
+            "extra_headers",
+            {
+              "kind": "object",
+              "entries": [
+                [
+                  "x-fixture",
+                  {
+                    "kind": "string",
+                    "value": "OMITTED SYNTHETIC VALUE"
+                  }
+                ]
+              ]
+            }
+          ]
+        ]
+      },
+      "projection": {
+        "profile": "forge-provider-client-input/v1",
+        "status": "observed",
+        "canonical_tagged_sha256": "c9313505ddea31886f072f0165746438dbbd56f1f281736cd5bae0d592c8a88e",
+        "encoded_size_bytes": 748,
+        "selected_present_fields_count": 6,
+        "omitted_fields_count": 1
+      },
+      "framed_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f76696465722d696e7075742d70726f6a656374696f6e2d7631222c226669656c6473223a5b5b22696e707574222c5b2270726573656e74222c5b226172726179222c5b5b226f626a656374222c5b5b2274797065222c5b22737472696e67222c226d657373616765225d5d2c5b22726f6c65222c5b22737472696e67222c2275736572225d5d2c5b22636f6e74656e74222c5b22737472696e67222c227b7b6c69746572616c7d7d20f09f988065cc815c725c6e225d5d5d5d5d5d5d5d2c5b22696e737472756374696f6e73222c5b2270726573656e74222c5b22737472696e67222c2273796e746865746963225d5d5d2c5b22746f6f6c73222c5b22616273656e74225d5d2c5b2274656d7065726174757265222c5b2270726573656e74222c5b2262696e6172793634222c2233666536363636363636363636363636225d5d5d2c5b226d61785f6f75747075745f746f6b656e73222c5b2270726573656e74222c5b22696e7465676572222c2238225d5d5d2c5b22746f705f70222c5b22616273656e74225d5d2c5b2274657874222c5b22616273656e74225d5d2c5b22726561736f6e696e67222c5b22616273656e74225d5d2c5b22696e636c756465222c5b2270726573656e74222c5b226172726179222c5b5b22737472696e67222c22726561736f6e696e672e656e637279707465645f636f6e74656e74225d5d5d5d5d2c5b2273746f7265222c5b2270726573656e74222c5b22626f6f6c222c66616c73655d5d5d2c5b22706172616c6c656c5f746f6f6c5f63616c6c73222c5b22616273656e74225d5d2c5b227472756e636174696f6e222c5b22616273656e74225d5d5d2c226d6574686f64223a2261726573706f6e736573222c2270726f66696c65223a22666f7267652d70726f76696465722d636c69656e742d696e7075742f7631222c2270726f76696465725f6d6f64656c5f6964223a5b22737472696e67222c22666978747572653a6d6f64656c225d7d"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # strata-forge platform delivery entrypoint
 
+For a matched local source workspace, use `strata-app/plans/strata-platform/README.md` in the sibling App checkout as the execution authority and confirm its source revision with the coordinator. Published `dev` may lag a local review topic; the immutable links below identify the actual published documentation snapshot.
+
 The canonical four-repository registry and contracts live in the [current strata-app plan](https://github.com/GemovicNemanja/strata-app/blob/dev/plans/strata-platform/README.md). This entrypoint owns no duplicate task, decision or contract copies.
 
 Canonical documentation snapshot: `562a6b53432a67d4f2551eb7bc5074d617ebf726`, published for review in [App PR #260](https://github.com/GemovicNemanja/strata-app/pull/260). The immutable links below resolve before merge; the App registry remains the single authority for subsequent coordinator updates.

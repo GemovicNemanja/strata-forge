@@ -1,0 +1,30 @@
+{
+  "qualification": "Bounded inert fine-tuning declaration producer; no launch/public-wire/environment availability or research claim. Original frozen packet retained.",
+  "files": [
+    {
+      "path": "HANDOFF.md",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/training-capabilities-evidence/HANDOFF.md",
+      "sha256": "e560e45ebc020048c871f391006813b96686c7a6b7fbb51b339ab30fb5ddb14b",
+      "bytes": 7903
+    },
+    {
+      "path": "source-manifest.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/training-capabilities-evidence/source-manifest.json",
+      "sha256": "3e177c038a5d0c9b51afeab7dee04ae251c64983bf6ace9053554beb406a4ea9",
+      "bytes": 3451
+    },
+    {
+      "path": "environment.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/training-capabilities-evidence/environment.json",
+      "sha256": "e8ddd4e6d35a4deef63b3a424f4f50e30a3b6277a3f3877d15ffe997fdc74993",
+      "bytes": 882
+    },
+    {
+      "path": "final-golden-generation.json",
+      "original": "/Users/nemanjagemovic/Documents/Personal/Code/.strata-workspaces/platform-20261110/agents/training-capabilities-evidence/final-golden-generation.json",
+      "sha256": "b6f06985607f1bb4f2a91e6e264a839138cc22bb7bf74ec73cbbe9f64becab84",
+      "bytes": 203
+    }
+  ],
+  "coordinator_checks": "5 canonical/malformed-copy/unknown-format controls passed independently over exactd3d6189 source."
+}

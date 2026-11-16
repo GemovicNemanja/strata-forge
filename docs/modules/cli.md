@@ -1,4 +1,4 @@
-# `strata_forge.cli` — the `forge` command-line interface
+# `strata_forge.cli` — the `strata-forge` command-line interface
 
 `strata_forge.cli` is the Typer-based CLI for the library. Every Forge
 module with a useful operator workflow surfaces a command here:
@@ -61,12 +61,27 @@ strata-forge serve vllm --model meta-llama/Llama-3.1-8B-Instruct --port 8000
 
 ## doctor
 
-Diagnose environment, configuration, and service reachability.
-Always exits 0 — it's a report, not a gate.
+Report configuration and tracked package presence. By default, doctor also checks
+TCP reachability of Redis and Qdrant, and Langfuse when both Langfuse keys are
+configured. Each connection attempt has a one-second timeout. Use `--offline`
+(alias `--presence-only`) to skip every service probe, including for configured
+services. This mode needs no running service or provider call.
 
 ```bash
 strata-forge doctor
+strata-forge doctor --offline
 ```
+
+Both modes print fixed service labels and statuses. URLs, credentials, profile
+names, diagnostic paths and local package-version suffixes are omitted. Tracked
+package metadata is observed without importing optional ML libraries. Invalid
+settings or unavailable package metadata produce fixed diagnostic messages;
+ordinary diagnostic failures still exit 0. Missing metadata is distinguished
+from a package reported as absent.
+
+Presence and TCP reachability do not verify provider authentication, model
+compatibility, installed worker support or execution readiness. Doctor remains a
+human-readable report, rather than a launch gate or JSON capability API.
 
 ## chat
 
@@ -251,3 +266,12 @@ without touching the rest of your environment.
   endpoint:** the `LocalBackend` spawns the server in the
   background; use `strata-forge compute status` and check the
   `base_url` printed at submit time once the server is ready.
+
+## Pinned classification worker commands
+
+`strata-forge eval schema` exports the installed EvalSpec JSON schema; cross-field semantic
+validation remains in the imported model. `eval validate-spec FILE` validates without input
+reads or authorization. `eval classify FILE` and `eval score-predictions FILE` delegate to the
+same worker and deny access without an installed trusted policy. They accept no policy import,
+callback or authorization flag. Existing `eval run/list/show` commands retain their behavior.
+See [pipeline workers](pipelines.md) for the exact boundary and fixed execution profile.

@@ -1,0 +1,99 @@
+{
+  "profile": "strata-prompt-json-v1",
+  "cases": [
+    {
+      "name": "object-order",
+      "value": {
+        "domain": "strata-prompt-fixture-v1",
+        "value": {
+          "z": "last",
+          "a": "first"
+        }
+      },
+      "canonical_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f6d70742d666978747572652d7631222c2276616c7565223a7b2261223a226669727374222c227a223a226c617374227d7d",
+      "sha256": "47b562c93600a1aa55da128097fc97f799a9803a783469db8945e7377b45f5bb"
+    },
+    {
+      "name": "unicode-and-newlines",
+      "value": {
+        "domain": "strata-prompt-fixture-v1",
+        "value": {
+          "literal": "A😀é\r\nB\n  "
+        }
+      },
+      "canonical_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f6d70742d666978747572652d7631222c2276616c7565223a7b226c69746572616c223a2241f09f988065cc815c725c6e425c6ee280a8e280a9227d7d",
+      "sha256": "7d498b030b3b9e733941b0958783eaebb24dcaddf0b2640a102331402080bb71"
+    },
+    {
+      "name": "controls-and-braces",
+      "value": {
+        "domain": "strata-prompt-fixture-v1",
+        "value": [
+          "{premises}",
+          "{{ topic }}",
+          "\"\\\b\t\n\f\r\u0000\u001f/"
+        ]
+      },
+      "canonical_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f6d70742d666978747572652d7631222c2276616c7565223a5b227b7072656d697365737d222c227b7b20746f706963207d7d222c225c225c5c5c625c745c6e5c665c725c75303030305c75303031662f225d7d",
+      "sha256": "9be04823c385ee1cbdd47cf94a0d3a772b7704586bd12fc895def169cdd3830a"
+    },
+    {
+      "name": "safe-integers",
+      "value": {
+        "domain": "strata-prompt-fixture-v1",
+        "value": [
+          9007199254740991,
+          -9007199254740991,
+          0,
+          true,
+          false,
+          null
+        ]
+      },
+      "canonical_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f6d70742d666978747572652d7631222c2276616c7565223a5b393030373139393235343734303939312c2d393030373139393235343734303939312c302c747275652c66616c73652c6e756c6c5d7d",
+      "sha256": "38650364db09cfe30dd9e0b20bbb71ec222faa4fd59424f583938f09f9942810"
+    },
+    {
+      "name": "empty-and-repeated",
+      "value": {
+        "domain": "strata-prompt-fixture-v1",
+        "value": [
+          "",
+          "same",
+          "same",
+          ""
+        ]
+      },
+      "canonical_utf8_hex": "7b22646f6d61696e223a227374726174612d70726f6d70742d666978747572652d7631222c2276616c7565223a5b22222c2273616d65222c2273616d65222c22225d7d",
+      "sha256": "9508d5a316e330cb5f5748360a79621f7ef0af461f53b1db3e3085a6d4bfc21b"
+    }
+  ],
+  "source_map_cases": [
+    {
+      "text": "A😀é\r\n",
+      "utf8_hex": "41f09f988065cc810d0a",
+      "spans": [
+        {
+          "start": 0,
+          "end": 1,
+          "text": "A"
+        },
+        {
+          "start": 1,
+          "end": 5,
+          "text": "😀"
+        },
+        {
+          "start": 5,
+          "end": 8,
+          "text": "é"
+        },
+        {
+          "start": 8,
+          "end": 10,
+          "text": "\r\n"
+        }
+      ]
+    }
+  ]
+}

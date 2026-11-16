@@ -20,3 +20,28 @@ Langfuse store + HF bridge (2.3.2) and synthetic-data primitives
 
 Module rules: [`CLAUDE.md`](CLAUDE.md). Full reference once shipped:
 `docs/modules/datasets.md`.
+
+## Local SQL value contracts
+
+Closed query, pinned input-manifest and trusted operator/file-description values are available
+without DuckDB or Docker. They do not execute SQL or grant source access. The standalone shared
+codec preserves supported values and refuses lossy/unknown types. See
+[the reference](../../../docs/modules/headless-sql.md) for the implemented boundary.
+
+
+## Provided native dataset execution
+
+`LocalDatasetExecutor` uses a separately configured fixed image for explicit CSV/JSONL or
+Parquet conversion, pinned named-table SQL and immutable Parquet materialization. It supplies
+no platform grants or durable jobs. See [the contract](../../../docs/modules/native-dataset-execution.md)
+for byte/result limits, scalar grammar and owned cleanup.
+
+## Settled native failure metadata
+
+The explicit local dataset executor can describe a fully settled worker refusal
+without exposing SQL, rows, paths or native diagnostics. Its issued immutable
+failure observation binds the actual error and current executor call. It can
+describe same-instance reusability after verified cleanup; it is not source
+permission, a retry instruction or a substitute for current platform policy.
+Cancellation and uncertain cleanup do not provide that witness. See
+[native execution](../../../docs/modules/native-dataset-execution.md).

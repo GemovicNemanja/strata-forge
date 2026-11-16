@@ -1,0 +1,282 @@
+{
+  "status": "PROPOSED vectors; no new runtime/schema validation or engine support is implemented",
+  "generation_spec": {
+    "schema_version": 2,
+    "protocol": "strata.generation.v2",
+    "forge_engine_version": "0.3.0+8905a1fce73f8894ae9688d0588c35dcbac0b8b2",
+    "run_id": "fictional-generation",
+    "model_ref": "fixture/model@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dataset_ref": "fixture/source@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dataset_config": "default",
+    "split": "validation",
+    "id_column": "item_id",
+    "selection": {
+      "row_start": 0,
+      "row_end": null,
+      "row_limit": 2
+    },
+    "template": "Reply to {question}.",
+    "column_mapping": {
+      "question": "question"
+    },
+    "profile": "vllm-0.24-chat-text/v1",
+    "overflow": "error",
+    "serving": {
+      "max_model_len": 4096,
+      "dtype": "float32",
+      "tensor_parallel_size": 1,
+      "concurrency": 4,
+      "deadline_seconds": 30.0
+    },
+    "generation": {
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "top_k": 32,
+      "min_p": 0.05,
+      "max_tokens": 1024,
+      "stop": [],
+      "samples": 2,
+      "seed": {
+        "mode": "per_item_sample_v1",
+        "base_seed": 20261107
+      },
+      "output_format": {
+        "kind": "text"
+      },
+      "channels": {
+        "mode": "plain"
+      }
+    },
+    "output": {
+      "kind": "local"
+    }
+  },
+  "generation_spec_canonical_utf8_hex": "7b22636f6c756d6e5f6d617070696e67223a7b227175657374696f6e223a227175657374696f6e227d2c22646174617365745f636f6e666967223a2264656661756c74222c22646174617365745f726566223a22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c22666f7267655f656e67696e655f76657273696f6e223a22302e332e302b38393035613166636537336638383934616539363838643035383863333564636261633062386232222c2267656e65726174696f6e223a7b226368616e6e656c73223a7b226d6f6465223a22706c61696e227d2c226d61785f746f6b656e73223a313032342c226d696e5f70223a302e30352c226f75747075745f666f726d6174223a7b226b696e64223a2274657874227d2c2273616d706c6573223a322c2273656564223a7b22626173655f73656564223a32303236313130372c226d6f6465223a227065725f6974656d5f73616d706c655f7631227d2c2273746f70223a5b5d2c2274656d7065726174757265223a302e372c22746f705f6b223a33322c22746f705f70223a302e397d2c2269645f636f6c756d6e223a226974656d5f6964222c226d6f64656c5f726566223a22666978747572652f6d6f64656c4062626262626262626262626262626262626262626262626262626262626262626262626262626262222c226f7574707574223a7b226b696e64223a226c6f63616c227d2c226f766572666c6f77223a226572726f72222c2270726f66696c65223a22766c6c6d2d302e32342d636861742d746578742f7631222c2270726f746f636f6c223a227374726174612e67656e65726174696f6e2e7632222c2272756e5f6964223a2266696374696f6e616c2d67656e65726174696f6e222c22736368656d615f76657273696f6e223a322c2273656c656374696f6e223a7b22726f775f656e64223a6e756c6c2c22726f775f6c696d6974223a322c22726f775f7374617274223a307d2c2273657276696e67223a7b22636f6e63757272656e6379223a342c22646561646c696e655f7365636f6e6473223a33302e302c226474797065223a22666c6f61743332222c226d61785f6d6f64656c5f6c656e223a343039362c2274656e736f725f706172616c6c656c5f73697a65223a317d2c2273706c6974223a2276616c69646174696f6e222c2274656d706c617465223a225265706c7920746f207b7175657374696f6e7d2e227d",
+  "generation_spec_sha256": "f4ddfd90545cb9b22f3c513380ad0ce9f61b2c88345cc6a12251d50bd2c671db",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "string",
+        "enum": [
+          "yes",
+          "no"
+        ],
+        "maxLength": 3
+      },
+      "note": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 64
+      }
+    },
+    "required": [
+      "answer",
+      "note"
+    ],
+    "additionalProperties": false
+  },
+  "schema_canonical_utf8_hex": "7b226164646974696f6e616c50726f70657274696573223a66616c73652c2270726f70657274696573223a7b22616e73776572223a7b22656e756d223a5b22796573222c226e6f225d2c226d61784c656e677468223a332c2274797065223a22737472696e67227d2c226e6f7465223a7b226d61784c656e677468223a36342c2274797065223a5b22737472696e67222c226e756c6c225d7d7d2c227265717569726564223a5b22616e73776572222c226e6f7465225d2c2274797065223a226f626a656374227d",
+  "schema_sha256": "fc9cff559a97c78a011d72f2232ee27743d6e854e4d9f65c8943b8a66bda22c8",
+  "seed_vectors": [
+    {
+      "item_id": "row-a",
+      "sample_index": 0,
+      "seed_input_utf8_hex": "5b227374726174612e67656e65726174696f6e2e736565642f7631222c32303236313130372c22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c2264656661756c74222c2276616c69646174696f6e222c22726f772d61222c305d",
+      "effective_seed_decimal": "7579892184440253098"
+    },
+    {
+      "item_id": "row-a",
+      "sample_index": 1,
+      "seed_input_utf8_hex": "5b227374726174612e67656e65726174696f6e2e736565642f7631222c32303236313130372c22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c2264656661756c74222c2276616c69646174696f6e222c22726f772d61222c315d",
+      "effective_seed_decimal": "2945537298045987281"
+    },
+    {
+      "item_id": "row|a",
+      "sample_index": 0,
+      "seed_input_utf8_hex": "5b227374726174612e67656e65726174696f6e2e736565642f7631222c32303236313130372c22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c2264656661756c74222c2276616c69646174696f6e222c22726f777c61222c305d",
+      "effective_seed_decimal": "6960077727290397490"
+    },
+    {
+      "item_id": "row|a",
+      "sample_index": 1,
+      "seed_input_utf8_hex": "5b227374726174612e67656e65726174696f6e2e736565642f7631222c32303236313130372c22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c2264656661756c74222c2276616c69646174696f6e222c22726f777c61222c315d",
+      "effective_seed_decimal": "3424187052989722015"
+    },
+    {
+      "item_id": "row-α",
+      "sample_index": 0,
+      "seed_input_utf8_hex": "5b227374726174612e67656e65726174696f6e2e736565642f7631222c32303236313130372c22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c2264656661756c74222c2276616c69646174696f6e222c22726f772dceb1222c305d",
+      "effective_seed_decimal": "8209452303314868825"
+    },
+    {
+      "item_id": "row-α",
+      "sample_index": 1,
+      "seed_input_utf8_hex": "5b227374726174612e67656e65726174696f6e2e736565642f7631222c32303236313130372c22666978747572652f736f757263654061616161616161616161616161616161616161616161616161616161616161616161616161616161222c2264656661756c74222c2276616c69646174696f6e222c22726f772dceb1222c315d",
+      "effective_seed_decimal": "5841244356430960837"
+    }
+  ],
+  "one_sample_engine_request": {
+    "model": "strata-7b83454b429fefc6d2da8b804d7c4347",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply to a fabricated question."
+      }
+    ],
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 32,
+    "min_p": 0.05,
+    "max_completion_tokens": 1024,
+    "stop": [],
+    "n": 1,
+    "seed": 7579892184440253098,
+    "stream": false
+  },
+  "json_response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "strata_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no"
+            ],
+            "maxLength": 3
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "answer",
+          "note"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "channel_cases": [
+    {
+      "name": "literal_tags_are_final",
+      "message": {
+        "role": "assistant",
+        "content": "<think>literal text</think>{literal}"
+      },
+      "finish_reason": "stop",
+      "expect": "completed_exact_literal"
+    },
+    {
+      "name": "explicit_reasoning_and_final",
+      "message": {
+        "role": "assistant",
+        "content": "{\"answer\":\"yes\",\"note\":null}",
+        "reasoning": "Synthetic channel fixture."
+      },
+      "finish_reason": "stop",
+      "expect": "separate_channels_validate_final_only"
+    },
+    {
+      "name": "analysis_only_length",
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "reasoning": "Synthetic unfinished channel."
+      },
+      "finish_reason": "length",
+      "expect": "incomplete_length_never_use_reasoning_as_final"
+    },
+    {
+      "name": "empty_final_is_distinct",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning": null
+      },
+      "finish_reason": "stop",
+      "expect": "retain_empty_final_then_format_validation"
+    },
+    {
+      "name": "conflicting_aliases",
+      "message": {
+        "role": "assistant",
+        "content": "final",
+        "reasoning": "one",
+        "reasoning_content": "different"
+      },
+      "finish_reason": "stop",
+      "expect": "invalid_protocol"
+    },
+    {
+      "name": "unknown_finish",
+      "message": {
+        "role": "assistant",
+        "content": "final"
+      },
+      "finish_reason": "future-reason",
+      "expect": "invalid_protocol"
+    },
+    {
+      "name": "tool_payload",
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "fictional",
+            "type": "function",
+            "function": {
+              "name": "fictional",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls",
+      "expect": "unsupported_output_not_tool_execution"
+    }
+  ],
+  "negative_contract_cases": [
+    "samples0",
+    "samples17",
+    "samples_true",
+    "numeric_string",
+    "unknown_key",
+    "generation_knob_on_scoring",
+    "missing_full_pin",
+    "missing_stable_id",
+    "duplicate_id",
+    "unknown_engine_profile",
+    "unproved_gpt_oss_profile",
+    "thinking_on_plain",
+    "effort_on_qwen_boolean_profile",
+    "enable_thinking_on_harmony",
+    "external_schema_ref",
+    "schema_keyword_default",
+    "grammar_backend_unavailable",
+    "N_times_samples_cap_plus_one",
+    "response_byte_cap_plus_one",
+    "missing_outer_authority",
+    "wrong_outer_digest",
+    "legacy_result_as_channel_authority"
+  ],
+  "native_capability_as_observed_now": {
+    "available": false,
+    "reason": "installed_engine_unavailable",
+    "vllm_distribution": null,
+    "gpt_oss_20b": "not_confirmed",
+    "gpt_oss_120b": "not_confirmed"
+  }
+}

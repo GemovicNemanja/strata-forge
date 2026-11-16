@@ -27,7 +27,7 @@ import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,6 +56,14 @@ __all__ = [
 # because neither is a count: one says WHICH milestone the prose belongs to, the other reports the
 # machine underneath it, and both stay meaningful during the long uncountable stretches.
 type ProgressKind = Literal["phase", "start", "step", "eval", "checkpoint", "end", "error"]
+
+type _ArtifactRef = Annotated[
+    str,
+    Field(
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?@[a-f0-9]{40}$",
+    ),
+]
 
 # The coarse milestone a run is in, as an ID rather than prose. ``message`` says what is happening
 # in words that change constantly ("Loading the dataset", "Starting the model server"); ``stage``
@@ -110,6 +118,8 @@ class ProgressEvent(BaseModel):
             excluding the values already promoted to their own fields.
         message: Free-form human-readable detail (the payload of ``phase``, and used by
             ``error``).
+        output_ref: Optional result repo at the actual full commit returned by upload.
+        input_refs: Resolved model/dataset repo commits, separate from numeric metrics.
         ts: Event timestamp (UTC).
     """
 
@@ -124,6 +134,10 @@ class ProgressEvent(BaseModel):
     learning_rate: float | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
     message: str = ""
+    output_ref: _ArtifactRef | None = None
+    input_refs: dict[Literal["model", "dataset"], _ArtifactRef] = Field(
+        default_factory=lambda: cast("dict[Literal['model', 'dataset'], _ArtifactRef]", {})
+    )
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

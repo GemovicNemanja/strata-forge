@@ -50,6 +50,7 @@ Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
 - [Chat-template formatting](#chat-template-formatting)
 - [Sequence packing](#sequence-packing)
 - [Driving training from a declaration](#driving-training-from-a-declaration)
+- [Declaration capability metadata](#declaration-capability-metadata)
 - [Lazy-import contract](#lazy-import-contract)
 - [Troubleshooting](#troubleshooting)
 
@@ -157,6 +158,39 @@ passes the run's delivered token, or ``False`` when none was
 delivered, to every load, including the merge step's base model,
 adapter and tokenizer, so a run never falls back to a credential
 the machine happens to hold.
+
+### Checkpoint completeness guard
+
+`training._load_guard` is a private reusable leaf that imports only core errors and Pydantic.
+Its trained-artifact guard consumes the `(model, loading_info)` result of a model load made
+with `output_loading_info=True`. Missing or malformed reports, unknown report fields, missing
+weights (including heads), unexpected weights, mismatches, nonempty error messages, and
+reported conversion errors are refused with `ModelLoadingError` before model execution.
+
+`LoadingAudit` is frozen and serializable. It retains fixed codes and counts, and at most 32
+parameter names per category, each at most 192 characters. Refusal messages include at most
+four names. Raw upstream messages, tensor values, shape payloads, and conversion-error text
+are excluded. Category counts and explicit `missing_omitted` / `unexpected_omitted` /
+`mismatched_omitted` counts retain omitted names; a truncated audit cannot authorize initialization.
+The inspected Transformers 5.8.1 `LoadStateDictInfo.to_dict()` omits `conversion_errors`; audits
+record `conversion_diagnostics="not_returned"` for that result. Supplied conversion diagnostics
+are checked. No alias, suffix, or tied-key conversion is inferred beyond the upstream report.
+
+`HeadKeyDecision` only compares complete observed missing/unexpected sets with exact declared
+created/removed keys. It is not a load exemption or an initializer receipt. A future training
+consumer must resolve an internal trusted initializer registry ID and record a receipt proving
+those exact parameters were initialized; a job spec cannot supply a callable, import path, or
+arbitrary key allowance. A decoder decision requires the ID `decoder_logit_head`. Intentional
+discarded keys need their own exact declaration; no broad unexpected-key allowance exists.
+
+The [HF scoring engines](compute.md#exact-hugging-face-scoring) consume this guard and record
+their accepted loading audit and pad policy. SFT/preference and merge loads retain their
+existing explicit loading flags; this helper does not silently change those consumers or
+introduce a classification training path. Their guard and initializer integration requires
+its own implementation. Synthetic CPU tests use complete and damaged local checkpoints,
+refuse missing body/head weights, and accept a fully saved checkpoint after explicit head
+initialization. These tests do not download pretrained models or reproduce a different
+Transformers/Torch version's conversion behavior.
 
 ## Preference tuning
 
@@ -417,6 +451,66 @@ hatch for a caller driving `SFTRunner` / `PreferenceRunner` from Python — ther
 operator, and Forge does not block access to the underlying TRL surface. The distinction is who
 submitted the values, not what they are.
 
+## Declaration capability metadata
+
+`strata_forge.training.capabilities` provides a pure, bounded projection of `METHODS` and
+`FORMATS`. Import its names directly from that leaf; it adds no CLI, HTTP, MCP, worker or
+top-level training export. It does not replace the method registry or the fine-tuning spec.
+
+The [task-profile inventory](task-capabilities.md) composes this exact v1 value
+alongside existing worker/SDK schemas. It does not reinterpret `declared` as an
+installed or authorized training capability.
+
+```python
+from strata_forge.training.capabilities import (
+    assess_training_capability, catalog_sha256, training_capabilities,
+)
+
+catalog = training_capabilities()
+identity = catalog_sha256(catalog)
+decision = assess_training_capability({
+    "method": "sft", "dataset_format": "text", "adapter": "none",
+})
+assert decision.code == "declared"
+```
+
+`declared` means only that these selectors match the existing inert fine-tuning declaration.
+The profile covers pretrained causal-LM SFT/DPO/ORPO/KTO, their actual registered dataset
+formats and the existing `none`/`lora`/`qlora` adapter choices. `none` means pretrained
+full-weight fine-tuning; it does not mean training from scratch. A merge requires an adapter.
+GRPO remains visible as refused metadata with its registry explanation. Other heads,
+from-scratch initialization and explicit distribution choices return fixed `*_outside_profile`
+refusal codes, scoped by the result's `profile="inert_finetune_declaration"`. This scope does
+not describe the separate trusted-Python/custom task interfaces or research implementations.
+`distribution="unspecified"` makes no single-GPU, multi-GPU, DDP or FSDP claim.
+
+Every result reports `installed`, `environment` and `hardware` as `unknown`. The declared
+`finetuning` extra is the training primitive's packaging requirement; it is not an installation
+check or a complete deployment profile for optional publication/storage. Model/architecture
+compatibility, data roles against actual columns, parameters, permissions, trusted source pins,
+output authority, dependency versions, runtime/GPU eligibility, budgets and launch admission
+remain separate checks. A valid projection is never permission to allocate or execute work.
+
+Catalogs and their nested descriptors are frozen models containing tuples, detached from the
+mutable registries. Method/format entries and method format sets sort by name; required and
+optional role order and tuning-knob order are preserved. Requests are strict, reject extra
+keys, limit each selector to 1–64 codepoints and require an actual boolean for `merge_adapter`.
+Malformed requests, including copied models containing invalid fields, return `invalid_request`
+without raw validation diagnostics or rejected-value echo. Refusal precedence is invalid input,
+task, initialization, distribution, unknown/disabled/mismatched method, format, adapter, merge.
+
+`canonical_catalog_bytes` emits the complete body as UTF-8 JSON, with sorted keys, compact
+separators, unescaped Unicode, no NaN and no trailing newline. `catalog_sha256` hashes those exact
+bytes, including `schema_sha256`. The schema hash covers a sorted-key canonical object named
+`catalog`, `request`, `decision`, each containing that model's `model_json_schema()` output.
+The golden fixture retains all three schemas and both identities. A dependency change that
+changes generated JSON Schema changes this identity and requires compatibility review; the
+digest is not an engine version, an execution receipt or a cross-repository wire approval.
+
+The library leaf adds no import of optional ML packages. Its containing training package
+uses message types through the LLM package's lazy import boundary; inspection does not load
+LiteLLM or providers and requires no offline cost-map flag.
+
 ## The upstream contract
 
 A config renders to a kwargs dict that is splatted into TRL's constructor, so the
@@ -518,6 +612,14 @@ JSONL line, read via `Backend.read_file` — see
 things a run *watcher* needs, decided in
 [ADR 0017](../architecture/adr/0017-run-telemetry-on-the-progress-channel.md).
 
+`ProgressEvent` also accepts optional `output_ref` and `input_refs` for immutable artifact
+provenance. Values are bounded canonical `repo@<full lowercase 40-character SHA>` strings;
+input keys are `model` and `dataset`. They remain separate from numeric metrics and from
+`message`, which existing consumers use as a result destination. Scoring fills them with
+resolved input revisions and the actual returned output commit. Older events omit them or
+read as `None` / `{}`; consumers must use the engine version they validated before accepting
+an event-schema extension.
+
 **`stage` — where the run is, as an id.** One of `RUN_STAGES`:
 
 ```
@@ -575,3 +677,277 @@ Non-finite numbers never reach the channel. `loss=nan` and `grad_norm=inf` are r
 pydantic serializes them to JSON `null` — which `metrics: dict[str, float]` then refuses to parse
 back, so an ordinary gradient explosion would emit a line the orchestrator could not read.
 `coerce_float` drops them, and metric keys are capped in length and count.
+
+## Pure verifier rendering metadata
+
+`VerifierConfig`, `RenderedVerifierInput` and `render_verifier_input` are exported from
+`strata_forge.training`. They share versioned, inert metadata with the bounded
+premise/hypothesis evaluation renderer, with no model/dataset I/O. Templates replace only
+`{premises}` and `{hypothesis}`; numbered LF text or compact UTF-8 JSON is deterministic.
+Declared premise/token/character limits describe this renderer's supported shape; refusal
+never slices a hypothesis. See [pipeline workers](pipelines.md) for overrides and artifacts.
+
+
+## Primary classifier SDK
+
+`ClassifierConfig`, `ClassifierExample`, `ClassifierRunner`, `initialize_classifier` and
+`load_classifier` provide a primary classification path over already-resolved Python objects.
+They perform no Hub fetch, upload or remote launch. ML imports are lazy under `[finetuning]`.
+The SDK is independent of the live method registry: `seq_cls` and `nli_pair` worker dispatch
+remain unavailable, and evaluation-worker credentials do not authorize training.
+
+`ClassifierConfig(labels=(...))` preserves explicit label order. The default is ordinary hard/
+soft cross-entropy. `objective="ce_brier"` requires an explicit positive `brier_weight`;
+`research_ce_brier(labels=...)` explicitly selects CE+0.1 sum-form Brier. Integer labels need
+`label_index_map`; aliases are declared. Soft distributions must be complete, finite and sum
+to one without repair. Nontrivial sample weights, class weights, smoothing, auxiliary roles
+and grouped/masked NLI binary objectives are unsupported and refuse. Explicit generic two-class
+CE does not imply a research entail-vs-not objective.
+
+Examples contain exact unique string item IDs, text, optional encoder text pair and a label;
+optional soft target distributions follow configured label order. `from_verifier` uses the
+same `VerifierConfig` renderer as evaluation, retains the premises/hypothesis and verifies
+rendering again during preparation. Declaring rendering while supplying unrelated text refuses.
+Overflow is `error` or explicit `drop`, retaining IDs/counts; hypotheses are never clipped.
+At most 100,000 rows and the existing declared rendering limits are supported in this slice.
+
+`await initialize_classifier(source, labels=..., initializer_id=...)` accepts a native
+`BertModel` with pooler for `encoder_random_head`, or `GPT2LMHeadModel`/
+`ModernBertDecoderForCausalLM` for `decoder_logit_head`. It copies body state strictly and
+refuses undeclared source keys. Decoder callers provide explicit unique single-token
+`verbalizer_ids` in label order and an `equivalence_inputs` batch containing input IDs and
+attention mask. Tokenizer/verbalizer resolution is the caller's responsibility; the receipt
+records actual IDs rather than guessing strings. No source checkpoint provenance is asserted:
+these are caller-resolved objects, and the receipt is not an inference load exemption.
+
+The fixed decoder wrapper copies the actual output projection and any output bias. The
+ModernBertDecoder adapter also copies LM dense/norm transformations without silently changing
+classifier/dense bias configuration. Last-attended-token pooling handles actual EOS inputs
+when EOS is also the pad ID. Step-zero comparison disables dropout and requires restricted
+probabilities to agree within `atol=1e-6, rtol=1e-5`, recording maximum probability error.
+Decoder paired/token-type input is unsupported. Native body attention supports eager/SDPA;
+other implementations must pass native support checks rather than invoking remote code.
+
+`await ClassifierRunner(config).train(initialized=..., tokenizer=..., rows=(...),
+output_dir=Path(...))` runs Transformers Trainer off the event loop. Typed controls include
+max steps/epochs, seed, batch size, LR/scheduler/warmup, FP32/BF16, gradient checkpointing and
+CPU selection. A tokenizer pad ID is required. The supported checkpoint policy is `final`;
+metric selection requires a separate implementation, and a selection split marked gate/test
+is specifically refused. Named training evaluation, bucketing, resume, adapters, auxiliary
+heads, calibration and abstention are not provided by this SDK slice.
+
+An output directory is reserved for one attempt and never overwritten. The `artifact` child
+contains safe model/config/tokenizer files plus `strata_classifier.json` (version 1, exact
+objective/initialization/selection/environment). Rendering metadata is copied when declared.
+Metadata is capped at 64 KiB before optimization; overflow audit includes bounded IDs/counts,
+while the SDK result retains the complete dropped-ID tuple. No checkpoints, optimizer state
+or pickled Trainer arguments are exported. `await load_classifier(Path(...))` resolves only
+local files, fixed installed model classes and complete safetensors, with remote code disabled.
+Missing, unexpected or mismatched weights refuse even when an initialization receipt exists.
+Decoder artifacts require this Forge loader; live `hf_classify` dispatch does not yet support
+the wrapper. No calibration or end-to-end worker claim follows from a local artifact.
+
+Cancellation requests cooperative stop at the next optimizer step and withholds artifact
+export if observed before export; an in-flight native operation cannot be forcibly terminated
+by cancelling its coroutine. Primary native load, decoder tokenization, head initialization, train and reload calls
+retain their physical thread until it returns, including under repeated cancellation; the
+caller cannot proceed to a later optimizer or cleanup while a cancelled call still runs.
+The trainer's cancellation event is set immediately, without a timed early ownership release.
+Native control exceptions are contained inside the thread rather than escaping the event loop.
+Process supervision remains necessary for a native call that does not return. SDK seeds are process-wide;
+concurrent training jobs should use isolated processes for reproducible RNG streams.
+
+## Supplied-logit verifier loss
+
+`strata_forge.training.verifier_loss` is a separate synchronous numerical API. Importing it
+requires no ML extra; calling `research_verifier_loss` requires Torch from `[finetuning]`.
+It does not import Transformers, initialize a model, parse dataset roles or activate training.
+The stable preset ID is `verifier_grouped_aux_v1`; ordinary `ClassifierConfig` still defaults
+to CE and the explicit primary `research_ce_brier` path retains its own behavior.
+
+```python
+from strata_forge.training.verifier_loss import (
+    EntailmentTarget, ResearchLossRow, ThreeWayTarget, research_verifier_loss,
+)
+
+rows = (
+    ResearchLossRow(primary=ThreeWayTarget(label_dist=(1.0, 0.0, 0.0))),
+    ResearchLossRow(primary=EntailmentTarget(entailment_target=0)),
+)
+terms = research_verifier_loss(primary_logits, class_order=("E", "C", "U"), rows=rows)
+# The caller owns these logits and the optimizer. terms.total retains its gradient graph.
+```
+
+Supply one floating `[B,3]` primary tensor and an explicit permutation of the semantic class
+names `E`, `C`, `U`. Three-way distributions follow that supplied order, are complete/finite
+and sum to one within 1e-6 without normalization. Two-way targets are strict integer 0/1:
+positive is E and negative is C+U. Stable log-softmax/log-sum-exp computes grouped CE;
+two-way Brier is the two-component sum `2*(p(E)-t)**2`. Every primary row contributes
+`CE + 0.1*sum_Brier`, averaged over the actual supplied batch row count.
+
+`ResearchLossRow.flag_target` is bool or null. Null excludes a row; false is a supervised
+negative. If any row is eligible, supply floating `flag_logits[B]`; BCE-with-logits averages
+only eligible rows. `support_set` is an exact subset of that row's unique ordered
+`premise_ids`. Null excludes support supervision; an empty set over a nonempty premise list
+is eligible all-negative supervision. Supply `support_logits` as a tuple of floating `[P_i]`
+tensors aligned to each row's IDs. Each eligible row first averages its own premise BCE,
+then those row means are averaged, so longer premise lists do not receive more row weight.
+An eligible zero-premise support row refuses because its mean is undefined.
+
+The total is `primary + flag + support`, with fixed auxiliary coefficients 1.0. Missing
+eligible logits, malformed targets, nonfinite/non-floating or wrong-shaped tensors, device
+mismatch and duplicate/unknown support IDs refuse. A wholly unlabeled auxiliary term is
+exact graph-compatible zero, with denominator 0 and zero gradients for supplied unused
+logits. Half/BF16 logits accumulate in FP32; FP64 inputs preserve FP64. IDs are row-local;
+the helper never infers token spans, markers or hypothesis conditioning. Its caller supplies
+correctly resolved targets, including the research protocol's null support on U rows.
+
+`ResearchLossTerms` returns differentiable `total`, `primary`, `flag`, `support`, their
+actual primary/flag/support row counts, and `preset_id`. The boundary revalidates frozen
+target instances and returns fixed `VerifierLossError` messages without raw nested errors.
+There are no smoothing, class/sample-weight, temperature or free-coefficient parameters.
+
+These are reductions over one complete supplied batch. Separately averaging distributed
+devices or accumulated microbatches with different eligible counts is not equivalent and
+is not implemented here. The auxiliary SDK below supplies local heads/geometry and export;
+worker role mapping, calibration, larger-population execution and live training remain
+separate contracts. See [the objective decision](../architecture/adr/0025-supplied-verifier-loss.md).
+
+## Auxiliary verifier SDK
+
+`VerifierGeometryConfig` is a distinct schema-2 renderer for explicit row-local premise IDs.
+It does not change schema-1 `VerifierConfig`, the primary classifier SDK defaults, worker
+specifications, registry entries or scorer dispatch. `VerifierPremise` and `VerifierExample`
+retain unique `p[1-9][0-9]*` identifiers in row order and validate any supplied support IDs.
+The premise segment is exactly `pid: text` lines separated by one LF. PID-start offsets are
+recorded while building that segment; PID-looking text inside a premise is not searched.
+
+Encoder geometry uses the tokenizer's native `(premises,hypothesis)` pair with attended CLS
+at position zero. Decoder geometry inserts premises before the hypothesis in its declared
+single-sequence template and pools at the last attended answer position. Fast-tokenizer
+sequence IDs, actual offset mappings and special/padding masks resolve the first premise
+token overlapping each PID's first character. Missing/outside/shared markers refuse.
+Raw Unicode is retained. No truncation or dropping occurs: limits remain at most 20 premises,
+8,192 tokens and 200,000 rendered characters. A supplied overlength batch refuses before its
+forward; this is not complete-split training preflight or scoring overflow-drop support.
+
+`initialize_verifier_classifier(primary, geometry=..., seed=..., ownership="share")` requires
+explicit sharing. It reuses primary child modules and exact parameter names, without allocating
+a duplicate backbone. Its copied config belongs to the wrapper; weights, mode/device changes
+and optimizer updates affect shared primary aliases. Retire the old alias and avoid concurrent
+operations through it. The primary seed must match the retained initializer receipt. The
+supported native primary families are BERT, GPT-2 and the installed ModernBERT-decoder wrapper;
+this does not add a ModernBERT encoder, Ettin conversion or arbitrary custom architecture.
+
+The complete primary path is preserved, including BERT pooler/dropout and decoder dense/norm
+transforms and selected output bias. Auxiliary heads instead read raw final backbone states:
+CLS or the attended answer position plus raw PID marker states. Their exact safe-tensor ABI is:
+
+| Tensor | Shape |
+| --- | --- |
+| `inconsistency_head.weight`, `.bias` | `[1,H]`, `[1]` |
+| `support_head.weight`, `.bias` | `[H,H]`, `[1]` |
+
+Weights use seeded `normal(0, config.initializer_range)` and biases start at zero. Bilinear
+support is `h^T W m_pid + b`, with ragged per-row PID attribution. Native wrapper `post_init`
+collects lifecycle metadata through a no-reinitialization `init_weights` override; it must
+never reset shared trained parameters. Initialization receipts describe exact transformations
+on caller-resolved objects, not model-source, custody or rights attestations.
+
+`encode_verifier_batch` resolves a tuple of explicit examples, returning a `VerifierBatch`.
+Its frozen wrapper contains mutable native tensors; it is not an authorization or immutable
+input attestation. `batch.forward_kwargs()` feeds the fixed native model for a graph-connected
+forward. The existing supplied-logit loss is selected explicitly; its semantic `E,C,U` order
+must correspond to the caller's model order. No implicit label alias mapping, class/sample
+weights, smoothing, Trainer objective or scientific threshold is introduced.
+
+`score_verifier_batch` returns local primary softmax, `p_inconsistent` and raw bilinear
+`support_scores` keyed by PID. Absent heads return null, not zero; a present support head on an
+empty premise list returns an empty map. These are not calibrated outputs or thresholded sets.
+Missing eligible target heads remain a refusal in the supplied-logit loss.
+
+`export_verifier_classifier` writes a fresh local artifact with `model.safetensors`, native
+config/tokenizer files, schema-2 `strata_verifier.json` and the distinct implementation ID
+`forge_auxiliary_verifier_v1` in `strata_classifier.json`. Nonempty destinations refuse.
+`load_verifier_classifier` uses fixed installed classes, local files only, no remote code,
+mandatory safetensors, bounded duplicate-safe metadata and strict loading diagnostics. It
+checks labels/family/geometry/declared head keys and shapes, retains tokenizer-file hashes,
+rejects external tokenizer-file pointers and reloads a native fast tokenizer. The restored
+object exposes that tokenizer. The self-contained fast-tokenizer JSON path is tested; native
+classes or auxiliary tokenizer assets outside the recorded bindings can refuse. Existing
+primary/worker readers reject this separate artifact implementation rather than adopting it.
+
+Native numerical forwards and pure geometry helpers are synchronous leaves. Public native
+CPU work and file operations are async over worker threads. Cancellation propagates to the
+caller but cannot interrupt arbitrary native thread work; a partial or completed local artifact
+may remain and must be handled explicitly. Saving does not certify training, select a checkpoint,
+publish a model or report a worker success. Complete-population preflight/streaming, training
+routing/authority, worker/scorer adoption, calibration and release remain separate consumers.
+
+## Complete local population training
+
+`TrainingPopulationPlanV2`, `prepare_training_population` and `train_prepared_population`
+provide a separate local disk-backed path over caller-resolved objects. They do not widen the
+primary SDK's materialization limits or register a remote worker. See
+[the population decision](../architecture/adr/0027-complete-local-training-populations.md).
+
+Declare separate exact dataset/model/tokenizer refs, config/split, expected source rows, complete or half-open
+range selection, seed, family, explicit codec and resource budgets. `PrimaryPopulationTask`
+uses `ClassifierExample` rows and ordinary explicitly labelled CE or the existing explicit
+Brier objective. `AuxiliaryPopulationTask` uses exactly `{example, targets}` rows: a
+`VerifierExample` plus explicit `ResearchLossRow` fields (`primary`, `flag_target`,
+`premise_ids`, `support_set`). Label spaces, class order and PIDs are explicit. The fixed auxiliary population codec requires
+geometry labels to equal the E/C/U class order exactly; display-label aliases or a second
+semantic mapping are unsupported, and no label/logit swapping is inferred. Null auxiliary
+targets remain absent; false and empty support sets remain eligible. Missing required heads,
+unsupported weights/smoothing, unknown IDs and implicit binary interpretations refuse.
+
+Both SDK calls require `ResolvedPopulationTokenizer(identity, tokenizer)`. Its trusted resolver
+metadata must match the separately declared tokenizer pin before native use; no same-model
+default is inferred. The canonical backend/special-token SHA is recorded independently. Neither
+the declared ref nor the content SHA attests external origin, resolution or custody.
+
+`TrustedPopulationSource.read(maximum)` returns at most 64 KiB of UTF-8 NDJSON. The source object
+must declare the exact pinned named split and enumerate it completely, without receiving the
+pilot range. These are trusted Python objects, never serialized imports/callbacks or a dataset
+mapper. Real source mappings require a separate metadata review. `PopulationAuthority.check`
+is a trusted caller seam at before/after read and before/after train boundaries; it is not a
+remote credential or an installed custody policy. There is no standalone authorized fallback.
+
+Preparation requires a fresh absolute private attempt directory with a resolved parent and
+sufficient free scratch space. It never adopts an existing attempt. It scans every source row
+to EOF, checks exact count/global IDs and tokenizes without truncation, even outside a pilot.
+Right-padding, a fast tokenizer and an existing pad ID are required without mutation. The
+cache stores exact unpadded inputs/marker geometry and explicit targets; training never
+re-reads or re-tokenizes the dataset. Native tokenizer allocations are outside the application
+spool bound. No optimizer is constructed before complete zero-overflow preparation.
+
+The private `preflight-receipt.json` records expected/observed source/selected counts, complete
+overflow counts and first offending stable ID in source order, hashes, serialized/cache bytes
+and disk/buffer high-water bounds. Incomplete, malformed or cancelled scans do not claim a
+complete population. It contains private metadata and is not automatic tool grounding.
+`prepared_complete` is local consistency status, not provenance, authorization, evaluation,
+checkpoint eligibility or publication. Only an issued in-process handle is consumable.
+
+The consumer exclusively claims the attempt, verifies its hashes/tokenizer again and uses
+`torch_cpu_randperm_v1` with the explicit seed, one process, FP32, batch size 32, one epoch, no AMP,
+accumulation, early stop or secondary shuffle. Record runtime versions for reproducibility;
+cross-version permutations are not promised. The final partial batch uses its actual row
+count in the objective. Confirmed row/step counts advance only after optimizer application.
+The fixed effective optimizer is native fused AdamW with weight decay 0, betas (.9, .999),
+epsilon 1e-8 and maximum gradient norm 1; learning rate/scheduler/warmup remain explicitly configured.
+Installed native defaults that disagree refuse instead of silently selecting a different
+optimizer. Before constructing AdamW, declared maximum length must fit both the configured
+and actual native BERT/GPT-2 position embedding capacity or ModernBERT decoder original rotary
+context. Missing/malformed/mismatched capacities refuse. Actual tokenizer vocabulary IDs must
+fit the actual resolved input embedding rows. No context extrapolation, resizing, token
+remapping or truncation is inferred. No adapters, resume, checkpoint selection or calibration
+are added.
+
+`epoch-receipt.json` records planned/applied order hashes, confirmed rows/steps and incomplete
+optimizer status on failure. A failing optimizer may already have mutated parameters; no
+rollback is claimed. A final authority refusal changes the receipt and cannot return success.
+Callers own final safe export after a successful result using the appropriate existing SDK.
+Native model aliases/mode/device/optimizer operations must be serialized by the caller.
+Cancellation drains owned native/file work; an uninterruptible native call has no hard thread
+termination deadline. Aborted attempts stay private and unavailable rather than being reused.

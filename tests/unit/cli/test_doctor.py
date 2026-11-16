@@ -60,8 +60,7 @@ class TestDoctorOutput:
         assert "Settings" in result.output
         assert "profile" in result.output
         assert "logging.level" in result.output
-        # Default profile is "dev".
-        assert "dev" in result.output
+        assert "configured" in result.output
 
     def test_renders_packages_section(self) -> None:
         result = runner.invoke(app, ["doctor"])
@@ -80,10 +79,11 @@ class TestDoctorOutput:
         result = runner.invoke(app, ["doctor"])
         assert "keys not set" in result.output
 
-    def test_pending_checks_announced(self) -> None:
+    def test_report_keeps_diagnostic_qualification_explicit(self) -> None:
         result = runner.invoke(app, ["doctor"])
-        assert "Provider auth probes" in result.output
-        assert "model-registry" in result.output
+        assert "provider authentication" in result.output
+        assert "execution readiness" in result.output
+        assert "checks land" not in result.output
 
     def test_reports_unreachable_when_probe_refused(self) -> None:
         result = runner.invoke(app, ["doctor"])
@@ -118,6 +118,23 @@ class TestDoctorWithReachableServices:
 
 
 class TestProbeUrl:
+    @pytest.mark.parametrize(
+        "url",
+        ["https://example.invalid:not-a-port", "https://example.invalid:99999", "http://[bad"],
+    )
+    def test_malformed_port_or_host_returns_false_without_probing(
+        self, url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[bool] = []
+
+        def forbidden(*_args: object, **_kwargs: object) -> None:
+            calls.append(True)
+            raise AssertionError("malformed URLs must not reach the socket")
+
+        monkeypatch.setattr(socket, "create_connection", forbidden)
+        assert doctor_module._probe_url(url) is False  # pyright: ignore[reportPrivateUsage]
+        assert calls == []
+
     def test_returns_false_for_bogus_url(self) -> None:
         assert doctor_module._probe_url("not-a-url-at-all") is False  # pyright: ignore[reportPrivateUsage]
 
@@ -156,3 +173,133 @@ class TestProbeUrl:
         monkeypatch.setattr(socket, "create_connection", _accept)
         doctor_module._probe_url("https://example.com:9999")  # pyright: ignore[reportPrivateUsage]
         assert seen == [("example.com", 9999)]
+
+
+@pytest.mark.parametrize("flag", ["--offline", "--presence-only"])
+def test_presence_aliases_never_invoke_a_probe(flag: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "fictional-public")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "fictional-secret")
+
+    def forbidden(*_args: object, **_kwargs: object) -> bool:
+        calls.append(True)
+        raise AssertionError("presence-only doctor must not probe")
+
+    monkeypatch.setattr(doctor_module, "_probe_url", forbidden)
+    result = runner.invoke(app, ["doctor", flag])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "not probed" in result.output
+    assert "configured" in result.output
+
+
+def test_default_mode_preserves_explicit_reachability_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "fictional-public")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "fictional-secret")
+
+    def reachable(url: str) -> bool:
+        calls.append(url)
+        return True
+
+    monkeypatch.setattr(doctor_module, "_probe_url", reachable)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert len(calls) == 3
+    assert "Service reachability" in result.output
+    assert "reachable" in result.output
+
+
+@pytest.mark.parametrize("flags", [[], ["--offline"]])
+def test_all_modes_omit_private_configuration_values(
+    flags: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    markers = [
+        "fictional-private-profile",
+        "fictional-user",
+        "fictional-password",
+        "fictional-host.invalid",
+        "fictional-path",
+        "fictional-query-secret",
+        "fictional-diagnostic-directory",
+    ]
+    url = (
+        "https://fictional-user:fictional-password@fictional-host.invalid:8443/"
+        "fictional-path?token=fictional-query-secret"
+    )
+    monkeypatch.setenv("FORGE_PROFILE", markers[0])
+    monkeypatch.setenv("FORGE_DIAGNOSTIC_PATH", "/fictional-diagnostic-directory/output.jsonl")
+    monkeypatch.setenv("LANGFUSE_HOST", url)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "fictional-public")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "fictional-secret")
+    monkeypatch.setenv("REDIS_URL", url)
+    monkeypatch.setenv("QDRANT_URL", url)
+    monkeypatch.setattr(doctor_module, "_probe_url", lambda url: False)
+    result = runner.invoke(app, ["doctor", *flags])
+    assert result.exit_code == 0
+    for marker in markers:
+        assert marker not in result.output
+    assert "Settings" in result.output
+    assert "Langfuse" in result.output
+
+
+def test_raw_snapshot_names_paths_and_local_version_suffixes_are_not_rendered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = {
+        "python": "3.14.5+fictional-python-owner",
+        "system": "fictional-system-owner",
+        "platform": "fictional-host-owner",
+        "cwd": "/fictional/source-owner",
+        "pkg.pydantic": "2.12.1+fictional-package-owner",
+        "pkg.fictional-extra-owner": "fictional-extra-content",
+    }
+    monkeypatch.setattr(doctor_module, "env_snapshot", lambda: snapshot)
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0
+    assert "local build" in result.output
+    assert "fictional" not in result.output
+
+
+def test_bad_configuration_is_a_fixed_diagnostic_and_never_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    def broken() -> None:
+        raise ValueError("fictional-private-config-content")
+
+    def forbidden(*_args: object, **_kwargs: object) -> bool:
+        calls.append(True)
+        raise AssertionError("bad configuration must not probe")
+
+    monkeypatch.setattr(doctor_module, "Settings", broken)
+    monkeypatch.setattr(doctor_module, "_probe_url", forbidden)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "Settings unavailable" in result.output
+    assert "fictional-private" not in result.output
+
+
+def test_metadata_failure_is_unknown_rather_than_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken() -> None:
+        raise ValueError("fictional-private-metadata-content")
+
+    monkeypatch.setattr(doctor_module, "env_snapshot", broken)
+    result = runner.invoke(app, ["doctor", "--offline"])
+    assert result.exit_code == 0
+    assert "Tracked packages unavailable" in result.output
+    assert "not installed" not in result.output
+    assert "fictional-private" not in result.output
+
+
+def test_presence_mode_is_documented_in_help() -> None:
+    result = runner.invoke(app, ["doctor", "--help"])
+    assert result.exit_code == 0
+    assert "--offline" in result.output
+    assert "--presence-only" in result.output

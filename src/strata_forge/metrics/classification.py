@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from contextlib import suppress
 from numbers import Integral, Real
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -32,6 +33,7 @@ __all__ = [
     "accuracy",
     "brier",
     "classification_report",
+    "classification_report_from_confusion",
     "confusion_matrix",
     "invalid_rate",
     "macro_f1",
@@ -260,6 +262,54 @@ def _report(matrix: ConfusionMatrix) -> ClassificationReport:
         macro_f1=_value(math.fsum(score.f1 for score in scores) / len(scores), matrix.n),
         invalid_rate=_value(sum(matrix.invalid_by_gold) / matrix.n if matrix.n else 0.0, matrix.n),
     )
+
+
+def _validated_confusion(matrix: ConfusionMatrix) -> ConfusionMatrix:
+    if type(matrix) is not ConfusionMatrix:
+        raise ValueError("invalid_confusion")
+    raw: object = object.__getattribute__(matrix, "__dict__")
+    if type(raw) is not dict or matrix.__pydantic_extra__ is not None:
+        raise ValueError("invalid_confusion")
+    data = cast("dict[object, object]", raw).copy()
+    if any(type(key) is not str for key in data) or set(data) != {
+        "labels",
+        "counts",
+        "invalid_by_gold",
+        "n",
+    }:
+        raise ValueError("invalid_confusion")
+    labels, counts, invalid, n = (data[key] for key in ("labels", "counts", "invalid_by_gold", "n"))
+    if (
+        type(labels) is not tuple
+        or type(counts) is not tuple
+        or type(invalid) is not tuple
+        or type(n) is not int
+    ):
+        raise ValueError("invalid_confusion")
+    if any(type(label) is not str for label in cast("tuple[object, ...]", labels)):
+        raise ValueError("invalid_confusion")
+    for row in cast("tuple[object, ...]", counts):
+        if type(row) is not tuple or any(
+            type(value) is not int for value in cast("tuple[object, ...]", row)
+        ):
+            raise ValueError("invalid_confusion")
+    if any(type(value) is not int for value in cast("tuple[object, ...]", invalid)):
+        raise ValueError("invalid_confusion")
+    # Existing instances may have skipped validation or been manually altered. Rebuild all
+    # original fields before the shared report math can use dimensions or denominators.
+    return ConfusionMatrix.model_validate(
+        {"labels": labels, "counts": counts, "invalid_by_gold": invalid, "n": n}, strict=True
+    )
+
+
+def classification_report_from_confusion(matrix: ConfusionMatrix) -> ClassificationReport:
+    """Revalidate exact integer confusion counts and reuse the ordinary classification report."""
+    result = None
+    with suppress(Exception):
+        result = _report(_validated_confusion(matrix))
+    if result is None:
+        raise ValidationError("confusion matrix is invalid")
+    return result
 
 
 def classification_report(

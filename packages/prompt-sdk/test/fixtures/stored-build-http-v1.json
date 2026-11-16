@@ -1,0 +1,86 @@
+{
+  "profile": "synthetic-stored-build-http-v1",
+  "status": "Actual fixed compiler bytes; native/account/audit identities are fictional wire fixtures, not stored grants.",
+  "compile_request": {
+    "version": 1,
+    "surface_ref": {
+      "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "version_id": "cccccccccccccccccccccccccccccccc",
+      "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "compile_receipt": {
+    "version": 1,
+    "command_id": "22222222222222222222222222222222",
+    "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "surface_ref": {
+      "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "version_id": "cccccccccccccccccccccccccccccccc",
+      "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "ref": {
+      "resource_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "version_id": "ffffffffffffffffffffffffffffffff",
+      "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "build_id": "e5277be39a92bbf384742eee97f2cc5f0ccc0d7ae5b72dd5d4118a102436ba06",
+    "build_size_bytes": 1511
+  },
+  "descriptor_header": "eyJidWlsZF9pZCI6ImU1Mjc3YmUzOWE5MmJiZjM4NDc0MmVlZTk3ZjJjYzVmMGNjYzBkN2FlNWI3MmRkNWQ0MTE4YTEwMjQzNmJhMDYiLCJidWlsZF9zaXplX2J5dGVzIjoxNTExLCJjb21tYW5kX2lkIjoiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJwcm9qZWN0X2lkIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJyZWYiOnsibWFuaWZlc3Rfc2hhMjU2IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInJlc291cmNlX2lkIjoiZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWUiLCJ2ZXJzaW9uX2lkIjoiZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifSwicmVzb3VyY2VfaWQiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInN1cmZhY2VfcmVmIjp7Im1hbmlmZXN0X3NoYTI1NiI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJyZXNvdXJjZV9pZCI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwidmVyc2lvbl9pZCI6ImNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjIn0sInZlcnNpb24iOjF9",
+  "body_utf8": "{\"compiler_version\":\"strata-modular-compiler/1\",\"constraints\":[],\"dependency_lock\":[{\"content_sha256\":\"2d4925a2909215a0e71fc2644bf09208ad26c7de2f87ca6868231d451eaa7d70\",\"coordinate\":\"fixture/browser@2\",\"provenance\":null},{\"content_sha256\":\"5133951b6f1d29132d2bf27296dd69f3ab93361487711203bd6c44139c0f38bb\",\"coordinate\":\"fixture/shared@3\",\"provenance\":null}],\"descriptor\":null,\"diagnostics\":[{\"code\":\"duplicate_literal\",\"origins\":[{\"coordinate\":\"fixture/shared@3\",\"occurrence_path\":[0,0,0]},{\"coordinate\":\"fixture/shared@3\",\"occurrence_path\":[0,3,0]}],\"severity\":\"advisory\"}],\"dialect\":\"strata-modules-v1\",\"domain\":\"strata-prompt-build-v1\",\"kind\":\"artifact\",\"outputs\":[{\"leaves\":[{\"kind\":\"text\",\"origin\":{\"coordinate\":\"fixture/shared@3\",\"occurrence_path\":[0,0,0]},\"text\":\"Fictional café / 東京.\\r\\nPreserve {{literal}}.\",\"variable\":null},{\"kind\":\"text\",\"origin\":{\"coordinate\":\"fixture/browser@2\",\"occurrence_path\":[0,1]},\"text\":\"Question: \",\"variable\":null},{\"kind\":\"variable\",\"origin\":{\"coordinate\":\"fixture/browser@2\",\"occurrence_path\":[0,2]},\"text\":null,\"variable\":\"question\"},{\"kind\":\"text\",\"origin\":{\"coordinate\":\"fixture/shared@3\",\"occurrence_path\":[0,3,0]},\"text\":\"Fictional café / 東京.\\r\\nPreserve {{literal}}.\",\"variable\":null}],\"role\":null,\"separator\":\"\\r\\n\"}],\"purpose\":\"skill\",\"schema_version\":1,\"surface\":{\"content_sha256\":\"2d4925a2909215a0e71fc2644bf09208ad26c7de2f87ca6868231d451eaa7d70\",\"coordinate\":\"fixture/browser@2\",\"provenance\":null},\"variables\":[{\"name\":\"question\",\"type\":\"string\"}]}",
+  "body_sha256": "e5277be39a92bbf384742eee97f2cc5f0ccc0d7ae5b72dd5d4118a102436ba06",
+  "body_size_bytes": 1511,
+  "build_query": {
+    "build_resource_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "history_page": {
+    "version": 1,
+    "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "items": [
+      {
+        "version": 1,
+        "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "command_id": "22222222222222222222222222222222",
+        "event_id": "99999999999999999999999999999999",
+        "surface_ref": {
+          "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "version_id": "cccccccccccccccccccccccccccccccc",
+          "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "ref": {
+          "resource_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "version_id": "ffffffffffffffffffffffffffffffff",
+          "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "build_id": "e5277be39a92bbf384742eee97f2cc5f0ccc0d7ae5b72dd5d4118a102436ba06",
+        "build_size_bytes": 1511,
+        "attached_at": "2026-11-07T01:02:03.123456Z"
+      },
+      {
+        "version": 1,
+        "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "command_id": "33333333333333333333333333333333",
+        "event_id": "88888888888888888888888888888888",
+        "surface_ref": {
+          "resource_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "version_id": "cccccccccccccccccccccccccccccccc",
+          "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "ref": {
+          "resource_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "version_id": "77777777777777777777777777777777",
+          "manifest_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        "build_id": "e5277be39a92bbf384742eee97f2cc5f0ccc0d7ae5b72dd5d4118a102436ba06",
+        "build_size_bytes": 1511,
+        "attached_at": "2026-11-07T01:02:03.123456Z"
+      }
+    ],
+    "next_before": "eyJhdCI6IjIwMjYtMTEtMDdUMDE6MDI6MDMuMTIzNDU2WiIsImV2ZW50X2lkIjoiODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODgiLCJraW5kIjoicHJvbXB0X2J1aWxkX2hpc3RvcnkiLCJ2ZXJzaW9uIjoxfQ"
+  }
+}

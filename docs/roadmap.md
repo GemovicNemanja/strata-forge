@@ -10,6 +10,10 @@ Design rationale that's bigger than a single phase lives in
 [ADRs](architecture/adr/). Per-module reference docs live in
 [`docs/modules/`](modules/).
 
+The loaded HF scorer has a trusted-Python, per-call no-truncation error policy. Worker/spec
+forwarding, explicit dropped-item receipts and research eligibility remain separate integration
+work; the legacy worker policy is unchanged. See [exact scoring](modules/compute.md#exact-hugging-face-scoring).
+
 | # | Phase | Status |
 |---|---|---|
 | 0 | Foundations | ✅ done |
@@ -107,11 +111,11 @@ type, test, docs, agent rules, and the cross-cutting `strata_forge.core` +
 
 **`strata_forge.cli`** — Typer entry point and the `doctor` command
 
-- `strata-forge doctor` validates env-var presence, runs lightweight provider
-  auth probes (stubbed where the LLM module didn't exist yet), reports
-  package versions and service reachability (Langfuse/Redis/Qdrant). It
-  *skips* unconfigured providers cleanly instead of failing — a missing
-  Anthropic key reports "skipped: missing env" and moves on.
+- [`strata-forge doctor`](modules/cli.md#doctor) reports redacted configuration
+  and tracked package presence, plus bounded TCP reachability for
+  Langfuse/Redis/Qdrant by default. `--offline` / `--presence-only` skips every
+  service probe. Both modes preserve diagnostic exit 0; neither verifies
+  provider authentication, model compatibility or execution readiness.
 - The other CLI commands (`chat`, `eval`, `experiments`, `prompts`,
   `datasets`, `train`, `serve`, `compute`) are stubbed with "not yet
   implemented (phase X)" messages so the entry-point shape is committed.
@@ -390,6 +394,12 @@ Jinja2 templating with safe filters; a store-agnostic prompt registry;
 explicit stable-prefix / dynamic-suffix split so provider prompt caching
 works without per-call hand-tuning; rendering to `strata_forge.llm.Message`
 instances.
+
+The independent [modular compiler](modules/prompt-composition.md) provides exact-version
+composition, immutable build/render identities, declared constraint checks and UTF-8 source
+maps. Its Python/Node fixtures cover portable bytes and an unchanged archived operational
+Strata import. Server persistence, review/publication, product UI and request capture remain
+separate integration work; compiler identity alone proves none of them.
 
 | Sub-phase | Deliverable |
 |---|---|
@@ -689,3 +699,17 @@ This finishes the roadmap. Future work (new vendors, new
 training methods, MCP tool support, guardrails layer, advanced
 telemetry) attaches against the now-complete public surface;
 none of it requires re-opening the phase plan.
+
+## Provided-file dataset execution boundary
+
+The [task-profile inventory](modules/task-capabilities.md) composes existing
+worker/SDK schemas with training declaration v1. It adds no task dispatcher or
+installed-target approval; cross-repository consumers retain their own gates.
+
+The [native dataset executor](modules/native-dataset-execution.md) supports explicit isolated
+conversion, named-table read SQL and bounded Parquet materialization with owned cleanup.
+Materialization preserves exact bound column names/types and refuses ambiguous names
+before CTAS; read-only indexed query results can retain duplicate names.
+Native server versioning/source authority, durable background jobs and larger distributed
+inputs require their separate service/lifecycle implementation; local receipts do not
+complete those platform capabilities.

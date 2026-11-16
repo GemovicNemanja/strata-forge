@@ -1,0 +1,14 @@
+{
+  "fixture_version": "scalar-logit-temperature-v1",
+  "synthetic_only": true,
+  "labels": ["A", "B"],
+  "logits": [[2.1972245773362196, 0.0], [2.1972245773362196, 0.0], [2.1972245773362196, 0.0], [2.1972245773362196, 0.0]],
+  "gold_indexes": [0, 0, 0, 1],
+  "temperature_bounds": {"minimum": 0.5, "maximum": 4.0},
+  "expected_temperature": 2.0,
+  "expected_unclipped_nll_before": 0.6546666599918812,
+  "expected_unclipped_nll_after": 0.5623351446188083,
+  "expected_brier_before": 0.42,
+  "expected_brier_after": 0.375,
+  "derivation": "Identical binary logit gap2*ln(3), with gold A3/4. Optimum p(A)=3/4 gives inverse_temperature=1/2. Brier uses the multiclass sum form."
+}
