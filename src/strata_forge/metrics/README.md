@@ -12,6 +12,10 @@ are explicit; supplied human identity/registration/provenance is not independent
 `agreement_bootstrap` adds a seeded item-level percentile interval for the coefficient the
 full-sample reference selects, counting resamples where it is undefined; it needs NumPy from
 `[scoring]`.
+`human_model_agreement` is a separate statistic for one human against one model rater: it
+excludes and counts human skips and null model labels, fails a slice with too many skips,
+refuses one with too many nulls or a missing reference, gates the reference-selected point value
+and reports the bootstrap interval and a non-gating user-versus-solver kappa beside it.
 No annotation resource, rater pooling, model opinion, dataset reading or research acceptance
 is supplied. See the direct-import agreement surface in the reference docs.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from fractions import Fraction
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,9 +22,23 @@ BOOTSTRAP_RESAMPLES = 10_000
 MAX_BOOTSTRAP_WORK = 20_000_000
 MAX_BOOTSTRAP_SEED = 2**53 - 1
 RESEARCH_ANNOTATION_THRESHOLD = 0.70
+HUMAN_MODEL_VERSION = "nominal-human-vs-model-v1"
+MAX_HUMAN_SKIP_FRACTION = 0.10
+MAX_MODEL_NULL_FRACTION = 0.10
 type CoefficientName = Literal["cohen_kappa", "gwet_ac1"]
 type UndefinedReason = Literal["empty", "chance_agreement_one"]
 type _GateReason = Literal["empty", "selected_coefficient_undefined"]
+
+type HumanModelStatus = Literal["pass", "fail", "refused"]
+type HumanModelReason = Literal[
+    "below_threshold",
+    "human_skips_exceeded",
+    "empty",
+    "reference_missing",
+    "model_nulls_exceeded",
+    "no_used_items",
+    "coefficient_undefined",
+]
 
 __all__ = [
     "AGREEMENT_VERSION",
@@ -34,19 +48,31 @@ __all__ = [
     "BOOTSTRAP_RNG",
     "BOOTSTRAP_VERSION",
     "GATE_VERSION",
+    "HUMAN_MODEL_VERSION",
     "MAX_BOOTSTRAP_SEED",
     "MAX_BOOTSTRAP_WORK",
+    "MAX_HUMAN_SKIP_FRACTION",
+    "MAX_MODEL_NULL_FRACTION",
     "REFERENCE_VERSION",
     "RESEARCH_ANNOTATION_THRESHOLD",
     "AgreementBootstrap",
     "AgreementEstimate",
     "AgreementGate",
+    "BootstrapInterval",
+    "ExactValue",
+    "HumanAnnotations",
+    "HumanModelAgreement",
+    "HumanModelReason",
+    "HumanModelStatus",
     "HumanRatings",
+    "ModelRatings",
     "PairwiseAgreement",
     "ReferencePrevalence",
     "RegisteredReference",
+    "ReportOnlyKappa",
     "ResolvedReference",
     "agreement_bootstrap",
+    "human_model_agreement",
     "pairwise_agreement",
     "reference_prevalence",
     "research_annotation_gate",
@@ -256,8 +282,12 @@ def _threshold(value: float) -> float:
     return result
 
 
+def _select_from_counts(counts: Sequence[int], n: int) -> CoefficientName:
+    return "gwet_ac1" if 5 * max(counts) >= 4 * n else "cohen_kappa"
+
+
 def _select_coefficient(prevalence: ReferencePrevalence) -> CoefficientName:
-    return "gwet_ac1" if 5 * max(prevalence.counts) >= 4 * prevalence.n else "cohen_kappa"
+    return _select_from_counts(prevalence.counts, prevalence.n)
 
 
 def _gate_values(
@@ -440,20 +470,16 @@ def _selected_estimate(
     return agreement.gwet_ac1 if coefficient == "gwet_ac1" else agreement.cohen_kappa
 
 
-class AgreementBootstrap(_Frozen):
-    """An item-level percentile interval for the coefficient the full sample selected."""
+class BootstrapInterval(_Frozen):
+    """The approved item-level percentile interval block, without any item identity."""
 
     bootstrap_version: Literal["item-percentile-bootstrap-v1"] = BOOTSTRAP_VERSION
     rng: Literal["numpy.random.Generator(PCG64)"] = BOOTSTRAP_RNG
     quantile_rule: Literal["hyndman-fan-7"] = BOOTSTRAP_QUANTILE_RULE
     coefficient_selection: Literal["full_sample_reference"] = "full_sample_reference"
-    agreement: PairwiseAgreement
-    prevalence: ReferencePrevalence
-    coefficient: CoefficientName
-    estimate: AgreementEstimate
     confidence_level: float = Field(default=BOOTSTRAP_CONFIDENCE, allow_inf_nan=False)
     seed: int = Field(ge=0, le=MAX_BOOTSTRAP_SEED)
-    resamples: int = Field(ge=1)
+    resamples: int = Field(ge=1, le=MAX_BOOTSTRAP_WORK)
     undefined_resamples: int = Field(ge=0)
     lower: float | None
     upper: float | None
@@ -461,17 +487,9 @@ class AgreementBootstrap(_Frozen):
     numpy_version: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _consistent(self) -> AgreementBootstrap:
-        paired, reference = self.agreement, self.prevalence
-        if (
-            paired.labels != reference.labels
-            or paired.item_ids != reference.item_ids
-            or not paired.n
-            or self.confidence_level != BOOTSTRAP_CONFIDENCE
-            or self.coefficient != _select_coefficient(reference)
-            or self.estimate != _selected_estimate(paired, self.coefficient)
-            or self.undefined_resamples > self.resamples
-            or self.resamples * max(paired.n, len(paired.labels) ** 2) > MAX_BOOTSTRAP_WORK
+    def _consistent(self) -> BootstrapInterval:
+        if self.confidence_level != BOOTSTRAP_CONFIDENCE or (
+            self.undefined_resamples > self.resamples
         ):
             raise ValueError("agreement_bootstrap_invalid")
         if self.undefined_resamples == self.resamples:
@@ -484,7 +502,32 @@ class AgreementBootstrap(_Frozen):
                 and all(math.isfinite(bound) for bound in (self.lower, self.upper))
                 and -1 <= self.lower <= self.upper <= 1
             )
-        if not valid or (self.estimate.value is None and self.reason is None):
+        if not valid:
+            raise ValueError("agreement_bootstrap_invalid")
+        return self
+
+
+class AgreementBootstrap(_Frozen):
+    """An item-level percentile interval for the coefficient the full sample selected."""
+
+    agreement: PairwiseAgreement
+    prevalence: ReferencePrevalence
+    coefficient: CoefficientName
+    estimate: AgreementEstimate
+    interval: BootstrapInterval
+
+    @model_validator(mode="after")
+    def _consistent(self) -> AgreementBootstrap:
+        paired, reference = self.agreement, self.prevalence
+        if (
+            paired.labels != reference.labels
+            or paired.item_ids != reference.item_ids
+            or not paired.n
+            or self.coefficient != _select_coefficient(reference)
+            or self.estimate != _selected_estimate(paired, self.coefficient)
+            or self.interval.resamples * max(paired.n, len(paired.labels) ** 2) > MAX_BOOTSTRAP_WORK
+            or (self.estimate.value is None and self.interval.reason is None)
+        ):
             raise ValueError("agreement_bootstrap_invalid")
         return self
 
@@ -545,6 +588,35 @@ def _percentile(values: tuple[float, ...], probability: Fraction) -> float:
     return min(max(low + weight * (high - low), low), high)
 
 
+def _interval(
+    cells: Sequence[int], size: int, coefficient: CoefficientName, *, seed: int, resamples: int
+) -> BootstrapInterval:
+    if resamples * max(len(cells), size * size) > MAX_BOOTSTRAP_WORK or (
+        4 * len(cells) * len(cells) * (size - 1) > 2**53
+    ):
+        raise ValidationError("agreement_bootstrap_too_large")
+    values, undefined, numpy_version = _resampled_coefficients(
+        cells, size, coefficient, seed=seed, resamples=resamples
+    )
+    tail = (1 - Fraction(str(BOOTSTRAP_CONFIDENCE))) / 2
+    return BootstrapInterval(
+        seed=seed,
+        resamples=resamples,
+        undefined_resamples=undefined,
+        lower=_percentile(values, tail) if values else None,
+        upper=_percentile(values, 1 - tail) if values else None,
+        reason=None if values else "all_resamples_undefined",
+        numpy_version=numpy_version,
+    )
+
+
+def _bootstrap_settings(seed: object, resamples: object) -> tuple[int, int]:
+    return (
+        _bootstrap_count(seed, 0, MAX_BOOTSTRAP_SEED, "agreement_bootstrap_seed_invalid"),
+        _bootstrap_count(resamples, 1, MAX_BOOTSTRAP_WORK, "agreement_bootstrap_resamples_invalid"),
+    )
+
+
 def agreement_bootstrap(
     rater_a: HumanRatings,
     rater_b: HumanRatings,
@@ -561,35 +633,305 @@ def agreement_bootstrap(
         raise ValidationError("agreement_population_mismatch")
     if not paired.n:
         raise ValidationError("agreement_bootstrap_empty")
-    chosen_seed = _bootstrap_count(seed, 0, MAX_BOOTSTRAP_SEED, "agreement_bootstrap_seed_invalid")
-    count = _bootstrap_count(
-        resamples, 1, MAX_BOOTSTRAP_WORK, "agreement_bootstrap_resamples_invalid"
-    )
+    chosen_seed, count = _bootstrap_settings(seed, resamples)
     size = len(paired.labels)
-    if count * max(paired.n, size * size) > MAX_BOOTSTRAP_WORK or (
-        4 * paired.n * paired.n * (size - 1) > 2**53
-    ):
-        raise ValidationError("agreement_bootstrap_too_large")
     coefficient = _select_coefficient(reference)
     order = {label: i for i, label in enumerate(paired.labels)}
     cells = tuple(
         order[left] * size + order[right]
         for left, right in zip(rater_a.ratings, rater_b.ratings, strict=True)
     )
-    values, undefined, numpy_version = _resampled_coefficients(
-        cells, size, coefficient, seed=chosen_seed, resamples=count
-    )
-    tail = (1 - Fraction(str(BOOTSTRAP_CONFIDENCE))) / 2
     return AgreementBootstrap(
         agreement=paired,
         prevalence=reference,
         coefficient=coefficient,
         estimate=_selected_estimate(paired, coefficient),
-        seed=chosen_seed,
-        resamples=count,
-        undefined_resamples=undefined,
-        lower=_percentile(values, tail) if values else None,
-        upper=_percentile(values, 1 - tail) if values else None,
-        reason=None if values else "all_resamples_undefined",
-        numpy_version=numpy_version,
+        interval=_interval(cells, size, coefficient, seed=chosen_seed, resamples=count),
+    )
+
+
+class HumanAnnotations(_Frozen):
+    """One caller-declared human rater whose `None` entries are explicit skips."""
+
+    rater_id: str = Field(min_length=1)
+    rater_kind: Literal["human"]
+    item_ids: tuple[str, ...]
+    ratings: tuple[str | None, ...]
+
+    @model_validator(mode="after")
+    def _complete(self) -> HumanAnnotations:
+        if (
+            not self.rater_id.strip()
+            or not _unique(self.item_ids)
+            or not _nonempty(tuple(label for label in self.ratings if label is not None))
+            or len(self.item_ids) != len(self.ratings)
+        ):
+            raise ValueError("agreement_input_invalid")
+        return self
+
+
+class ModelRatings(_Frozen):
+    """One model rater with its prompt digest and run reference; `None` is a null label."""
+
+    rater_id: str = Field(min_length=1)
+    rater_kind: Literal["model"]
+    item_ids: tuple[str, ...]
+    ratings: tuple[str | None, ...]
+    model_prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_run_ref: str | None
+
+    @model_validator(mode="after")
+    def _complete(self) -> ModelRatings:
+        if (
+            not self.rater_id.strip()
+            or not _unique(self.item_ids)
+            or not _nonempty(tuple(label for label in self.ratings if label is not None))
+            or len(self.item_ids) != len(self.ratings)
+            or (self.model_run_ref is not None and not self.model_run_ref.strip())
+        ):
+            raise ValueError("agreement_input_invalid")
+        return self
+
+
+class ExactValue(_Frozen):
+    """A coefficient as its exact rational spelling and the float nearest to it."""
+
+    exact: str = Field(pattern=r"^-?[0-9]+(/[0-9]+)?$")
+    value: float = Field(ge=-1, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ExactValue:
+        rational = Fraction(self.exact)
+        if str(rational) != self.exact or float(rational) != self.value:
+            raise ValueError("agreement_value_invalid")
+        return self
+
+    @classmethod
+    def of(cls, value: Fraction) -> ExactValue:
+        """Spell a rational coefficient exactly."""
+        return cls(exact=str(value), value=float(value))
+
+
+class ReportOnlyKappa(_Frozen):
+    """User-versus-solver-gold Cohen kappa; reported beside the gate and never gating."""
+
+    role: Literal["report_only"] = "report_only"
+    n: int = Field(ge=0)
+    value: ExactValue | None
+    reason: UndefinedReason | None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ReportOnlyKappa:
+        if (self.value is None) == (self.reason is None) or (self.reason == "empty") != (
+            self.n == 0
+        ):
+            raise ValueError("agreement_report_invalid")
+        return self
+
+
+def _exceeds(count: int, items: int, fraction: float) -> bool:
+    return count > Fraction(str(fraction)) * items
+
+
+class HumanModelAgreement(_Frozen):
+    """Counted exclusions, a reference-selected gated point value and its reported interval."""
+
+    statistic_version: Literal["nominal-human-vs-model-v1"] = HUMAN_MODEL_VERSION
+    items: int = Field(ge=0)
+    human_skipped: int = Field(ge=0)
+    model_null: int = Field(ge=0)
+    used: int = Field(ge=0)
+    max_human_skip_fraction: float = Field(ge=0, le=1, allow_inf_nan=False)
+    max_model_null_fraction: float = Field(ge=0, le=1, allow_inf_nan=False)
+    status: HumanModelStatus
+    reason: HumanModelReason | None
+    coefficient: CoefficientName | None
+    value: ExactValue | None
+    cohen_kappa: ExactValue | None
+    cohen_kappa_reason: Literal["chance_agreement_one"] | None
+    threshold: float = Field(allow_inf_nan=False)
+    interval: BootstrapInterval | None
+    user_solver_kappa: ReportOnlyKappa
+    model_prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_run_ref: str | None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> HumanModelAgreement:
+        excluded = self.items - self.used
+        skips = _exceeds(self.human_skipped, self.items, self.max_human_skip_fraction)
+        nulls = _exceeds(self.model_null, self.items, self.max_model_null_fraction)
+        refused = self.status == "refused"
+        valued = self.value is not None
+        checks = (
+            self.used <= self.items,
+            max(self.human_skipped, self.model_null) <= excluded,
+            excluded <= self.human_skipped + self.model_null,
+            refused == (self.reason not in {None, "below_threshold", "human_skips_exceeded"}),
+            (self.status == "pass") == (self.reason is None),
+            self.reason != "empty" or self.items == 0,
+            self.reason != "model_nulls_exceeded" or nulls,
+            self.reason in {"empty", "reference_missing", "model_nulls_exceeded"} or not nulls,
+            self.reason != "no_used_items" or self.used == 0,
+            self.reason != "human_skips_exceeded" or skips,
+            refused or self.reason == "human_skips_exceeded" or not skips,
+            valued == (not refused),
+            (self.interval is not None) == valued,
+            (self.coefficient is None) == (self.reason in {"empty", "reference_missing"}),
+            self.coefficient == "gwet_ac1"
+            or (self.cohen_kappa is None and self.cohen_kappa_reason is None),
+            not (self.cohen_kappa is not None and self.cohen_kappa_reason is not None),
+            not valued
+            or self.coefficient != "gwet_ac1"
+            or (self.cohen_kappa is None) != (self.cohen_kappa_reason is None),
+            valued or (self.cohen_kappa is None and self.cohen_kappa_reason is None),
+        )
+        if not all(checks):
+            raise ValueError("agreement_human_model_invalid")
+        if self.status == "pass" or self.reason == "below_threshold":
+            met = self.value is not None and Fraction(self.value.exact) >= Fraction(
+                str(self.threshold)
+            )
+            if met != (self.status == "pass"):
+                raise ValueError("agreement_human_model_invalid")
+        return self
+
+
+def _limit(value: object) -> float:
+    if type(value) not in {int, float}:
+        raise ValidationError("agreement_exclusion_limit_invalid")
+    number = float(cast("float", value))
+    if not math.isfinite(number) or not 0 <= number <= 1:
+        raise ValidationError("agreement_exclusion_limit_invalid")
+    return number
+
+
+def _counts(pairs: Sequence[tuple[str, str]], order: dict[str, int]) -> tuple[tuple[int, ...], ...]:
+    matrix = [[0] * len(order) for _ in order]
+    for left, right in pairs:
+        matrix[order[left]][order[right]] += 1
+    return tuple(tuple(row) for row in matrix)
+
+
+def _user_solver(
+    human: HumanAnnotations, references: Sequence[RegisteredReference], order: dict[str, int]
+) -> ReportOnlyKappa:
+    pairs = [
+        (label, reference.solver_gold)
+        for label, reference in zip(human.ratings, references, strict=True)
+        if label is not None and reference.solver_gold is not None
+    ]
+    _, kappa, _, chance, _ = _ratios(_counts(pairs, order), len(pairs))
+    reason: UndefinedReason | None = None
+    if kappa is None:
+        reason = "chance_agreement_one" if chance == 1 else "empty"
+    return ReportOnlyKappa(
+        n=len(pairs), value=ExactValue.of(kappa) if kappa is not None else None, reason=reason
+    )
+
+
+def human_model_agreement(
+    human: HumanAnnotations,
+    model: ModelRatings,
+    references: Sequence[RegisteredReference],
+    *,
+    labels: Sequence[str],
+    seed: int,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    threshold: float = RESEARCH_ANNOTATION_THRESHOLD,
+    max_human_skip_fraction: float = MAX_HUMAN_SKIP_FRACTION,
+    max_model_null_fraction: float = MAX_MODEL_NULL_FRACTION,
+) -> HumanModelAgreement:
+    """Gate one human against one model on a slice, excluding and counting skips and nulls."""
+    names = _label_order(labels)
+    person = _checked(HumanAnnotations, human, "agreement_input_invalid")
+    machine = _checked(ModelRatings, model, "agreement_input_invalid")
+    if (
+        person.rater_id == machine.rater_id
+        or person.item_ids != machine.item_ids
+        or any(
+            label is not None and label not in names
+            for label in (*person.ratings, *machine.ratings)
+        )
+    ):
+        raise ValidationError("agreement_input_invalid")
+    if not _sequence(references):
+        raise ValidationError("agreement_reference_invalid")
+    refs = tuple(
+        _checked(RegisteredReference, item, "agreement_reference_invalid") for item in references
+    )
+    if tuple(item.item_id for item in refs) != person.item_ids or any(
+        label is not None and label not in names
+        for item in refs
+        for label in (item.solver_gold, item.adjudicated)
+    ):
+        raise ValidationError("agreement_reference_invalid")
+    limit = _threshold(threshold)
+    skip_limit = _limit(max_human_skip_fraction)
+    null_limit = _limit(max_model_null_fraction)
+    chosen_seed, count = _bootstrap_settings(seed, resamples)
+    order = {label: i for i, label in enumerate(names)}
+    items = len(person.item_ids)
+    pairs = [
+        (left, right)
+        for left, right in zip(person.ratings, machine.ratings, strict=True)
+        if left is not None and right is not None
+    ]
+    skipped = sum(label is None for label in person.ratings)
+    nulls = sum(label is None for label in machine.ratings)
+    reference_labels = [
+        item.solver_gold if item.solver_gold is not None else item.adjudicated for item in refs
+    ]
+    coefficient: CoefficientName | None = None
+    reason: HumanModelReason | None = None
+    if not items:
+        reason = "empty"
+    elif any(label is None for label in reference_labels):
+        reason = "reference_missing"
+    else:
+        coefficient = _select_from_counts([reference_labels.count(label) for label in names], items)
+        if _exceeds(nulls, items, null_limit):
+            reason = "model_nulls_exceeded"
+        elif not pairs:
+            reason = "no_used_items"
+    value: Fraction | None = None
+    kappa: Fraction | None = None
+    kappa_chance: Fraction | None = None
+    if reason is None and coefficient is not None:
+        _, kappa, ac1, kappa_chance, _ = _ratios(_counts(pairs, order), len(pairs))
+        value = ac1 if coefficient == "gwet_ac1" else kappa
+        if value is None:
+            reason = "coefficient_undefined"
+    interval: BootstrapInterval | None = None
+    status: HumanModelStatus = "refused"
+    if value is not None and coefficient is not None:
+        size = len(names)
+        cells = tuple(order[left] * size + order[right] for left, right in pairs)
+        interval = _interval(cells, size, coefficient, seed=chosen_seed, resamples=count)
+        if _exceeds(skipped, items, skip_limit):
+            status, reason = "fail", "human_skips_exceeded"
+        elif value >= Fraction(str(limit)):
+            status = "pass"
+        else:
+            status, reason = "fail", "below_threshold"
+    with_kappa = value is not None and coefficient == "gwet_ac1"
+    return HumanModelAgreement(
+        items=items,
+        human_skipped=skipped,
+        model_null=nulls,
+        used=len(pairs),
+        max_human_skip_fraction=skip_limit,
+        max_model_null_fraction=null_limit,
+        status=status,
+        reason=reason,
+        coefficient=coefficient,
+        value=ExactValue.of(value) if value is not None else None,
+        cohen_kappa=ExactValue.of(kappa) if with_kappa and kappa is not None else None,
+        cohen_kappa_reason="chance_agreement_one"
+        if with_kappa and kappa is None and kappa_chance == 1
+        else None,
+        threshold=limit,
+        interval=interval,
+        user_solver_kappa=_user_solver(person, refs, order),
+        model_prompt_sha256=machine.model_prompt_sha256,
+        model_run_ref=machine.model_run_ref,
     )

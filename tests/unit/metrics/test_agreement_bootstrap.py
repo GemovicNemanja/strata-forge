@@ -113,16 +113,19 @@ def test_fixed_seed_is_deterministic_and_records_its_contract() -> None:
     second = agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED)
     assert first == second
     assert first.model_dump_json() == second.model_dump_json()
-    assert first.bootstrap_version == BOOTSTRAP_VERSION
-    assert first.rng == "numpy.random.Generator(PCG64)"
-    assert first.quantile_rule == "hyndman-fan-7"
-    assert first.coefficient_selection == "full_sample_reference"
-    assert first.seed == SEED
-    assert first.resamples == BOOTSTRAP_RESAMPLES
-    assert first.confidence_level == 0.95
-    assert first.numpy_version == np.__version__
+    assert first.interval.bootstrap_version == BOOTSTRAP_VERSION
+    assert first.interval.rng == "numpy.random.Generator(PCG64)"
+    assert first.interval.quantile_rule == "hyndman-fan-7"
+    assert first.interval.coefficient_selection == "full_sample_reference"
+    assert first.interval.seed == SEED
+    assert first.interval.resamples == BOOTSTRAP_RESAMPLES
+    assert first.interval.confidence_level == 0.95
+    assert first.interval.numpy_version == np.__version__
     other = agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED + 1)
-    assert (other.lower, other.upper) != (first.lower, first.upper)
+    assert (other.interval.lower, other.interval.upper) != (
+        first.interval.lower,
+        first.interval.upper,
+    )
     assert AgreementBootstrap.model_validate_json(first.model_dump_json()) == first
 
 
@@ -146,18 +149,18 @@ def test_resamples_match_exact_point_arithmetic_and_type_7_percentiles() -> None
     expected, undefined, _ = _exact_resample_values(
         a.ratings, b.ratings, "cohen_kappa", labels=LABELS, seed=SEED, resamples=400
     )
-    assert undefined == result.undefined_resamples == 0
-    assert result.lower is not None
-    assert result.upper is not None
-    assert result.lower == _type7(expected, TAIL)
-    assert result.upper == _type7(expected, 1 - TAIL)
+    assert undefined == result.interval.undefined_resamples == 0
+    assert result.interval.lower is not None
+    assert result.interval.upper is not None
+    assert result.interval.lower == _type7(expected, TAIL)
+    assert result.interval.upper == _type7(expected, 1 - TAIL)
     numpy_bounds = np.quantile(np.asarray(expected), [0.025, 0.975], method="linear")
     low, high = (float(value) for value in numpy_bounds)
-    assert math.isclose(result.lower, low, abs_tol=1e-12)
-    assert math.isclose(result.upper, high, abs_tol=1e-12)
+    assert math.isclose(result.interval.lower, low, abs_tol=1e-12)
+    assert math.isclose(result.interval.upper, high, abs_tol=1e-12)
     assert result.estimate == pairwise_agreement(a, b, labels=LABELS).cohen_kappa
     assert result.estimate.value is not None
-    assert result.lower <= result.estimate.value <= result.upper
+    assert result.interval.lower <= result.estimate.value <= result.interval.upper
 
 
 def test_type_7_positions_are_exact_order_statistics_at_41_values() -> None:
@@ -179,8 +182,12 @@ def test_perfect_agreement_counts_single_class_resamples_as_undefined() -> None:
     )
     single_class = sum(len({ratings[i] for i in row}) == 1 for row in rows)
     assert 0 < single_class < 2000
-    assert result.undefined_resamples == single_class
-    assert (result.lower, result.upper, result.reason) == (1.0, 1.0, None)
+    assert result.interval.undefined_resamples == single_class
+    assert (result.interval.lower, result.interval.upper, result.interval.reason) == (
+        1.0,
+        1.0,
+        None,
+    )
 
 
 def test_all_resamples_undefined_when_selected_kappa_is_undefined() -> None:
@@ -195,9 +202,9 @@ def test_all_resamples_undefined_when_selected_kappa_is_undefined() -> None:
     )
     assert result.coefficient == "cohen_kappa"
     assert result.estimate.reason == "chance_agreement_one"
-    assert result.undefined_resamples == 50
-    assert (result.lower, result.upper) == (None, None)
-    assert result.reason == "all_resamples_undefined"
+    assert result.interval.undefined_resamples == 50
+    assert (result.interval.lower, result.interval.upper) == (None, None)
+    assert result.interval.reason == "all_resamples_undefined"
 
 
 @pytest.mark.parametrize(
@@ -232,10 +239,16 @@ def test_coefficient_stays_fixed_by_the_full_sample_selection(
         for row in rows
     ]
     assert any(reselected), "the fixture must contain resamples a per-resample rule would flip"
-    assert result.undefined_resamples == undefined
-    assert (result.lower, result.upper) == (_type7(expected, TAIL), _type7(expected, 1 - TAIL))
+    assert result.interval.undefined_resamples == undefined
+    assert (result.interval.lower, result.interval.upper) == (
+        _type7(expected, TAIL),
+        _type7(expected, 1 - TAIL),
+    )
     flipped, _, _ = _exact_resample_values(a, b, other, labels=LABELS, seed=SEED, resamples=300)
-    assert (result.lower, result.upper) != (_type7(flipped, TAIL), _type7(flipped, 1 - TAIL))
+    assert (result.interval.lower, result.interval.upper) != (
+        _type7(flipped, TAIL),
+        _type7(flipped, 1 - TAIL),
+    )
 
 
 def test_population_and_label_validation_refuses_with_fixed_codes() -> None:
@@ -296,12 +309,15 @@ def test_result_refuses_forged_or_inconsistent_fields() -> None:
     a, b, refs = _pilot(30, seed=3)
     result = agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=100)
     payload = result.model_dump(mode="python")
-    forgeries: list[dict[str, object]] = [
+    top: list[dict[str, object]] = [
         {"coefficient": "gwet_ac1"},
         {"estimate": result.agreement.gwet_ac1},
+        {"interval": {**payload["interval"], "resamples": 10**9}},
+    ]
+    nested: list[dict[str, object]] = [
         {"undefined_resamples": 101},
         {"undefined_resamples": 100},
-        {"lower": result.upper, "upper": result.lower},
+        {"lower": result.interval.upper, "upper": result.interval.lower},
         {"lower": None},
         {"upper": 1.5},
         {"confidence_level": 0.9},
@@ -309,9 +325,14 @@ def test_result_refuses_forged_or_inconsistent_fields() -> None:
         {"seed": -1},
         {"bootstrap_version": "other"},
     ]
-    for change in forgeries:
+    for change in top:
         with pytest.raises(ModelValidationError):
             AgreementBootstrap.model_validate({**payload, **change})
+    for change in nested:
+        with pytest.raises(ModelValidationError):
+            AgreementBootstrap.model_validate(
+                {**payload, "interval": {**payload["interval"], **change}}
+            )
 
 
 def test_pilot_scale_runtime_bound() -> None:
@@ -320,5 +341,5 @@ def test_pilot_scale_runtime_bound() -> None:
     start = time.perf_counter()
     result = agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=10_000)
     elapsed = time.perf_counter() - start
-    assert result.resamples == 10_000
+    assert result.interval.resamples == 10_000
     assert elapsed < 1.0

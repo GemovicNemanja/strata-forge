@@ -34,9 +34,23 @@ This is a pure deterministic numerical leaf. Read
   a new approval. No other bootstrap, and no inference of independence from cluster-repeated
   rows, is exported.
 - Update this file, module README, reference docs, and tests with any public API change.
-- `agreement` supports only two complete caller-declared human raters with distinct identities,
-  identical unique ordered item IDs and an explicit complete nominal category set. Refuse missing
-  labels/alignment; never silently filter, pool model raters or infer adjudication.
+- The two-human statistic (`nominal-two-human-raters-v1`) supports only two complete
+  caller-declared human raters with distinct identities, identical unique ordered item IDs and an
+  explicit complete nominal category set. Refuse missing labels/alignment; never silently filter,
+  pool model raters or infer adjudication. Do not loosen this rule.
+- The separate human-vs-model statistic (`nominal-human-vs-model-v1`, `human_model_agreement`)
+  was confirmed by the research owner on 2026-11-17 (r10-thresholds T6 as amended by CR-9 and
+  CC-20261106-01 §3, relayed by the platform coordinator). Its fixed rules: exactly one
+  `HumanAnnotations` and one `ModelRatings` (prompt SHA-256 and run ref provenance), never
+  interchangeable with `HumanRatings`; the function excludes and counts human skips and null
+  model labels separately, removing an item excluded for either reason from both series; skips
+  `>` the skip fraction (default 0.10) of the slice items FAIL, nulls `>` the null fraction
+  (default 0.10) REFUSE, and refusal takes precedence; the existing selector runs once on the
+  reference label over ALL slice items (gold before adjudication) and a slice with any item lacking
+  a reference refuses; kappa is reported beside a selected AC1; the point value `>=` threshold
+  (default 0.70) gates and the interval is report-only, using the approved bootstrap on the pair
+  after exclusions; user-vs-solver kappa on solver-gold items is report-only and never gates; the
+  result carries no item IDs or labels. Changing any of these needs a new version and approval.
 - Keep reference-only coefficient selection separate from rater-marginal chance correction.
   Gold takes precedence over supplied adjudication; absent both refuses. Registered item-set,
   reference version and per-item source refs are caller provenance, not trusted attestation.
@@ -46,5 +60,5 @@ This is a pure deterministic numerical leaf. Read
 - Preserve undefined coefficient reasons and `confidence_method="not_produced"` on point reports.
   No implicit multi-rater, missingness, other CI or annotation-resource implementation. Keep the
   synthetic `agreement_point_v1.json` conformance fixture synchronized. Import and point functions
-  need no NumPy or ML dependency; only `agreement_bootstrap` imports NumPy, lazily, from
-  `[scoring]`. Its per-resample values must stay equal to the exact `Fraction` point arithmetic.
+  need no NumPy or ML dependency; only `agreement_bootstrap` and `human_model_agreement`
+  import NumPy, lazily, from `[scoring]`. Its per-resample values must stay equal to the exact `Fraction` point arithmetic.

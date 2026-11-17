@@ -351,7 +351,7 @@ from strata_forge.metrics.agreement import agreement_bootstrap
 
 interval = agreement_bootstrap(a, b, references, labels=labels, seed=20261104)
 assert interval.coefficient == "cohen_kappa"
-assert interval.resamples == 10_000
+assert interval.interval.resamples == 10_000
 ```
 
 ```python
@@ -411,13 +411,96 @@ Importing `metrics.agreement` and the point functions still need no NumPy.
   `j = m-1`). The 95% interval uses `p = 1/40` and `p = 39/40`; the confidence level is fixed
   at 0.95 (`BOOTSTRAP_CONFIDENCE`) by the approved contract and recorded on the result.
 
-The frozen `AgreementBootstrap` records the contract fields (`bootstrap_version`, `rng`,
-`quantile_rule`, `coefficient_selection="full_sample_reference"`, `confidence_level`), both
-full point reports, the selected `coefficient` and its full-sample `estimate`, `seed`,
-`resamples`, `undefined_resamples`, `lower`, `upper`, `reason` and `numpy_version`. Validation
+The frozen `AgreementBootstrap` holds both full point reports, the selected `coefficient`, its
+full-sample `estimate` and an `interval` block. `BootstrapInterval` records the contract fields
+(`bootstrap_version`, `rng`, `quantile_rule`, `coefficient_selection="full_sample_reference"`,
+`confidence_level`), `seed`, `resamples`, `undefined_resamples`, `lower`, `upper`, `reason` and
+`numpy_version`, and no item identity, so the human-vs-model result below reuses it. Validation
 refuses a coefficient that disagrees with the selector, an estimate that is not the selected
 coefficient's, an undefined count above the resample count, misordered or out-of-range bounds,
-and a missing reason. It supports strict JSON round trips. Like the point helpers, it is
-direct-import only and is not re-exported by `strata_forge.metrics` or
+and a missing reason. Both support strict JSON round trips. Like the point helpers, they are
+direct-import only and are not re-exported by `strata_forge.metrics` or
 `evals.classification`. One call covers one slice; the caller supplies each slice's population.
 The rater contract is unchanged: both rater declarations are `rater_kind="human"`.
+
+## One human against one model rater
+
+`human_model_agreement` is a separate statistic, `statistic_version="nominal-human-vs-model-v1"`,
+beside the unchanged two-human one. The research owner confirmed its rules on 2026-11-17. It
+imports NumPy from `[scoring]` only for its interval.
+
+```python
+from strata_forge.metrics.agreement import (
+    HumanAnnotations, ModelRatings, human_model_agreement,
+)
+
+result = human_model_agreement(
+    HumanAnnotations(rater_id="user-1", rater_kind="human", item_ids=ids, ratings=user_labels),
+    ModelRatings(
+        rater_id="model-1", rater_kind="model", item_ids=ids, ratings=model_labels,
+        model_prompt_sha256=prompt_digest, model_run_ref="run-7",
+    ),
+    references,                      # one RegisteredReference per slice item, same order
+    labels=labels, seed=20261104,    # resamples=10_000, threshold=0.70,
+)                                    # max_human_skip_fraction=0.10, max_model_null_fraction=0.10
+```
+
+**Raters.** `HumanAnnotations` (`rater_kind="human"`) allows `None` as an explicit skip.
+`ModelRatings` (`rater_kind="model"`) allows `None` as a null model label and carries
+`model_prompt_sha256` (64 lowercase hex characters) and `model_run_ref` (a nonempty string or
+null). The types are distinct and closed. `pairwise_agreement` and `agreement_bootstrap` refuse a
+`ModelRatings`, and `human_model_agreement` refuses a `HumanRatings`, two humans or two models.
+The rater IDs must differ. The item-ID tuples must be identical in order, and every non-null
+label must be a declared category. An unknown model label refuses rather than counting as null.
+
+**Exclusions.** The function, not the caller, excludes per slice. `human_skipped` counts the
+human's skips and `model_null` the model's nulls, each over all `items`. An item with both counts
+in both. An item excluded for either reason leaves both series, so `used` is the number of items
+with both labels. The fractions are parameters (default `0.10`), compared strictly and exactly
+against their decimal spelling: `human_skipped > fraction * items` fails the slice and
+`model_null > fraction * items` refuses it. Twelve of 120 is within either limit; thirteen is not.
+
+**Selection.** The existing selector runs once, on the reference label of **all** slice items
+(solver gold when supplied, otherwise adjudication) in exact integers: AC1 iff some category has
+`5*count >= 4*items`, otherwise kappa. The coefficient is computed on the used pairs, and the
+bootstrap holds it fixed across resamples. When AC1 is selected, `cohen_kappa` reports kappa on
+the same pairs beside it, or `cohen_kappa_reason="chance_agreement_one"` when kappa is undefined.
+
+**Status.** Statuses are `pass`, `fail` or `refused`, decided in this order:
+
+1. `refused`, reason `empty`: the slice has no items.
+2. `refused`, reason `reference_missing`: some item has neither gold nor adjudication.
+3. `refused`, reason `model_nulls_exceeded`: the null limit is exceeded. This takes precedence
+   over a skip failure, because a refused slice is neither pass nor fail.
+4. `refused`, reason `no_used_items` or `coefficient_undefined`: no value exists.
+5. `fail`, reason `human_skips_exceeded`: the skip limit is exceeded. The value and interval
+   are still reported.
+6. `pass` when the exact value is `>=` the threshold (default 0.70, inclusive; a kappa of
+   exactly 7/10 passes), otherwise `fail` with reason `below_threshold`.
+
+A refused slice has no value, kappa or interval. The interval never gates.
+
+**Interval.** `interval` is the approved `BootstrapInterval` over the used pairs: the same seed,
+resample count, single `(resamples, used)` draw in the declared item order with excluded items
+removed, type-7 rule and undefined-resample count as `agreement_bootstrap`. It is identical to
+`agreement_bootstrap` over those pairs whenever both select the same coefficient.
+
+**User-versus-solver kappa.** `user_solver_kappa` (`role="report_only"`) is Cohen kappa between
+the human and the solver gold, over the items that have solver gold and a human label. Model
+nulls do not affect it, and adjudicated items are not included. It never changes the status.
+`n=0` gives `reason="empty"`.
+
+**Result.** `HumanModelAgreement` is frozen and closed. It records:
+
+- the statistic version and the counts `items`, `human_skipped`, `model_null` and `used`;
+- both exclusion fractions, `status`, `reason`, `coefficient` and `threshold`;
+- `value` and `cohen_kappa` as `ExactValue` (`exact`, the reduced rational such as `"7/10"`,
+  and `value`, its nearest float);
+- `cohen_kappa_reason`, `interval` and `user_solver_kappa`;
+- the model provenance.
+
+It holds no item IDs, labels or rater-supplied text. Validation re-derives the exclusion
+decisions from the counts, refuses inconsistent counts, status/reason pairs, values, kappa
+presence and threshold decisions, and supports strict JSON round trips. Input errors use fixed
+Forge `ValidationError` codes, including `agreement_exclusion_limit_invalid` for a fraction
+outside `[0, 1]`, a non-finite one or a non-number.

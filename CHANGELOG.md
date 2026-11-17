@@ -21,6 +21,16 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   undefined (chance agreement one) are counted in `undefined_resamples`. The frozen
   `AgreementBootstrap` records the contract, seed, NumPy version and bounds. NumPy comes from the
   `[scoring]` extra and is imported only when the function runs.
+- `strata_forge.metrics.agreement.human_model_agreement` adds the `nominal-human-vs-model-v1`
+  statistic for one human (`HumanAnnotations`, `None` = skip) against one model
+  (`ModelRatings`, `None` = null label, with `model_prompt_sha256` and `model_run_ref`), beside the
+  unchanged two-human statistic. Skips and nulls are excluded from both series and counted. More
+  than 10% skips fails the slice, and more than 10% nulls refuses it; both fractions are
+  parameters. The reference-prevalence selector runs once over all slice items, and kappa is
+  reported beside a selected AC1. The exact point value gates at an inclusive 0.70, and the
+  bootstrap interval is reported only. A report-only user-versus-solver kappa is reported beside
+  it. The frozen `HumanModelAgreement` holds exact rational values and no item IDs or labels.
+  `AgreementBootstrap` now carries its interval as a `BootstrapInterval` block.
 
 ## [0.4.0] - 2026-11-17
 
