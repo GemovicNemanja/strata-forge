@@ -466,19 +466,25 @@ against their decimal spelling: `human_skipped > fraction * items` fails the sli
 bootstrap holds it fixed across resamples. When AC1 is selected, `cohen_kappa` reports kappa on
 the same pairs beside it, or `cohen_kappa_reason="chance_agreement_one"` when kappa is undefined.
 
-**Status.** Statuses are `pass`, `fail` or `refused`, decided in this order:
+**Status.** The status is `pass`, `fail` or `refused`. `reasons` is an ordered tuple of every
+condition that applies, empty exactly when the slice passes. It is decided in this order:
 
-1. `refused`, reason `empty`: the slice has no items.
-2. `refused`, reason `reference_missing`: some item has neither gold nor adjudication.
-3. `refused`, reason `model_nulls_exceeded`: the null limit is exceeded. This takes precedence
-   over a skip failure, because a refused slice is neither pass nor fail.
-4. `refused`, reason `no_used_items` or `coefficient_undefined`: no value exists.
-5. `fail`, reason `human_skips_exceeded`: the skip limit is exceeded. The value and interval
-   are still reported.
-6. `pass` when the exact value is `>=` the threshold (default 0.70, inclusive; a kappa of
-   exactly 7/10 passes), otherwise `fail` with reason `below_threshold`.
+1. `refused`, `("empty",)`: the slice has no items.
+2. `refused`, `("reference_missing",)`: some item has neither gold nor adjudication.
+3. The skip limit is the signed rule, and the null limit is a default that never overrides it:
+   - When skips exceed their limit, the status is `fail` and `human_skips_exceeded` comes
+     first. `model_nulls_exceeded` follows when nulls also exceed theirs, so a re-pilot also
+     re-runs the model labels.
+   - When only nulls exceed their limit, the status is `refused`, `("model_nulls_exceeded",)`.
+4. Otherwise a value condition is appended, if one applies: `no_used_items`,
+   `coefficient_undefined`, or `below_threshold` when the exact value is below the threshold
+   (default 0.70, inclusive; a kappa of exactly 7/10 passes).
+5. With no skip failure, a value condition gives `refused` (`no_used_items`,
+   `coefficient_undefined`) or `fail` (`below_threshold`); no condition at all gives `pass`.
 
-A refused slice has no value, kappa or interval. The interval never gates.
+A failed slice still reports its value and interval for information when the value is defined,
+for example `("human_skips_exceeded", "model_nulls_exceeded")` with both. A refused slice
+never reports a value, kappa or interval. The interval never gates.
 
 **Interval.** `interval` is the approved `BootstrapInterval` over the used pairs: the same seed,
 resample count, single `(resamples, used)` draw in the declared item order with excluded items
@@ -493,14 +499,15 @@ nulls do not affect it, and adjudicated items are not included. It never changes
 **Result.** `HumanModelAgreement` is frozen and closed. It records:
 
 - the statistic version and the counts `items`, `human_skipped`, `model_null` and `used`;
-- both exclusion fractions, `status`, `reason`, `coefficient` and `threshold`;
+- both exclusion fractions, `status`, `reasons`, `coefficient` and `threshold`;
 - `value` and `cohen_kappa` as `ExactValue` (`exact`, the reduced rational such as `"7/10"`,
   and `value`, its nearest float);
 - `cohen_kappa_reason`, `interval` and `user_solver_kappa`;
 - the model provenance.
 
 It holds no item IDs, labels or rater-supplied text. Validation re-derives the exclusion
-decisions from the counts, refuses inconsistent counts, status/reason pairs, values, kappa
+decisions from the counts through the same decision rule, refuses inconsistent counts,
+status/reasons pairs, values, kappa
 presence and threshold decisions, and supports strict JSON round trips. Input errors use fixed
 Forge `ValidationError` codes, including `agreement_exclusion_limit_invalid` for a fraction
 outside `[0, 1]`, a non-finite one or a non-number.

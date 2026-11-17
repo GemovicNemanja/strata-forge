@@ -733,6 +733,44 @@ def _exceeds(count: int, items: int, fraction: float) -> bool:
     return count > Fraction(str(fraction)) * items
 
 
+def _decide(
+    *,
+    items: int,
+    used: int,
+    skips_exceeded: bool,
+    nulls_exceeded: bool,
+    reference_missing: bool,
+    undefined: bool,
+    value: Fraction | None,
+    threshold: float,
+) -> tuple[HumanModelStatus, tuple[HumanModelReason, ...], bool] | None:
+    """Return status, ordered reasons and whether a value is reported; None if inconsistent."""
+    if not items:
+        return "refused", ("empty",), False
+    if reference_missing:
+        return "refused", ("reference_missing",), False
+    reasons: list[HumanModelReason] = []
+    if skips_exceeded:
+        reasons.append("human_skips_exceeded")
+    if nulls_exceeded:
+        reasons.append("model_nulls_exceeded")
+        # The signed skip failure is never overridden by the default null refusal.
+        if not skips_exceeded:
+            return "refused", tuple(reasons), False
+    if not used:
+        reasons.append("no_used_items")
+    elif undefined:
+        reasons.append("coefficient_undefined")
+    elif value is None:
+        return None
+    elif value < Fraction(str(threshold)):
+        reasons.append("below_threshold")
+    reported = bool(used) and not undefined
+    if skips_exceeded or "below_threshold" in reasons:
+        return "fail", tuple(reasons), reported
+    return ("refused" if reasons else "pass"), tuple(reasons), reported
+
+
 class HumanModelAgreement(_Frozen):
     """Counted exclusions, a reference-selected gated point value and its reported interval."""
 
@@ -744,7 +782,7 @@ class HumanModelAgreement(_Frozen):
     max_human_skip_fraction: float = Field(ge=0, le=1, allow_inf_nan=False)
     max_model_null_fraction: float = Field(ge=0, le=1, allow_inf_nan=False)
     status: HumanModelStatus
-    reason: HumanModelReason | None
+    reasons: tuple[HumanModelReason, ...]
     coefficient: CoefficientName | None
     value: ExactValue | None
     cohen_kappa: ExactValue | None
@@ -758,25 +796,25 @@ class HumanModelAgreement(_Frozen):
     @model_validator(mode="after")
     def _consistent(self) -> HumanModelAgreement:
         excluded = self.items - self.used
-        skips = _exceeds(self.human_skipped, self.items, self.max_human_skip_fraction)
-        nulls = _exceeds(self.model_null, self.items, self.max_model_null_fraction)
-        refused = self.status == "refused"
+        structural = self.reasons in {("empty",), ("reference_missing",)}
+        decision = _decide(
+            items=self.items,
+            used=self.used,
+            skips_exceeded=_exceeds(self.human_skipped, self.items, self.max_human_skip_fraction),
+            nulls_exceeded=_exceeds(self.model_null, self.items, self.max_model_null_fraction),
+            reference_missing=self.reasons == ("reference_missing",),
+            undefined="coefficient_undefined" in self.reasons,
+            value=Fraction(self.value.exact) if self.value is not None else None,
+            threshold=self.threshold,
+        )
         valued = self.value is not None
         checks = (
+            decision is not None and decision == (self.status, self.reasons, valued),
             self.used <= self.items,
             max(self.human_skipped, self.model_null) <= excluded,
             excluded <= self.human_skipped + self.model_null,
-            refused == (self.reason not in {None, "below_threshold", "human_skips_exceeded"}),
-            (self.status == "pass") == (self.reason is None),
-            self.reason != "empty" or self.items == 0,
-            self.reason != "model_nulls_exceeded" or nulls,
-            self.reason in {"empty", "reference_missing", "model_nulls_exceeded"} or not nulls,
-            self.reason != "no_used_items" or self.used == 0,
-            self.reason != "human_skips_exceeded" or skips,
-            refused or self.reason == "human_skips_exceeded" or not skips,
-            valued == (not refused),
             (self.interval is not None) == valued,
-            (self.coefficient is None) == (self.reason in {"empty", "reference_missing"}),
+            (self.coefficient is None) == structural,
             self.coefficient == "gwet_ac1"
             or (self.cohen_kappa is None and self.cohen_kappa_reason is None),
             not (self.cohen_kappa is not None and self.cohen_kappa_reason is not None),
@@ -787,12 +825,6 @@ class HumanModelAgreement(_Frozen):
         )
         if not all(checks):
             raise ValueError("agreement_human_model_invalid")
-        if self.status == "pass" or self.reason == "below_threshold":
-            met = self.value is not None and Fraction(self.value.exact) >= Fraction(
-                str(self.threshold)
-            )
-            if met != (self.status == "pass"):
-                raise ValueError("agreement_human_model_invalid")
         return self
 
 
@@ -881,38 +913,36 @@ def human_model_agreement(
     reference_labels = [
         item.solver_gold if item.solver_gold is not None else item.adjudicated for item in refs
     ]
+    reference_missing = any(label is None for label in reference_labels)
     coefficient: CoefficientName | None = None
-    reason: HumanModelReason | None = None
-    if not items:
-        reason = "empty"
-    elif any(label is None for label in reference_labels):
-        reason = "reference_missing"
-    else:
-        coefficient = _select_from_counts([reference_labels.count(label) for label in names], items)
-        if _exceeds(nulls, items, null_limit):
-            reason = "model_nulls_exceeded"
-        elif not pairs:
-            reason = "no_used_items"
     value: Fraction | None = None
     kappa: Fraction | None = None
     kappa_chance: Fraction | None = None
-    if reason is None and coefficient is not None:
-        _, kappa, ac1, kappa_chance, _ = _ratios(_counts(pairs, order), len(pairs))
-        value = ac1 if coefficient == "gwet_ac1" else kappa
-        if value is None:
-            reason = "coefficient_undefined"
+    if items and not reference_missing:
+        coefficient = _select_from_counts([reference_labels.count(label) for label in names], items)
+        if pairs:
+            _, kappa, ac1, kappa_chance, _ = _ratios(_counts(pairs, order), len(pairs))
+            value = ac1 if coefficient == "gwet_ac1" else kappa
+    decision = _decide(
+        items=items,
+        used=len(pairs),
+        skips_exceeded=_exceeds(skipped, items, skip_limit),
+        nulls_exceeded=_exceeds(nulls, items, null_limit),
+        reference_missing=reference_missing,
+        undefined=bool(pairs) and value is None,
+        value=value,
+        threshold=limit,
+    )
+    if decision is None:
+        raise ValidationError("agreement_human_model_invalid")
+    status, reasons, reported = decision
     interval: BootstrapInterval | None = None
-    status: HumanModelStatus = "refused"
-    if value is not None and coefficient is not None:
+    if not reported or value is None or coefficient is None:
+        value = None
+    else:
         size = len(names)
         cells = tuple(order[left] * size + order[right] for left, right in pairs)
         interval = _interval(cells, size, coefficient, seed=chosen_seed, resamples=count)
-        if _exceeds(skipped, items, skip_limit):
-            status, reason = "fail", "human_skips_exceeded"
-        elif value >= Fraction(str(limit)):
-            status = "pass"
-        else:
-            status, reason = "fail", "below_threshold"
     with_kappa = value is not None and coefficient == "gwet_ac1"
     return HumanModelAgreement(
         items=items,
@@ -922,7 +952,7 @@ def human_model_agreement(
         max_human_skip_fraction=skip_limit,
         max_model_null_fraction=null_limit,
         status=status,
-        reason=reason,
+        reasons=reasons,
         coefficient=coefficient,
         value=ExactValue.of(value) if value is not None else None,
         cohen_kappa=ExactValue.of(kappa) if with_kappa and kappa is not None else None,

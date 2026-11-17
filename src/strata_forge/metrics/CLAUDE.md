@@ -45,9 +45,11 @@ This is a pure deterministic numerical leaf. Read
   interchangeable with `HumanRatings`; the function excludes and counts human skips and null
   model labels separately, removing an item excluded for either reason from both series; skips
   `>` the skip fraction (default 0.10) of the slice items FAIL, nulls `>` the null fraction
-  (default 0.10) REFUSE, and refusal takes precedence; the existing selector runs once on the
-  reference label over ALL slice items (gold before adjudication) and a slice with any item lacking
-  a reference refuses; kappa is reported beside a selected AC1; the point value `>=` threshold
+  (default 0.10) REFUSE, but a signed skip FAIL is never overridden by the null default: both
+  exceeded is FAIL with both reasons listed (ordered `reasons` tuple, empty iff pass), a refused
+  slice reports no value and a failed one still reports its value and CI; the existing selector
+  runs once on the reference label over ALL slice items (gold before adjudication) and a slice
+  with any item lacking a reference refuses; kappa is reported beside a selected AC1; the point value `>=` threshold
   (default 0.70) gates and the interval is report-only, using the approved bootstrap on the pair
   after exclusions; user-vs-solver kappa on solver-gold items is report-only and never gates; the
   result carries no item IDs or labels. Changing any of these needs a new version and approval.

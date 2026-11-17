@@ -25,8 +25,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   statistic for one human (`HumanAnnotations`, `None` = skip) against one model
   (`ModelRatings`, `None` = null label, with `model_prompt_sha256` and `model_run_ref`), beside the
   unchanged two-human statistic. Skips and nulls are excluded from both series and counted. More
-  than 10% skips fails the slice, and more than 10% nulls refuses it; both fractions are
-  parameters. The reference-prevalence selector runs once over all slice items, and kappa is
+  than 10% skips fails the slice, and more than 10% nulls alone refuses it. When both are
+  exceeded the slice fails, and its ordered `reasons` list both. Both fractions are parameters. A
+  refused slice reports no value; a failed one still reports its value and interval. The reference-prevalence selector runs once over all slice items, and kappa is
   reported beside a selected AC1. The exact point value gates at an inclusive 0.70, and the
   bootstrap interval is reported only. A report-only user-versus-solver kappa is reported beside
   it. The frozen `HumanModelAgreement` holds exact rational values and no item IDs or labels.

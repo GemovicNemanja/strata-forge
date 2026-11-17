@@ -240,7 +240,7 @@ def test_human_skips_fail_strictly_above_ten_percent(skips: int, status: str) ->
     result = _run(human, model, _balanced_refs(120))
     assert result.human_skipped == skips
     assert result.status == status
-    assert result.reason == (None if status == "pass" else "human_skips_exceeded")
+    assert result.reasons == (() if status == "pass" else ("human_skips_exceeded",))
     assert result.value is not None
     assert result.interval is not None
     assert result.value.value > 0.7
@@ -253,15 +253,74 @@ def test_model_nulls_refuse_strictly_above_ten_percent(nulls: int, status: str) 
     assert result.model_null == nulls
     assert result.status == status
     if status == "refused":
-        assert result.reason == "model_nulls_exceeded"
+        assert result.reasons == ("model_nulls_exceeded",)
         assert (result.value, result.interval, result.cohen_kappa) == (None, None, None)
         assert result.coefficient == "cohen_kappa"
 
 
-def test_model_null_refusal_takes_precedence_over_a_human_skip_failure() -> None:
-    human, model = _pairs(120, skips=20, nulls=20)
+def test_both_limits_exceeded_fail_with_both_reasons_and_report_the_value() -> None:
+    human, model = _pairs(120, skips=13, nulls=13)
     result = _run(human, model, _balanced_refs(120))
-    assert (result.status, result.reason) == ("refused", "model_nulls_exceeded")
+    assert result.status == "fail"
+    assert result.reasons == ("human_skips_exceeded", "model_nulls_exceeded")
+    assert result.value is not None
+    assert result.interval is not None
+    payload = result.model_dump(mode="python")
+    for forged in (
+        {"status": "refused", "value": None, "interval": None},
+        {"reasons": ("human_skips_exceeded",)},
+        {"reasons": ("model_nulls_exceeded",)},
+    ):
+        with pytest.raises(ModelValidationError):
+            HumanModelAgreement.model_validate({**payload, **forged})
+
+
+def test_a_skip_failure_lists_every_other_applicable_reason() -> None:
+    human, model = _exact_kappa_7_10()
+    skipped: list[str | None] = [None, None, None, None, None, *human[5:]]
+    below = _run(skipped, model, _refs([E] * 20 + [C] * 20))
+    assert below.status == "fail"
+    assert below.reasons == ("human_skips_exceeded", "below_threshold")
+    assert below.value is not None
+    undefined = _run([None, None, E, E, E, E, E, E, E, E], [E] * 10, _refs([E] * 5 + [C] * 5))
+    assert (undefined.status, undefined.reasons) == (
+        "fail",
+        ("human_skips_exceeded", "coefficient_undefined"),
+    )
+    assert (undefined.value, undefined.interval) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["empty", "reference_missing", "model_nulls_exceeded", "no_used_items", "undefined"],
+)
+def test_a_refused_slice_never_reports_a_value_kappa_or_interval(case: str) -> None:
+    human, model = _pairs(120, nulls=13 if case == "model_nulls_exceeded" else 0)
+    refs: Sequence[RegisteredReference] = _balanced_refs(120)
+    options: dict[str, float] = {}
+    if case == "empty":
+        human, model, refs = [], [], ()
+    elif case == "reference_missing":
+        refs = _refs([None, *[(E, C, U)[i % 3] for i in range(1, 120)]])
+    elif case == "no_used_items":
+        human = [None] * 120
+        options = {"max_human_skip_fraction": 1}
+    elif case == "undefined":
+        human, model, refs = [E] * 10, [E] * 10, _refs([E] * 5 + [C] * 5)
+    result = _run(human, model, refs, **options)
+    assert result.status == "refused"
+    assert len(result.reasons) == 1
+    assert (result.value, result.cohen_kappa, result.cohen_kappa_reason, result.interval) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    payload = result.model_dump(mode="python")
+    with pytest.raises(ModelValidationError):
+        HumanModelAgreement.model_validate(
+            {**payload, "value": {"exact": "1", "value": 1.0}, "interval": None}
+        )
 
 
 def test_exclusion_fractions_are_parameters_with_strict_comparison() -> None:
@@ -280,7 +339,7 @@ def test_exclusion_fractions_are_parameters_with_strict_comparison() -> None:
     one_null[5] = None
     assert _run(clean, clean, _balanced_refs(20), max_model_null_fraction=0).status == "pass"
     strict = _run(clean, one_null, _balanced_refs(20), max_model_null_fraction=0)
-    assert strict.reason == "model_nulls_exceeded"
+    assert strict.reasons == ("model_nulls_exceeded",)
 
 
 @pytest.mark.parametrize("fraction", [-0.1, 1.1, float("nan"), float("inf"), True, "0.1"])
@@ -358,9 +417,9 @@ def test_any_item_without_a_reference_label_refuses_the_slice() -> None:
     gold: list[str | None] = [(E, C, U)[i % 3] for i in range(20)]
     gold[7] = None
     result = _run(human, model, _refs(gold))
-    assert (result.status, result.reason, result.coefficient, result.value) == (
+    assert (result.status, result.reasons, result.coefficient, result.value) == (
         "refused",
-        "reference_missing",
+        ("reference_missing",),
         None,
         None,
     )
@@ -382,17 +441,17 @@ def test_threshold_is_inclusive_at_exactly_seven_tenths() -> None:
     assert at.coefficient == "cohen_kappa"
     assert at.value is not None
     assert (at.value.exact, at.value.value) == ("7/10", 0.7)
-    assert (at.status, at.reason, at.threshold) == ("pass", None, 0.7)
+    assert (at.status, at.reasons, at.threshold) == ("pass", (), 0.7)
     above = _run(human, model, refs, threshold=0.7000000001)
-    assert (above.status, above.reason) == ("fail", "below_threshold")
+    assert (above.status, above.reasons) == ("fail", ("below_threshold",))
     assert above.interval is not None
 
 
 def test_undefined_selected_coefficient_refuses() -> None:
     result = _run([E] * 10, [E] * 10, _refs([E] * 5 + [C] * 5))
-    assert (result.status, result.reason, result.coefficient) == (
+    assert (result.status, result.reasons, result.coefficient) == (
         "refused",
-        "coefficient_undefined",
+        ("coefficient_undefined",),
         "cohen_kappa",
     )
     assert (result.value, result.interval) == (None, None)
@@ -407,7 +466,7 @@ def test_ac1_beside_undefined_kappa_reports_the_kappa_reason() -> None:
 
 def test_empty_and_fully_excluded_slices_refuse() -> None:
     empty = _run([], [], ())
-    assert (empty.status, empty.reason, empty.items) == ("refused", "empty", 0)
+    assert (empty.status, empty.reasons, empty.items) == ("refused", ("empty",), 0)
     excluded = _run(
         [None] * 4,
         [E] * 4,
@@ -415,7 +474,7 @@ def test_empty_and_fully_excluded_slices_refuse() -> None:
         max_human_skip_fraction=1,
         max_model_null_fraction=1,
     )
-    assert (excluded.status, excluded.reason, excluded.used) == ("refused", "no_used_items", 0)
+    assert (excluded.status, excluded.reasons, excluded.used) == ("refused", ("no_used_items",), 0)
 
 
 # Interval and report-only user-solver kappa
@@ -483,9 +542,9 @@ def test_user_solver_kappa_uses_only_solver_gold_items_and_never_gates() -> None
     resolved = [g if g is not None else a for g, a in zip(gold, adjudicated, strict=True)]
     no_solver = _run(skipped, model, _refs([None] * 40, resolved))
     assert (no_solver.user_solver_kappa.n, no_solver.user_solver_kappa.reason) == (0, "empty")
-    assert (no_solver.status, no_solver.reason, no_solver.value, no_solver.interval) == (
+    assert (no_solver.status, no_solver.reasons, no_solver.value, no_solver.interval) == (
         result.status,
-        result.reason,
+        result.reasons,
         result.value,
         result.interval,
     )
@@ -497,9 +556,11 @@ def test_frozen_result_refuses_forged_decisions_and_counts() -> None:
     payload = result.model_dump(mode="python")
     forgeries: list[dict[str, object]] = [
         {"threshold": 0.71},
-        {"status": "fail", "reason": "below_threshold"},
-        {"status": "fail", "reason": "human_skips_exceeded"},
-        {"status": "refused", "reason": "model_nulls_exceeded"},
+        {"status": "fail", "reasons": ("below_threshold",)},
+        {"status": "fail", "reasons": ("human_skips_exceeded",)},
+        {"status": "refused", "reasons": ("model_nulls_exceeded",)},
+        {"status": "refused", "reasons": ()},
+        {"reasons": ("model_nulls_exceeded", "human_skips_exceeded")},
         {"used": 41},
         {"human_skipped": 1},
         {"value": {"exact": "7/10", "value": 0.71}},
