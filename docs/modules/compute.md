@@ -291,7 +291,10 @@ hyperparameter keys are refused like any other unknown spec key.
 
 Each results row is ``{custom_id, output, error, finish_reason,
 input_tokens, output_tokens}``; a failed row carries ``None`` in the last
-three. Beside ``results.parquet`` the runner writes ``manifest.json``
+three. ``finish_reason`` is the client's normalized value (``stop``,
+``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
+client does not recognise is reported as ``stop``; ``length`` (the output
+hit ``max_tokens``) is always preserved. Beside ``results.parquet`` the runner writes ``manifest.json``
 (schema ``strata.run.manifest/v1``, ``kind`` ``inference``; every runner's
 manifest shares the schema), pushed with the results or kept with them on
 the machine. It records:
@@ -314,6 +317,13 @@ the machine. It records:
   totals.
 
 It holds no row content and no credential.
+
+A pushed run goes only to a **private** output dataset repo: the runner
+creates it private when it is missing and refuses a public one, first
+before any download or GPU time and again at push time, because a run's
+outputs and manifest name the model and dataset it read. The results and
+the manifest go up in one Hub commit, so a repo never holds one run's
+results beside another run's manifest.
 
 ### The runner contract
 

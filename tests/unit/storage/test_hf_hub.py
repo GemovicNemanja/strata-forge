@@ -26,6 +26,10 @@ class _FakeApi:
     def delete_repo(self, **kwargs: Any) -> None:
         self.calls.append(("delete_repo", kwargs))
 
+    def repo_info(self, **kwargs: Any) -> Any:
+        self.calls.append(("repo_info", kwargs))
+        return types.SimpleNamespace(private=kwargs["repo_id"].endswith("-private"))
+
     def list_repo_files(self, **kwargs: Any) -> list[str]:
         self.calls.append(("list_repo_files", kwargs))
         return ["config.json", "model.safetensors", "tokenizer.json"]
@@ -134,6 +138,15 @@ class TestRepoLifecycle:
         assert kwargs["repo_type"] == "dataset"
         assert kwargs["private"] is True
         assert kwargs["exist_ok"] is False
+
+    async def test_is_private_reads_the_repo_visibility(self, fake_hf: dict[str, Any]) -> None:
+        client = HFHubClient()
+        assert await client.is_private("me/out-private", repo_type="dataset") is True
+        assert await client.is_private("me/out-public", repo_type="dataset") is False
+        assert fake_hf["last_api"].calls[0] == (
+            "repo_info",
+            {"repo_id": "me/out-private", "repo_type": "dataset"},
+        )
 
     async def test_create_repo_extras_forwarded(self, fake_hf: dict[str, Any]) -> None:
         client = HFHubClient()

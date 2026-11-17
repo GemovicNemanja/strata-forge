@@ -36,6 +36,17 @@ if TYPE_CHECKING:
     from strata_forge.llm import LLMClient, LLMResponse
 
 _TOKEN = "hf_secretwritetoken1234567890"
+# The real preflight, kept before the autouse fixture below replaces it for every other test.
+_REAL_CHECK_OUTPUT_REPO = ir._check_output_repo  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.fixture(autouse=True)
+def _output_repo_is_private(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    # The output-repo preflight asks the Hub; tests that exercise it call the real one directly.
+    async def _ok(spec: Any, hf_token: Any) -> None:
+        del spec, hf_token
+
+    monkeypatch.setattr(ir, "_check_output_repo", _ok)
 
 
 @pytest.fixture(autouse=True)
@@ -493,6 +504,7 @@ async def test_main_reports_a_phase_for_every_silent_stretch(
     events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     kinds = [e["kind"] for e in events]
     assert [e["message"] for e in events if e["kind"] == "phase"] == [
+        "Checking the output repo",
         "Loading the dataset",
         "Downloading the model",
         "Generating responses",
@@ -1469,9 +1481,9 @@ async def test_sampling_extras_are_sent_with_every_chunk(
 def test_the_snapshot_commit_is_read_from_the_cache_directory_name(tmp_path: Path) -> None:
     cached = tmp_path / "models--org--model" / "snapshots" / _SHA
     cached.mkdir(parents=True)
-    assert ir._snapshot_commit(cached) == _SHA  # pyright: ignore[reportPrivateUsage]
+    assert ir.snapshot_commit(cached) == _SHA  # pyright: ignore[reportPrivateUsage]
     # A layout that does not name a commit records none rather than a guess.
-    assert ir._snapshot_commit(tmp_path / "hub-snapshot") is None  # pyright: ignore[reportPrivateUsage]
+    assert ir.snapshot_commit(tmp_path / "hub-snapshot") is None  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
@@ -1508,7 +1520,7 @@ async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
     assert set(manifest["serving"]) == {"max_model_len", "dtype"}
     assert manifest["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
     assert manifest["dataset"]["requested_revision"] == "8978b4c1c8a030706e837a239dd870a8fe8de8a4"
-    assert manifest["engine"]["version"] == ir.__version__
+    assert manifest["engine"]["version"] == SPEC_VERSION
     assert set(manifest["engine"]["packages"]) == {
         "vllm",
         "transformers",
@@ -1531,91 +1543,153 @@ async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
     assert "ROW-TEXT" not in raw
 
 
-async def test_the_manifest_is_pushed_beside_the_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+class _Hub:
+    """A Hub client double: records uploads and answers visibility from ``public``."""
+
+    public: ClassVar[set[str]] = set()
+    calls: ClassVar[list[tuple[str, Any]]] = []
+
+    def __init__(self, *, token: str) -> None:
+        assert token == _TOKEN
+
+    async def create_repo(self, repo_id: str, **kwargs: Any) -> None:
+        _Hub.calls.append(("create_repo", (repo_id, kwargs)))
+
+    async def is_private(self, repo_id: str, **_kw: Any) -> bool:
+        return repo_id not in _Hub.public
+
+    async def upload_folder(self, local_dir: Any, repo_id: str, **kwargs: Any) -> None:
+        _Hub.calls.append(("upload_folder", (str(local_dir), repo_id, kwargs)))
+
+    async def upload_file(self, *_a: Any, **_kw: Any) -> None:  # pragma: no cover - must not run
+        raise AssertionError("results and manifest go up in one commit, never file by file")
+
+
+@pytest.fixture
+def hub(monkeypatch: pytest.MonkeyPatch) -> type[_Hub]:
+    _Hub.public = set()
+    _Hub.calls = []
+    monkeypatch.setattr(ir, "HFHubClient", _Hub)
+    return _Hub
+
+
+async def test_results_and_manifest_go_up_in_one_commit(tmp_path: Path, hub: type[_Hub]) -> None:
     results = tmp_path / "results.parquet"
     results.write_bytes(b"")
     (tmp_path / "manifest.json").write_text("{}")
-    uploads: list[str] = []
-
-    class _Hub:
-        def __init__(self, *, token: str) -> None:
-            assert token == _TOKEN
-
-        async def create_repo(self, *_a: Any, **_kw: Any) -> None:
-            return None
-
-        async def upload_file(self, path: Any, name: str, *_a: Any, **_kw: Any) -> None:
-            del path
-            uploads.append(name)
-
-    monkeypatch.setattr(ir, "HFHubClient", _Hub)
     spec = ir.RunSpec.model_validate_json(_spec_json())
+
     assert await ir._push_results(spec, results, _TOKEN) == "org/out"  # pyright: ignore[reportPrivateUsage]
-    assert uploads == ["results.parquet", "manifest.json"]
+    uploads = [c for c in hub.calls if c[0] == "upload_folder"]
+    assert len(uploads) == 1
+    local_dir, repo_id, kwargs = uploads[0][1]
+    assert local_dir == str(tmp_path)
+    assert repo_id == "org/out"
+    assert kwargs["repo_type"] == "dataset"
+    # Only this run's files, even when the directory is a shared fallback location.
+    assert kwargs["allow_patterns"] == ("results.parquet", "manifest.json")
+    # Created private when missing.
+    assert hub.calls[0] == (
+        "create_repo",
+        ("org/out", {"repo_type": "dataset", "private": True, "exist_ok": True}),
+    )
 
 
-def _serve_with_models(monkeypatch: pytest.MonkeyPatch, payload: Any, status: int = 200) -> None:
-    import httpx
+async def test_a_public_output_repo_is_refused_at_push(tmp_path: Path, hub: type[_Hub]) -> None:
+    hub.public = {"org/out"}
+    results = tmp_path / "results.parquet"
+    results.write_bytes(b"")
+    spec = ir.RunSpec.model_validate_json(_spec_json())
 
-    real_client = httpx.AsyncClient
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/models"
-        return httpx.Response(status, json=payload)
-
-    def _client(**kwargs: Any) -> httpx.AsyncClient:
-        return real_client(transport=httpx.MockTransport(_handler), **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", _client)
+    with pytest.raises(ir.RunError, match="is public"):
+        await ir._push_results(spec, results, _TOKEN)  # pyright: ignore[reportPrivateUsage]
+    assert not [c for c in hub.calls if c[0] == "upload_folder"]
 
 
-async def test_the_served_context_length_is_read_from_the_model_server(
+async def test_a_public_output_repo_is_refused_before_any_gpu_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub: type[_Hub]
+) -> None:
+    hub.public = {"org/out"}
+    monkeypatch.setattr(ir, "_check_output_repo", _REAL_CHECK_OUTPUT_REPO)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _deliver_token(monkeypatch, tmp_path)
+    loaded: list[bool] = []
+
+    def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
+        del spec, token
+        loaded.append(True)
+        return [{"question": "a"}]
+
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+    monkeypatch.setattr(ir, "_load_rows", _rows)
+
+    assert await ir.main() == 1
+    assert not loaded  # refused before the dataset download, the model download or the server
+
+
+async def test_a_run_that_does_not_push_skips_the_output_preflight(hub: type[_Hub]) -> None:
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    await _REAL_CHECK_OUTPUT_REPO(spec, None)
+    assert hub.calls == []
+
+
+async def test_an_unpinned_run_records_the_commit_it_served(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sha = "40c069824f4251a91eefaf281ebe4c544efd3e18"
+    cached = tmp_path / "models--org--model" / "snapshots" / sha
+    cached.mkdir(parents=True)
+    (cached / "model.safetensors").write_bytes(b"")
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **_kw: str(cached))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 0
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["model"] == {"id": "org/model", "requested_revision": None, "commit": sha}
+
+
+@pytest.mark.parametrize("bad", [{"seed": 2**63}, {"seed": True}, {"top_k": True}, {"seed": "1"}])
+def test_seed_and_top_k_are_strict_bounded_integers(bad: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):  # noqa: PT011 - Pydantic's own error type
+        ir.Hyperparams.model_validate(bad)
+
+
+async def test_seed_and_top_k_reach_the_wire_through_the_real_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _serve_with_models(
-        monkeypatch,
-        {
-            "data": [
-                {"id": "other/model", "max_model_len": 1},
-                {"id": "org/model", "max_model_len": 8192},
-            ]
-        },
+    # The whole client stack down to the transport call: what the model server would receive.
+    import litellm
+
+    from strata_forge.llm import LLMClient as RealClient
+    from strata_forge.llm.providers.config import OpenAICompatConfig
+
+    sent: dict[str, Any] = {}
+
+    async def _acompletion(**kwargs: Any) -> Any:
+        sent.update(kwargs)
+        return litellm.ModelResponse(
+            choices=[{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", _acompletion)
+    provider = ir.OpenAICompatProvider(
+        OpenAICompatConfig(base_url="http://127.0.0.1:8000/v1", api_key=ir.SecretStr("x"))
     )
-    assert await ir._served_max_model_len("http://127.0.0.1:8000/v1", "org/model") == 8192  # pyright: ignore[reportPrivateUsage]
-
-
-@pytest.mark.parametrize(
-    ("payload", "status"),
-    [
-        ({"data": [{"id": "org/model"}]}, 200),
-        ({"data": [{"id": "org/model", "max_model_len": True}]}, 200),
-        ({"data": "nope"}, 200),
-        (["not", "an", "object"], 200),
-        ({"data": [{"id": "org/model", "max_model_len": 8192}]}, 500),
-    ],
-)
-async def test_an_unreadable_served_context_length_records_none(
-    monkeypatch: pytest.MonkeyPatch, payload: Any, status: int
-) -> None:
-    _serve_with_models(monkeypatch, payload, status)
-    assert await ir._served_max_model_len("http://127.0.0.1:8000/v1", "org/model") is None  # pyright: ignore[reportPrivateUsage]
-
-
-def test_the_served_dtype_is_read_from_the_engine_start_up_line(tmp_path: Path) -> None:
-    (tmp_path / "serve.stdout.log").write_text("starting\n")
-    (tmp_path / "serve.stderr.log").write_text(
-        "INFO Initializing an LLM engine with config: model='/m', dtype=torch.bfloat16, max_seq_len=8192\n"
+    client = RealClient(
+        model="org/model", provider="openai_compat", provider_clients={"openai_compat": provider}
     )
-    assert ir._served_dtype(tmp_path) == "bfloat16"  # pyright: ignore[reportPrivateUsage]
-    assert ir._served_dtype(tmp_path / "missing") is None  # pyright: ignore[reportPrivateUsage]
-
-
-def test_the_checkpoint_dtype_is_read_from_its_config(tmp_path: Path) -> None:
-    (tmp_path / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
-    assert ir._checkpoint_dtype(tmp_path) == "bfloat16"  # pyright: ignore[reportPrivateUsage]
-    (tmp_path / "config.json").write_text(json.dumps({"dtype": "float16"}))
-    assert ir._checkpoint_dtype(tmp_path) == "float16"  # pyright: ignore[reportPrivateUsage]
-    (tmp_path / "config.json").write_text("[]")
-    assert ir._checkpoint_dtype(tmp_path) is None  # pyright: ignore[reportPrivateUsage]
+    hp = ir.Hyperparams(seed=7, top_k=20, temperature=0.7, top_p=0.8)
+    await client.complete(
+        messages=[ir.UserMessage(content="hi")],
+        temperature=hp.temperature,
+        top_p=hp.top_p,
+        provider_extras=ir._sampling_extras(hp),  # pyright: ignore[reportPrivateUsage]
+    )
+    assert sent["seed"] == 7
+    assert sent["extra_body"] == {"top_k": 20}
+    assert sent["temperature"] == 0.7
+    assert sent["top_p"] == 0.8

@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.metadata
 import itertools
 import json
 import re
@@ -71,9 +70,8 @@ from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt
 
-from strata_forge import __version__
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
@@ -84,17 +82,23 @@ from strata_forge.llm.providers.openai_compat import (
     OpenAICompatProvider,
 )
 from strata_forge.pipelines._common import (
+    MANIFEST_FILENAME,
+    MANIFEST_SCHEMA,
     RunError,
     RunSecrets,
     emit,
     load_config,
+    manifest_engine,
     model_server_environ,
     phase_sink,
+    require_commit_sha,
     results_dir,
     run_redactor,
     runner_main,
+    snapshot_commit,
     ticking_phase,
     validate_repo_id,
+    write_manifest,
 )
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
@@ -117,14 +121,7 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
 _MAX_RENDERED_CHARS = 200_000
 _RESULTS_FILENAME = "results.parquet"
-_MANIFEST_FILENAME = "manifest.json"
-#: One schema for every runner's manifest, told apart by its ``kind``, so a reader of run evidence
-#: handles scoring and training manifests without a second format.
-_MANIFEST_SCHEMA = "strata.run.manifest/v1"
 _MANIFEST_KIND = "inference"
-# A full Hub commit id: lowercase hex, exactly 40 characters. A branch or tag name moves, so a run
-# pinned by one is not reproducible, and an abbreviated id is ambiguous to the Hub's resolver.
-_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 #: The installed distributions whose versions decide what a run computed. The model server and
 #: its stack are installed fresh on the VM per run within a version range, so the exact versions
 #: are only knowable here, after installation.
@@ -196,8 +193,10 @@ class Hyperparams(BaseModel):
     top_p: float | None = None
     # Sent to the model server with every request. A per-request seed makes each row's sampling
     # reproducible on the same engine and hardware; it does not make two engines agree.
-    seed: int | None = Field(default=None, ge=0)
-    top_k: int | None = Field(default=None, ge=1)
+    # Strict: JSON ``true`` is not a seed. Bounded to int64, the model server's own range, so an
+    # out-of-range value is refused at spec load rather than by every request after start-up.
+    seed: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    top_k: StrictInt | None = Field(default=None, ge=1)
     concurrency: int = Field(default=8, ge=1, le=256)
     progress_chunk: int = Field(default=200, ge=1)
     row_limit: int | None = Field(default=None, ge=1)
@@ -240,12 +239,7 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
     spec = load_config(RunSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
-    if spec.model_revision is not None and not _COMMIT_SHA_RE.fullmatch(spec.model_revision):
-        msg = (
-            "model_revision must be a full 40-character lowercase commit id; a branch, tag or "
-            "abbreviated id is refused because the revision it names can change"
-        )
-        raise RunError(msg)
+    require_commit_sha(spec.model_revision, "model_revision")
     if spec.output_repo_id is not None:
         validate_repo_id(spec.output_repo_id, "output repo")
     _validate_template_coverage(spec)
@@ -459,9 +453,9 @@ async def _run_batches(
 def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | None:
     """The sampling settings the chat-completions call has no parameter for.
 
-    ``seed`` is an OpenAI-compatible request field. ``top_k`` is not, so it rides in
-    ``extra_body``, which the model server reads as part of the request body: passed as a plain
-    keyword it would be refused before the request is sent.
+    ``seed`` is an OpenAI-compatible request field. ``top_k`` is not an OpenAI parameter, so it
+    rides in ``extra_body``, the transport's explicit channel for server-specific body fields,
+    rather than depending on how the transport treats an unrecognised keyword.
     """
     extras: dict[str, Any] = {}
     if hp.seed is not None:
@@ -570,32 +564,6 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
     return snapshot
 
 
-def _snapshot_commit(snapshot: Path) -> str | None:
-    """The commit a Hub snapshot directory holds, read from its name.
-
-    The Hub cache keeps each downloaded revision under ``snapshots/<commit>``, so the directory
-    name is the commit the default branch resolved to at download time. Anything else (a local
-    directory, a different cache layout) records no commit rather than a guess.
-    """
-    name = snapshot.name
-    return name if _COMMIT_SHA_RE.fullmatch(name) else None
-
-
-def _installed_versions() -> dict[str, str | None]:
-    """Installed versions of :data:`_RECORDED_DISTRIBUTIONS`, ``None`` for one not installed.
-
-    Read from package metadata, so nothing is imported: importing the model server's stack in
-    this process would pay its start-up cost for a version string.
-    """
-    versions: dict[str, str | None] = {}
-    for name in _RECORDED_DISTRIBUTIONS:
-        try:
-            versions[name] = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError:
-            versions[name] = None
-    return versions
-
-
 async def _served_max_model_len(base_url: str, model_id: str) -> int | None:
     """The context length the model server actually admitted, as its ``/models`` route reports it.
 
@@ -673,14 +641,9 @@ def _build_manifest(
     finish = Counter(str(r["finish_reason"]) for r in rows if r["error"] is None)
     ok = sum(1 for r in rows if r["error"] is None)
     return {
-        "schema": _MANIFEST_SCHEMA,
+        "schema": MANIFEST_SCHEMA,
         "kind": _MANIFEST_KIND,
-        "engine": {
-            "version": __version__,
-            "spec_engine_version": spec.engine_version,
-            "python": sys.version.split()[0],
-            "packages": _installed_versions(),
-        },
+        "engine": manifest_engine(spec.engine_version, _RECORDED_DISTRIBUTIONS),
         "model": {
             "id": spec.model_id,
             "requested_revision": spec.model_revision,
@@ -708,36 +671,50 @@ def _build_manifest(
     }
 
 
-def _write_manifest(manifest: dict[str, Any], outdir: Path) -> Path:
-    outdir.mkdir(parents=True, exist_ok=True)
-    path = outdir / _MANIFEST_FILENAME
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    return path
+async def _ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
+    """Create the output repo private if it is missing, and refuse one that is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and
+    a run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
+    if not await hub.is_private(out_repo, repo_type="dataset"):
+        msg = (
+            f"the output repo {out_repo} is public; results are pushed only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)
+
+
+async def _check_output_repo(spec: RunSpec, hf_token: str | None) -> None:
+    """Refuse a public output repo before any GPU time is spent, not after the run."""
+    if not (hf_token and spec.output_repo_id):
+        return
+    out_repo = validate_repo_id(spec.output_repo_id, "output repo")
+    await _ensure_private_output(HFHubClient(token=hf_token), out_repo)
 
 
 async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
+    """Push the results and the manifest beside them in ONE Hub commit.
+
+    One commit, because two can half-land: a results file next to an earlier run's manifest is a
+    false provenance record, worse than none.
+    """
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push results"
         raise RunError(msg)
     out_repo = validate_repo_id(spec.output_repo_id, "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
-    await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
-    await hub.upload_file(
-        results_path,
-        _RESULTS_FILENAME,
+    # Re-checked at push time: visibility can change during a long run.
+    await _ensure_private_output(hub, out_repo)
+    await hub.upload_folder(
+        results_path.parent,
         out_repo,
         repo_type="dataset",
         commit_message="batch inference results",
+        # Only this run's two files: the directory can be a shared fallback location.
+        allow_patterns=(results_path.name, MANIFEST_FILENAME),
     )
-    manifest_path = results_path.parent / _MANIFEST_FILENAME
-    if manifest_path.is_file():
-        await hub.upload_file(
-            manifest_path,
-            _MANIFEST_FILENAME,
-            out_repo,
-            repo_type="dataset",
-            commit_message="batch inference manifest",
-        )
     return out_repo
 
 
@@ -753,6 +730,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # runs BEFORE the first countable milestone and can take minutes on its own.
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
     # blocked event loop cannot tick the caption that says it is still going.
+    if hf_token and spec.output_repo_id:
+        async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
+            await _check_output_repo(spec, hf_token)
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         rows = await asyncio.to_thread(_load_rows, spec, hub_token)
     prompts, custom_ids = _build_requests(spec, rows)
@@ -764,7 +744,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # token, and the server that follows is third-party code that must not hold it.
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
-    model_commit = spec.model_revision or _snapshot_commit(snapshot)
+    model_commit = spec.model_revision or snapshot_commit(snapshot)
 
     hp = spec.hyperparams
     task = build_vllm_task(
@@ -874,7 +854,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         # Beside the results, so the push and the on-VM copy carry it alike.
         await asyncio.to_thread(
-            _write_manifest,
+            write_manifest,
             _build_manifest(spec, out, model_commit, serving_facts),
             Path(results_path).parent,
         )

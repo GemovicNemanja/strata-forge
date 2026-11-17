@@ -15,8 +15,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   with every request, adds `finish_reason` and per-row token counts to the results, and writes a
   content-free `manifest.json` (`strata.run.manifest/v1`, `kind` `inference`) beside them: the
   served model commit, the engine and installed library versions, the served context length and
-  dtype, the template digest, the settings and the counts. This changes the runner
-  spec, so the next release is a minor bump.
+  dtype, the template digest, the settings and the counts. Results and manifest are pushed in
+  one commit, only to a private output repo: a public one is refused before the run starts and
+  again at push time. This changes the runner spec, so the next release is a minor bump.
+- `HFHubClient.is_private` reports a repo's visibility, since `create_repo(private=True,
+  exist_ok=True)` leaves an existing repo's visibility unchanged.
+- `strata_forge.pipelines._common` holds the helpers every runner's manifest shares: the commit-id
+  check, the snapshot-commit reader, installed-version capture and `strata.run.manifest/v1`.
 - `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
   conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,
   and explicit named-family Holm correction that retains caller order. Frozen results and

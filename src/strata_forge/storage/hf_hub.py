@@ -153,6 +153,16 @@ class HFHubClient:
         url: Any = await asyncio.to_thread(api.create_repo, **kwargs)
         return str(url)
 
+    async def is_private(self, repo_id: str, *, repo_type: RepoType = "model") -> bool:
+        """Whether the repo is private. Raises whatever the Hub client raises when it is missing.
+
+        ``create_repo(private=True, exist_ok=True)`` leaves an EXISTING repo's visibility as it
+        is, so a caller that must not publish needs to ask rather than assume.
+        """
+        api = self._api()
+        info: Any = await asyncio.to_thread(api.repo_info, repo_id=repo_id, repo_type=repo_type)
+        return bool(getattr(info, "private", False))
+
     async def delete_repo(
         self,
         repo_id: str,
