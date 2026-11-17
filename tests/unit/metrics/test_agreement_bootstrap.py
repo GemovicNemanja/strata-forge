@@ -343,6 +343,19 @@ def test_golden_bounds_pin_the_numpy_stream() -> None:
     assert result.interval.undefined_resamples == 0
 
 
+def test_the_resample_stream_itself_is_pinned() -> None:
+    """The bounds above can coincide across streams (the upper bound often sits at 1.0), so the
+    index stream the bootstrap draws is pinned directly: the same generator, call and shape."""
+    import hashlib
+
+    generator = np.random.Generator(np.random.PCG64(SEED))
+    draws = generator.integers(0, 12, size=(1000, 12), dtype=np.int64)
+    assert (
+        hashlib.sha256(draws.tobytes()).hexdigest()
+        == "532254d142027c64ccd48c15b97ca31ac4d3bfb45a944c6c755c0020e7c729b1"
+    )
+
+
 def test_missing_numpy_has_an_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     a, b, refs = _pilot(10)
     monkeypatch.setitem(sys.modules, "numpy", None)
