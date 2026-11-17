@@ -1,7 +1,5 @@
 # strata-forge
 
-## Platform delivery planning
-
 Typed, async-first toolkit for AI/LLM work — inference, evaluation, fine-tuning, retrieval, and
 remote compute orchestration across the major foundation-model providers.
 
