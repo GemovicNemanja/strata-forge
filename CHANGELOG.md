@@ -13,8 +13,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - The batch-inference runner pins a model to a full Hub commit id (`RunSpec.model_revision`;
   a branch, tag or abbreviated id is refused), sends `Hyperparams.seed` and `Hyperparams.top_k`
   with every request, adds `finish_reason` and per-row token counts to the results, and writes a
-  content-free `manifest.json` beside them: the served model commit, the engine and installed
-  library versions, the template digest, the settings and the counts. This changes the runner
+  content-free `manifest.json` (`strata.run.manifest/v1`, `kind` `inference`) beside them: the
+  served model commit, the engine and installed library versions, the served context length and
+  dtype, the template digest, the settings and the counts. This changes the runner
   spec, so the next release is a minor bump.
 - `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
   conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,

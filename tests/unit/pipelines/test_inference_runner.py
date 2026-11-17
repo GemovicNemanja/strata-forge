@@ -464,7 +464,13 @@ def _mock_main_deps(
         del results_path, token
         return cast("str", spec.output_repo_id)
 
+    async def _no_served_len(base_url: str, model_id: str) -> int | None:
+        del base_url, model_id
+        return None
+
     _FakeRunner.scripted = [_ok("A")] if scripted is None else scripted
+    # The real probe would reach for a model server on loopback; nothing listens there in a test.
+    monkeypatch.setattr(ir, "_served_max_model_len", _no_served_len)
     monkeypatch.setattr(ir, "_load_rows", _rows)
     monkeypatch.setattr(ir, "serving_endpoint", serving)
     monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
@@ -1497,7 +1503,9 @@ async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
     assert await ir.main() == 0
     raw = (tmp_path / "manifest.json").read_text()
     manifest = json.loads(raw)
-    assert manifest["schema"] == "strata.inference.manifest/v1"
+    assert manifest["schema"] == "strata.run.manifest/v1"
+    assert manifest["kind"] == "inference"
+    assert set(manifest["serving"]) == {"max_model_len", "dtype"}
     assert manifest["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
     assert manifest["dataset"]["requested_revision"] == "8978b4c1c8a030706e837a239dd870a8fe8de8a4"
     assert manifest["engine"]["version"] == ir.__version__
@@ -1546,3 +1554,68 @@ async def test_the_manifest_is_pushed_beside_the_results(
     spec = ir.RunSpec.model_validate_json(_spec_json())
     assert await ir._push_results(spec, results, _TOKEN) == "org/out"  # pyright: ignore[reportPrivateUsage]
     assert uploads == ["results.parquet", "manifest.json"]
+
+
+def _serve_with_models(monkeypatch: pytest.MonkeyPatch, payload: Any, status: int = 200) -> None:
+    import httpx
+
+    real_client = httpx.AsyncClient
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(status, json=payload)
+
+    def _client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(_handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _client)
+
+
+async def test_the_served_context_length_is_read_from_the_model_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _serve_with_models(
+        monkeypatch,
+        {
+            "data": [
+                {"id": "other/model", "max_model_len": 1},
+                {"id": "org/model", "max_model_len": 8192},
+            ]
+        },
+    )
+    assert await ir._served_max_model_len("http://127.0.0.1:8000/v1", "org/model") == 8192  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        ({"data": [{"id": "org/model"}]}, 200),
+        ({"data": [{"id": "org/model", "max_model_len": True}]}, 200),
+        ({"data": "nope"}, 200),
+        (["not", "an", "object"], 200),
+        ({"data": [{"id": "org/model", "max_model_len": 8192}]}, 500),
+    ],
+)
+async def test_an_unreadable_served_context_length_records_none(
+    monkeypatch: pytest.MonkeyPatch, payload: Any, status: int
+) -> None:
+    _serve_with_models(monkeypatch, payload, status)
+    assert await ir._served_max_model_len("http://127.0.0.1:8000/v1", "org/model") is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_served_dtype_is_read_from_the_engine_start_up_line(tmp_path: Path) -> None:
+    (tmp_path / "serve.stdout.log").write_text("starting\n")
+    (tmp_path / "serve.stderr.log").write_text(
+        "INFO Initializing an LLM engine with config: model='/m', dtype=torch.bfloat16, max_seq_len=8192\n"
+    )
+    assert ir._served_dtype(tmp_path) == "bfloat16"  # pyright: ignore[reportPrivateUsage]
+    assert ir._served_dtype(tmp_path / "missing") is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_checkpoint_dtype_is_read_from_its_config(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+    assert ir._checkpoint_dtype(tmp_path) == "bfloat16"  # pyright: ignore[reportPrivateUsage]
+    (tmp_path / "config.json").write_text(json.dumps({"dtype": "float16"}))
+    assert ir._checkpoint_dtype(tmp_path) == "float16"  # pyright: ignore[reportPrivateUsage]
+    (tmp_path / "config.json").write_text("[]")
+    assert ir._checkpoint_dtype(tmp_path) is None  # pyright: ignore[reportPrivateUsage]

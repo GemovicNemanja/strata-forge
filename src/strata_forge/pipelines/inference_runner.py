@@ -69,7 +69,7 @@ import time
 from collections import Counter, deque
 from pathlib import Path
 from statistics import median
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -118,7 +118,10 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 _MAX_RENDERED_CHARS = 200_000
 _RESULTS_FILENAME = "results.parquet"
 _MANIFEST_FILENAME = "manifest.json"
-_MANIFEST_SCHEMA = "strata.inference.manifest/v1"
+#: One schema for every runner's manifest, told apart by its ``kind``, so a reader of run evidence
+#: handles scoring and training manifests without a second format.
+_MANIFEST_SCHEMA = "strata.run.manifest/v1"
+_MANIFEST_KIND = "inference"
 # A full Hub commit id: lowercase hex, exactly 40 characters. A branch or tag name moves, so a run
 # pinned by one is not reproducible, and an abbreviated id is ambiguous to the Hub's resolver.
 _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -126,6 +129,11 @@ _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 #: its stack are installed fresh on the VM per run within a version range, so the exact versions
 #: are only knowable here, after installation.
 _RECORDED_DISTRIBUTIONS = ("vllm", "transformers", "torch", "datasets", "huggingface-hub")
+# vLLM prints its resolved engine configuration once at start-up, ``dtype=torch.bfloat16`` among
+# it. Only the head of each log is read: the line comes before any request is served.
+_SERVED_DTYPE_RE = re.compile(r"\bdtype=torch\.([a-z0-9_]+)")
+_SERVE_LOG_HEAD_BYTES = 2 * 1024 * 1024
+_SERVE_LOGS = ("serve.stdout.log", "serve.stderr.log")
 # Where results land on the VM when they are not pushed — see `_local_results_dir`.
 _RESULTS_DIR_NAME = "strata-inference-results"
 # How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
@@ -588,8 +596,74 @@ def _installed_versions() -> dict[str, str | None]:
     return versions
 
 
+async def _served_max_model_len(base_url: str, model_id: str) -> int | None:
+    """The context length the model server actually admitted, as its ``/models`` route reports it.
+
+    The server may clamp or derive the value it serves, so the requested ``max_model_len`` is not
+    evidence of it. Best effort: an answer without the field records ``None``, never a failure.
+    """
+    import httpx  # already a core dep via litellm
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url.rstrip('/')}/models")
+            response.raise_for_status()
+            payload: Any = response.json()  # pyright: ignore[reportAny] - untyped JSON from the server
+    except httpx.HTTPError, ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    entries = cast("dict[str, Any]", payload).get("data")
+    if not isinstance(entries, list):
+        return None
+    for raw in cast("list[Any]", entries):
+        if not isinstance(raw, dict):
+            continue
+        entry = cast("dict[str, Any]", raw)
+        if entry.get("id") == model_id:
+            value = entry.get("max_model_len")
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return None
+
+
+def _served_dtype(log_dir: Path) -> str | None:
+    """The dtype the model server resolved, read from its own start-up configuration line.
+
+    ``auto`` (or no ``dtype`` at all) leaves the choice to the server, which can differ from the
+    checkpoint's own dtype; its log is the one place that states what it chose. ``None`` when no
+    such line is found.
+    """
+    for name in _SERVE_LOGS:
+        path = log_dir / name
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(_SERVE_LOG_HEAD_BYTES).decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        match = _SERVED_DTYPE_RE.search(head)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _checkpoint_dtype(snapshot: Path) -> str | None:
+    """The dtype the checkpoint's ``config.json`` declares (``torch_dtype`` or ``dtype``)."""
+    try:
+        config: Any = json.loads((snapshot / "config.json").read_text())  # pyright: ignore[reportAny] - untyped JSON
+    except OSError, ValueError:
+        return None
+    if not isinstance(config, dict):
+        return None
+    typed = cast("dict[str, Any]", config)
+    value: Any = typed.get("torch_dtype") or typed.get("dtype")
+    return value if isinstance(value, str) else None
+
+
 def _build_manifest(
-    spec: RunSpec, rows: list[dict[str, Any]], model_commit: str | None
+    spec: RunSpec,
+    rows: list[dict[str, Any]],
+    model_commit: str | None,
+    serving: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What a run needs to be reproduced and audited, with no row content and no secret.
 
@@ -600,6 +674,7 @@ def _build_manifest(
     ok = sum(1 for r in rows if r["error"] is None)
     return {
         "schema": _MANIFEST_SCHEMA,
+        "kind": _MANIFEST_KIND,
         "engine": {
             "version": __version__,
             "spec_engine_version": spec.engine_version,
@@ -617,6 +692,8 @@ def _build_manifest(
             "split": spec.split,
             "requested_revision": spec.dataset_commit_sha,
         },
+        # What the model server actually ran with, next to what was asked for in `hyperparams`.
+        "serving": serving or {"max_model_len": None, "dtype": None},
         "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
         "column_mapping": spec.column_mapping,
         "hyperparams": spec.hyperparams.model_dump(),
@@ -747,6 +824,15 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         # stages, which is right: bind the stage here rather than widening its public API.
         on_phase=lambda message: phase(message, stage="load_model"),
     ) as endpoint:
+        # Read once the server is up, while its logs and routes still exist.
+        serving_facts: dict[str, Any] = {
+            "max_model_len": await _served_max_model_len(endpoint.base_url, spec.model_id),
+            "dtype": {
+                "requested": hp.dtype,
+                "checkpoint": await asyncio.to_thread(_checkpoint_dtype, snapshot),
+                "served": await asyncio.to_thread(_served_dtype, Path.cwd()),
+            },
+        }
         # The endpoint this runner just launched is on loopback and takes no credential, and
         # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back
         # to whatever OPENAI_API_KEY the VM happens to carry, which would send the user's real
@@ -788,7 +874,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         # Beside the results, so the push and the on-VM copy carry it alike.
         await asyncio.to_thread(
-            _write_manifest, _build_manifest(spec, out, model_commit), Path(results_path).parent
+            _write_manifest,
+            _build_manifest(spec, out, model_commit, serving_facts),
+            Path(results_path).parent,
         )
     if hf_token and spec.output_repo_id:
         try:

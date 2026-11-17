@@ -292,8 +292,9 @@ hyperparameter keys are refused like any other unknown spec key.
 Each results row is ``{custom_id, output, error, finish_reason,
 input_tokens, output_tokens}``; a failed row carries ``None`` in the last
 three. Beside ``results.parquet`` the runner writes ``manifest.json``
-(schema ``strata.inference.manifest/v1``), pushed with the results or kept
-with them on the machine. It records:
+(schema ``strata.run.manifest/v1``, ``kind`` ``inference``; every runner's
+manifest shares the schema), pushed with the results or kept with them on
+the machine. It records:
 
 - the model id, the requested revision and the commit actually served
   (the requested pin, or the commit the Hub cache resolved the default
@@ -303,6 +304,10 @@ with them on the machine. It records:
   ``vllm``, ``transformers``, ``torch``, ``datasets`` and
   ``huggingface-hub``, which the machine installs fresh per run within a
   range;
+- what the model server actually ran with, which can differ from what was
+  requested: the ``max_model_len`` its ``/models`` route reports, and the
+  dtype requested, declared by the checkpoint and resolved by the server
+  (from its start-up configuration line), each ``None`` when unknown;
 - a SHA-256 of the template (never its text), the column mapping and the
   hyperparameters;
 - row, success and failure counts, a ``finish_reason`` histogram and token
