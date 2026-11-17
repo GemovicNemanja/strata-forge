@@ -77,10 +77,13 @@ class PhaseSink(Protocol):
 
 
 __all__ = [
+    "COMMIT_SHA_RE",
     "ENGINE_DISTRIBUTION",
     "HF_TOKEN_SECRET",
     "LEGACY_TOKEN_ENV",
     "LEGACY_TOKEN_MESSAGE",
+    "MANIFEST_FILENAME",
+    "MANIFEST_SCHEMA",
     "MAX_PHASE_CHARS",
     "MAX_SECRETS_FILE_BYTES",
     "PHASE_TICK_SECONDS",
@@ -97,17 +100,22 @@ __all__ = [
     "install_termination_handlers",
     "installed_engine_commit",
     "installed_engine_version",
+    "installed_versions",
     "load_config",
     "load_secrets",
+    "manifest_engine",
     "model_server_environ",
     "phase_sink",
     "progress_path",
+    "require_commit_sha",
     "results_dir",
     "run_redactor",
     "runner_main",
     "sanitize",
+    "snapshot_commit",
     "ticking_phase",
     "validate_repo_id",
+    "write_manifest",
 ]
 
 # An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
@@ -156,9 +164,9 @@ PHASE_TICK_SECONDS = 10.0
 # The distribution whose installed metadata answers "which engine commit is this VM running".
 # The import package is ``strata_forge``; the distribution name is what ``pip`` and PEP 610 know.
 ENGINE_DISTRIBUTION = "strata-forge"
-# A full git commit id. The handshake compares whole ids, never a prefix: a short id the
-# control plane happened to send would match more than one commit.
-_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# A full git / Hub commit id: lowercase hex, exactly 40 characters. Whole ids only, never a
+# prefix: a short id matches more than one commit, and a branch or tag name moves.
+COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 # Set (to anything but empty / "0" / "false") by an orchestrator that stamps every spec, which
 # turns a spec with no ``engine_version`` from an accepted-with-warning launch into a refusal.
 # The transition for a control plane from before the handshake is bounded by this switch, not
@@ -505,7 +513,7 @@ def check_engine_version(expected: str | None) -> str | None:
     if not plus:
         return None
     installed_commit = installed_engine_commit()
-    if not _COMMIT_RE.fullmatch(commit) or installed_commit != commit:
+    if not COMMIT_SHA_RE.fullmatch(commit) or installed_commit != commit:
         running = (
             f"{executing}+{installed_commit}" if installed_commit else f"{executing} (release)"
         )
@@ -753,3 +761,73 @@ async def runner_main(
     finally:
         if writer is not None:
             writer.close()
+
+
+# ------------------------------ run manifest ------------------------------
+
+#: One schema for every runner's manifest, told apart by its ``kind``, so a reader of run evidence
+#: handles batch, scoring and training manifests without a second format.
+MANIFEST_SCHEMA = "strata.run.manifest/v1"
+MANIFEST_FILENAME = "manifest.json"
+
+
+def require_commit_sha(value: str | None, field: str) -> None:
+    """Refuse a revision that is set but is not a full commit id.
+
+    A branch, tag or abbreviated id is refused because the revision it names can change, so a run
+    pinned by one is not reproducible.
+    """
+    if value is not None and not COMMIT_SHA_RE.fullmatch(value):
+        msg = (
+            f"{field} must be a full 40-character lowercase commit id; a branch, tag or "
+            "abbreviated id is refused because the revision it names can change"
+        )
+        raise RunError(msg)
+
+
+def snapshot_commit(snapshot: Path) -> str | None:
+    """The commit a Hub snapshot directory holds, read from its name.
+
+    The Hub cache keeps each downloaded revision under ``snapshots/<commit>``, so the directory
+    name is the commit the requested revision (or the default branch) resolved to at download
+    time. Anything else (a local directory, a different cache layout) records no commit rather
+    than a guess.
+    """
+    name = snapshot.name
+    return name if COMMIT_SHA_RE.fullmatch(name) else None
+
+
+def installed_versions(distributions: tuple[str, ...]) -> dict[str, str | None]:
+    """Installed versions of ``distributions``, ``None`` for one not installed.
+
+    Read from package metadata, so nothing is imported: a machine installs a runner's stack fresh
+    within version ranges, so the exact versions are only knowable there, and importing a heavy
+    stack to read a version string would pay its start-up cost.
+    """
+    versions: dict[str, str | None] = {}
+    for name in distributions:
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
+def manifest_engine(
+    spec_engine_version: str | None, distributions: tuple[str, ...]
+) -> dict[str, Any]:
+    """The ``engine`` block every manifest carries: what software actually ran the job."""
+    return {
+        "version": __version__,
+        "spec_engine_version": spec_engine_version,
+        "python": sys.version.split()[0],
+        "packages": installed_versions(distributions),
+    }
+
+
+def write_manifest(manifest: dict[str, Any], outdir: Path) -> Path:
+    """Write ``manifest`` as ``manifest.json`` in ``outdir`` (beside the run's results)."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / MANIFEST_FILENAME
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return path

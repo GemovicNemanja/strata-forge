@@ -26,6 +26,10 @@ class _FakeApi:
     def delete_repo(self, **kwargs: Any) -> None:
         self.calls.append(("delete_repo", kwargs))
 
+    def repo_info(self, **kwargs: Any) -> Any:
+        self.calls.append(("repo_info", kwargs))
+        return types.SimpleNamespace(private=kwargs["repo_id"].endswith("-private"))
+
     def list_repo_files(self, **kwargs: Any) -> list[str]:
         self.calls.append(("list_repo_files", kwargs))
         return ["config.json", "model.safetensors", "tokenizer.json"]
@@ -37,6 +41,10 @@ class _FakeApi:
     def upload_folder(self, **kwargs: Any) -> str:
         self.calls.append(("upload_folder", kwargs))
         return f"https://huggingface.co/{kwargs['repo_id']}/commit/def"
+
+    def create_commit(self, **kwargs: Any) -> str:
+        self.calls.append(("create_commit", kwargs))
+        return f"https://huggingface.co/{kwargs['repo_id']}/commit/ghi"
 
 
 @pytest.fixture
@@ -67,6 +75,7 @@ def fake_hf(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     fake.hf_hub_download = _hf_hub_download  # type: ignore[attr-defined]
     fake.snapshot_download = _snapshot_download  # type: ignore[attr-defined]
     fake.HfApi = _make_api  # type: ignore[attr-defined]
+    fake.CommitOperationAdd = lambda **kw: ("add", kw)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
     return state
 
@@ -134,6 +143,40 @@ class TestRepoLifecycle:
         assert kwargs["repo_type"] == "dataset"
         assert kwargs["private"] is True
         assert kwargs["exist_ok"] is False
+
+    async def test_is_private_reads_the_repo_visibility(self, fake_hf: dict[str, Any]) -> None:
+        client = HFHubClient()
+        assert await client.is_private("me/out-private", repo_type="dataset") is True
+        assert await client.is_private("me/out-public", repo_type="dataset") is False
+        assert fake_hf["last_api"].calls[0] == (
+            "repo_info",
+            {"repo_id": "me/out-private", "repo_type": "dataset"},
+        )
+
+    async def test_upload_files_is_one_commit_of_exactly_those_files(
+        self, fake_hf: dict[str, Any]
+    ) -> None:
+        client = HFHubClient()
+        await client.upload_files(
+            {"results.parquet": "/r/results.parquet", "manifest.json": Path("/r/manifest.json")},
+            "me/out",
+            repo_type="dataset",
+            commit_message="results",
+        )
+        ((name, kwargs),) = fake_hf["last_api"].calls
+        assert name == "create_commit"
+        assert kwargs["repo_id"] == "me/out"
+        assert kwargs["repo_type"] == "dataset"
+        assert kwargs["commit_message"] == "results"
+        assert kwargs["operations"] == [
+            ("add", {"path_in_repo": "results.parquet", "path_or_fileobj": "/r/results.parquet"}),
+            ("add", {"path_in_repo": "manifest.json", "path_or_fileobj": "/r/manifest.json"}),
+        ]
+
+    async def test_upload_files_refuses_an_empty_commit(self, fake_hf: dict[str, Any]) -> None:
+        del fake_hf
+        with pytest.raises(ValueError, match="at least one file"):
+            await HFHubClient().upload_files({}, "me/out")
 
     async def test_create_repo_extras_forwarded(self, fake_hf: dict[str, Any]) -> None:
         client = HFHubClient()

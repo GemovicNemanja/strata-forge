@@ -5,7 +5,7 @@ strata_forge.pipelines.inference_runner``). It reads an INERT run spec from the
 ``STRATA_RUN_CONFIG`` env var, loads a Hugging Face dataset split, renders one prompt
 per row by simple ``{column}`` substitution (NO code execution), serves the model with
 vLLM on the same VM, runs a concurrency-bounded batch through an openai-compatible
-``LLMClient``, and then EITHER pushes ``{custom_id, output}`` results to the user's HF
+``LLMClient``, and then EITHER pushes ``{custom_id, output, ...}`` results to the user's HF
 dataset repo (when a write token + an output repo are supplied) OR keeps them as a parquet
 file on the VM (outside the per-run workdir, for the user to retrieve over SSH). Live
 progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestrator tails it).
@@ -36,7 +36,9 @@ credentials + the network):
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only). The ``error``
+    repo id; result rows are ``{custom_id, output, error, finish_reason, input_tokens,
+    output_tokens}`` (model text and its accounting only), and the ``manifest.json`` beside them
+    records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
     column is pushed to the Hub with the results, an exception's text is not under this
     module's control, and neither is a phrase from ``serving_endpoint``'s public phase hook.
@@ -57,16 +59,18 @@ its entire timeout, invisibly.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
+import json
 import re
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from statistics import median
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
@@ -78,17 +82,23 @@ from strata_forge.llm.providers.openai_compat import (
     OpenAICompatProvider,
 )
 from strata_forge.pipelines._common import (
+    MANIFEST_FILENAME,
+    MANIFEST_SCHEMA,
     RunError,
     RunSecrets,
     emit,
     load_config,
+    manifest_engine,
     model_server_environ,
     phase_sink,
+    require_commit_sha,
     results_dir,
     run_redactor,
     runner_main,
+    snapshot_commit,
     ticking_phase,
     validate_repo_id,
+    write_manifest,
 )
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
@@ -98,6 +108,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from strata_forge.core.redact import Redactor
+    from strata_forge.llm.registry import ProviderName
 
 __all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
 
@@ -110,6 +121,16 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
 _MAX_RENDERED_CHARS = 200_000
 _RESULTS_FILENAME = "results.parquet"
+_MANIFEST_KIND = "inference"
+#: The installed distributions whose versions decide what a run computed. The model server and
+#: its stack are installed fresh on the VM per run within a version range, so the exact versions
+#: are only knowable here, after installation.
+_RECORDED_DISTRIBUTIONS = ("vllm", "transformers", "torch", "datasets", "huggingface-hub")
+# vLLM prints its resolved engine configuration once at start-up, ``dtype=torch.bfloat16`` among
+# it. Only the head of each log is read: the line comes before any request is served.
+_SERVED_DTYPE_RE = re.compile(r"\bdtype=torch\.([a-z0-9_]+)")
+_SERVE_LOG_HEAD_BYTES = 2 * 1024 * 1024
+_SERVE_LOGS = ("serve.stdout.log", "serve.stderr.log")
 # Where results land on the VM when they are not pushed — see `_local_results_dir`.
 _RESULTS_DIR_NAME = "strata-inference-results"
 # How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
@@ -170,6 +191,12 @@ class Hyperparams(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = Field(default=None, ge=1)
     top_p: float | None = None
+    # Sent to the model server with every request. A per-request seed makes each row's sampling
+    # reproducible on the same engine and hardware; it does not make two engines agree.
+    # Strict: JSON ``true`` is not a seed. Bounded to int64, the model server's own range, so an
+    # out-of-range value is refused at spec load rather than by every request after start-up.
+    seed: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    top_k: StrictInt | None = Field(default=None, ge=1)
     concurrency: int = Field(default=8, ge=1, le=256)
     progress_chunk: int = Field(default=200, ge=1)
     row_limit: int | None = Field(default=None, ge=1)
@@ -190,6 +217,9 @@ class RunSpec(BaseModel):
     # step installs, so a spec cannot pick an engine the control plane did not validate against.
     engine_version: str | None = None
     model_id: str
+    # The model's full Hub commit id. Set, it is the only revision the run downloads; unset, the
+    # run takes the repo's default branch as it is at download time, and records what that was.
+    model_revision: str | None = None
     dataset_id: str
     dataset_commit_sha: str | None = None
     dataset_config: str | None = None
@@ -209,6 +239,7 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
     spec = load_config(RunSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
+    require_commit_sha(spec.model_revision, "model_revision")
     if spec.output_repo_id is not None:
         validate_repo_id(spec.output_repo_id, "output repo")
     _validate_template_coverage(spec)
@@ -222,7 +253,7 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     behaviour for the primitive but a catastrophe for a run: every row gets the byte-identical,
     row-independent prompt, the model answers it N times, every row SUCCEEDS, and the run reports
     `succeeded` with N copies of an answer to the literal text ``{question}``. Nothing downstream
-    can notice — the results file records ``{custom_id, output, error}``, so neither the rendered
+    can notice — the results file records the output and its accounting per row, so neither the rendered
     prompt nor the source row is in it.
 
     The one check that existed validated the mapping's VALUES against the split's columns, which
@@ -364,11 +395,25 @@ async def _run_batches(
         chunk = prompts[start : start + hp.progress_chunk]
         ids = custom_ids[start : start + hp.progress_chunk]
         results = await runner.run(
-            chunk, temperature=hp.temperature, max_tokens=hp.max_tokens, top_p=hp.top_p
+            chunk,
+            temperature=hp.temperature,
+            max_tokens=hp.max_tokens,
+            top_p=hp.top_p,
+            provider_extras=_sampling_extras(hp),
         )
         for cid, result in zip(ids, results, strict=True):
             if result.succeeded and result.response is not None:
-                out.append({"custom_id": cid, "output": result.response.text, "error": None})
+                response = result.response
+                out.append(
+                    {
+                        "custom_id": cid,
+                        "output": response.text,
+                        "error": None,
+                        "finish_reason": response.finish_reason,
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                    }
+                )
                 ok += 1
                 # Both already measured per request by the client — a true per-row latency and a
                 # real token count, not an average reconstructed from the chunk's wall time.
@@ -376,7 +421,16 @@ async def _run_batches(
                 output_tokens += result.response.usage.output_tokens
             else:
                 error = redactor.redact(repr(result.error))
-                out.append({"custom_id": cid, "output": None, "error": error})
+                out.append(
+                    {
+                        "custom_id": cid,
+                        "output": None,
+                        "error": error,
+                        "finish_reason": None,
+                        "input_tokens": None,
+                        "output_tokens": None,
+                    }
+                )
                 failed += 1
         emit(
             writer,
@@ -394,6 +448,21 @@ async def _run_batches(
             ),
         )
     return out
+
+
+def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | None:
+    """The sampling settings the chat-completions call has no parameter for.
+
+    ``seed`` is an OpenAI-compatible request field. ``top_k`` is not an OpenAI parameter, so it
+    rides in ``extra_body``, the transport's explicit channel for server-specific body fields,
+    rather than depending on how the transport treats an unrecognised keyword.
+    """
+    extras: dict[str, Any] = {}
+    if hp.seed is not None:
+        extras["seed"] = hp.seed
+    if hp.top_k is not None:
+        extras["extra_body"] = {"top_k": hp.top_k}
+    return {"openai_compat": extras} if extras else None
 
 
 def _throughput(
@@ -472,12 +541,14 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
     """Download the model's servable files with the run's credential; return the local snapshot.
 
     The model server is pointed at this directory with the Hub switched off, so what it can load
-    is exactly what this download admitted, and the token stays in this process.
+    is exactly what this download admitted, and the token stays in this process. A pinned
+    ``model_revision`` is the only revision downloaded.
     """
     hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
     try:
         snapshot = await hub.download_snapshot(
             spec.model_id,
+            revision=spec.model_revision,
             allow_patterns=SNAPSHOT_PATTERNS,
             ignore_patterns=SNAPSHOT_IGNORED,
         )
@@ -493,16 +564,163 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
     return snapshot
 
 
+async def _served_max_model_len(base_url: str, model_id: str) -> int | None:
+    """The context length the model server actually admitted, as its ``/models`` route reports it.
+
+    The server may clamp or derive the value it serves, so the requested ``max_model_len`` is not
+    evidence of it. Best effort: an answer without the field records ``None``, never a failure.
+    """
+    import httpx  # already a core dep via litellm
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url.rstrip('/')}/models")
+            response.raise_for_status()
+            payload: Any = response.json()  # pyright: ignore[reportAny] - untyped JSON from the server
+    except httpx.HTTPError, ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    entries = cast("dict[str, Any]", payload).get("data")
+    if not isinstance(entries, list):
+        return None
+    for raw in cast("list[Any]", entries):
+        if not isinstance(raw, dict):
+            continue
+        entry = cast("dict[str, Any]", raw)
+        if entry.get("id") == model_id:
+            value = entry.get("max_model_len")
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return None
+
+
+def _served_dtype(log_dir: Path) -> str | None:
+    """The dtype the model server resolved, read from its own start-up configuration line.
+
+    ``auto`` (or no ``dtype`` at all) leaves the choice to the server, which can differ from the
+    checkpoint's own dtype; its log is the one place that states what it chose. ``None`` when no
+    such line is found.
+    """
+    for name in _SERVE_LOGS:
+        path = log_dir / name
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(_SERVE_LOG_HEAD_BYTES).decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        match = _SERVED_DTYPE_RE.search(head)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _checkpoint_dtype(snapshot: Path) -> str | None:
+    """The dtype the checkpoint's ``config.json`` declares (``torch_dtype`` or ``dtype``)."""
+    try:
+        config: Any = json.loads((snapshot / "config.json").read_text())  # pyright: ignore[reportAny] - untyped JSON
+    except OSError, ValueError:
+        return None
+    if not isinstance(config, dict):
+        return None
+    typed = cast("dict[str, Any]", config)
+    value: Any = typed.get("torch_dtype") or typed.get("dtype")
+    return value if isinstance(value, str) else None
+
+
+def _build_manifest(
+    spec: RunSpec,
+    rows: list[dict[str, Any]],
+    model_commit: str | None,
+    serving: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """What a run needs to be reproduced and audited, with no row content and no secret.
+
+    The template is recorded as a digest: the spec that holds its text is stored by the control
+    plane, and a pushed manifest should not republish prompt text beside the outputs.
+    """
+    finish = Counter(str(r["finish_reason"]) for r in rows if r["error"] is None)
+    ok = sum(1 for r in rows if r["error"] is None)
+    return {
+        "schema": MANIFEST_SCHEMA,
+        "kind": _MANIFEST_KIND,
+        "engine": manifest_engine(spec.engine_version, _RECORDED_DISTRIBUTIONS),
+        "model": {
+            "id": spec.model_id,
+            "requested_revision": spec.model_revision,
+            "commit": model_commit,
+        },
+        "dataset": {
+            "id": spec.dataset_id,
+            "config": spec.dataset_config,
+            "split": spec.split,
+            "requested_revision": spec.dataset_commit_sha,
+        },
+        # What the model server actually ran with, next to what was asked for in `hyperparams`.
+        "serving": serving or {"max_model_len": None, "dtype": None},
+        "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
+        "column_mapping": spec.column_mapping,
+        "hyperparams": spec.hyperparams.model_dump(),
+        "counts": {
+            "rows": len(rows),
+            "succeeded": ok,
+            "failed": len(rows) - ok,
+            "finish_reasons": dict(sorted(finish.items())),
+            "input_tokens": sum(int(r["input_tokens"] or 0) for r in rows),
+            "output_tokens": sum(int(r["output_tokens"] or 0) for r in rows),
+        },
+    }
+
+
+async def _ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
+    """Create the output repo private if it is missing, and refuse one that is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and
+    a run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    try:
+        await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
+        private = await hub.is_private(out_repo, repo_type="dataset")
+    except Exception as exc:
+        msg = f"could not prepare the output repo {out_repo}: {exc}"
+        raise RunError(msg) from exc
+    if not private:
+        msg = (
+            f"the output repo {out_repo} is public; results are pushed only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)
+
+
+async def _check_output_repo(spec: RunSpec, hf_token: str | None) -> None:
+    """Refuse a public output repo before any GPU time is spent, not after the run.
+
+    It creates the repo (private) when missing, so a run that then fails leaves an empty private
+    repo behind: cheaper than discovering a public one after the generations are done.
+    """
+    if not (hf_token and spec.output_repo_id):
+        return
+    out_repo = validate_repo_id(spec.output_repo_id, "output repo")
+    await _ensure_private_output(HFHubClient(token=hf_token), out_repo)
+
+
 async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
+    """Push the results and the manifest beside them in ONE Hub commit.
+
+    One commit, because two can half-land: a results file next to an earlier run's manifest is a
+    false provenance record, worse than none.
+    """
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push results"
         raise RunError(msg)
     out_repo = validate_repo_id(spec.output_repo_id, "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
-    await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
-    await hub.upload_file(
-        results_path,
-        _RESULTS_FILENAME,
+    # Re-checked at push time: visibility can change during a long run.
+    await _ensure_private_output(hub, out_repo)
+    await hub.upload_files(
+        {
+            _RESULTS_FILENAME: results_path,
+            MANIFEST_FILENAME: results_path.parent / MANIFEST_FILENAME,
+        },
         out_repo,
         repo_type="dataset",
         commit_message="batch inference results",
@@ -518,6 +736,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     gpu = GpuSampler()
     phase = phase_sink(writer, hf_token, gpu=gpu)
 
+    if hf_token and spec.output_repo_id:
+        async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
+            await _check_output_repo(spec, hf_token)
     # The split download is unbounded by row_limit (that only slices during iteration), so it
     # runs BEFORE the first countable milestone and can take minutes on its own.
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
@@ -533,6 +754,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # token, and the server that follows is third-party code that must not hold it.
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
+    model_commit = spec.model_revision or snapshot_commit(snapshot)
 
     hp = spec.hyperparams
     task = build_vllm_task(
@@ -592,6 +814,15 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         # stages, which is right: bind the stage here rather than widening its public API.
         on_phase=lambda message: phase(message, stage="load_model"),
     ) as endpoint:
+        # Read once the server is up, while its logs and routes still exist.
+        serving_facts: dict[str, Any] = {
+            "max_model_len": await _served_max_model_len(endpoint.base_url, spec.model_id),
+            "dtype": {
+                "requested": hp.dtype,
+                "checkpoint": await asyncio.to_thread(_checkpoint_dtype, snapshot),
+                "served": await asyncio.to_thread(_served_dtype, Path.cwd()),
+            },
+        }
         # The endpoint this runner just launched is on loopback and takes no credential, and
         # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back
         # to whatever OPENAI_API_KEY the VM happens to carry, which would send the user's real
@@ -631,6 +862,12 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # here would otherwise look like it died complete, with no explanation.
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
+        # Beside the results, so the push and the on-VM copy carry it alike.
+        await asyncio.to_thread(
+            write_manifest,
+            _build_manifest(spec, out, model_commit, serving_facts),
+            Path(results_path).parent,
+        )
     if hf_token and spec.output_repo_id:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):

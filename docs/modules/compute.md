@@ -275,6 +275,58 @@ secrets file the backend wrote beside the job, and append the same ``ProgressEve
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
 
+### Batch-inference pins, sampling and manifest
+
+``RunSpec.model_revision`` pins the model to a full 40-character lowercase
+Hub commit id, and the runner downloads only that revision. A branch, tag or
+abbreviated id is refused at spec load, before anything is downloaded,
+because the revision it names can move. Left unset, the run serves the
+repo's default branch as it is at download time.
+
+``Hyperparams.seed`` and ``Hyperparams.top_k`` are sent to the model server
+with every request, next to ``temperature`` / ``top_p`` / ``max_tokens``:
+``seed`` as an OpenAI-compatible request field, ``top_k`` inside
+``extra_body`` because chat completions has no parameter for it. Unknown
+hyperparameter keys are refused like any other unknown spec key.
+
+Each results row is ``{custom_id, output, error, finish_reason,
+input_tokens, output_tokens}``; a failed row carries ``None`` in the last
+three. ``finish_reason`` is the client's normalized value (``stop``,
+``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
+client does not recognise is reported as ``stop``; ``length`` (the output
+hit ``max_tokens``) is always preserved. Beside ``results.parquet`` the runner writes ``manifest.json``
+(schema ``strata.run.manifest/v1``, ``kind`` ``inference``; every runner's
+manifest shares the schema), pushed with the results or kept with them on
+the machine. It records:
+
+- the model id, the requested revision and the commit actually served
+  (the requested pin, or the commit the Hub cache resolved the default
+  branch to);
+- the dataset id, config, split and requested revision;
+- the engine version, the Python version and the installed versions of
+  ``vllm``, ``transformers``, ``torch``, ``datasets`` and
+  ``huggingface-hub``, which the machine installs fresh per run within a
+  range;
+- what the model server actually ran with, which can differ from what was
+  requested: the ``max_model_len`` its ``/models`` route reports, and the
+  dtype requested, declared by the checkpoint and resolved by the server
+  (from its start-up configuration line), each ``None`` when unknown;
+- a SHA-256 of the template (never its text), the column mapping and the
+  hyperparameters;
+- row, success and failure counts, a ``finish_reason`` histogram and token
+  totals.
+
+It holds no row content and no credential.
+
+A pushed run goes only to a **private** output dataset repo: the runner
+creates it private when it is missing and refuses a public one, first
+before any download or GPU time and again at push time, because a run's
+outputs and manifest name the model and dataset it read. The results and
+the manifest go up in one Hub commit of exactly those two files, so a repo
+never holds one run's results beside another run's manifest. The check
+creates a missing repo private, so a run that fails afterwards can leave an
+empty private repo behind.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a
