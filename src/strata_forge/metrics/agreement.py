@@ -19,7 +19,8 @@ BOOTSTRAP_RNG = "numpy.random.Generator(PCG64)"
 BOOTSTRAP_QUANTILE_RULE = "hyndman-fan-7"
 BOOTSTRAP_CONFIDENCE = 0.95
 BOOTSTRAP_RESAMPLES = 10_000
-MAX_BOOTSTRAP_WORK = 20_000_000
+MAX_BOOTSTRAP_RESAMPLES = 1_000_000
+_BOOTSTRAP_CHUNK = 1 << 20
 MAX_BOOTSTRAP_SEED = 2**53 - 1
 RESEARCH_ANNOTATION_THRESHOLD = 0.70
 HUMAN_MODEL_VERSION = "nominal-human-vs-model-v1"
@@ -32,10 +33,10 @@ type _GateReason = Literal["empty", "selected_coefficient_undefined"]
 type HumanModelStatus = Literal["pass", "fail", "refused"]
 type HumanModelReason = Literal[
     "below_threshold",
-    "human_skips_exceeded",
+    "skip_fraction_exceeded",
     "empty",
-    "reference_missing",
-    "model_nulls_exceeded",
+    "reference_unavailable",
+    "model_null_fraction_exceeded",
     "no_used_items",
     "coefficient_undefined",
 ]
@@ -49,8 +50,8 @@ __all__ = [
     "BOOTSTRAP_VERSION",
     "GATE_VERSION",
     "HUMAN_MODEL_VERSION",
+    "MAX_BOOTSTRAP_RESAMPLES",
     "MAX_BOOTSTRAP_SEED",
-    "MAX_BOOTSTRAP_WORK",
     "MAX_HUMAN_SKIP_FRACTION",
     "MAX_MODEL_NULL_FRACTION",
     "REFERENCE_VERSION",
@@ -479,7 +480,7 @@ class BootstrapInterval(_Frozen):
     coefficient_selection: Literal["full_sample_reference"] = "full_sample_reference"
     confidence_level: float = Field(default=BOOTSTRAP_CONFIDENCE, allow_inf_nan=False)
     seed: int = Field(ge=0, le=MAX_BOOTSTRAP_SEED)
-    resamples: int = Field(ge=1, le=MAX_BOOTSTRAP_WORK)
+    resamples: int = Field(ge=1, le=MAX_BOOTSTRAP_RESAMPLES)
     undefined_resamples: int = Field(ge=0)
     lower: float | None
     upper: float | None
@@ -525,8 +526,8 @@ class AgreementBootstrap(_Frozen):
             or not paired.n
             or self.coefficient != _select_coefficient(reference)
             or self.estimate != _selected_estimate(paired, self.coefficient)
-            or self.interval.resamples * max(paired.n, len(paired.labels) ** 2) > MAX_BOOTSTRAP_WORK
             or (self.estimate.value is None and self.interval.reason is None)
+            or (self.coefficient == "gwet_ac1" and self.interval.undefined_resamples)
         ):
             raise ValueError("agreement_bootstrap_invalid")
         return self
@@ -549,32 +550,55 @@ def _resampled_coefficients(
             "agreement_bootstrap requires numpy: install 'strata-forge[scoring]'"
         ) from exc
     n = len(cells)
+    if 4 * n * n * (size - 1) >= 2**62:
+        raise ValidationError("agreement_bootstrap_too_large")
     population = np.asarray(cells, dtype=np.int64)
-    draws = np.random.Generator(np.random.PCG64(seed)).integers(
-        0, n, size=(resamples, n), dtype=np.int64
-    )
-    offsets = (np.arange(resamples, dtype=np.int64) * (size * size))[:, None]
-    counts = np.bincount(
-        (population[draws] + offsets).ravel(), minlength=resamples * size * size
-    ).reshape(resamples, size, size)
-    diagonal = np.trace(counts, axis1=1, axis2=2)
-    row_totals = counts.sum(axis=2)
-    column_totals = counts.sum(axis=1)
-    # Both coefficients are reduced to one exact integer ratio per resample, so a single
-    # correctly rounded division equals float(Fraction) of the point-estimate arithmetic.
-    if coefficient == "cohen_kappa":
-        chance = (row_totals * column_totals).sum(axis=1)
-        numerator = n * diagonal - chance
-        denominator = n * n - chance
-    else:
-        pooled = row_totals + column_totals
-        chance = (pooled * (2 * n - pooled)).sum(axis=1)
-        numerator = 4 * n * (size - 1) * diagonal - chance
-        denominator = 4 * n * n * (size - 1) - chance
-    defined = denominator != 0
-    values = np.sort(numerator[defined] / denominator[defined])
-    undefined = resamples - int(np.count_nonzero(defined))
-    return tuple(float(value) for value in values.tolist()), undefined, str(np.__version__)
+    left, right = population // size, population % size
+    agree = (left == right).astype(np.int64)
+    generator = np.random.Generator(np.random.PCG64(seed))
+    # Consecutive row blocks from one generator reproduce the single (resamples, n) draw, so
+    # chunking bounds memory without changing the stream.
+    rows = max(1, _BOOTSTRAP_CHUNK // max(n, size))
+    rounded = 4 * n * n * (size - 1) <= 2**53
+    values: list[float] = []
+    undefined = 0
+    for start in range(0, resamples, rows):
+        count = min(rows, resamples - start)
+        draws = generator.integers(0, n, size=(count, n), dtype=np.int64)
+        offsets = (np.arange(count, dtype=np.int64) * size)[:, None]
+        diagonal = agree[draws].sum(axis=1)
+        row_totals = np.bincount((left[draws] + offsets).ravel(), minlength=count * size).reshape(
+            count, size
+        )
+        column_totals = np.bincount(
+            (right[draws] + offsets).ravel(), minlength=count * size
+        ).reshape(count, size)
+        # Each coefficient is one exact integer ratio per resample; below 2**53 a single
+        # correctly rounded division equals float(Fraction) of the point arithmetic.
+        if coefficient == "cohen_kappa":
+            chance = (row_totals * column_totals).sum(axis=1)
+            numerator = n * diagonal - chance
+            denominator = n * n - chance
+        else:
+            pooled = row_totals + column_totals
+            chance = (pooled * (2 * n - pooled)).sum(axis=1)
+            numerator = 4 * n * (size - 1) * diagonal - chance
+            denominator = 4 * n * n * (size - 1) - chance
+        defined = denominator != 0
+        undefined += count - int(np.count_nonzero(defined))
+        if rounded:
+            values.extend(
+                float(value) for value in (numerator[defined] / denominator[defined]).tolist()
+            )
+        else:
+            values.extend(
+                float(Fraction(int(top), int(bottom)))
+                for top, bottom in zip(
+                    numerator[defined].tolist(), denominator[defined].tolist(), strict=True
+                )
+            )
+    values.sort()
+    return tuple(values), undefined, str(np.__version__)
 
 
 def _percentile(values: tuple[float, ...], probability: Fraction) -> float:
@@ -591,10 +615,6 @@ def _percentile(values: tuple[float, ...], probability: Fraction) -> float:
 def _interval(
     cells: Sequence[int], size: int, coefficient: CoefficientName, *, seed: int, resamples: int
 ) -> BootstrapInterval:
-    if resamples * max(len(cells), size * size) > MAX_BOOTSTRAP_WORK or (
-        4 * len(cells) * len(cells) * (size - 1) > 2**53
-    ):
-        raise ValidationError("agreement_bootstrap_too_large")
     values, undefined, numpy_version = _resampled_coefficients(
         cells, size, coefficient, seed=seed, resamples=resamples
     )
@@ -613,7 +633,9 @@ def _interval(
 def _bootstrap_settings(seed: object, resamples: object) -> tuple[int, int]:
     return (
         _bootstrap_count(seed, 0, MAX_BOOTSTRAP_SEED, "agreement_bootstrap_seed_invalid"),
-        _bootstrap_count(resamples, 1, MAX_BOOTSTRAP_WORK, "agreement_bootstrap_resamples_invalid"),
+        _bootstrap_count(
+            resamples, 1, MAX_BOOTSTRAP_RESAMPLES, "agreement_bootstrap_resamples_invalid"
+        ),
     )
 
 
@@ -739,33 +761,41 @@ def _decide(
     used: int,
     skips_exceeded: bool,
     nulls_exceeded: bool,
-    reference_missing: bool,
+    reference_unavailable: bool,
     undefined: bool,
     value: Fraction | None,
     threshold: float,
 ) -> tuple[HumanModelStatus, tuple[HumanModelReason, ...], bool] | None:
     """Return status, ordered reasons and whether a value is reported; None if inconsistent."""
+    if (undefined or not used or reference_unavailable) and value is not None:
+        return None
+    if (not used or reference_unavailable) and undefined:
+        return None
     if not items:
+        # Zero items cannot exceed a skip fraction, so an empty slice is always refused.
         return "refused", ("empty",), False
-    if reference_missing:
-        return "refused", ("reference_missing",), False
     reasons: list[HumanModelReason] = []
     if skips_exceeded:
-        reasons.append("human_skips_exceeded")
+        reasons.append("skip_fraction_exceeded")
+    if reference_unavailable:
+        reasons.append("reference_unavailable")
     if nulls_exceeded:
-        reasons.append("model_nulls_exceeded")
-        # The signed skip failure is never overridden by the default null refusal.
-        if not skips_exceeded:
-            return "refused", tuple(reasons), False
+        reasons.append("model_null_fraction_exceeded")
+    # The signed skip failure outranks every refusal and lists each one beside it; without it,
+    # the first refusal alone is reported.
+    if reasons and not skips_exceeded:
+        return "refused", (reasons[0],), False
     if not used:
         reasons.append("no_used_items")
+    elif reference_unavailable:
+        pass
     elif undefined:
         reasons.append("coefficient_undefined")
     elif value is None:
         return None
     elif value < Fraction(str(threshold)):
         reasons.append("below_threshold")
-    reported = bool(used) and not undefined
+    reported = value is not None
     if skips_exceeded or "below_threshold" in reasons:
         return "fail", tuple(reasons), reported
     return ("refused" if reasons else "pass"), tuple(reasons), reported
@@ -779,15 +809,15 @@ class HumanModelAgreement(_Frozen):
     human_skipped: int = Field(ge=0)
     model_null: int = Field(ge=0)
     used: int = Field(ge=0)
-    max_human_skip_fraction: float = Field(ge=0, le=1, allow_inf_nan=False)
-    max_model_null_fraction: float = Field(ge=0, le=1, allow_inf_nan=False)
+    max_human_skip_fraction: float = Field(ge=0, lt=1, allow_inf_nan=False)
+    max_model_null_fraction: float = Field(ge=0, lt=1, allow_inf_nan=False)
     status: HumanModelStatus
     reasons: tuple[HumanModelReason, ...]
     coefficient: CoefficientName | None
     value: ExactValue | None
     cohen_kappa: ExactValue | None
     cohen_kappa_reason: Literal["chance_agreement_one"] | None
-    threshold: float = Field(allow_inf_nan=False)
+    threshold: float = Field(ge=-1, le=1, allow_inf_nan=False)
     interval: BootstrapInterval | None
     user_solver_kappa: ReportOnlyKappa
     model_prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -796,13 +826,13 @@ class HumanModelAgreement(_Frozen):
     @model_validator(mode="after")
     def _consistent(self) -> HumanModelAgreement:
         excluded = self.items - self.used
-        structural = self.reasons in {("empty",), ("reference_missing",)}
+        structural = "empty" in self.reasons or "reference_unavailable" in self.reasons
         decision = _decide(
             items=self.items,
             used=self.used,
             skips_exceeded=_exceeds(self.human_skipped, self.items, self.max_human_skip_fraction),
             nulls_exceeded=_exceeds(self.model_null, self.items, self.max_model_null_fraction),
-            reference_missing=self.reasons == ("reference_missing",),
+            reference_unavailable="reference_unavailable" in self.reasons,
             undefined="coefficient_undefined" in self.reasons,
             value=Fraction(self.value.exact) if self.value is not None else None,
             threshold=self.threshold,
@@ -811,6 +841,11 @@ class HumanModelAgreement(_Frozen):
         checks = (
             decision is not None and decision == (self.status, self.reasons, valued),
             self.used <= self.items,
+            not valued or self.used > 0,
+            self.user_solver_kappa.n <= self.items - self.human_skipped,
+            self.coefficient != "gwet_ac1"
+            or self.interval is None
+            or self.interval.undefined_resamples == 0,
             max(self.human_skipped, self.model_null) <= excluded,
             excluded <= self.human_skipped + self.model_null,
             (self.interval is not None) == valued,
@@ -832,7 +867,7 @@ def _limit(value: object) -> float:
     if type(value) not in {int, float}:
         raise ValidationError("agreement_exclusion_limit_invalid")
     number = float(cast("float", value))
-    if not math.isfinite(number) or not 0 <= number <= 1:
+    if not math.isfinite(number) or not 0 <= number < 1:
         raise ValidationError("agreement_exclusion_limit_invalid")
     return number
 
@@ -891,13 +926,19 @@ def human_model_agreement(
     refs = tuple(
         _checked(RegisteredReference, item, "agreement_reference_invalid") for item in references
     )
-    if tuple(item.item_id for item in refs) != person.item_ids or any(
-        label is not None and label not in names
-        for item in refs
-        for label in (item.solver_gold, item.adjudicated)
+    if (
+        tuple(item.item_id for item in refs) != person.item_ids
+        or any(not _nonempty((item.source_ref, item.version_ref)) for item in refs)
+        or any(
+            label is not None and label not in names
+            for item in refs
+            for label in (item.solver_gold, item.adjudicated)
+        )
     ):
         raise ValidationError("agreement_reference_invalid")
     limit = _threshold(threshold)
+    if not -1 <= limit <= 1:
+        raise ValidationError("agreement_threshold_invalid")
     skip_limit = _limit(max_human_skip_fraction)
     null_limit = _limit(max_model_null_fraction)
     chosen_seed, count = _bootstrap_settings(seed, resamples)
@@ -913,12 +954,12 @@ def human_model_agreement(
     reference_labels = [
         item.solver_gold if item.solver_gold is not None else item.adjudicated for item in refs
     ]
-    reference_missing = any(label is None for label in reference_labels)
+    reference_unavailable = any(label is None for label in reference_labels)
     coefficient: CoefficientName | None = None
     value: Fraction | None = None
     kappa: Fraction | None = None
     kappa_chance: Fraction | None = None
-    if items and not reference_missing:
+    if items and not reference_unavailable:
         coefficient = _select_from_counts([reference_labels.count(label) for label in names], items)
         if pairs:
             _, kappa, ac1, kappa_chance, _ = _ratios(_counts(pairs, order), len(pairs))
@@ -928,8 +969,8 @@ def human_model_agreement(
         used=len(pairs),
         skips_exceeded=_exceeds(skipped, items, skip_limit),
         nulls_exceeded=_exceeds(nulls, items, null_limit),
-        reference_missing=reference_missing,
-        undefined=bool(pairs) and value is None,
+        reference_unavailable=reference_unavailable,
+        undefined=coefficient is not None and bool(pairs) and value is None,
         value=value,
         threshold=limit,
     )

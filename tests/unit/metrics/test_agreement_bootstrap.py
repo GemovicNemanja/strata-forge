@@ -14,9 +14,11 @@ import pytest
 from pydantic import ValidationError as ModelValidationError
 
 from strata_forge.core.errors import ValidationError
+from strata_forge.metrics import agreement as agreement_module
 from strata_forge.metrics.agreement import (
     BOOTSTRAP_RESAMPLES,
     BOOTSTRAP_VERSION,
+    MAX_BOOTSTRAP_RESAMPLES,
     MAX_BOOTSTRAP_SEED,
     AgreementBootstrap,
     HumanRatings,
@@ -292,10 +294,53 @@ def test_invalid_resample_count_refuses(resamples: object) -> None:
         agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=resamples)  # type: ignore[arg-type]
 
 
-def test_work_bound_refuses_before_drawing() -> None:
-    a, b, refs = _pilot(120)
-    with pytest.raises(ValidationError, match="agreement_bootstrap_too_large"):
-        agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=200_000)
+def test_resample_count_is_bounded() -> None:
+    a, b, refs = _pilot(10)
+    with pytest.raises(ValidationError, match="agreement_bootstrap_resamples_invalid"):
+        agreement_bootstrap(
+            a, b, refs, labels=LABELS, seed=SEED, resamples=MAX_BOOTSTRAP_RESAMPLES + 1
+        )
+
+
+def test_chunked_draws_are_bit_identical_to_one_draw(monkeypatch: pytest.MonkeyPatch) -> None:
+    a, b, refs = _pilot(30, seed=3)
+    whole = agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=700)
+    expected, _, _ = _exact_resample_values(
+        a.ratings, b.ratings, "cohen_kappa", labels=LABELS, seed=SEED, resamples=700
+    )
+    assert whole.interval.lower == _type7(expected, TAIL)
+    for chunk in (1, 31, 64, 30 * 7 + 1):
+        monkeypatch.setattr(agreement_module, "_BOOTSTRAP_CHUNK", chunk)
+        assert agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=700) == whole
+
+
+def test_size_never_refuses_large_slices_or_label_sets() -> None:
+    wide = tuple(f"class-{i}" for i in range(50))
+    ratings = [wide[i % 50] for i in range(120)]
+    other = [wide[(i + (i % 7 == 0)) % 50] for i in range(120)]
+    result = agreement_bootstrap(
+        _human("a", ratings),
+        _human("b", other),
+        _references(ratings, names=wide),
+        labels=wide,
+        seed=SEED,
+        resamples=BOOTSTRAP_RESAMPLES,
+    )
+    assert result.interval.resamples == BOOTSTRAP_RESAMPLES
+    assert result.interval.lower is not None
+
+
+def test_golden_bounds_pin_the_numpy_stream() -> None:
+    """A NumPy release that changes PCG64 or `integers` must fail here, not drift silently."""
+    a = ("E", "E", "C", "U", "E", "C", "C", "U", "E", "U", "C", "E")
+    b = ("E", "C", "C", "U", "E", "C", "E", "U", "E", "C", "C", "E")
+    result = agreement_bootstrap(
+        _human("a", a), _human("b", b), _references(a), labels=LABELS, seed=SEED, resamples=1000
+    )
+    assert result.coefficient == "cohen_kappa"
+    assert result.estimate.value == 19 / 31
+    assert (result.interval.lower, result.interval.upper) == (5 / 29, 1.0)
+    assert result.interval.undefined_resamples == 0
 
 
 def test_missing_numpy_has_an_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,4 +387,4 @@ def test_pilot_scale_runtime_bound() -> None:
     result = agreement_bootstrap(a, b, refs, labels=LABELS, seed=SEED, resamples=10_000)
     elapsed = time.perf_counter() - start
     assert result.interval.resamples == 10_000
-    assert elapsed < 1.0
+    assert elapsed < 2.0

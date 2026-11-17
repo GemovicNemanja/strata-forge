@@ -240,7 +240,7 @@ def test_human_skips_fail_strictly_above_ten_percent(skips: int, status: str) ->
     result = _run(human, model, _balanced_refs(120))
     assert result.human_skipped == skips
     assert result.status == status
-    assert result.reasons == (() if status == "pass" else ("human_skips_exceeded",))
+    assert result.reasons == (() if status == "pass" else ("skip_fraction_exceeded",))
     assert result.value is not None
     assert result.interval is not None
     assert result.value.value > 0.7
@@ -253,7 +253,7 @@ def test_model_nulls_refuse_strictly_above_ten_percent(nulls: int, status: str) 
     assert result.model_null == nulls
     assert result.status == status
     if status == "refused":
-        assert result.reasons == ("model_nulls_exceeded",)
+        assert result.reasons == ("model_null_fraction_exceeded",)
         assert (result.value, result.interval, result.cohen_kappa) == (None, None, None)
         assert result.coefficient == "cohen_kappa"
 
@@ -262,14 +262,14 @@ def test_both_limits_exceeded_fail_with_both_reasons_and_report_the_value() -> N
     human, model = _pairs(120, skips=13, nulls=13)
     result = _run(human, model, _balanced_refs(120))
     assert result.status == "fail"
-    assert result.reasons == ("human_skips_exceeded", "model_nulls_exceeded")
+    assert result.reasons == ("skip_fraction_exceeded", "model_null_fraction_exceeded")
     assert result.value is not None
     assert result.interval is not None
     payload = result.model_dump(mode="python")
     for forged in (
         {"status": "refused", "value": None, "interval": None},
-        {"reasons": ("human_skips_exceeded",)},
-        {"reasons": ("model_nulls_exceeded",)},
+        {"reasons": ("skip_fraction_exceeded",)},
+        {"reasons": ("model_null_fraction_exceeded",)},
     ):
         with pytest.raises(ModelValidationError):
             HumanModelAgreement.model_validate({**payload, **forged})
@@ -280,31 +280,38 @@ def test_a_skip_failure_lists_every_other_applicable_reason() -> None:
     skipped: list[str | None] = [None, None, None, None, None, *human[5:]]
     below = _run(skipped, model, _refs([E] * 20 + [C] * 20))
     assert below.status == "fail"
-    assert below.reasons == ("human_skips_exceeded", "below_threshold")
+    assert below.reasons == ("skip_fraction_exceeded", "below_threshold")
     assert below.value is not None
     undefined = _run([None, None, E, E, E, E, E, E, E, E], [E] * 10, _refs([E] * 5 + [C] * 5))
     assert (undefined.status, undefined.reasons) == (
         "fail",
-        ("human_skips_exceeded", "coefficient_undefined"),
+        ("skip_fraction_exceeded", "coefficient_undefined"),
     )
     assert (undefined.value, undefined.interval) == (None, None)
 
 
 @pytest.mark.parametrize(
     "case",
-    ["empty", "reference_missing", "model_nulls_exceeded", "no_used_items", "undefined"],
+    [
+        "empty",
+        "reference_unavailable",
+        "model_null_fraction_exceeded",
+        "no_used_items",
+        "undefined",
+    ],
 )
 def test_a_refused_slice_never_reports_a_value_kappa_or_interval(case: str) -> None:
-    human, model = _pairs(120, nulls=13 if case == "model_nulls_exceeded" else 0)
+    human, model = _pairs(120, nulls=13 if case == "model_null_fraction_exceeded" else 0)
     refs: Sequence[RegisteredReference] = _balanced_refs(120)
     options: dict[str, float] = {}
     if case == "empty":
         human, model, refs = [], [], ()
-    elif case == "reference_missing":
+    elif case == "reference_unavailable":
         refs = _refs([None, *[(E, C, U)[i % 3] for i in range(1, 120)]])
     elif case == "no_used_items":
-        human = [None] * 120
-        options = {"max_human_skip_fraction": 1}
+        human = [None] * 60 + human[60:]
+        model = model[:60] + [None] * 60
+        options = {"max_human_skip_fraction": 0.6, "max_model_null_fraction": 0.6}
     elif case == "undefined":
         human, model, refs = [E] * 10, [E] * 10, _refs([E] * 5 + [C] * 5)
     result = _run(human, model, refs, **options)
@@ -339,10 +346,10 @@ def test_exclusion_fractions_are_parameters_with_strict_comparison() -> None:
     one_null[5] = None
     assert _run(clean, clean, _balanced_refs(20), max_model_null_fraction=0).status == "pass"
     strict = _run(clean, one_null, _balanced_refs(20), max_model_null_fraction=0)
-    assert strict.reasons == ("model_nulls_exceeded",)
+    assert strict.reasons == ("model_null_fraction_exceeded",)
 
 
-@pytest.mark.parametrize("fraction", [-0.1, 1.1, float("nan"), float("inf"), True, "0.1"])
+@pytest.mark.parametrize("fraction", [-0.1, 1, 1.0, 1.1, float("nan"), float("inf"), True, "0.1"])
 def test_invalid_exclusion_fractions_refuse(fraction: object) -> None:
     human, model = _pairs(20)
     for name in ("max_human_skip_fraction", "max_model_null_fraction"):
@@ -419,7 +426,7 @@ def test_any_item_without_a_reference_label_refuses_the_slice() -> None:
     result = _run(human, model, _refs(gold))
     assert (result.status, result.reasons, result.coefficient, result.value) == (
         "refused",
-        ("reference_missing",),
+        ("reference_unavailable",),
         None,
         None,
     )
@@ -468,11 +475,11 @@ def test_empty_and_fully_excluded_slices_refuse() -> None:
     empty = _run([], [], ())
     assert (empty.status, empty.reasons, empty.items) == ("refused", ("empty",), 0)
     excluded = _run(
-        [None] * 4,
-        [E] * 4,
+        [None, None, E, C],
+        [E, C, None, None],
         _refs([E, C, E, C]),
-        max_human_skip_fraction=1,
-        max_model_null_fraction=1,
+        max_human_skip_fraction=0.6,
+        max_model_null_fraction=0.6,
     )
     assert (excluded.status, excluded.reasons, excluded.used) == ("refused", ("no_used_items",), 0)
 
@@ -557,10 +564,10 @@ def test_frozen_result_refuses_forged_decisions_and_counts() -> None:
     forgeries: list[dict[str, object]] = [
         {"threshold": 0.71},
         {"status": "fail", "reasons": ("below_threshold",)},
-        {"status": "fail", "reasons": ("human_skips_exceeded",)},
-        {"status": "refused", "reasons": ("model_nulls_exceeded",)},
+        {"status": "fail", "reasons": ("skip_fraction_exceeded",)},
+        {"status": "refused", "reasons": ("model_null_fraction_exceeded",)},
         {"status": "refused", "reasons": ()},
-        {"reasons": ("model_nulls_exceeded", "human_skips_exceeded")},
+        {"reasons": ("model_null_fraction_exceeded", "skip_fraction_exceeded")},
         {"used": 41},
         {"human_skipped": 1},
         {"value": {"exact": "7/10", "value": 0.71}},
@@ -574,3 +581,113 @@ def test_frozen_result_refuses_forged_decisions_and_counts() -> None:
     for change in forgeries:
         with pytest.raises(ModelValidationError):
             HumanModelAgreement.model_validate({**payload, **change})
+
+
+# The signed skip failure outranks every refusal
+
+
+def _skipped(human: Sequence[str | None], count: int = 13) -> list[str | None]:
+    return [None] * count + list(human[count:])
+
+
+@pytest.mark.parametrize(
+    ("case", "reasons"),
+    [
+        ("reference_unavailable", ("skip_fraction_exceeded", "reference_unavailable")),
+        ("model_null", ("skip_fraction_exceeded", "model_null_fraction_exceeded")),
+        ("no_used_items", ("skip_fraction_exceeded", "no_used_items")),
+        ("coefficient_undefined", ("skip_fraction_exceeded", "coefficient_undefined")),
+        (
+            "all",
+            (
+                "skip_fraction_exceeded",
+                "reference_unavailable",
+                "model_null_fraction_exceeded",
+            ),
+        ),
+    ],
+)
+def test_exceeded_skips_fail_and_list_each_refusal_reason(
+    case: str, reasons: tuple[str, ...]
+) -> None:
+    human, model = _pairs(120)
+    gold: list[str | None] = [(E, C, U)[i % 3] for i in range(120)]
+    options: dict[str, float] = {}
+    human = _skipped(human)
+    if case in {"reference_unavailable", "all"}:
+        gold[50] = None
+    if case in {"model_null", "all"}:
+        model = model[:107] + [None] * 13
+    if case == "no_used_items":
+        human = [None] * 60 + human[60:]
+        model = model[:60] + [None] * 60
+        options = {"max_model_null_fraction": 0.9}
+    if case == "coefficient_undefined":
+        human = _skipped([E] * 120)
+        model = [E] * 120
+    result = _run(human, model, _refs(gold), **options)
+    assert result.status == "fail"
+    assert result.reasons == reasons
+    defined = case == "model_null"
+    assert (result.value is not None) == defined
+    assert (result.interval is not None) == defined
+    assert (result.coefficient is None) == (case in {"reference_unavailable", "all"})
+    if not defined:
+        assert (result.cohen_kappa, result.cohen_kappa_reason) == (None, None)
+
+
+def test_empty_slices_are_refused_since_zero_items_cannot_exceed_skips() -> None:
+    result = _run([], [], (), max_human_skip_fraction=0)
+    assert (result.status, result.reasons) == ("refused", ("empty",))
+
+
+# Policy bounds, reference provenance and validator gaps
+
+
+@pytest.mark.parametrize("threshold", [-1.5, 1.0000001, 2])
+def test_threshold_outside_the_coefficient_range_refuses(threshold: float) -> None:
+    human, model = _pairs(20)
+    with pytest.raises(ValidationError, match="agreement_threshold_invalid"):
+        _run(human, model, _balanced_refs(20), threshold=threshold)
+
+
+@pytest.mark.parametrize("threshold", [-1, 1])
+def test_threshold_bounds_are_inclusive_and_recorded(threshold: float) -> None:
+    human, model = _pairs(20)
+    assert _run(human, model, _balanced_refs(20), threshold=threshold).threshold == threshold
+
+
+@pytest.mark.parametrize("field", ["source_ref", "version_ref"])
+def test_blank_reference_provenance_refuses(field: str) -> None:
+    human, model = _pairs(4)
+    refs = list(_balanced_refs(4))
+    refs[2] = refs[2].model_copy(update={field: "  "})
+    with pytest.raises(ValidationError, match="agreement_reference_invalid"):
+        _run(human, model, refs)
+
+
+def test_validator_refuses_uncounted_report_only_and_impossible_ac1_intervals() -> None:
+    result = _run([E] * 14 + [C] * 6, [E] * 13 + [C] * 7, _refs([E] * 16 + [C] * 4))
+    assert result.coefficient == "gwet_ac1"
+    assert result.interval is not None
+    payload = result.model_dump(mode="python")
+    solver = {**payload["user_solver_kappa"], "n": 21}
+    interval = {**payload["interval"], "undefined_resamples": 1}
+    for forged in ({"user_solver_kappa": solver}, {"interval": interval}):
+        with pytest.raises(ModelValidationError):
+            HumanModelAgreement.model_validate({**payload, **forged})
+
+
+def test_report_only_interval_cost_never_blocks_a_large_slice() -> None:
+    human = [(E, C, U)[i % 3] for i in range(2001)]
+    model = [label if i % 10 else (E, C, U)[(i + 1) % 3] for i, label in enumerate(human)]
+    result = human_model_agreement(
+        _human(human),
+        _model(model),
+        _refs(human),
+        labels=LABELS,
+        seed=SEED,
+    )
+    assert result.status == "pass"
+    assert result.interval is not None
+    assert result.interval.resamples == 10_000

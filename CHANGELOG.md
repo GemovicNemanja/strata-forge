@@ -25,13 +25,16 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   statistic for one human (`HumanAnnotations`, `None` = skip) against one model
   (`ModelRatings`, `None` = null label, with `model_prompt_sha256` and `model_run_ref`), beside the
   unchanged two-human statistic. Skips and nulls are excluded from both series and counted. More
-  than 10% skips fails the slice, and more than 10% nulls alone refuses it. When both are
-  exceeded the slice fails, and its ordered `reasons` list both. Both fractions are parameters. A
-  refused slice reports no value; a failed one still reports its value and interval. The reference-prevalence selector runs once over all slice items, and kappa is
-  reported beside a selected AC1. The exact point value gates at an inclusive 0.70, and the
-  bootstrap interval is reported only. A report-only user-versus-solver kappa is reported beside
-  it. The frozen `HumanModelAgreement` holds exact rational values and no item IDs or labels.
-  `AgreementBootstrap` now carries its interval as a `BootstrapInterval` block.
+  than 10% skips fails the slice (`skip_fraction_exceeded`); that signed failure outranks every
+  refusal and lists each applicable one beside it in an ordered `reasons` tuple, such as
+  `reference_unavailable` or `model_null_fraction_exceeded`. Without it, more than 10% nulls or
+  a missing reference label refuses the slice. Both fractions are parameters in `[0, 1)`, and the
+  threshold is bounded to `[-1, 1]`. The reference-prevalence selector runs once over all slice
+  items, and kappa is reported beside a selected AC1. The exact point value gates at an
+  inclusive 0.70; a value, kappa and the bootstrap interval are reported only when a coefficient
+  is defined and the slice is not refused, and the interval never gates or refuses. A report-only
+  user-versus-solver kappa is reported beside it. The frozen `HumanModelAgreement` holds exact
+  rational values and no item IDs or labels.
 
 ## [0.4.0] - 2026-11-17
 

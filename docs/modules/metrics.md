@@ -332,13 +332,14 @@ the selector or sets policy for another consumer. A finite threshold outside the
 range is preserved as caller policy, without clamping.
 
 The returned `AgreementGate` retains both full reports, selected coefficient/value, threshold,
-`passed`, undefined reason and `confidence_method="not_produced"`. A selected undefined kappa
-has `passed=null`, `reason="selected_coefficient_undefined"` and its coefficient reason.
-An empty slice selects nothing and has `passed=null`, `reason="empty"`. These point comparisons
-do not implement a confidence interval, multi-rater method or completed G0/annotation gate; the
-separate bootstrap below supplies the only interval. Callers must enforce the frozen reference source, role separation and applicable study
-protocol before interpreting them. Function-level refusals use fixed Forge `ValidationError`
-codes without echoing supplied item/rater/source values; input-model validation hides values.
+`passed`, undefined reason and `confidence_method="not_produced"`. A selected undefined kappa has
+`passed=null`, `reason="selected_coefficient_undefined"` and its coefficient reason. An empty slice
+selects nothing and has `passed=null`, `reason="empty"`. These point comparisons do not implement a
+confidence interval, multi-rater method or completed G0/annotation gate; the separate bootstrap
+below supplies the only interval. Callers must enforce the frozen reference source, role separation
+and applicable study protocol before interpreting them. Function-level refusals use fixed Forge
+`ValidationError` codes without echoing supplied item/rater/source values; input-model validation
+hides values.
 
 The [synthetic agreement fixture](../../tests/unit/metrics/fixtures/agreement_point_v1.json)
 retains hand-counted rational results, including unequal marginals, negative coefficients
@@ -382,21 +383,25 @@ Importing `metrics.agreement` and the point functions still need no NumPy.
   not reselected by its own resampled reference prevalence: the interval then describes the
   sampling variability of the reported point estimate, and the reported coefficient never
   changes between the estimate and its interval. References are not resampled.
-- **Draws.** `numpy.random.Generator(PCG64(seed))` makes one C-order draw
-  `integers(0, n, size=(resamples, n), dtype=int64)`; row `r` is resample `r` and column `j`
-  its `j`-th item, indexing the caller's declared item order. Each resample keeps every
-  item's (rater A, rater B) pair together. `seed` is a required integer in `[0, 2**53-1]`;
-  bool is refused. `resamples` is a caller-supplied integer, at least one, default 10,000.
-  The same seed, count, population and NumPy version give an identical result; the NumPy
-  version is recorded in `numpy_version` because the generator's stream belongs to NumPy.
-- **Arithmetic.** Contingency counts are formed for all resamples at once (one `bincount`).
-  Each coefficient reduces to one integer ratio per resample — kappa
-  `(n*d - S)/(n*n - S)` with `S = sum(a_c*b_c)`, AC1 `(4n(K-1)d - P)/(4n²(K-1) - P)` with
-  `P = sum(pooled_c*(2n - pooled_c))` — so its single correctly rounded division equals the
-  float of the exact `Fraction` the point estimate uses. The inputs are bounded so those
-  integers stay below `2**53`: `4*n*n*(K-1) <= 2**53` and
-  `resamples * max(n, K*K) <= MAX_BOOTSTRAP_WORK` (20,000,000), otherwise
-  `agreement_bootstrap_too_large`. 10,000 resamples of 120 items take about 15 ms.
+- **Draws.** The stream is that of one C-order draw
+  `numpy.random.Generator(PCG64(seed)).integers(0, n, size=(resamples, n), dtype=int64)`;
+  row `r` is resample `r` and column `j` its `j`-th item, indexing the caller's declared item
+  order. The rows are drawn in consecutive blocks of about 2**20 indices from the same generator,
+  which reproduces that stream bit for bit while bounding memory. Each resample keeps every
+  item's (rater A, rater B) pair together. `seed` is a required integer in `[0, 2**53-1]`; bool
+  is refused. `resamples` is a caller-supplied integer, at least one, default 10,000. The same
+  seed, count, population and NumPy version give an identical result; the NumPy version is
+  recorded in `numpy_version` because the generator's stream belongs to NumPy.
+- **Arithmetic.** Each block forms the agreement count and both raters' class marginals for
+  all its resamples at once (`bincount`), never a K-by-K table per resample. Each coefficient
+  reduces to one integer ratio per resample: kappa is `(n*d - S)/(n*n - S)` with
+  `S = sum(a_c*b_c)`, and AC1 is `(4n(K-1)d - P)/(4n²(K-1) - P)` with
+  `P = sum(pooled_c*(2n - pooled_c))`. While `4*n*n*(K-1) <= 2**53`, a single correctly
+  rounded division equals the float of the exact `Fraction` the point estimate uses. Above that,
+  each ratio is converted through `Fraction`, so the equality still holds. Only a population
+  with `4*n*n*(K-1) >= 2**62`, beyond any slice that fits in memory, refuses with
+  `agreement_bootstrap_too_large`. `resamples` is at most `MAX_BOOTSTRAP_RESAMPLES` (1,000,000).
+  10,000 resamples of 120 items take about 15 ms.
 - **Undefined resamples.** A kappa resample whose chance agreement is one (both raters put
   every drawn item in the same single category) has no value. It is counted in
   `undefined_resamples`, not silently dropped, and is excluded from the quantiles, which are
@@ -409,7 +414,11 @@ Importing `metrics.agreement` and the point functions still need no NumPy.
   probability `p` has the exact rational position `h = (m-1)*p`, `j = floor(h)`, and the bound
   is `x[j] + (h-j)*(x[j+1]-x[j])`, clamped to `[x[j], x[j+1]]` against rounding (`x[j]` when
   `j = m-1`). The 95% interval uses `p = 1/40` and `p = 39/40`; the confidence level is fixed
-  at 0.95 (`BOOTSTRAP_CONFIDENCE`) by the approved contract and recorded on the result.
+  at 0.95 (`BOOTSTRAP_CONFIDENCE`) by the approved contract and recorded on the result. The
+  bounds follow this exact rule, not `np.quantile`. They agree with
+  `np.quantile(..., method="linear")` to within about `2e-15`, but are not bit-identical to it.
+- **Golden values.** A unit test pins exact bounds for a fixed seed and input, so a NumPy
+  release that changes the PCG64 or `integers` stream fails CI rather than drifting silently.
 
 The frozen `AgreementBootstrap` holds both full point reports, the selected `coefficient`, its
 full-sample `estimate` and an `interval` block. `BootstrapInterval` records the contract fields
@@ -453,11 +462,11 @@ null). The types are distinct and closed. `pairwise_agreement` and `agreement_bo
 The rater IDs must differ. The item-ID tuples must be identical in order, and every non-null
 label must be a declared category. An unknown model label refuses rather than counting as null.
 
-**Exclusions.** The function, not the caller, excludes per slice. `human_skipped` counts the
-human's skips and `model_null` the model's nulls, each over all `items`. An item with both counts
-in both. An item excluded for either reason leaves both series, so `used` is the number of items
-with both labels. The fractions are parameters (default `0.10`), compared strictly and exactly
-against their decimal spelling: `human_skipped > fraction * items` fails the slice and
+**Exclusions.** The function, not the caller, excludes per slice. `human_skipped` counts the human's
+skips and `model_null` the model's nulls, each over all `items`. An item with both counts in both.
+An item excluded for either reason leaves both series, so `used` is the number of items with both
+labels. The fractions are parameters (default `0.10`, each in `[0, 1)`), compared strictly and
+exactly against their decimal spelling: `human_skipped > fraction * items` fails the slice and
 `model_null > fraction * items` refuses it. Twelve of 120 is within either limit; thirteen is not.
 
 **Selection.** The existing selector runs once, on the reference label of **all** slice items
@@ -466,25 +475,30 @@ against their decimal spelling: `human_skipped > fraction * items` fails the sli
 bootstrap holds it fixed across resamples. When AC1 is selected, `cohen_kappa` reports kappa on
 the same pairs beside it, or `cohen_kappa_reason="chance_agreement_one"` when kappa is undefined.
 
-**Status.** The status is `pass`, `fail` or `refused`. `reasons` is an ordered tuple of every
-condition that applies, empty exactly when the slice passes. It is decided in this order:
+**Status.** The status is `pass`, `fail` or `refused`. `reasons` is an ordered tuple, empty
+exactly when the slice passes. Its order is `skip_fraction_exceeded`, `empty`,
+`reference_unavailable`, `model_null_fraction_exceeded`, `no_used_items`,
+`coefficient_undefined`, `below_threshold`.
 
-1. `refused`, `("empty",)`: the slice has no items.
-2. `refused`, `("reference_missing",)`: some item has neither gold nor adjudication.
-3. The skip limit is the signed rule, and the null limit is a default that never overrides it:
-   - When skips exceed their limit, the status is `fail` and `human_skips_exceeded` comes
-     first. `model_nulls_exceeded` follows when nulls also exceed theirs, so a re-pilot also
-     re-runs the model labels.
-   - When only nulls exceed their limit, the status is `refused`, `("model_nulls_exceeded",)`.
-4. Otherwise a value condition is appended, if one applies: `no_used_items`,
-   `coefficient_undefined`, or `below_threshold` when the exact value is below the threshold
-   (default 0.70, inclusive; a kappa of exactly 7/10 passes).
-5. With no skip failure, a value condition gives `refused` (`no_used_items`,
-   `coefficient_undefined`) or `fail` (`below_threshold`); no condition at all gives `pass`.
+- **Exceeded skips fail, always.** The signed skip rule outranks every refusal reason: the
+  status is `fail`, `skip_fraction_exceeded` comes first, and every other applicable reason
+  follows it. These are `reference_unavailable`, `model_null_fraction_exceeded`,
+  `no_used_items`, `coefficient_undefined` and `below_threshold`; listing the null-label reason
+  makes a re-pilot also re-run the model labels. An empty slice cannot exceed a skip fraction,
+  so it is always refused.
+- **Otherwise the first refusal alone refuses.** In order, these are: `empty` (no items),
+  `reference_unavailable` (some item has neither gold nor adjudication),
+  `model_null_fraction_exceeded`, `no_used_items` and `coefficient_undefined`.
+- **Otherwise the threshold decides.** The slice passes when the exact value is `>=` the
+  threshold (default 0.70, inclusive; a kappa of exactly 7/10 passes), and fails with
+  `below_threshold` when it is lower.
 
-A failed slice still reports its value and interval for information when the value is defined,
-for example `("human_skips_exceeded", "model_nulls_exceeded")` with both. A refused slice
-never reports a value, kappa or interval. The interval never gates.
+A value, with kappa beside AC1 and the interval, is reported only when a coefficient is defined
+and the slice is not refused. So `("skip_fraction_exceeded", "model_null_fraction_exceeded")`
+reports one, while a fail with `reference_unavailable`, `no_used_items` or
+`coefficient_undefined` does not. A refused slice never reports a value, kappa or interval.
+The status and value are decided before the interval is drawn, and no slice size makes the
+interval refuse. The interval never gates.
 
 **Interval.** `interval` is the approved `BootstrapInterval` over the used pairs: the same seed,
 resample count, single `(resamples, used)` draw in the declared item order with excluded items
@@ -507,7 +521,16 @@ nulls do not affect it, and adjudicated items are not included. It never changes
 
 It holds no item IDs, labels or rater-supplied text. Validation re-derives the exclusion
 decisions from the counts through the same decision rule, refuses inconsistent counts,
-status/reasons pairs, values, kappa
-presence and threshold decisions, and supports strict JSON round trips. Input errors use fixed
-Forge `ValidationError` codes, including `agreement_exclusion_limit_invalid` for a fraction
-outside `[0, 1]`, a non-finite one or a non-number.
+status/reasons pairs, values, kappa presence and threshold decisions. It also refuses:
+
+- a value without used items;
+- a `user_solver_kappa.n` above `items - human_skipped`;
+- undefined resamples under AC1, whose chance agreement cannot reach one.
+
+It supports strict JSON round trips. Input errors use fixed Forge `ValidationError` codes:
+
+- `agreement_threshold_invalid` for a threshold outside `[-1, 1]`;
+- `agreement_exclusion_limit_invalid` for a fraction outside `[0, 1)`, a non-finite one or a
+  non-number;
+- `agreement_reference_invalid` for a blank `source_ref` or `version_ref`, as
+  `reference_prevalence` refuses.
