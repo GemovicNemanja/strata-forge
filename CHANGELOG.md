@@ -8,6 +8,20 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.metrics.agreement.agreement_bootstrap` returns a seeded item-level percentile
+  bootstrap interval (`item-percentile-bootstrap-v1`) for the two-rater agreement coefficient
+  that the full-sample reference prevalence selects, as `research_annotation_gate` does: Gwet's
+  AC1 at an inclusive 80% reference category, otherwise Cohen's kappa. Every resample keeps that
+  coefficient rather than reselecting. Items are resampled with replacement by
+  `numpy.random.Generator(PCG64(seed))` (one `(resamples, n)` draw, default 10,000 resamples),
+  confusion counts are vectorised across resamples, each resample's value equals the exact point
+  arithmetic, and the 95% bounds use Hyndman-Fan type 7 quantiles. Resamples whose kappa is
+  undefined (chance agreement one) are counted in `undefined_resamples`. The frozen
+  `AgreementBootstrap` records the contract, seed, NumPy version and bounds. NumPy comes from the
+  `[scoring]` extra and is imported only when the function runs.
+
 ## [0.4.0] - 2026-11-17
 
 ### Added

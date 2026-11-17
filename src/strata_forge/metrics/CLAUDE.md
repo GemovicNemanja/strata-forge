@@ -24,8 +24,15 @@ This is a pure deterministic numerical leaf. Read
   test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
   discard invalid predictions. Holm operates on represented p-values and cannot recover
   underflowed inputs. The synthetic comparison fixture is the numerical conformance reference.
-- Bootstrap code requires an approved RNG/seed/order/quantile/population contract. No
-  bootstrap implementation or inference of independence from cluster-repeated rows is exported.
+- Bootstrap code requires an approved RNG/seed/order/quantile/population contract. The only
+  approved one is `agreement_bootstrap` (`item-percentile-bootstrap-v1`, approved for the
+  ANNOT-001 report on 2026-11-17): item-level nonparametric percentile bootstrap,
+  `Generator(PCG64(seed))` with one C-order `(resamples, n)` index draw over the declared item
+  order, caller-supplied count (default 10,000), coefficient fixed by the full-sample reference
+  selection, undefined resamples counted and reported, Hyndman-Fan type 7 quantiles at exact
+  rational positions, confidence fixed at 0.95. Changing any of these is a new version and needs
+  a new approval. No other bootstrap, and no inference of independence from cluster-repeated
+  rows, is exported.
 - Update this file, module README, reference docs, and tests with any public API change.
 - `agreement` supports only two complete caller-declared human raters with distinct identities,
   identical unique ordered item IDs and an explicit complete nominal category set. Refuse missing
@@ -36,6 +43,8 @@ This is a pure deterministic numerical leaf. Read
 - Use integer `5 * max_reference_count >= 4 * n` for the fixed selector and exact rational
   coefficient comparison against the supplied threshold's decimal spelling. The named 0.70
   helper default is not a global annotation/research policy or release gate.
-- Preserve undefined coefficient reasons and `confidence_method="not_produced"`. No implicit
-  multi-rater, missingness, CI/bootstrap or annotation-resource implementation. Keep the synthetic
-  `agreement_point_v1.json` conformance fixture synchronized; no NumPy or ML dependency is needed.
+- Preserve undefined coefficient reasons and `confidence_method="not_produced"` on point reports.
+  No implicit multi-rater, missingness, other CI or annotation-resource implementation. Keep the
+  synthetic `agreement_point_v1.json` conformance fixture synchronized. Import and point functions
+  need no NumPy or ML dependency; only `agreement_bootstrap` imports NumPy, lazily, from
+  `[scoring]`. Its per-resample values must stay equal to the exact `Fraction` point arithmetic.

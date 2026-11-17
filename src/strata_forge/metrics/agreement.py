@@ -1,4 +1,4 @@
-"""Nominal two-human-rater agreement and a separate registered-reference selector."""
+"""Nominal two-human-rater agreement, a registered-reference selector and its bootstrap."""
 
 from __future__ import annotations
 
@@ -14,6 +14,13 @@ from strata_forge.core.errors import ValidationError
 AGREEMENT_VERSION = "nominal-two-human-raters-v1"
 REFERENCE_VERSION = "registered-reference-prevalence-v1"
 GATE_VERSION = "reference-prevalence-agreement-gate-v1"
+BOOTSTRAP_VERSION = "item-percentile-bootstrap-v1"
+BOOTSTRAP_RNG = "numpy.random.Generator(PCG64)"
+BOOTSTRAP_QUANTILE_RULE = "hyndman-fan-7"
+BOOTSTRAP_CONFIDENCE = 0.95
+BOOTSTRAP_RESAMPLES = 10_000
+MAX_BOOTSTRAP_WORK = 20_000_000
+MAX_BOOTSTRAP_SEED = 2**53 - 1
 RESEARCH_ANNOTATION_THRESHOLD = 0.70
 type CoefficientName = Literal["cohen_kappa", "gwet_ac1"]
 type UndefinedReason = Literal["empty", "chance_agreement_one"]
@@ -21,9 +28,17 @@ type _GateReason = Literal["empty", "selected_coefficient_undefined"]
 
 __all__ = [
     "AGREEMENT_VERSION",
+    "BOOTSTRAP_CONFIDENCE",
+    "BOOTSTRAP_QUANTILE_RULE",
+    "BOOTSTRAP_RESAMPLES",
+    "BOOTSTRAP_RNG",
+    "BOOTSTRAP_VERSION",
     "GATE_VERSION",
+    "MAX_BOOTSTRAP_SEED",
+    "MAX_BOOTSTRAP_WORK",
     "REFERENCE_VERSION",
     "RESEARCH_ANNOTATION_THRESHOLD",
+    "AgreementBootstrap",
     "AgreementEstimate",
     "AgreementGate",
     "HumanRatings",
@@ -31,6 +46,7 @@ __all__ = [
     "ReferencePrevalence",
     "RegisteredReference",
     "ResolvedReference",
+    "agreement_bootstrap",
     "pairwise_agreement",
     "reference_prevalence",
     "research_annotation_gate",
@@ -240,6 +256,10 @@ def _threshold(value: float) -> float:
     return result
 
 
+def _select_coefficient(prevalence: ReferencePrevalence) -> CoefficientName:
+    return "gwet_ac1" if 5 * max(prevalence.counts) >= 4 * prevalence.n else "cohen_kappa"
+
+
 def _gate_values(
     agreement: PairwiseAgreement, prevalence: ReferencePrevalence, threshold: float
 ) -> tuple[
@@ -249,9 +269,7 @@ def _gate_values(
         raise ValidationError("agreement_population_mismatch")
     if not agreement.n:
         return None, None, None, "empty", "empty"
-    selected: CoefficientName = (
-        "gwet_ac1" if 5 * max(prevalence.counts) >= 4 * prevalence.n else "cohen_kappa"
-    )
+    selected = _select_coefficient(prevalence)
     _, kappa, ac1, _, _ = _ratios(agreement.counts, agreement.n)
     value = ac1 if selected == "gwet_ac1" else kappa
     if value is None:
@@ -413,4 +431,165 @@ def research_annotation_gate(
         passed=passed,
         reason=reason,
         selected_reason=selected_reason,
+    )
+
+
+def _selected_estimate(
+    agreement: PairwiseAgreement, coefficient: CoefficientName
+) -> AgreementEstimate:
+    return agreement.gwet_ac1 if coefficient == "gwet_ac1" else agreement.cohen_kappa
+
+
+class AgreementBootstrap(_Frozen):
+    """An item-level percentile interval for the coefficient the full sample selected."""
+
+    bootstrap_version: Literal["item-percentile-bootstrap-v1"] = BOOTSTRAP_VERSION
+    rng: Literal["numpy.random.Generator(PCG64)"] = BOOTSTRAP_RNG
+    quantile_rule: Literal["hyndman-fan-7"] = BOOTSTRAP_QUANTILE_RULE
+    coefficient_selection: Literal["full_sample_reference"] = "full_sample_reference"
+    agreement: PairwiseAgreement
+    prevalence: ReferencePrevalence
+    coefficient: CoefficientName
+    estimate: AgreementEstimate
+    confidence_level: float = Field(default=BOOTSTRAP_CONFIDENCE, allow_inf_nan=False)
+    seed: int = Field(ge=0, le=MAX_BOOTSTRAP_SEED)
+    resamples: int = Field(ge=1)
+    undefined_resamples: int = Field(ge=0)
+    lower: float | None
+    upper: float | None
+    reason: Literal["all_resamples_undefined"] | None
+    numpy_version: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> AgreementBootstrap:
+        paired, reference = self.agreement, self.prevalence
+        if (
+            paired.labels != reference.labels
+            or paired.item_ids != reference.item_ids
+            or not paired.n
+            or self.confidence_level != BOOTSTRAP_CONFIDENCE
+            or self.coefficient != _select_coefficient(reference)
+            or self.estimate != _selected_estimate(paired, self.coefficient)
+            or self.undefined_resamples > self.resamples
+            or self.resamples * max(paired.n, len(paired.labels) ** 2) > MAX_BOOTSTRAP_WORK
+        ):
+            raise ValueError("agreement_bootstrap_invalid")
+        if self.undefined_resamples == self.resamples:
+            valid = self.lower is None and self.upper is None and self.reason is not None
+        else:
+            valid = (
+                self.reason is None
+                and self.lower is not None
+                and self.upper is not None
+                and all(math.isfinite(bound) for bound in (self.lower, self.upper))
+                and -1 <= self.lower <= self.upper <= 1
+            )
+        if not valid or (self.estimate.value is None and self.reason is None):
+            raise ValueError("agreement_bootstrap_invalid")
+        return self
+
+
+def _bootstrap_count(value: object, low: int, high: int, code: str) -> int:
+    if type(value) is not int or not low <= value <= high:
+        raise ValidationError(code)
+    return value
+
+
+def _resampled_coefficients(
+    cells: Sequence[int], size: int, coefficient: CoefficientName, *, seed: int, resamples: int
+) -> tuple[tuple[float, ...], int, str]:
+    """Return sorted defined resample values, the undefined count and the NumPy version."""
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise ImportError(
+            "agreement_bootstrap requires numpy: install 'strata-forge[scoring]'"
+        ) from exc
+    n = len(cells)
+    population = np.asarray(cells, dtype=np.int64)
+    draws = np.random.Generator(np.random.PCG64(seed)).integers(
+        0, n, size=(resamples, n), dtype=np.int64
+    )
+    offsets = (np.arange(resamples, dtype=np.int64) * (size * size))[:, None]
+    counts = np.bincount(
+        (population[draws] + offsets).ravel(), minlength=resamples * size * size
+    ).reshape(resamples, size, size)
+    diagonal = np.trace(counts, axis1=1, axis2=2)
+    row_totals = counts.sum(axis=2)
+    column_totals = counts.sum(axis=1)
+    # Both coefficients are reduced to one exact integer ratio per resample, so a single
+    # correctly rounded division equals float(Fraction) of the point-estimate arithmetic.
+    if coefficient == "cohen_kappa":
+        chance = (row_totals * column_totals).sum(axis=1)
+        numerator = n * diagonal - chance
+        denominator = n * n - chance
+    else:
+        pooled = row_totals + column_totals
+        chance = (pooled * (2 * n - pooled)).sum(axis=1)
+        numerator = 4 * n * (size - 1) * diagonal - chance
+        denominator = 4 * n * n * (size - 1) - chance
+    defined = denominator != 0
+    values = np.sort(numerator[defined] / denominator[defined])
+    undefined = resamples - int(np.count_nonzero(defined))
+    return tuple(float(value) for value in values.tolist()), undefined, str(np.__version__)
+
+
+def _percentile(values: tuple[float, ...], probability: Fraction) -> float:
+    position = (len(values) - 1) * probability
+    index = math.floor(position)
+    low = values[index]
+    if index + 1 == len(values):
+        return low
+    high = values[index + 1]
+    weight = float(position - index)
+    return min(max(low + weight * (high - low), low), high)
+
+
+def agreement_bootstrap(
+    rater_a: HumanRatings,
+    rater_b: HumanRatings,
+    prevalence: ReferencePrevalence,
+    *,
+    labels: Sequence[str],
+    seed: int,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> AgreementBootstrap:
+    """Bootstrap items with replacement for the coefficient the full-sample reference selects."""
+    paired = pairwise_agreement(rater_a, rater_b, labels=labels)
+    reference = _checked(ReferencePrevalence, prevalence, "agreement_reference_invalid")
+    if paired.labels != reference.labels or paired.item_ids != reference.item_ids:
+        raise ValidationError("agreement_population_mismatch")
+    if not paired.n:
+        raise ValidationError("agreement_bootstrap_empty")
+    chosen_seed = _bootstrap_count(seed, 0, MAX_BOOTSTRAP_SEED, "agreement_bootstrap_seed_invalid")
+    count = _bootstrap_count(
+        resamples, 1, MAX_BOOTSTRAP_WORK, "agreement_bootstrap_resamples_invalid"
+    )
+    size = len(paired.labels)
+    if count * max(paired.n, size * size) > MAX_BOOTSTRAP_WORK or (
+        4 * paired.n * paired.n * (size - 1) > 2**53
+    ):
+        raise ValidationError("agreement_bootstrap_too_large")
+    coefficient = _select_coefficient(reference)
+    order = {label: i for i, label in enumerate(paired.labels)}
+    cells = tuple(
+        order[left] * size + order[right]
+        for left, right in zip(rater_a.ratings, rater_b.ratings, strict=True)
+    )
+    values, undefined, numpy_version = _resampled_coefficients(
+        cells, size, coefficient, seed=chosen_seed, resamples=count
+    )
+    tail = (1 - Fraction(str(BOOTSTRAP_CONFIDENCE))) / 2
+    return AgreementBootstrap(
+        agreement=paired,
+        prevalence=reference,
+        coefficient=coefficient,
+        estimate=_selected_estimate(paired, coefficient),
+        seed=chosen_seed,
+        resamples=count,
+        undefined_resamples=undefined,
+        lower=_percentile(values, tail) if values else None,
+        upper=_percentile(values, 1 - tail) if values else None,
+        reason=None if values else "all_resamples_undefined",
+        numpy_version=numpy_version,
     )
