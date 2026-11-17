@@ -199,6 +199,14 @@ commit_url = await hub.upload_folder(
     "me/llama-finetune",
     commit_message="snapshot 42",
 )
+# Exactly these files, in one all-or-nothing commit; nothing else in the directory is listed.
+commit_url = await hub.upload_files(
+    {"results.parquet": "./out/results.parquet", "manifest.json": "./out/manifest.json"},
+    "me/run-results",
+    repo_type="dataset",
+)
+# create_repo(private=True, exist_ok=True) leaves an existing repo's visibility as it is.
+assert await hub.is_private("me/run-results", repo_type="dataset")
 ```
 
 ### Convenience push/pull

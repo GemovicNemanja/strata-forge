@@ -7,21 +7,22 @@ Authoritative rules for what each `strata_forge.*` module owns, what it imports,
 | Module | May import from | Must NOT import from |
 |---|---|---|
 | `strata_forge.core` | — | any other `strata_forge.*` |
+| `strata_forge.metrics` | `core` | all other `strata_forge.*`, including `evals`, `training`, `pipelines` |
 | `strata_forge.config` | `core` | `llm`, `prompts`, `tracing`, … |
 | `strata_forge.llm` | `core`, `config` | higher-level modules |
 | `strata_forge.tracing` | `core`, `config`, `llm` (for trace types) | `evals`, `agents`, `rag`, … |
 | `strata_forge.storage` | `core`, `config` | LLM/eval/agent layers |
 | `strata_forge.prompts` | `core`, `config`, `llm` (typing only), `tracing` | `evals`, `agents`, `rag` |
 | `strata_forge.datasets` | `core`, `config`, `llm` (embedding API), `storage`, `tracing` | `evals`, `agents`, `rag` |
-| `strata_forge.evals` | `core`, `config`, `llm`, `prompts`, `datasets`, `tracing`, `storage` | `agents` (other way around if needed) |
+| `strata_forge.evals` | `core`, `metrics`, `config`, `llm`, `prompts`, `datasets`, `tracing`, `storage` | `agents` (other way around if needed) |
 | `strata_forge.rag` | `core`, `config`, `llm`, `storage`, `tracing` | `agents`, `evals`, `training`, `compute` |
 | `strata_forge.agents` | `core`, `config`, `llm`, `prompts`, `tracing`, `rag`, `storage` | `evals`, `training`, `compute` |
 | `strata_forge.compute` | `core`, `config`, `llm`, `storage`, `tracing` | `evals`, `agents`, `training` (other way around) |
-| `strata_forge.training` | `core`, `config`, `llm` (typing only), `datasets`, `storage`, `tracing`, `compute` | `evals`, `agents`, `rag` |
+| `strata_forge.training` | `core`, `metrics`, `config`, `llm` (typing only), `datasets`, `storage`, `tracing`, `compute` | `evals`, `agents`, `rag` |
 | `strata_forge.cli` | any module | (no inverse rule — cli is a sink) |
 | `strata_forge.sync` | any async public surface | provider SDKs directly |
 
-Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`) are imported **inside** functions that use them, never at module load.
+Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdrant-client`, `vllm`, `pillow`, `redis`, `inspect-ai`, `numpy`) are imported **inside** functions that use them, never at module load.
 
 ## Per-module ownership
 
@@ -34,6 +35,15 @@ Heavy deps (`torch`, `transformers`, `trl`, `peft`, `skypilot`, `asyncssh`, `qdr
 **Owns:** `Settings` (Pydantic BaseSettings) and its sub-models. YAML overlay loader. `.env` integration. The `get_settings()` cached accessor.
 
 **Does NOT:** Construct provider clients. Read provider-specific env vars except through declared sub-models. Make network calls.
+
+### `strata_forge.metrics`
+**Owns:** Pure classification point metrics, explicit label order, population/coverage accounting,
+probability provenance, stable temperature application, and its draft calibration component.
+These deterministic functions are synchronous under [ADR 0020](adr/0020-pure-metric-functions.md).
+
+**Does NOT:** Import training or evaluation runners, read datasets, fit or call models, write
+artifacts, choose research thresholds or pool populations. Training and evaluation may share
+this leaf without introducing a training-to-evaluation dependency.
 
 ### `strata_forge.llm`
 **Owns:** `LLMClient`, message and response types, tool calling primitives (`Tool`, `@tool`, `run_tool_loop`), structured output, multimodal image input, streaming, two-axis fallback, response cache (provider-agnostic), model registry, cost/token accounting, NDJSON diagnostic dump. Provider clients via LiteLLM wrappers in `providers/`.

@@ -227,6 +227,17 @@ sink the whole batch.
 
 ## Metrics
 
+Explicit-label per-row classification functions live in the pure
+[`strata_forge.metrics`](metrics.md) leaf and are re-exported from
+`strata_forge.evals.classification`: `classification_report`, `accuracy`, `macro_f1`,
+`confusion_matrix`, `invalid_rate`, `brier`, and `nll`. Invalid predictions remain wrong in
+the denominator; missing probability vectors expose reduced coverage. Raw and restricted
+probabilities carry distinct provenance. These synchronous functions do not run experiments
+or read artifacts. Their definitions differ from the outcome aggregates below.
+The same aliases include `wilson_interval`, `mcnemar_exact`, and `holm_correction`; the
+[comparison contract](metrics.md#explicit-population-comparisons) specifies eligible counts,
+pairing, named families, floating underflow, and the boundary around resampling.
+
 ```python
 from strata_forge.evals import (
     pass_rate,                  # fraction passing one grader

@@ -8,6 +8,39 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
+### Added
+
+- The batch-inference runner pins a model to a full Hub commit id (`RunSpec.model_revision`;
+  a branch, tag or abbreviated id is refused), sends `Hyperparams.seed` and `Hyperparams.top_k`
+  with every request, adds `finish_reason` and per-row token counts to the results, and writes a
+  content-free `manifest.json` (`strata.run.manifest/v1`, `kind` `inference`) beside them: the
+  served model commit, the engine and installed library versions, the served context length and
+  dtype, the template digest, the settings and the counts. Results and manifest are pushed in
+  one commit, only to a private output repo: a public one is refused before the run starts and
+  again at push time. This changes the runner spec, so the next release is a minor bump.
+- `HFHubClient.is_private` reports a repo's visibility, since `create_repo(private=True,
+  exist_ok=True)` leaves an existing repo's visibility unchanged. `HFHubClient.upload_files`
+  uploads exactly the given files in one commit.
+- `strata_forge.pipelines._common` holds the helpers every runner's manifest shares: the commit-id
+  check, the snapshot-commit reader, installed-version capture and `strata.run.manifest/v1`.
+- `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact
+  conditional McNemar tests with all-pair accuracy deltas and finite log/underflow provenance,
+  and explicit named-family Holm correction that retains caller order. Frozen results and
+  evaluation aliases require no numerical extra and choose no rejection threshold. Large
+  binomial tails avoid cancellation from subtracting log-gamma values. Bootstrap execution
+  remains outside these helpers' contract.
+
+- `strata_forge.metrics` provides explicit-label classification reports, accuracy, macro-F1,
+  confusion matrices with invalid-output counts, multiclass sum-form Brier score, and NLL.
+  Undefined values, denominators, probability coverage, clipping, and raw/restricted probability
+  provenance are preserved in serializable frozen models. `evals.classification` re-exports
+  the same functions. Pure metric functions are synchronous under ADR 0020.
+- Temperature application is stable and loads NumPy lazily through `[scoring]`. A draft
+  `TemperatureCalibration` component records its label order, fit provenance, and optional
+  before/after scores; it does not fit temperatures or write a training calibration file.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added

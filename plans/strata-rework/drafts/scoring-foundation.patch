@@ -1,0 +1,1099 @@
+diff --git a/docs/modules/compute.md b/docs/modules/compute.md
+index e0c1e6b..36c3a6e 100644
+--- a/docs/modules/compute.md
++++ b/docs/modules/compute.md
+@@ -275,6 +275,65 @@ secrets file the backend wrote beside the job, and append the same ``ProgressEve
+ ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
+ of which is running.
+ 
++### Private exact-scoring foundation
++
++`strata_forge.pipelines._scoring` contains reusable Hugging Face forward-pass scoring
++primitives. It is an internal module, **not an inference-runner capability**: `Hyperparams`
++and the deployed runner still accept only the existing vLLM chat path. No engine picker,
++server argument or agent tool is enabled by this foundation.
++
++`await load_scorer(model_id, engine=..., token=..., max_length=..., revision=...)` loads a
++tokenizer and either `AutoModelForSequenceClassification` (`hf_classify`) or
++`AutoModelForCausalLM` (`hf_label_logits`). Both loads explicitly receive `token` and
++`trust_remote_code=False`; the model load also requires `use_safetensors=True`. `token=False`
++means anonymous access, without the machine's cached credential. Only a Hub repo id is
++accepted, not a local model path. Dependencies are lazy; the existing `[finetuning]` extra
++supplies torch and transformers for direct internal use. The scorer neither reads secrets
++from the environment nor logs input text, credentials or model exceptions.
++
++Call `await scorer.score([ScoringInput(text=..., text_pair=...)], batch_size=...)` with
++already-rendered text. No Jinja, Python or template interpretation occurs here. Forward
++passes run in a worker thread, in evaluation/inference mode, sorted into length batches;
++results return in the original order with the input index. The scorer uses an explicit
++`max_length`; a caller must choose a limit supported by the model. It does not render or
++apply a chat template, choose a tokenizer revision independently, or truncate text by
++character count.
++
++- **Classifier:** every row requires `text_pair`. Probabilities use a numerically stable
++  softmax over all classifier logits, in numeric `config.id2label` order. `label_alias` maps
++  each source class name to its output name; it is mandatory for every generic `LABEL_n`
++  name. Missing/non-contiguous class ids, duplicate output names and unknown alias keys
++  are refused. Output names are inert bounded strings, never expressions. `ScoredRow.columns()`
++  supplies `p_<label>`, `pred` and `error` columns.
++- **Length policy:** classifiers tokenize pairs with `truncation="only_first"`, preserving
++  the complete hypothesis. A pair exceeding the limit increments `overflow_rows`. A
++  truncated premise also increments `truncated_rows`. A hypothesis that cannot fit returns
++  a row with `hypothesis_too_long`, no probabilities, and contributes to `failed_rows`;
++  equality is also refused when a nonempty premise would have no token space. The scorer
++  never silently changes that hypothesis.
++- **Decoder:** `label_tokens` maps output labels to literal verbalizer strings. Each must
++  encode to exactly one distinct token without special tokens; preflight refuses multi-token,
++  empty or colliding verbalizers before loading weights. One forward pass reads the logits
++  at each prompt's last real input token, with right padding, and computes probabilities
++  renormalized over those verbalizer ids. `mass_outside` is the full-vocabulary softmax mass
++  outside those ids, calculated directly rather than from a censored top-k result. It is
++  not a calibration guarantee or a logical uncertainty label. Overlength prompts return
++  `prompt_too_long` instead of being truncated; a prompt with no input-token position is
++  refused. Decoder inputs never take `text_pair`.
++
++An optional synchronous `on_progress` callback receives the existing `ProgressEvent(kind="step",
++stage="run")` shape from the worker thread. Steps count completed input rows, including
++length refusals, and report cumulative `succeeded`, `failed`, `overflow_rows` and
++`truncated_rows`. It emits no start/end lifecycle events. Unexpected model/tokenizer failures
++propagate; a runner integrating this module must apply its shared redactor before surfacing
++those exceptions and own final run success/failure policy and artifact persistence.
++
++Integration remains separate: spec/agent knob approval, inert pair-template rendering,
++runner routing, bounded direct dependencies in `[serving]`, clean-install checks, model/dataset
++revision provenance, Parquet persistence, and VM comparison against a local reference are
++required before these engines can be advertised as launchable runs. Offline tests use
++tokenizer/model/tensor fakes and do not establish compatibility or performance on real weights.
++
+ ### The runner contract
+ 
+ An orchestrator that launches a ``strata_forge.pipelines`` runner on a
+diff --git a/src/strata_forge/pipelines/_scoring.py b/src/strata_forge/pipelines/_scoring.py
+new file mode 100644
+index 0000000..5dbbdb6
+--- /dev/null
++++ b/src/strata_forge/pipelines/_scoring.py
+@@ -0,0 +1,477 @@
++"""Private exact-scoring primitives; pipeline launchers do not expose these engines.
++
++Inputs are already-rendered text, never executable templates. Heavy dependencies are lazy,
++and model loading accepts only explicit Hub credentials, safetensors and built-in model code.
++The caller owns result persistence, lifecycle events and scrubbing upstream exceptions.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import math
++import re
++from importlib import import_module
++from typing import TYPE_CHECKING, Literal, Protocol, cast
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from strata_forge.core.errors import ValidationError
++from strata_forge.pipelines._common import REPO_ID_RE
++from strata_forge.training.progress import ProgressEvent
++
++if TYPE_CHECKING:
++    from collections.abc import Callable, Mapping, Sequence
++    from contextlib import AbstractContextManager
++
++type ScoringEngine = Literal["hf_classify", "hf_label_logits"]
++type HubCredential = str | Literal[False]
++
++
++class ScoringInput(BaseModel):
++    """One rendered prompt, optionally paired with a classifier hypothesis."""
++
++    model_config = ConfigDict(frozen=True, extra="forbid")
++    text: str
++    text_pair: str | None = None
++
++
++class ScoredRow(BaseModel):
++    """A score or an explicit length refusal, indexed in the caller's input order."""
++
++    model_config = ConfigDict(frozen=True, extra="forbid")
++    index: int
++    probabilities: dict[str, float] = Field(default_factory=dict)
++    pred: str | None = None
++    mass_outside: float | None = None
++    overflow: bool = False
++    truncated: bool = False
++    error: str | None = None
++
++    def columns(self) -> dict[str, str | float | None]:
++        """Return the probability-bearing columns a result writer can persist."""
++        result: dict[str, str | float | None] = {
++            f"p_{label}": probability for label, probability in self.probabilities.items()
++        }
++        result.update(pred=self.pred, error=self.error)
++        if self.mass_outside is not None:
++            result["mass_outside"] = self.mass_outside
++        return result
++
++
++class ScoringResult(BaseModel):
++    """Ordered rows and honest counts, including refused overlength inputs."""
++
++    model_config = ConfigDict(frozen=True, extra="forbid")
++    rows: list[ScoredRow]
++    overflow_rows: int
++    truncated_rows: int
++    failed_rows: int
++
++
++class _Tensor(Protocol):
++    @property
++    def shape(self) -> Sequence[int]: ...
++    def __getitem__(self, key: object) -> _Tensor: ...
++    def to(self, device: str) -> _Tensor: ...
++    def float(self) -> _Tensor: ...
++    def detach(self) -> _Tensor: ...
++    def cpu(self) -> _Tensor: ...
++    def tolist(self) -> object: ...
++
++
++class _Tokenizer(Protocol):
++    padding_side: str
++    pad_token_id: int | None
++    eos_token_id: int | None
++
++    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]: ...
++    def num_special_tokens_to_add(self, pair: bool = False) -> int: ...
++    def __call__(
++        self, text: list[str], text_pair: list[str] | None = None, **kwargs: object
++    ) -> Mapping[str, _Tensor]: ...
++
++
++class _ModelConfig(Protocol):
++    id2label: Mapping[int | str, str]
++
++
++class _ModelOutput(Protocol):
++    logits: _Tensor
++
++
++class _Model(Protocol):
++    config: _ModelConfig
++
++    def eval(self) -> object: ...
++    def to(self, device: str) -> object: ...
++    def __call__(self, **kwargs: _Tensor) -> _ModelOutput: ...
++
++
++class _Factory(Protocol):
++    def from_pretrained(self, model_id: str, **kwargs: object) -> object: ...
++
++
++class _Transformers(Protocol):
++    AutoTokenizer: _Factory
++    AutoModelForSequenceClassification: _Factory
++    AutoModelForCausalLM: _Factory
++
++
++class _Torch(Protocol):
++    def inference_mode(self) -> AbstractContextManager[object]: ...
++
++
++def _label_names(
++    id2label: Mapping[int | str, str], label_alias: Mapping[str, str] | None
++) -> list[str]:
++    by_id: dict[int, str] = {}
++    for key, value in id2label.items():
++        if (
++            isinstance(key, bool)
++            or not str(key).isdigit()
++            or not isinstance(cast("object", value), str)
++        ):
++            raise ValidationError("id2label must map contiguous integer class ids to names")
++        index = int(key)
++        if index in by_id:
++            raise ValidationError("id2label repeats a class id")
++        by_id[index] = value
++    if not by_id or set(by_id) != set(range(len(by_id))):
++        raise ValidationError("id2label must map contiguous integer class ids to names")
++    names = [by_id[index] for index in range(len(by_id))]
++    aliases = dict(label_alias or {})
++    if aliases.keys() - set(names):
++        raise ValidationError("label_alias contains a name absent from id2label")
++    for name in names:
++        if re.fullmatch(r"LABEL_\d+", name, re.IGNORECASE) and name not in aliases:
++            raise ValidationError("generic id2label names require an explicit label_alias")
++    return _validate_labels([aliases.get(name, name) for name in names])
++
++
++def _validate_labels(names: list[str]) -> list[str]:
++    if any(not name.strip() or len(name) > 64 for name in names):
++        raise ValidationError("labels must contain 1 to 64 characters")
++    if not names or len(set(names)) != len(names):
++        raise ValidationError("labels must be nonempty and unique")
++    return names
++
++
++def _verbalizer_ids(tokenizer: _Tokenizer, label_tokens: Mapping[str, str]) -> list[int]:
++    _validate_labels(list(label_tokens))
++    ids: list[int] = []
++    for text in label_tokens.values():
++        encoded = tokenizer.encode(text, add_special_tokens=False)
++        if len(encoded) != 1:
++            raise ValidationError("each label verbalizer must encode to exactly one token")
++        ids.append(encoded[0])
++    if len(set(ids)) != len(ids):
++        raise ValidationError("label verbalizers must use distinct token ids")
++    return ids
++
++
++def _softmax(values: Sequence[float]) -> list[float]:
++    if not values or any(not math.isfinite(value) for value in values):
++        raise ValidationError("model logits must be finite and nonempty")
++    maximum = max(values)
++    weights = [math.exp(value - maximum) for value in values]
++    denominator = math.fsum(weights)
++    return [weight / denominator for weight in weights]
++
++
++def _label_probabilities(logits: Sequence[float], ids: Sequence[int]) -> tuple[list[float], float]:
++    if not logits or any(not math.isfinite(value) for value in logits):
++        raise ValidationError("model logits must be finite and nonempty")
++    if any(index < 0 or index >= len(logits) for index in ids):
++        raise ValidationError("a verbalizer token id is outside the model vocabulary")
++    selected = [logits[index] for index in ids]
++    probabilities = _softmax(selected)
++    # Sum the complement directly: 1 - label_mass loses tiny outside probabilities.
++    maximum = max(logits)
++    weights = [math.exp(value - maximum) for value in logits]
++    selected_ids = set(ids)
++    outside = math.fsum(value for index, value in enumerate(weights) if index not in selected_ids)
++    return probabilities, outside / math.fsum(weights)
++
++
++def _vector(tensor: _Tensor) -> list[float]:
++    raw = tensor.float().detach().cpu().tolist()
++    if not isinstance(raw, list):
++        raise ValidationError("model logits have an unexpected shape")
++    values = cast("list[object]", raw)
++    if any(isinstance(value, bool) or not isinstance(value, int | float) for value in values):
++        raise ValidationError("model logits have an unexpected shape")
++    return [float(cast("int | float", value)) for value in values]
++
++
++class Scorer:
++    """A private loaded model with synchronous, length-batched forward passes."""
++
++    def __init__(
++        self,
++        *,
++        engine: ScoringEngine,
++        model: _Model,
++        tokenizer: _Tokenizer,
++        torch: _Torch,
++        labels: list[str],
++        token_ids: list[int],
++        max_length: int,
++        device: str,
++    ) -> None:
++        self._engine = engine
++        self._model = model
++        self._tokenizer = tokenizer
++        self._torch = torch
++        self._labels = labels
++        self._token_ids = token_ids
++        self._max_length = max_length
++        self._device = device
++
++    async def score(
++        self,
++        rows: Sequence[ScoringInput],
++        *,
++        batch_size: int = 8,
++        on_progress: Callable[[ProgressEvent], None] | None = None,
++    ) -> ScoringResult:
++        """Score rendered inputs off the event loop; the callback runs in that worker."""
++        if batch_size < 1:
++            raise ValidationError("batch_size must be positive")
++        return await asyncio.to_thread(self._score, list(rows), batch_size, on_progress)
++
++    def _score(
++        self,
++        rows: list[ScoringInput],
++        batch_size: int,
++        on_progress: Callable[[ProgressEvent], None] | None,
++    ) -> ScoringResult:
++        tokenizer = self._tokenizer
++        results: dict[int, ScoredRow] = {}
++        pending: list[tuple[int, int, bool]] = []
++        overflow_count = 0
++        truncated_count = 0
++        failed_count = 0
++        for index, row in enumerate(rows):
++            first_length = len(tokenizer.encode(row.text, add_special_tokens=False))
++            pair_length = (
++                len(tokenizer.encode(row.text_pair, add_special_tokens=False))
++                if row.text_pair is not None
++                else 0
++            )
++            if self._engine == "hf_classify" and row.text_pair is None:
++                raise ValidationError("hf_classify requires text_pair for every row")
++            if self._engine == "hf_label_logits" and row.text_pair is not None:
++                raise ValidationError("hf_label_logits accepts a single rendered prompt")
++            specials = tokenizer.num_special_tokens_to_add(pair=row.text_pair is not None)
++            length = first_length + pair_length + specials
++            overflow = length > self._max_length
++            error: str | None = None
++            if self._engine == "hf_classify":
++                # only_first cannot remove the entire first sequence in every HF tokenizer.
++                if pair_length + specials > self._max_length or (
++                    first_length > 0 and pair_length + specials >= self._max_length
++                ):
++                    error = "hypothesis_too_long: hypothesis cannot fit without truncation"
++            elif overflow:
++                error = "prompt_too_long: decoder scoring never truncates the prompt"
++            elif length == 0:
++                error = "empty_prompt: decoder scoring needs a label position"
++            if error is not None:
++                results[index] = ScoredRow(index=index, overflow=overflow, error=error)
++                overflow_count += overflow
++                failed_count += 1
++            else:
++                pending.append((min(length, self._max_length), index, overflow))
++
++        pending.sort()
++        self._progress(
++            len(results), len(rows), overflow_count, truncated_count, failed_count, on_progress
++        )
++        for offset in range(0, len(pending), batch_size):
++            batch = pending[offset : offset + batch_size]
++            inputs = [rows[index].text for _, index, _ in batch]
++            pairs = (
++                [cast("str", rows[index].text_pair) for _, index, _ in batch]
++                if self._engine == "hf_classify"
++                else None
++            )
++            features = tokenizer(
++                inputs,
++                pairs,
++                padding=True,
++                truncation="only_first" if pairs is not None else False,
++                max_length=self._max_length,
++                return_tensors="pt",
++                return_attention_mask=True,
++            )
++            with self._torch.inference_mode():
++                output = self._model(
++                    **{key: value.to(self._device) for key, value in features.items()}
++                )
++            expected_rank = 2 if pairs is not None else 3
++            if len(output.logits.shape) != expected_rank or output.logits.shape[0] != len(batch):
++                raise ValidationError("model logits have an unexpected shape")
++            if pairs is None and output.logits.shape[1] < max(length for length, _, _ in batch):
++                raise ValidationError("model logits omit a prompt's label position")
++            for batch_index, (length, index, overflow) in enumerate(batch):
++                mass_outside: float | None = None
++                if pairs is not None:
++                    values = _vector(output.logits[batch_index])
++                    if len(values) != len(self._labels):
++                        raise ValidationError("model logits do not match id2label")
++                    probabilities = _softmax(values)
++                else:
++                    # Right padding keeps each prompt's positions unchanged. Read its last
++                    # real token, never the padding position of a longer batch neighbour.
++                    values = _vector(output.logits[batch_index, length - 1, :])
++                    probabilities, mass_outside = _label_probabilities(values, self._token_ids)
++                results[index] = ScoredRow(
++                    index=index,
++                    probabilities=dict(zip(self._labels, probabilities, strict=True)),
++                    pred=self._labels[
++                        max(range(len(probabilities)), key=probabilities.__getitem__)
++                    ],
++                    mass_outside=mass_outside,
++                    overflow=overflow,
++                    truncated=overflow,
++                )
++                overflow_count += overflow
++                truncated_count += overflow
++            self._progress(
++                len(results), len(rows), overflow_count, truncated_count, failed_count, on_progress
++            )
++        ordered = [results[index] for index in range(len(rows))]
++        return ScoringResult(
++            rows=ordered,
++            overflow_rows=overflow_count,
++            truncated_rows=truncated_count,
++            failed_rows=failed_count,
++        )
++
++    @staticmethod
++    def _progress(
++        completed: int,
++        total: int,
++        overflow: int,
++        truncated: int,
++        failed: int,
++        sink: Callable[[ProgressEvent], None] | None,
++    ) -> None:
++        if sink is not None and completed:
++            sink(
++                ProgressEvent(
++                    kind="step",
++                    stage="run",
++                    step=completed,
++                    total_steps=total,
++                    metrics={
++                        "overflow_rows": float(overflow),
++                        "truncated_rows": float(truncated),
++                        "failed": float(failed),
++                        "succeeded": float(completed - failed),
++                    },
++                )
++            )
++
++
++async def load_scorer(
++    model_id: str,
++    *,
++    engine: ScoringEngine,
++    token: HubCredential,
++    max_length: int,
++    revision: str | None = None,
++    label_alias: Mapping[str, str] | None = None,
++    label_tokens: Mapping[str, str] | None = None,
++    device: str = "cpu",
++) -> Scorer:
++    """Load built-in HF model/tokenizer code with explicit authentication and safe weights."""
++    if not REPO_ID_RE.fullmatch(model_id):
++        raise ValidationError("model_id must be a Hub repo id, not a local path")
++    if token is not False and (not isinstance(cast("object", token), str) or not token):
++        raise ValidationError("token must be an explicit credential or False")
++    if max_length < 1:
++        raise ValidationError("max_length must be positive")
++    if engine not in ("hf_classify", "hf_label_logits"):
++        raise ValidationError("unsupported scoring engine")
++    if engine == "hf_classify" and label_tokens is not None:
++        raise ValidationError("hf_classify uses id2label, not label_tokens")
++    if engine == "hf_label_logits" and (not label_tokens or label_alias is not None):
++        raise ValidationError("hf_label_logits requires label_tokens and does not use label_alias")
++    return await asyncio.to_thread(
++        _load_scorer,
++        model_id,
++        engine,
++        token,
++        max_length,
++        revision,
++        dict(label_alias) if label_alias is not None else None,
++        dict(label_tokens) if label_tokens is not None else None,
++        device,
++    )
++
++
++def _load_scorer(
++    model_id: str,
++    engine: ScoringEngine,
++    token: HubCredential,
++    max_length: int,
++    revision: str | None,
++    label_alias: Mapping[str, str] | None,
++    label_tokens: Mapping[str, str] | None,
++    device: str,
++) -> Scorer:
++    try:
++        transformers = cast("_Transformers", import_module("transformers"))
++        torch = cast("_Torch", import_module("torch"))
++    except ImportError as exc:
++        raise ImportError(
++            "HF scoring requires torch and transformers; install 'strata-forge[finetuning]'."
++        ) from exc
++    tokenizer = cast(
++        "_Tokenizer",
++        transformers.AutoTokenizer.from_pretrained(
++            model_id,
++            revision=revision,
++            token=token,
++            trust_remote_code=False,
++        ),
++    )
++    tokenizer.padding_side = "right"
++    if tokenizer.pad_token_id is None:
++        if tokenizer.eos_token_id is None:
++            raise ValidationError("batched scoring requires a pad token or an EOS token")
++        tokenizer.pad_token_id = tokenizer.eos_token_id
++    ids = _verbalizer_ids(tokenizer, label_tokens) if label_tokens is not None else []
++    factory = (
++        transformers.AutoModelForSequenceClassification
++        if engine == "hf_classify"
++        else transformers.AutoModelForCausalLM
++    )
++    model = cast(
++        "_Model",
++        factory.from_pretrained(
++            model_id,
++            revision=revision,
++            token=token,
++            use_safetensors=True,
++            trust_remote_code=False,
++        ),
++    )
++    labels = (
++        _label_names(model.config.id2label, label_alias)
++        if engine == "hf_classify"
++        else list(label_tokens or {})
++    )
++    model.to(device)
++    model.eval()
++    return Scorer(
++        engine=engine,
++        model=model,
++        tokenizer=tokenizer,
++        torch=torch,
++        labels=labels,
++        token_ids=ids,
++        max_length=max_length,
++        device=device,
++    )
+diff --git a/tests/unit/pipelines/test_scoring.py b/tests/unit/pipelines/test_scoring.py
+new file mode 100644
+index 0000000..d67d30e
+--- /dev/null
++++ b/tests/unit/pipelines/test_scoring.py
+@@ -0,0 +1,540 @@
++"""Offline forward-pass fakes exercise scoring without torch, downloads or credentials."""
++
++from __future__ import annotations
++
++import contextlib
++import math
++import sys
++import types
++from typing import TYPE_CHECKING, cast
++
++import pytest
++
++from strata_forge.core.errors import ValidationError
++from strata_forge.pipelines import _scoring as scoring
++
++if TYPE_CHECKING:
++    from collections.abc import Mapping
++
++    from strata_forge.training.progress import ProgressEvent
++
++type _Data = int | float | list[_Data]
++
++
++class Tensor:
++    def __init__(self, data: _Data) -> None:
++        self.data = data
++
++    @property
++    def shape(self) -> tuple[int, ...]:
++        dimensions: list[int] = []
++        value = self.data
++        while isinstance(value, list):
++            dimensions.append(len(value))
++            if not value:
++                break
++            value = value[0]
++        return tuple(dimensions)
++
++    def __getitem__(self, key: object) -> Tensor:
++        value = self.data
++        for index in key if isinstance(key, tuple) else (key,):
++            assert isinstance(value, list)
++            assert isinstance(index, int | slice)
++            value = value[index]
++        return Tensor(value)
++
++    def to(self, device: str) -> Tensor:
++        assert device == "cpu"
++        return self
++
++    def float(self) -> Tensor:
++        return self
++
++    def detach(self) -> Tensor:
++        return self
++
++    def cpu(self) -> Tensor:
++        return self
++
++    def tolist(self) -> object:
++        return self.data
++
++
++class Tokenizer:
++    padding_side = "left"
++    pad_token_id: int | None = 0
++    eos_token_id: int | None = 98
++
++    def __init__(self) -> None:
++        self.calls: list[dict[str, object]] = []
++        self.vocab = {"A": 1, "B": 2, "C": 3, "first": 4, "second": 5}
++
++    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
++        assert add_special_tokens is False
++        return [self.vocab.get(word, 6) for word in text.split()]
++
++    def num_special_tokens_to_add(self, pair: bool = False) -> int:
++        return 3 if pair else 1
++
++    def __call__(
++        self, text: list[str], text_pair: list[str] | None = None, **kwargs: object
++    ) -> Mapping[str, Tensor]:
++        self.calls.append({"text": text, "text_pair": text_pair, **kwargs})
++        assert self.padding_side == "right"
++        assert kwargs["return_tensors"] == "pt"
++        sequences: list[list[int]] = []
++        for index, first in enumerate(text):
++            first_ids = self.encode(first, add_special_tokens=False)
++            if text_pair is not None:
++                assert kwargs["truncation"] == "only_first"
++                pair_ids = self.encode(text_pair[index], add_special_tokens=False)
++                available = cast("int", kwargs["max_length"]) - len(pair_ids) - 3
++                assert available >= 0
++                sequences.append([99, *first_ids[:available], 98, *pair_ids, 98])
++            else:
++                assert kwargs["truncation"] is False
++                sequences.append([99, *first_ids])
++        width = max(map(len, sequences))
++        return {
++            "input_ids": Tensor(
++                cast("_Data", [row + [0] * (width - len(row)) for row in sequences])
++            ),
++            "attention_mask": Tensor(
++                cast("_Data", [[1] * len(row) + [0] * (width - len(row)) for row in sequences])
++            ),
++        }
++
++
++class Model:
++    def __init__(self, labels: dict[int | str, str], *, causal: bool) -> None:
++        self.config = types.SimpleNamespace(id2label=labels)
++        self.causal = causal
++        self.evaluating = False
++        self.forward_calls = 0
++        self.override_logits: Tensor | None = None
++
++    def eval(self) -> Model:
++        self.evaluating = True
++        return self
++
++    def to(self, device: str) -> Model:
++        assert device == "cpu"
++        return self
++
++    def __call__(self, **features: Tensor) -> types.SimpleNamespace:
++        assert self.evaluating
++        self.forward_calls += 1
++        if self.override_logits is not None:
++            return types.SimpleNamespace(logits=self.override_logits)
++        ids = cast("list[list[int]]", features["input_ids"].tolist())
++        if self.causal:
++            logits = [
++                [
++                    ([0.0, math.log(2), math.log(3), math.log(4)] if token else [0.0] * 4)
++                    for token in row
++                ]
++                for row in ids
++            ]
++        else:
++            logits = [[float(row[1]), 0.0, -1.0] for row in ids]
++        return types.SimpleNamespace(logits=Tensor(cast("_Data", logits)))
++
++
++@pytest.fixture
++def fake_hf(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
++    tokenizer = Tokenizer()
++    labels: dict[int | str, str] = {2: "neutral", 0: "contradiction", 1: "entailment"}
++    calls: list[tuple[str, str, dict[str, object]]] = []
++    models: list[Model] = []
++
++    def tokenizer_load(model_id: str, **kwargs: object) -> Tokenizer:
++        calls.append(("tokenizer", model_id, kwargs))
++        return tokenizer
++
++    def model_load(model_id: str, **kwargs: object) -> Model:
++        calls.append(("classifier", model_id, kwargs))
++        model = Model(labels, causal=False)
++        models.append(model)
++        return model
++
++    def causal_load(model_id: str, **kwargs: object) -> Model:
++        calls.append(("causal", model_id, kwargs))
++        model = Model(labels, causal=True)
++        models.append(model)
++        return model
++
++    transformers = types.ModuleType("transformers")
++    monkeypatch.setattr(
++        transformers,
++        "AutoTokenizer",
++        types.SimpleNamespace(from_pretrained=tokenizer_load),
++        raising=False,
++    )
++    monkeypatch.setattr(
++        transformers,
++        "AutoModelForSequenceClassification",
++        types.SimpleNamespace(from_pretrained=model_load),
++        raising=False,
++    )
++    monkeypatch.setattr(
++        transformers,
++        "AutoModelForCausalLM",
++        types.SimpleNamespace(from_pretrained=causal_load),
++        raising=False,
++    )
++    torch = types.ModuleType("torch")
++    monkeypatch.setattr(torch, "inference_mode", contextlib.nullcontext, raising=False)
++    monkeypatch.setitem(sys.modules, "transformers", transformers)
++    monkeypatch.setitem(sys.modules, "torch", torch)
++    return types.SimpleNamespace(tokenizer=tokenizer, labels=labels, calls=calls, models=models)
++
++
++async def test_classifier_uses_class_ids_not_dictionary_order(
++    fake_hf: types.SimpleNamespace,
++) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model", engine="hf_classify", token=False, max_length=12
++    )
++    result = await scorer.score([scoring.ScoringInput(text="A", text_pair="B")])
++    assert list(result.rows[0].probabilities) == ["contradiction", "entailment", "neutral"]
++    assert result.rows[0].pred == "contradiction"
++    assert result.rows[0].columns()["p_contradiction"] == pytest.approx(
++        math.e / (math.e + 1 + math.exp(-1))
++    )
++    assert result.rows[0].mass_outside is None
++    assert result.overflow_rows == result.failed_rows == 0
++    assert fake_hf.models[0].evaluating
++
++
++async def test_generic_labels_require_explicit_aliases(fake_hf: types.SimpleNamespace) -> None:
++    fake_hf.labels.update({0: "LABEL_0", 1: "LABEL_1", 2: "LABEL_2"})
++    with pytest.raises(ValidationError, match="explicit label_alias"):
++        await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
++    scorer = await scoring.load_scorer(
++        "org/model",
++        engine="hf_classify",
++        token=False,
++        max_length=12,
++        label_alias={"LABEL_0": "contradicted", "LABEL_1": "entailed", "LABEL_2": "undetermined"},
++    )
++    result = await scorer.score([scoring.ScoringInput(text="A", text_pair="B")])
++    assert set(result.rows[0].probabilities) == {"contradicted", "entailed", "undetermined"}
++
++
++@pytest.mark.parametrize(
++    ("labels", "aliases"),
++    [
++        ({"bad": "yes"}, None),
++        ({1: "yes"}, None),
++        ({0: "yes", "0": "no"}, None),
++        ({0: "yes", 1: "yes"}, None),
++        ({0: "yes"}, {"typo": "yes"}),
++        ({0: "yes", 1: "no"}, {"yes": "same", "no": "same"}),
++        ({0: "yes"}, {"yes": ""}),
++    ],
++)
++def test_bad_label_metadata_is_refused(
++    labels: dict[int | str, str],
++    aliases: dict[str, str] | None,
++) -> None:
++    with pytest.raises(ValidationError):
++        scoring._label_names(labels, aliases)  # pyright: ignore[reportPrivateUsage]
++
++
++async def test_first_only_truncation_preserves_hypotheses_and_counts_refusals(
++    fake_hf: types.SimpleNamespace,
++) -> None:
++    scorer = await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=7)
++    events: list[ProgressEvent] = []
++    result = await scorer.score(
++        [
++            scoring.ScoringInput(text="first first first first first", text_pair="B"),
++            scoring.ScoringInput(text="A", text_pair="B B B B B"),
++            scoring.ScoringInput(text="A", text_pair="B B B B"),
++            scoring.ScoringInput(text="A", text_pair="B"),
++        ],
++        batch_size=1,
++        on_progress=events.append,
++    )
++    assert result.overflow_rows == 3
++    assert result.truncated_rows == 1
++    assert result.failed_rows == 2
++    assert result.rows[0].truncated
++    assert result.rows[1].error is not None
++    assert "hypothesis_too_long" in result.rows[1].error
++    assert result.rows[2].error is not None
++    assert "hypothesis_too_long" in result.rows[2].error
++    assert [row.index for row in result.rows] == [0, 1, 2, 3]
++    assert [call["text_pair"] for call in fake_hf.tokenizer.calls] == [["B"], ["B"]]
++    assert [event.step for event in events] == [2, 3, 4]
++    assert events[-1].metrics["overflow_rows"] == 3
++    assert events[-1].metrics["failed"] == 2
++
++
++async def test_length_batches_restore_input_order(fake_hf: types.SimpleNamespace) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model", engine="hf_classify", token=False, max_length=20
++    )
++    result = await scorer.score(
++        [
++            scoring.ScoringInput(text="first first first", text_pair="B"),
++            scoring.ScoringInput(text="A", text_pair="B"),
++            scoring.ScoringInput(text="second second", text_pair="B"),
++        ],
++        batch_size=2,
++    )
++    assert [call["text"] for call in fake_hf.tokenizer.calls] == [
++        ["A", "second second"],
++        ["first first first"],
++    ]
++    assert (
++        result.rows[0].probabilities["contradiction"]
++        > result.rows[1].probabilities["contradiction"]
++    )
++    assert (
++        result.rows[2].probabilities["contradiction"]
++        > result.rows[0].probabilities["contradiction"]
++    )
++    assert fake_hf.models[0].forward_calls == 2
++
++
++async def test_exact_decoder_scores_use_full_vocabulary_and_last_real_position(
++    fake_hf: types.SimpleNamespace,
++) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model",
++        engine="hf_label_logits",
++        token=False,
++        max_length=12,
++        label_tokens={"entailed": "A", "contradicted": "B"},
++    )
++    result = await scorer.score(
++        [
++            scoring.ScoringInput(text="first"),
++            scoring.ScoringInput(text="first second second"),
++        ]
++    )
++    for row in result.rows:
++        assert row.probabilities == pytest.approx({"entailed": 0.4, "contradicted": 0.6})
++        assert row.mass_outside == pytest.approx(0.5)
++        assert row.pred == "contradicted"
++        assert row.columns()["mass_outside"] == pytest.approx(0.5)
++    assert fake_hf.models[0].forward_calls == 1
++
++
++async def test_decoder_refuses_overlength_instead_of_truncating(
++    fake_hf: types.SimpleNamespace,
++) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model",
++        engine="hf_label_logits",
++        token=False,
++        max_length=2,
++        label_tokens={"yes": "A", "no": "B"},
++    )
++    result = await scorer.score([scoring.ScoringInput(text="first second")])
++    assert result.rows[0].probabilities == {}
++    assert result.rows[0].mass_outside is None
++    assert result.overflow_rows == result.failed_rows == 1
++    assert result.truncated_rows == 0
++    assert fake_hf.models[0].forward_calls == 0
++
++
++@pytest.mark.parametrize("verbalizers", [{"yes": "A B"}, {"yes": ""}, {"yes": "A", "no": "A"}])
++async def test_bad_verbalizers_are_refused_before_model_loading(
++    fake_hf: types.SimpleNamespace,
++    verbalizers: dict[str, str],
++) -> None:
++    with pytest.raises(ValidationError):
++        await scoring.load_scorer(
++            "org/model",
++            engine="hf_label_logits",
++            token=False,
++            max_length=12,
++            label_tokens=verbalizers,
++        )
++    assert fake_hf.models == []
++
++
++@pytest.mark.parametrize("token", [False, "hf_explicit_test_credential"])
++@pytest.mark.parametrize("engine", ["hf_classify", "hf_label_logits"])
++async def test_loader_boundary_is_safe_and_explicit(
++    fake_hf: types.SimpleNamespace,
++    token: scoring.HubCredential,
++    engine: scoring.ScoringEngine,
++) -> None:
++    await scoring.load_scorer(
++        "org/model",
++        engine=engine,
++        token=token,
++        max_length=12,
++        revision="pinned-revision",
++        label_tokens={"yes": "A", "no": "B"} if engine == "hf_label_logits" else None,
++    )
++    for kind, model_id, kwargs in fake_hf.calls:
++        assert model_id == "org/model"
++        assert kwargs["token"] == token
++        assert kwargs["revision"] == "pinned-revision"
++        assert kwargs["trust_remote_code"] is False
++        if kind != "tokenizer":
++            assert kwargs["use_safetensors"] is True
++
++
++async def test_decoder_can_pad_with_eos(fake_hf: types.SimpleNamespace) -> None:
++    fake_hf.tokenizer.pad_token_id = None
++    await scoring.load_scorer(
++        "org/model", engine="hf_label_logits", token=False, max_length=12, label_tokens={"yes": "A"}
++    )
++    assert fake_hf.tokenizer.pad_token_id == 98
++
++
++async def test_no_padding_token_is_refused(fake_hf: types.SimpleNamespace) -> None:
++    fake_hf.tokenizer.pad_token_id = fake_hf.tokenizer.eos_token_id = None
++    with pytest.raises(ValidationError, match="pad token"):
++        await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
++
++
++def test_exact_probability_arithmetic_is_stable_and_rejects_bad_logits() -> None:
++    probs, outside = scoring._label_probabilities([1000, 1001, 999], [0, 1])  # pyright: ignore[reportPrivateUsage]
++    assert math.fsum(probs) == pytest.approx(1)
++    assert outside == pytest.approx(math.exp(-1) / (1 + math.e + math.exp(-1)))
++    _, tiny_outside = scoring._label_probabilities([0, -40], [0])  # pyright: ignore[reportPrivateUsage]
++    assert tiny_outside == pytest.approx(math.exp(-40), rel=1e-12, abs=0)
++    with pytest.raises(ValidationError, match="finite"):
++        scoring._label_probabilities([math.nan, 1], [0])  # pyright: ignore[reportPrivateUsage]
++    with pytest.raises(ValidationError, match="vocabulary"):
++        scoring._label_probabilities([0, 1], [2])  # pyright: ignore[reportPrivateUsage]
++
++
++async def test_missing_optional_dependencies_have_an_install_hint(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    def missing(name: str) -> object:
++        raise ImportError(name)
++
++    monkeypatch.setattr(scoring, "import_module", missing)
++    with pytest.raises(ImportError, match="strata-forge\\[finetuning\\]"):
++        await scoring.load_scorer("org/model", engine="hf_classify", token=False, max_length=12)
++
++
++async def test_import_does_not_load_heavy_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
++    import importlib
++    import importlib.util
++
++    calls: list[str] = []
++
++    original = importlib.import_module
++
++    def guarded(name: str, package: str | None = None) -> types.ModuleType:
++        if name in {"torch", "transformers"}:
++            calls.append(name)
++            raise AssertionError("heavy import at module load")
++        return original(name, package)
++
++    spec = importlib.util.spec_from_file_location("scoring_lazy_check", scoring.__file__)
++    assert spec is not None
++    assert spec.loader is not None
++    module = importlib.util.module_from_spec(spec)
++    monkeypatch.setitem(sys.modules, "scoring_lazy_check", module)
++    monkeypatch.setattr(importlib, "import_module", guarded)
++    spec.loader.exec_module(module)
++    assert calls == []
++
++
++async def test_empty_work_and_wrong_input_shapes(fake_hf: types.SimpleNamespace) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model", engine="hf_classify", token=False, max_length=12
++    )
++    result = await scorer.score([])
++    assert result.rows == []
++    assert result.failed_rows == result.overflow_rows == 0
++    with pytest.raises(ValidationError, match="text_pair"):
++        await scorer.score([scoring.ScoringInput(text="A")])
++    with pytest.raises(ValidationError, match="batch_size"):
++        await scorer.score([], batch_size=0)
++
++
++@pytest.mark.parametrize(
++    ("kwargs", "message"),
++    [
++        ({"model_id": "../model"}, "Hub repo"),
++        ({"token": True}, "explicit credential"),
++        ({"max_length": 0}, "positive"),
++        ({"engine": "vllm_chat"}, "unsupported scoring engine"),
++        ({"label_tokens": {"yes": "A"}}, "not label_tokens"),
++        ({"engine": "hf_label_logits"}, "requires label_tokens"),
++    ],
++)
++async def test_invalid_loader_options_fail_before_imports(
++    monkeypatch: pytest.MonkeyPatch,
++    kwargs: dict[str, object],
++    message: str,
++) -> None:
++    def forbidden(name: str) -> object:
++        raise AssertionError(name)
++
++    monkeypatch.setattr(scoring, "import_module", forbidden)
++    options: dict[str, object] = {
++        "model_id": "org/model",
++        "engine": "hf_classify",
++        "token": False,
++        "max_length": 12,
++    }
++    options.update(kwargs)
++    with pytest.raises(ValidationError, match=message):
++        await scoring.load_scorer(**options)  # pyright: ignore[reportArgumentType] — exercise invalid wire values
++
++
++@pytest.mark.parametrize(
++    ("logits", "message"),
++    [
++        (Tensor([0.0, 1.0]), "unexpected shape"),
++        (Tensor([[0.0, 1.0]]), "match id2label"),
++        (Tensor([[0.0, math.inf, 1.0]]), "finite"),
++    ],
++)
++async def test_invalid_model_outputs_are_not_persisted_as_scores(
++    fake_hf: types.SimpleNamespace,
++    logits: Tensor,
++    message: str,
++) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model", engine="hf_classify", token=False, max_length=12
++    )
++    fake_hf.models[0].override_logits = logits
++    with pytest.raises(ValidationError, match=message):
++        await scorer.score([scoring.ScoringInput(text="A", text_pair="B")])
++
++
++async def test_decoder_rejects_pairs_and_shortened_logit_sequences(
++    fake_hf: types.SimpleNamespace,
++) -> None:
++    scorer = await scoring.load_scorer(
++        "org/model", engine="hf_label_logits", token=False, max_length=12, label_tokens={"yes": "A"}
++    )
++    with pytest.raises(ValidationError, match="single rendered prompt"):
++        await scorer.score([scoring.ScoringInput(text="first", text_pair="B")])
++    fake_hf.models[0].override_logits = Tensor([[[0.0, 1.0, 2.0, 3.0]]])
++    with pytest.raises(ValidationError, match="label position"):
++        await scorer.score([scoring.ScoringInput(text="first second")])
++
++
++async def test_empty_decoder_without_special_tokens_has_no_label_position(
++    fake_hf: types.SimpleNamespace,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setattr(fake_hf.tokenizer, "num_special_tokens_to_add", lambda pair=False: 0)
++    scorer = await scoring.load_scorer(
++        "org/model", engine="hf_label_logits", token=False, max_length=12, label_tokens={"yes": "A"}
++    )
++    result = await scorer.score([scoring.ScoringInput(text="")])
++    assert result.rows[0].error == "empty_prompt: decoder scoring needs a label position"
++    assert result.failed_rows == 1
++    assert fake_hf.models[0].forward_calls == 0
++
++
++@pytest.mark.parametrize("data", [1.0, [[1.0]]])
++def test_model_vector_must_be_flat(data: _Data) -> None:
++    with pytest.raises(ValidationError, match="unexpected shape"):
++        scoring._vector(Tensor(data))  # pyright: ignore[reportPrivateUsage]
