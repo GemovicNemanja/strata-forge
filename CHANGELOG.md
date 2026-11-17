@@ -8,6 +8,34 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.metrics.agreement.agreement_bootstrap` returns a seeded item-level percentile
+  bootstrap interval (`item-percentile-bootstrap-v1`) for the two-rater agreement coefficient
+  that the full-sample reference prevalence selects, as `research_annotation_gate` does: Gwet's
+  AC1 at an inclusive 80% reference category, otherwise Cohen's kappa. Every resample keeps that
+  coefficient rather than reselecting. Items are resampled with replacement by
+  `numpy.random.Generator(PCG64(seed))` (one `(resamples, n)` draw, default 10,000 resamples),
+  confusion counts are vectorised across resamples, each resample's value equals the exact point
+  arithmetic, and the 95% bounds use Hyndman-Fan type 7 quantiles. Resamples whose kappa is
+  undefined (chance agreement one) are counted in `undefined_resamples`. The frozen
+  `AgreementBootstrap` records the contract, seed, NumPy version and bounds. NumPy comes from the
+  `[scoring]` extra and is imported only when the function runs.
+- `strata_forge.metrics.agreement.human_model_agreement` adds the `nominal-human-vs-model-v1`
+  statistic for one human (`HumanAnnotations`, `None` = skip) against one model
+  (`ModelRatings`, `None` = null label, with `model_prompt_sha256` and `model_run_ref`), beside the
+  unchanged two-human statistic. Skips and nulls are excluded from both series and counted. More
+  than 10% skips fails the slice (`skip_fraction_exceeded`); that signed failure outranks every
+  refusal and lists each applicable one beside it in an ordered `reasons` tuple, such as
+  `reference_unavailable` or `model_null_fraction_exceeded`. Without it, more than 10% nulls or
+  a missing reference label refuses the slice. Both fractions are parameters in `[0, 1)`, and the
+  threshold is bounded to `[-1, 1]`. The reference-prevalence selector runs once over all slice
+  items, and kappa is reported beside a selected AC1. The exact point value gates at an
+  inclusive 0.70; a value, kappa and the bootstrap interval are reported only when a coefficient
+  is defined and the slice is not refused, and the interval never gates or refuses. A report-only
+  user-versus-solver kappa is reported beside it. The frozen `HumanModelAgreement` holds exact
+  rational values and no item IDs or labels.
+
 ## [0.4.0] - 2026-11-17
 
 ### Added

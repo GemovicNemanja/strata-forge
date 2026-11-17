@@ -3,7 +3,8 @@
 This pure leaf is shared by training and evaluation. It performs no I/O, reads no datasets,
 calls no models, and imports neither consumer. Functions are synchronous under
 [ADR 0020](../architecture/adr/0020-pure-metric-functions.md). Execution workers own scheduling
-and persistence. NumPy is required only by nonempty temperature application, through `[scoring]`.
+and persistence. NumPy is required only by nonempty temperature application and the agreement
+bootstrap, through `[scoring]`.
 
 ## Public surface
 
@@ -217,13 +218,14 @@ at large near-central counts and exhaustive small paired tables.
 
 ### Resampling boundary
 
-No bootstrap execution is exported. A resampling contract must specify its eligible unit
-IDs, exact paired population, declared cluster/base-problem mapping, preserved config/slice
-context, and behavior for absent classes or undefined metrics. Reproducibility additionally
-requires an explicit RNG algorithm and seed, canonical unit/cluster ordering, replicate
-count, quantile/interpolation definition, and failure/coverage policy. Those choices are not
-silently made by these three helpers. They supply neither bootstrap intervals nor research
-thresholds, calibration fits, or an evaluation runner.
+The only bootstrap is the approved agreement interval described under
+[Item-level agreement bootstrap](#item-level-agreement-bootstrap). Any other resampling contract
+must specify its eligible unit IDs, exact paired population, declared cluster/base-problem
+mapping, preserved config/slice context, and behavior for absent classes or undefined metrics.
+Reproducibility additionally requires an explicit RNG algorithm and seed, canonical unit/cluster
+ordering, replicate count, quantile/interpolation definition, and failure/coverage policy. Those
+choices are not silently made by these three helpers. They supply neither bootstrap intervals
+nor research thresholds, calibration fits, or an evaluation runner.
 
 Module rules: [`src/strata_forge/metrics/CLAUDE.md`](../../src/strata_forge/metrics/CLAUDE.md).
 
@@ -330,14 +332,205 @@ the selector or sets policy for another consumer. A finite threshold outside the
 range is preserved as caller policy, without clamping.
 
 The returned `AgreementGate` retains both full reports, selected coefficient/value, threshold,
-`passed`, undefined reason and `confidence_method="not_produced"`. A selected undefined kappa
-has `passed=null`, `reason="selected_coefficient_undefined"` and its coefficient reason.
-An empty slice selects nothing and has `passed=null`, `reason="empty"`. These point comparisons
-do not implement a confidence interval, bootstrap, multi-rater method or completed G0/annotation
-gate. Callers must enforce the frozen reference source, role separation and applicable study
-protocol before interpreting them. Function-level refusals use fixed Forge `ValidationError`
-codes without echoing supplied item/rater/source values; input-model validation hides values.
+`passed`, undefined reason and `confidence_method="not_produced"`. A selected undefined kappa has
+`passed=null`, `reason="selected_coefficient_undefined"` and its coefficient reason. An empty slice
+selects nothing and has `passed=null`, `reason="empty"`. These point comparisons do not implement a
+confidence interval, multi-rater method or completed G0/annotation gate; the separate bootstrap
+below supplies the only interval. Callers must enforce the frozen reference source, role separation
+and applicable study protocol before interpreting them. Function-level refusals use fixed Forge
+`ValidationError` codes without echoing supplied item/rater/source values; input-model validation
+hides values.
 
 The [synthetic agreement fixture](../../tests/unit/metrics/fixtures/agreement_point_v1.json)
 retains hand-counted rational results, including unequal marginals, negative coefficients
 and a declared unused category. It contains no research annotations or model outputs.
+
+### Item-level agreement bootstrap
+
+```python
+from strata_forge.metrics.agreement import agreement_bootstrap
+
+interval = agreement_bootstrap(a, b, references, labels=labels, seed=20261104)
+assert interval.coefficient == "cohen_kappa"
+assert interval.interval.resamples == 10_000
+```
+
+```python
+def agreement_bootstrap(
+    rater_a: HumanRatings,
+    rater_b: HumanRatings,
+    prevalence: ReferencePrevalence,
+    *,
+    labels: Sequence[str],
+    seed: int,
+    resamples: int = BOOTSTRAP_RESAMPLES,  # 10_000
+) -> AgreementBootstrap: ...
+```
+
+This is a nonparametric percentile bootstrap over **items**, approved as a contract
+(`bootstrap_version="item-percentile-bootstrap-v1"`). It requires NumPy from `[scoring]`,
+imported only when the function runs; a missing installation raises an actionable hint.
+Importing `metrics.agreement` and the point functions still need no NumPy.
+
+- **Population.** The two rater declarations and the reference prevalence must cover the same
+  ordered item IDs and declared labels, exactly as `research_annotation_gate` requires. The
+  caller removes skipped items before building all three, so the bootstrap population and the
+  full-sample selection share one population. An empty population refuses with
+  `agreement_bootstrap_empty`, since no interval exists over zero items.
+- **Coefficient.** The coefficient is chosen once, by the same reference-only selector as the
+  gate on the **full-sample** reference prevalence (AC1 iff some category has integer
+  `5*count >= 4*n`, else kappa), and every resample computes that coefficient. A resample is
+  not reselected by its own resampled reference prevalence: the interval then describes the
+  sampling variability of the reported point estimate, and the reported coefficient never
+  changes between the estimate and its interval. References are not resampled.
+- **Draws.** The stream is that of one C-order draw
+  `numpy.random.Generator(PCG64(seed)).integers(0, n, size=(resamples, n), dtype=int64)`;
+  row `r` is resample `r` and column `j` its `j`-th item, indexing the caller's declared item
+  order. The rows are drawn in consecutive blocks of about 2**20 indices from the same generator,
+  which reproduces that stream bit for bit while bounding memory. Each resample keeps every
+  item's (rater A, rater B) pair together. `seed` is a required integer in `[0, 2**53-1]`; bool
+  is refused. `resamples` is a caller-supplied integer, at least one, default 10,000. The same
+  seed, count, population and NumPy version give an identical result; the NumPy version is
+  recorded in `numpy_version` because the generator's stream belongs to NumPy.
+- **Arithmetic.** Each block forms the agreement count and both raters' class marginals for
+  all its resamples at once (`bincount`), never a K-by-K table per resample. Each coefficient
+  reduces to one integer ratio per resample: kappa is `(n*d - S)/(n*n - S)` with
+  `S = sum(a_c*b_c)`, and AC1 is `(4n(K-1)d - P)/(4n²(K-1) - P)` with
+  `P = sum(pooled_c*(2n - pooled_c))`. While `4*n*n*(K-1) <= 2**53`, a single correctly
+  rounded division equals the float of the exact `Fraction` the point estimate uses. Above that,
+  each ratio is converted through `Fraction`, so the equality still holds. Only a population
+  with `4*n*n*(K-1) >= 2**62`, beyond any slice that fits in memory, refuses with
+  `agreement_bootstrap_too_large`. `resamples` is at most `MAX_BOOTSTRAP_RESAMPLES` (1,000,000).
+  10,000 resamples of 120 items take about 15 ms.
+- **Undefined resamples.** A kappa resample whose chance agreement is one (both raters put
+  every drawn item in the same single category) has no value. It is counted in
+  `undefined_resamples`, not silently dropped, and is excluded from the quantiles, which are
+  taken over the `resamples - undefined_resamples` defined values. AC1 chance never reaches one
+  for two or more categories. If every resample is undefined (as when the full-sample selected
+  kappa is itself undefined) `lower`/`upper` are null with `reason="all_resamples_undefined"`.
+  Callers decide whether a nonzero undefined count is acceptable for their report.
+- **Quantile rule.** `quantile_rule="hyndman-fan-7"`, the linear interpolation that is
+  NumPy's and R's default. Over the `m` defined values sorted ascending `x[0..m-1]`, the
+  probability `p` has the exact rational position `h = (m-1)*p`, `j = floor(h)`, and the bound
+  is `x[j] + (h-j)*(x[j+1]-x[j])`, clamped to `[x[j], x[j+1]]` against rounding (`x[j]` when
+  `j = m-1`). The 95% interval uses `p = 1/40` and `p = 39/40`; the confidence level is fixed
+  at 0.95 (`BOOTSTRAP_CONFIDENCE`) by the approved contract and recorded on the result. The
+  bounds follow this exact rule, not `np.quantile`. They agree with
+  `np.quantile(..., method="linear")` to within about `2e-15`, but are not bit-identical to it.
+- **Golden values.** A unit test pins exact bounds for a fixed seed and input, so a NumPy
+  release that changes the PCG64 or `integers` stream fails CI rather than drifting silently.
+
+The frozen `AgreementBootstrap` holds both full point reports, the selected `coefficient`, its
+full-sample `estimate` and an `interval` block. `BootstrapInterval` records the contract fields
+(`bootstrap_version`, `rng`, `quantile_rule`, `coefficient_selection="full_sample_reference"`,
+`confidence_level`), `seed`, `resamples`, `undefined_resamples`, `lower`, `upper`, `reason` and
+`numpy_version`, and no item identity, so the human-vs-model result below reuses it. Validation
+refuses a coefficient that disagrees with the selector, an estimate that is not the selected
+coefficient's, an undefined count above the resample count, misordered or out-of-range bounds,
+and a missing reason. Both support strict JSON round trips. Like the point helpers, they are
+direct-import only and are not re-exported by `strata_forge.metrics` or
+`evals.classification`. One call covers one slice; the caller supplies each slice's population.
+The rater contract is unchanged: both rater declarations are `rater_kind="human"`.
+
+## One human against one model rater
+
+`human_model_agreement` is a separate statistic, `statistic_version="nominal-human-vs-model-v1"`,
+beside the unchanged two-human one. The research owner confirmed its rules on 2026-11-17. It
+imports NumPy from `[scoring]` only for its interval.
+
+```python
+from strata_forge.metrics.agreement import (
+    HumanAnnotations, ModelRatings, human_model_agreement,
+)
+
+result = human_model_agreement(
+    HumanAnnotations(rater_id="user-1", rater_kind="human", item_ids=ids, ratings=user_labels),
+    ModelRatings(
+        rater_id="model-1", rater_kind="model", item_ids=ids, ratings=model_labels,
+        model_prompt_sha256=prompt_digest, model_run_ref="run-7",
+    ),
+    references,                      # one RegisteredReference per slice item, same order
+    labels=labels, seed=20261104,    # resamples=10_000, threshold=0.70,
+)                                    # max_human_skip_fraction=0.10, max_model_null_fraction=0.10
+```
+
+**Raters.** `HumanAnnotations` (`rater_kind="human"`) allows `None` as an explicit skip.
+`ModelRatings` (`rater_kind="model"`) allows `None` as a null model label and carries
+`model_prompt_sha256` (64 lowercase hex characters) and `model_run_ref` (a nonempty string or
+null). The types are distinct and closed. `pairwise_agreement` and `agreement_bootstrap` refuse a
+`ModelRatings`, and `human_model_agreement` refuses a `HumanRatings`, two humans or two models.
+The rater IDs must differ. The item-ID tuples must be identical in order, and every non-null
+label must be a declared category. An unknown model label refuses rather than counting as null.
+
+**Exclusions.** The function, not the caller, excludes per slice. `human_skipped` counts the human's
+skips and `model_null` the model's nulls, each over all `items`. An item with both counts in both.
+An item excluded for either reason leaves both series, so `used` is the number of items with both
+labels. The fractions are parameters (default `0.10`, each in `[0, 1)`), compared strictly and
+exactly against their decimal spelling: `human_skipped > fraction * items` fails the slice and
+`model_null > fraction * items` refuses it. Twelve of 120 is within either limit; thirteen is not.
+
+**Selection.** The existing selector runs once, on the reference label of **all** slice items
+(solver gold when supplied, otherwise adjudication) in exact integers: AC1 iff some category has
+`5*count >= 4*items`, otherwise kappa. The coefficient is computed on the used pairs, and the
+bootstrap holds it fixed across resamples. When AC1 is selected, `cohen_kappa` reports kappa on
+the same pairs beside it, or `cohen_kappa_reason="chance_agreement_one"` when kappa is undefined.
+
+**Status.** The status is `pass`, `fail` or `refused`. `reasons` is an ordered tuple, empty
+exactly when the slice passes. Its order is `skip_fraction_exceeded`, `empty`,
+`reference_unavailable`, `model_null_fraction_exceeded`, `no_used_items`,
+`coefficient_undefined`, `below_threshold`.
+
+- **Exceeded skips fail, always.** The signed skip rule outranks every refusal reason: the
+  status is `fail`, `skip_fraction_exceeded` comes first, and every other applicable reason
+  follows it. These are `reference_unavailable`, `model_null_fraction_exceeded`,
+  `no_used_items`, `coefficient_undefined` and `below_threshold`; listing the null-label reason
+  makes a re-pilot also re-run the model labels. An empty slice cannot exceed a skip fraction,
+  so it is always refused.
+- **Otherwise the first refusal alone refuses.** In order, these are: `empty` (no items),
+  `reference_unavailable` (some item has neither gold nor adjudication),
+  `model_null_fraction_exceeded`, `no_used_items` and `coefficient_undefined`.
+- **Otherwise the threshold decides.** The slice passes when the exact value is `>=` the
+  threshold (default 0.70, inclusive; a kappa of exactly 7/10 passes), and fails with
+  `below_threshold` when it is lower.
+
+A value, with kappa beside AC1 and the interval, is reported only when a coefficient is defined
+and the slice is not refused. So `("skip_fraction_exceeded", "model_null_fraction_exceeded")`
+reports one, while a fail with `reference_unavailable`, `no_used_items` or
+`coefficient_undefined` does not. A refused slice never reports a value, kappa or interval.
+The status and value are decided before the interval is drawn, and no slice size makes the
+interval refuse. The interval never gates.
+
+**Interval.** `interval` is the approved `BootstrapInterval` over the used pairs: the same seed,
+resample count, single `(resamples, used)` draw in the declared item order with excluded items
+removed, type-7 rule and undefined-resample count as `agreement_bootstrap`. It is identical to
+`agreement_bootstrap` over those pairs whenever both select the same coefficient.
+
+**User-versus-solver kappa.** `user_solver_kappa` (`role="report_only"`) is Cohen kappa between
+the human and the solver gold, over the items that have solver gold and a human label. Model
+nulls do not affect it, and adjudicated items are not included. It never changes the status.
+`n=0` gives `reason="empty"`.
+
+**Result.** `HumanModelAgreement` is frozen and closed. It records:
+
+- the statistic version and the counts `items`, `human_skipped`, `model_null` and `used`;
+- both exclusion fractions, `status`, `reasons`, `coefficient` and `threshold`;
+- `value` and `cohen_kappa` as `ExactValue` (`exact`, the reduced rational such as `"7/10"`,
+  and `value`, its nearest float);
+- `cohen_kappa_reason`, `interval` and `user_solver_kappa`;
+- the model provenance.
+
+It holds no item IDs, labels or rater-supplied text. Validation re-derives the exclusion
+decisions from the counts through the same decision rule, refuses inconsistent counts,
+status/reasons pairs, values, kappa presence and threshold decisions. It also refuses:
+
+- a value without used items;
+- a `user_solver_kappa.n` above `items - human_skipped`;
+- undefined resamples under AC1, whose chance agreement cannot reach one.
+
+It supports strict JSON round trips. Input errors use fixed Forge `ValidationError` codes:
+
+- `agreement_threshold_invalid` for a threshold outside `[-1, 1]`;
+- `agreement_exclusion_limit_invalid` for a fraction outside `[0, 1)`, a non-finite one or a
+  non-number;
+- `agreement_reference_invalid` for a blank `source_ref` or `version_ref`, as
+  `reference_prevalence` refuses.

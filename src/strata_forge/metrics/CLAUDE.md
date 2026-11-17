@@ -24,18 +24,47 @@ This is a pure deterministic numerical leaf. Read
   test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
   discard invalid predictions. Holm operates on represented p-values and cannot recover
   underflowed inputs. The synthetic comparison fixture is the numerical conformance reference.
-- Bootstrap code requires an approved RNG/seed/order/quantile/population contract. No
-  bootstrap implementation or inference of independence from cluster-repeated rows is exported.
+- Bootstrap code requires an approved RNG/seed/order/quantile/population contract. The only approved
+  one is `agreement_bootstrap` (`item-percentile-bootstrap-v1`, approved for the ANNOT-001 report on
+  2026-11-17): item-level nonparametric percentile bootstrap, `Generator(PCG64(seed))` with the
+  stream of one C-order `(resamples, n)` index draw over the declared item order (drawn in
+  consecutive row blocks that reproduce it bit for bit), caller-supplied count (default 10,000),
+  coefficient fixed by the full-sample reference selection, undefined resamples counted and
+  reported, Hyndman-Fan type 7 quantiles at exact rational positions, confidence fixed at 0.95.
+  Changing any of these is a new version and needs a new approval. No other bootstrap, and no
+  inference of independence from cluster-repeated rows, is exported.
 - Update this file, module README, reference docs, and tests with any public API change.
-- `agreement` supports only two complete caller-declared human raters with distinct identities,
-  identical unique ordered item IDs and an explicit complete nominal category set. Refuse missing
-  labels/alignment; never silently filter, pool model raters or infer adjudication.
+- The two-human statistic (`nominal-two-human-raters-v1`) supports only two complete
+  caller-declared human raters with distinct identities, identical unique ordered item IDs and an
+  explicit complete nominal category set. Refuse missing labels/alignment; never silently filter,
+  pool model raters or infer adjudication. Do not loosen this rule.
+- The separate human-vs-model statistic (`nominal-human-vs-model-v1`, `human_model_agreement`) was
+  confirmed by the research owner on 2026-11-17 (r10-thresholds T6 as amended by CR-9 and
+  CC-20261106-01 §3, relayed by the platform coordinator). Its fixed rules: exactly one
+  `HumanAnnotations` and one `ModelRatings` (prompt SHA-256 and run ref provenance), never
+  interchangeable with `HumanRatings`; the function excludes and counts human skips and null model
+  labels separately, removing an item excluded for either reason from both series; skips `>` the
+  skip fraction (default 0.10) of the slice items FAIL, nulls `>` the null fraction (default 0.10)
+  REFUSE; the signed skip FAIL (`skip_fraction_exceeded`) outranks every refusal reason and lists
+  each applicable one beside it in the ordered `reasons` tuple (empty iff pass); a value, kappa and
+  CI are reported only when a coefficient is defined and the slice is not refused; status and value
+  are decided before the interval, whose size never refuses a slice; the existing selector runs once
+  on the reference label over ALL slice items (gold before adjudication) and a slice with any item
+  lacking a reference refuses unless skips also fail it; the threshold is bounded to [-1, 1] and
+  both fractions to [0, 1); kappa is reported beside a selected AC1; the point value `>=`
+  threshold (default 0.70) gates and the interval is report-only, using the approved bootstrap on
+  the pair after exclusions; user-vs-solver kappa on solver-gold items is report-only and never
+  gates; the result carries no item IDs or labels. Changing any of these needs a new version and
+  approval.
 - Keep reference-only coefficient selection separate from rater-marginal chance correction.
   Gold takes precedence over supplied adjudication; absent both refuses. Registered item-set,
   reference version and per-item source refs are caller provenance, not trusted attestation.
 - Use integer `5 * max_reference_count >= 4 * n` for the fixed selector and exact rational
   coefficient comparison against the supplied threshold's decimal spelling. The named 0.70
   helper default is not a global annotation/research policy or release gate.
-- Preserve undefined coefficient reasons and `confidence_method="not_produced"`. No implicit
-  multi-rater, missingness, CI/bootstrap or annotation-resource implementation. Keep the synthetic
-  `agreement_point_v1.json` conformance fixture synchronized; no NumPy or ML dependency is needed.
+- Preserve undefined coefficient reasons and `confidence_method="not_produced"` on point reports. No
+  implicit multi-rater, missingness, other CI or annotation-resource implementation. Keep the
+  synthetic `agreement_point_v1.json` conformance fixture synchronized. Import and point functions
+  need no NumPy or ML dependency; only `agreement_bootstrap` and `human_model_agreement` import
+  NumPy, lazily, from `[scoring]`. Its per-resample values must stay equal to the exact `Fraction`
+  point arithmetic.
