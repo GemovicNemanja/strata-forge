@@ -8,6 +8,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
 ### Added
 
 - The batch-inference runner pins a model to a full Hub commit id (`RunSpec.model_revision`;
