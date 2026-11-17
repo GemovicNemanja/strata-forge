@@ -319,6 +319,37 @@ class HFHubClient:
         result: Any = await asyncio.to_thread(api.upload_folder, **kwargs)
         return str(result)
 
+    async def upload_files(
+        self,
+        files: Mapping[str, str | Path],
+        repo_id: str,
+        *,
+        repo_type: RepoType = "model",
+        commit_message: str | None = None,
+    ) -> str:
+        """Upload exactly ``files`` (``{path_in_repo: local_path}``) in ONE commit.
+
+        Unlike :meth:`upload_folder`, nothing else is listed or considered: the commit is exactly
+        these files, all or nothing. Returns the commit URL / hash.
+        """
+        if not files:
+            msg = "upload_files needs at least one file"
+            raise ValueError(msg)
+        hf_mod = self._import_hf()
+        api = self._api()
+        operations = [
+            hf_mod.CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(local))
+            for name, local in files.items()
+        ]
+        kwargs: dict[str, Any] = {
+            "repo_id": repo_id,
+            "repo_type": repo_type,
+            "operations": operations,
+            "commit_message": commit_message or f"upload {len(operations)} files",
+        }
+        result: Any = await asyncio.to_thread(api.create_commit, **kwargs)
+        return str(result)
+
     # -----------------------------------------------------------------
     # Convenience wrappers
     # -----------------------------------------------------------------

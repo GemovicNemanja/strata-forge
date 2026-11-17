@@ -19,7 +19,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   one commit, only to a private output repo: a public one is refused before the run starts and
   again at push time. This changes the runner spec, so the next release is a minor bump.
 - `HFHubClient.is_private` reports a repo's visibility, since `create_repo(private=True,
-  exist_ok=True)` leaves an existing repo's visibility unchanged.
+  exist_ok=True)` leaves an existing repo's visibility unchanged. `HFHubClient.upload_files`
+  uploads exactly the given files in one commit.
 - `strata_forge.pipelines._common` holds the helpers every runner's manifest shares: the commit-id
   check, the snapshot-commit reader, installed-version capture and `strata.run.manifest/v1`.
 - `strata_forge.metrics.comparison` provides two-sided Wilson proportion intervals, exact

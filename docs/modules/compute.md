@@ -322,8 +322,10 @@ A pushed run goes only to a **private** output dataset repo: the runner
 creates it private when it is missing and refuses a public one, first
 before any download or GPU time and again at push time, because a run's
 outputs and manifest name the model and dataset it read. The results and
-the manifest go up in one Hub commit, so a repo never holds one run's
-results beside another run's manifest.
+the manifest go up in one Hub commit of exactly those two files, so a repo
+never holds one run's results beside another run's manifest. The check
+creates a missing repo private, so a run that fails afterwards can leave an
+empty private repo behind.
 
 ### The runner contract
 

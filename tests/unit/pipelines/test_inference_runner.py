@@ -1558,8 +1558,8 @@ class _Hub:
     async def is_private(self, repo_id: str, **_kw: Any) -> bool:
         return repo_id not in _Hub.public
 
-    async def upload_folder(self, local_dir: Any, repo_id: str, **kwargs: Any) -> None:
-        _Hub.calls.append(("upload_folder", (str(local_dir), repo_id, kwargs)))
+    async def upload_files(self, files: Any, repo_id: str, **kwargs: Any) -> None:
+        _Hub.calls.append(("upload_files", (dict(files), repo_id, kwargs)))
 
     async def upload_file(self, *_a: Any, **_kw: Any) -> None:  # pragma: no cover - must not run
         raise AssertionError("results and manifest go up in one commit, never file by file")
@@ -1580,14 +1580,13 @@ async def test_results_and_manifest_go_up_in_one_commit(tmp_path: Path, hub: typ
     spec = ir.RunSpec.model_validate_json(_spec_json())
 
     assert await ir._push_results(spec, results, _TOKEN) == "org/out"  # pyright: ignore[reportPrivateUsage]
-    uploads = [c for c in hub.calls if c[0] == "upload_folder"]
+    uploads = [c for c in hub.calls if c[0] == "upload_files"]
     assert len(uploads) == 1
-    local_dir, repo_id, kwargs = uploads[0][1]
-    assert local_dir == str(tmp_path)
+    files, repo_id, kwargs = uploads[0][1]
+    # Exactly this run's two files, nothing else from a possibly shared directory.
+    assert files == {"results.parquet": results, "manifest.json": tmp_path / "manifest.json"}
     assert repo_id == "org/out"
     assert kwargs["repo_type"] == "dataset"
-    # Only this run's files, even when the directory is a shared fallback location.
-    assert kwargs["allow_patterns"] == ("results.parquet", "manifest.json")
     # Created private when missing.
     assert hub.calls[0] == (
         "create_repo",
@@ -1603,7 +1602,7 @@ async def test_a_public_output_repo_is_refused_at_push(tmp_path: Path, hub: type
 
     with pytest.raises(ir.RunError, match="is public"):
         await ir._push_results(spec, results, _TOKEN)  # pyright: ignore[reportPrivateUsage]
-    assert not [c for c in hub.calls if c[0] == "upload_folder"]
+    assert not [c for c in hub.calls if c[0] == "upload_files"]
 
 
 async def test_a_public_output_repo_is_refused_before_any_gpu_time(
@@ -1641,7 +1640,12 @@ async def test_an_unpinned_run_records_the_commit_it_served(
     cached = tmp_path / "models--org--model" / "snapshots" / sha
     cached.mkdir(parents=True)
     (cached / "model.safetensors").write_bytes(b"")
-    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **_kw: str(cached))
+
+    def _download(**kwargs: Any) -> str:
+        del kwargs
+        return str(cached)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _download)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
     _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
@@ -1693,3 +1697,19 @@ async def test_seed_and_top_k_reach_the_wire_through_the_real_client(
     assert sent["extra_body"] == {"top_k": 20}
     assert sent["temperature"] == 0.7
     assert sent["top_p"] == 0.8
+
+
+async def test_a_hub_failure_preparing_the_output_repo_names_the_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Down:
+        def __init__(self, *, token: str) -> None:
+            del token
+
+        async def create_repo(self, *_a: Any, **_kw: Any) -> None:
+            raise RuntimeError("503 from the Hub")
+
+    monkeypatch.setattr(ir, "HFHubClient", _Down)
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    with pytest.raises(ir.RunError, match="could not prepare the output repo org/out: 503"):
+        await _REAL_CHECK_OUTPUT_REPO(spec, _TOKEN)
