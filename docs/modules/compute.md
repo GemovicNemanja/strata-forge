@@ -275,6 +275,41 @@ secrets file the backend wrote beside the job, and append the same ``ProgressEve
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
 of which is running.
 
+### Batch-inference pins, sampling and manifest
+
+``RunSpec.model_revision`` pins the model to a full 40-character lowercase
+Hub commit id, and the runner downloads only that revision. A branch, tag or
+abbreviated id is refused at spec load, before anything is downloaded,
+because the revision it names can move. Left unset, the run serves the
+repo's default branch as it is at download time.
+
+``Hyperparams.seed`` and ``Hyperparams.top_k`` are sent to the model server
+with every request, next to ``temperature`` / ``top_p`` / ``max_tokens``:
+``seed`` as an OpenAI-compatible request field, ``top_k`` inside
+``extra_body`` because chat completions has no parameter for it. Unknown
+hyperparameter keys are refused like any other unknown spec key.
+
+Each results row is ``{custom_id, output, error, finish_reason,
+input_tokens, output_tokens}``; a failed row carries ``None`` in the last
+three. Beside ``results.parquet`` the runner writes ``manifest.json``
+(schema ``strata.inference.manifest/v1``), pushed with the results or kept
+with them on the machine. It records:
+
+- the model id, the requested revision and the commit actually served
+  (the requested pin, or the commit the Hub cache resolved the default
+  branch to);
+- the dataset id, config, split and requested revision;
+- the engine version, the Python version and the installed versions of
+  ``vllm``, ``transformers``, ``torch``, ``datasets`` and
+  ``huggingface-hub``, which the machine installs fresh per run within a
+  range;
+- a SHA-256 of the template (never its text), the column mapping and the
+  hyperparameters;
+- row, success and failure counts, a ``finish_reason`` histogram and token
+  totals.
+
+It holds no row content and no credential.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a

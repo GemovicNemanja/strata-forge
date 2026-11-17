@@ -75,7 +75,14 @@ def _deliver_token(monkeypatch: pytest.MonkeyPatch, directory: Path) -> Path:
     return path
 
 
-def _ok(text: str, *, latency_ms: float = 100.0, output_tokens: int = 10) -> BatchInferenceResult:
+def _ok(
+    text: str,
+    *,
+    latency_ms: float = 100.0,
+    output_tokens: int = 10,
+    input_tokens: int = 5,
+    finish_reason: str = "stop",
+) -> BatchInferenceResult:
     """A successful result shaped like a real ``LLMResponse``.
 
     ``latency_ms`` and ``usage`` are not decoration: the runner reads both to report per-row
@@ -87,7 +94,8 @@ def _ok(text: str, *, latency_ms: float = 100.0, output_tokens: int = 10) -> Bat
             types.SimpleNamespace(
                 text=text,
                 latency_ms=latency_ms,
-                usage=types.SimpleNamespace(output_tokens=output_tokens),
+                finish_reason=finish_reason,
+                usage=types.SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
             ),
         )
     )
@@ -312,8 +320,22 @@ async def test_run_batches_reconciles_and_emits(
         )
 
     assert out == [
-        {"custom_id": "row-0", "output": "OUT0", "error": None},
-        {"custom_id": "row-1", "output": None, "error": "RuntimeError('boom')"},
+        {
+            "custom_id": "row-0",
+            "output": "OUT0",
+            "error": None,
+            "finish_reason": "stop",
+            "input_tokens": 5,
+            "output_tokens": 10,
+        },
+        {
+            "custom_id": "row-1",
+            "output": None,
+            "error": "RuntimeError('boom')",
+            "finish_reason": None,
+            "input_tokens": None,
+            "output_tokens": None,
+        },
     ]
     events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     step = [e for e in events if e["kind"] == "step"]
@@ -997,7 +1019,14 @@ async def test_a_failed_run_still_writes_its_results(
     assert code == 1
     assert written, "the results file must be written before the run is failed"
     assert written[-1] == [
-        {"custom_id": "row-0", "output": None, "error": "RuntimeError('kaboom')"}
+        {
+            "custom_id": "row-0",
+            "output": None,
+            "error": "RuntimeError('kaboom')",
+            "finish_reason": None,
+            "input_tokens": None,
+            "output_tokens": None,
+        }
     ]
 
 
@@ -1347,3 +1376,173 @@ async def test_the_batch_runs_without_a_liveness_probe(
             redactor=Redactor(),
         )
     assert len(out) == 4
+
+
+# ----------------------------- pinned revisions + manifest ------------------
+
+_SHA = "9216db5781bf21249d130ec9da846c4624c16137"
+
+
+@pytest.mark.parametrize("bad", ["main", "v1.0", _SHA[:12], _SHA.upper(), _SHA + "0", ""])
+def test_a_model_revision_that_is_not_a_full_commit_is_refused(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    # A branch or tag moves and an abbreviated id is ambiguous: a run pinned by either is not
+    # reproducible, so the spec is refused before anything is downloaded.
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(model_revision=bad))
+    with pytest.raises(ir.RunError, match="full 40-character"):
+        ir.load_spec()
+
+
+async def test_a_pinned_model_revision_is_the_one_downloaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(model_revision=_SHA))
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 0
+    assert hub_snapshots[0]["revision"] == _SHA
+
+
+async def test_an_unpinned_run_downloads_the_default_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 0
+    assert "revision" not in hub_snapshots[0]
+
+
+def test_seed_and_top_k_reach_the_model_server_as_request_fields() -> None:
+    # top_k is not a chat-completions parameter, so it must travel in the body itself.
+    hp = ir.Hyperparams(seed=20261104, top_k=20)
+    assert ir._sampling_extras(hp) == {  # pyright: ignore[reportPrivateUsage]
+        "openai_compat": {"seed": 20261104, "extra_body": {"top_k": 20}}
+    }
+    assert ir._sampling_extras(ir.Hyperparams()) is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("field", [{"seed": -1}, {"top_k": 0}, {"top_n": 3}])
+def test_out_of_range_or_unknown_sampling_keys_are_refused(field: dict[str, int]) -> None:
+    with pytest.raises(ValueError):  # noqa: PT011 - Pydantic's own error type
+        ir.Hyperparams.model_validate(field)
+
+
+async def test_sampling_extras_are_sent_with_every_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    class _Recording(_FakeRunner):
+        async def run(self, prompts: Any, **kwargs: Any) -> tuple[BatchInferenceResult, ...]:
+            seen.append(kwargs)
+            return await super().run(prompts)
+
+    _FakeRunner.scripted = [_ok("A")]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _Recording)
+    spec = ir.RunSpec.model_validate_json(
+        _spec_json(hyperparams={"seed": 7, "top_k": 20, "temperature": 0.7, "top_p": 0.8})
+    )
+    prompts, ids = ir._build_requests(spec, [{"question": "a"}])  # pyright: ignore[reportPrivateUsage]
+    await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+        spec,
+        client=cast("LLMClient", object()),
+        prompts=prompts,
+        custom_ids=ids,
+        writer=None,
+        redactor=Redactor(),
+    )
+    assert seen[0]["temperature"] == 0.7
+    assert seen[0]["top_p"] == 0.8
+    assert seen[0]["provider_extras"] == {"openai_compat": {"seed": 7, "extra_body": {"top_k": 20}}}
+
+
+def test_the_snapshot_commit_is_read_from_the_cache_directory_name(tmp_path: Path) -> None:
+    cached = tmp_path / "models--org--model" / "snapshots" / _SHA
+    cached.mkdir(parents=True)
+    assert ir._snapshot_commit(cached) == _SHA  # pyright: ignore[reportPrivateUsage]
+    # A layout that does not name a commit records none rather than a guess.
+    assert ir._snapshot_commit(tmp_path / "hub-snapshot") is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    template = "SECRET-PROMPT-TEXT {q}"
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(
+            model_revision=_SHA,
+            dataset_commit_sha="8978b4c1c8a030706e837a239dd870a8fe8de8a4",
+            template=template,
+            hyperparams={"seed": 1, "top_k": 20, "max_tokens": 4096},
+        ),
+    )
+    _mock_main_deps(
+        monkeypatch,
+        tmp_path,
+        _recording_serving({}),
+        rows=[{"question": "a"}, {"question": "b"}, {"question": "c"}],
+        scripted=[
+            _ok("ROW-TEXT-A", input_tokens=3, output_tokens=7),
+            _ok("ROW-TEXT-B", input_tokens=4, output_tokens=9, finish_reason="length"),
+            _fail(RuntimeError("x")),
+        ],
+    )
+
+    assert await ir.main() == 0
+    raw = (tmp_path / "manifest.json").read_text()
+    manifest = json.loads(raw)
+    assert manifest["schema"] == "strata.inference.manifest/v1"
+    assert manifest["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
+    assert manifest["dataset"]["requested_revision"] == "8978b4c1c8a030706e837a239dd870a8fe8de8a4"
+    assert manifest["engine"]["version"] == ir.__version__
+    assert set(manifest["engine"]["packages"]) == {
+        "vllm",
+        "transformers",
+        "torch",
+        "datasets",
+        "huggingface-hub",
+    }
+    assert manifest["hyperparams"]["top_k"] == 20
+    assert manifest["counts"] == {
+        "rows": 3,
+        "succeeded": 2,
+        "failed": 1,
+        "finish_reasons": {"length": 1, "stop": 1},
+        "input_tokens": 7,
+        "output_tokens": 16,
+    }
+    # Digest, never text: neither the template nor a row's output rides out in the manifest.
+    assert manifest["template_sha256"] == ir.hashlib.sha256(template.encode()).hexdigest()
+    assert "SECRET-PROMPT-TEXT" not in raw
+    assert "ROW-TEXT" not in raw
+
+
+async def test_the_manifest_is_pushed_beside_the_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = tmp_path / "results.parquet"
+    results.write_bytes(b"")
+    (tmp_path / "manifest.json").write_text("{}")
+    uploads: list[str] = []
+
+    class _Hub:
+        def __init__(self, *, token: str) -> None:
+            assert token == _TOKEN
+
+        async def create_repo(self, *_a: Any, **_kw: Any) -> None:
+            return None
+
+        async def upload_file(self, path: Any, name: str, *_a: Any, **_kw: Any) -> None:
+            del path
+            uploads.append(name)
+
+    monkeypatch.setattr(ir, "HFHubClient", _Hub)
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    assert await ir._push_results(spec, results, _TOKEN) == "org/out"  # pyright: ignore[reportPrivateUsage]
+    assert uploads == ["results.parquet", "manifest.json"]

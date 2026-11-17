@@ -5,7 +5,7 @@ strata_forge.pipelines.inference_runner``). It reads an INERT run spec from the
 ``STRATA_RUN_CONFIG`` env var, loads a Hugging Face dataset split, renders one prompt
 per row by simple ``{column}`` substitution (NO code execution), serves the model with
 vLLM on the same VM, runs a concurrency-bounded batch through an openai-compatible
-``LLMClient``, and then EITHER pushes ``{custom_id, output}`` results to the user's HF
+``LLMClient``, and then EITHER pushes ``{custom_id, output, ...}`` results to the user's HF
 dataset repo (when a write token + an output repo are supplied) OR keeps them as a parquet
 file on the VM (outside the per-run workdir, for the user to retrieve over SSH). Live
 progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestrator tails it).
@@ -36,7 +36,9 @@ credentials + the network):
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error}`` (model text only). The ``error``
+    repo id; result rows are ``{custom_id, output, error, finish_reason, input_tokens,
+    output_tokens}`` (model text and its accounting only), and the ``manifest.json`` beside them
+    records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
     column is pushed to the Hub with the results, an exception's text is not under this
     module's control, and neither is a phrase from ``serving_endpoint``'s public phase hook.
@@ -57,17 +59,21 @@ its entire timeout, invisibly.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib.metadata
 import itertools
+import json
 import re
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from strata_forge import __version__
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
@@ -98,6 +104,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from strata_forge.core.redact import Redactor
+    from strata_forge.llm.registry import ProviderName
 
 __all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
 
@@ -110,6 +117,15 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 # Cap a rendered prompt so a pathological row can't blow up memory / the request.
 _MAX_RENDERED_CHARS = 200_000
 _RESULTS_FILENAME = "results.parquet"
+_MANIFEST_FILENAME = "manifest.json"
+_MANIFEST_SCHEMA = "strata.inference.manifest/v1"
+# A full Hub commit id: lowercase hex, exactly 40 characters. A branch or tag name moves, so a run
+# pinned by one is not reproducible, and an abbreviated id is ambiguous to the Hub's resolver.
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+#: The installed distributions whose versions decide what a run computed. The model server and
+#: its stack are installed fresh on the VM per run within a version range, so the exact versions
+#: are only knowable here, after installation.
+_RECORDED_DISTRIBUTIONS = ("vllm", "transformers", "torch", "datasets", "huggingface-hub")
 # Where results land on the VM when they are not pushed — see `_local_results_dir`.
 _RESULTS_DIR_NAME = "strata-inference-results"
 # How much of one row's error is quoted as the sample when EVERY row failed. Enough to name a
@@ -170,6 +186,10 @@ class Hyperparams(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = Field(default=None, ge=1)
     top_p: float | None = None
+    # Sent to the model server with every request. A per-request seed makes each row's sampling
+    # reproducible on the same engine and hardware; it does not make two engines agree.
+    seed: int | None = Field(default=None, ge=0)
+    top_k: int | None = Field(default=None, ge=1)
     concurrency: int = Field(default=8, ge=1, le=256)
     progress_chunk: int = Field(default=200, ge=1)
     row_limit: int | None = Field(default=None, ge=1)
@@ -190,6 +210,9 @@ class RunSpec(BaseModel):
     # step installs, so a spec cannot pick an engine the control plane did not validate against.
     engine_version: str | None = None
     model_id: str
+    # The model's full Hub commit id. Set, it is the only revision the run downloads; unset, the
+    # run takes the repo's default branch as it is at download time, and records what that was.
+    model_revision: str | None = None
     dataset_id: str
     dataset_commit_sha: str | None = None
     dataset_config: str | None = None
@@ -209,6 +232,12 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
     spec = load_config(RunSpec, writer=writer)
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
+    if spec.model_revision is not None and not _COMMIT_SHA_RE.fullmatch(spec.model_revision):
+        msg = (
+            "model_revision must be a full 40-character lowercase commit id; a branch, tag or "
+            "abbreviated id is refused because the revision it names can change"
+        )
+        raise RunError(msg)
     if spec.output_repo_id is not None:
         validate_repo_id(spec.output_repo_id, "output repo")
     _validate_template_coverage(spec)
@@ -222,7 +251,7 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     behaviour for the primitive but a catastrophe for a run: every row gets the byte-identical,
     row-independent prompt, the model answers it N times, every row SUCCEEDS, and the run reports
     `succeeded` with N copies of an answer to the literal text ``{question}``. Nothing downstream
-    can notice — the results file records ``{custom_id, output, error}``, so neither the rendered
+    can notice — the results file records the output and its accounting per row, so neither the rendered
     prompt nor the source row is in it.
 
     The one check that existed validated the mapping's VALUES against the split's columns, which
@@ -364,11 +393,25 @@ async def _run_batches(
         chunk = prompts[start : start + hp.progress_chunk]
         ids = custom_ids[start : start + hp.progress_chunk]
         results = await runner.run(
-            chunk, temperature=hp.temperature, max_tokens=hp.max_tokens, top_p=hp.top_p
+            chunk,
+            temperature=hp.temperature,
+            max_tokens=hp.max_tokens,
+            top_p=hp.top_p,
+            provider_extras=_sampling_extras(hp),
         )
         for cid, result in zip(ids, results, strict=True):
             if result.succeeded and result.response is not None:
-                out.append({"custom_id": cid, "output": result.response.text, "error": None})
+                response = result.response
+                out.append(
+                    {
+                        "custom_id": cid,
+                        "output": response.text,
+                        "error": None,
+                        "finish_reason": response.finish_reason,
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                    }
+                )
                 ok += 1
                 # Both already measured per request by the client — a true per-row latency and a
                 # real token count, not an average reconstructed from the chunk's wall time.
@@ -376,7 +419,16 @@ async def _run_batches(
                 output_tokens += result.response.usage.output_tokens
             else:
                 error = redactor.redact(repr(result.error))
-                out.append({"custom_id": cid, "output": None, "error": error})
+                out.append(
+                    {
+                        "custom_id": cid,
+                        "output": None,
+                        "error": error,
+                        "finish_reason": None,
+                        "input_tokens": None,
+                        "output_tokens": None,
+                    }
+                )
                 failed += 1
         emit(
             writer,
@@ -394,6 +446,21 @@ async def _run_batches(
             ),
         )
     return out
+
+
+def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | None:
+    """The sampling settings the chat-completions call has no parameter for.
+
+    ``seed`` is an OpenAI-compatible request field. ``top_k`` is not, so it rides in
+    ``extra_body``, which the model server reads as part of the request body: passed as a plain
+    keyword it would be refused before the request is sent.
+    """
+    extras: dict[str, Any] = {}
+    if hp.seed is not None:
+        extras["seed"] = hp.seed
+    if hp.top_k is not None:
+        extras["extra_body"] = {"top_k": hp.top_k}
+    return {"openai_compat": extras} if extras else None
 
 
 def _throughput(
@@ -472,12 +539,14 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
     """Download the model's servable files with the run's credential; return the local snapshot.
 
     The model server is pointed at this directory with the Hub switched off, so what it can load
-    is exactly what this download admitted, and the token stays in this process.
+    is exactly what this download admitted, and the token stays in this process. A pinned
+    ``model_revision`` is the only revision downloaded.
     """
     hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
     try:
         snapshot = await hub.download_snapshot(
             spec.model_id,
+            revision=spec.model_revision,
             allow_patterns=SNAPSHOT_PATTERNS,
             ignore_patterns=SNAPSHOT_IGNORED,
         )
@@ -491,6 +560,82 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
         raise RunError(msg) from exc
     await asyncio.to_thread(_require_safetensors, snapshot, spec.model_id)
     return snapshot
+
+
+def _snapshot_commit(snapshot: Path) -> str | None:
+    """The commit a Hub snapshot directory holds, read from its name.
+
+    The Hub cache keeps each downloaded revision under ``snapshots/<commit>``, so the directory
+    name is the commit the default branch resolved to at download time. Anything else (a local
+    directory, a different cache layout) records no commit rather than a guess.
+    """
+    name = snapshot.name
+    return name if _COMMIT_SHA_RE.fullmatch(name) else None
+
+
+def _installed_versions() -> dict[str, str | None]:
+    """Installed versions of :data:`_RECORDED_DISTRIBUTIONS`, ``None`` for one not installed.
+
+    Read from package metadata, so nothing is imported: importing the model server's stack in
+    this process would pay its start-up cost for a version string.
+    """
+    versions: dict[str, str | None] = {}
+    for name in _RECORDED_DISTRIBUTIONS:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
+def _build_manifest(
+    spec: RunSpec, rows: list[dict[str, Any]], model_commit: str | None
+) -> dict[str, Any]:
+    """What a run needs to be reproduced and audited, with no row content and no secret.
+
+    The template is recorded as a digest: the spec that holds its text is stored by the control
+    plane, and a pushed manifest should not republish prompt text beside the outputs.
+    """
+    finish = Counter(str(r["finish_reason"]) for r in rows if r["error"] is None)
+    ok = sum(1 for r in rows if r["error"] is None)
+    return {
+        "schema": _MANIFEST_SCHEMA,
+        "engine": {
+            "version": __version__,
+            "spec_engine_version": spec.engine_version,
+            "python": sys.version.split()[0],
+            "packages": _installed_versions(),
+        },
+        "model": {
+            "id": spec.model_id,
+            "requested_revision": spec.model_revision,
+            "commit": model_commit,
+        },
+        "dataset": {
+            "id": spec.dataset_id,
+            "config": spec.dataset_config,
+            "split": spec.split,
+            "requested_revision": spec.dataset_commit_sha,
+        },
+        "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
+        "column_mapping": spec.column_mapping,
+        "hyperparams": spec.hyperparams.model_dump(),
+        "counts": {
+            "rows": len(rows),
+            "succeeded": ok,
+            "failed": len(rows) - ok,
+            "finish_reasons": dict(sorted(finish.items())),
+            "input_tokens": sum(int(r["input_tokens"] or 0) for r in rows),
+            "output_tokens": sum(int(r["output_tokens"] or 0) for r in rows),
+        },
+    }
+
+
+def _write_manifest(manifest: dict[str, Any], outdir: Path) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / _MANIFEST_FILENAME
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return path
 
 
 async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
@@ -507,6 +652,15 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
         repo_type="dataset",
         commit_message="batch inference results",
     )
+    manifest_path = results_path.parent / _MANIFEST_FILENAME
+    if manifest_path.is_file():
+        await hub.upload_file(
+            manifest_path,
+            _MANIFEST_FILENAME,
+            out_repo,
+            repo_type="dataset",
+            commit_message="batch inference manifest",
+        )
     return out_repo
 
 
@@ -533,6 +687,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # token, and the server that follows is third-party code that must not hold it.
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
+    model_commit = spec.model_revision or _snapshot_commit(snapshot)
 
     hp = spec.hyperparams
     task = build_vllm_task(
@@ -631,6 +786,10 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # here would otherwise look like it died complete, with no explanation.
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
+        # Beside the results, so the push and the on-VM copy carry it alike.
+        await asyncio.to_thread(
+            _write_manifest, _build_manifest(spec, out, model_commit), Path(results_path).parent
+        )
     if hf_token and spec.output_repo_id:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
