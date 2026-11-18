@@ -30,6 +30,13 @@ The rules the report follows:
   The cluster is ``cluster_column``; a row without one, or every row when only
   ``premises_column`` is declared, clusters on :func:`premise_cluster_key`; else each item is its
   own cluster.
+- With ``calibration`` set, each file's ``logit_<label>`` columns give three separately reported
+  probability reads on the shared rows: ``raw`` (their softmax), ``cross_fit`` (a temperature
+  2-fold cross-fitted by cluster over the fit population: this split, or its named slice) and
+  ``applied`` (the system's own pinned ``calibration.json`` temperature, when it declares one).
+  Each has sum-form Brier with a cluster interval, NLL and top-label ECE; each comparison has a
+  paired raw Brier delta and the SD of the per-item Brier differences. Temperatures produce these
+  reads and select nothing.
 
 The report carries no item text: ids, gold labels, mapped predictions and slice values only.
 """
@@ -44,18 +51,28 @@ import re
 import sys
 import unicodedata
 from collections import Counter
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from strata_forge.metrics.classification import classification_report
+from strata_forge.metrics.calibration import temperature_scale
+from strata_forge.metrics.calibration_fit import (
+    ECE_BINS,
+    CrossFitTemperature,
+    cross_fit_temperature,
+    expected_calibration_error,
+)
+from strata_forge.metrics.classification import brier, classification_report, nll
 from strata_forge.metrics.cluster_bootstrap import (
     CLUSTER_BOOTSTRAP_RESAMPLES,
     MAX_CLUSTER_BOOTSTRAP_RESAMPLES,
     MAX_CLUSTER_BOOTSTRAP_SEED,
     SystemIntervals,
     cluster_bootstrap,
+    cluster_mean_bootstrap,
     paired_cluster_bootstrap,
+    paired_cluster_mean_bootstrap,
 )
 from strata_forge.pipelines._common import (
     COMMIT_SHA_RE,
@@ -86,6 +103,8 @@ __all__ = [
     "ITEMS_FILENAME",
     "REPORT_FILENAME",
     "REPORT_SCHEMA",
+    "CalibrationRef",
+    "CalibrationSettings",
     "EvalSettings",
     "EvalSpec",
     "PredictionSource",
@@ -115,6 +134,11 @@ _PATH_RE = re.compile(
     r"\A[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.parquet\Z"
 )
 
+_JSON_PATH_RE = re.compile(
+    r"\A[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.json\Z"
+)
+_MAX_CALIBRATION_BYTES = 64 * 1024
+
 type _Population = list[int]
 
 
@@ -135,6 +159,33 @@ def _bounded_aliases(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
+class CalibrationRef(BaseModel):
+    """A system's own ``calibration.json`` (a temperature fitted on ID dev), at a pinned commit."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repo_type: Literal["model", "dataset"] = "model"
+    repo_id: str = Field(min_length=1, max_length=255)
+    commit_sha: str
+    path: str = Field(default="calibration.json", max_length=255)
+
+    @field_validator("commit_sha")
+    @classmethod
+    def _pinned(cls, value: str) -> str:
+        if not COMMIT_SHA_RE.fullmatch(value):
+            msg = "commit_sha must be a full 40-character lowercase commit id"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def _json_path(cls, value: str) -> str:
+        if ".." in value or not _JSON_PATH_RE.fullmatch(value):
+            msg = "path must be a relative .json path inside the repo"
+            raise ValueError(msg)
+        return value
+
+
 class PredictionSource(BaseModel):
     """One system's predictions: a parquet file in a dataset repo at a pinned commit."""
 
@@ -151,6 +202,8 @@ class PredictionSource(BaseModel):
     overflow_column: str | None = None
     # Prediction value -> declared label, for systems whose label spelling differs.
     label_aliases: dict[str, str] = Field(default_factory=dict[str, str])
+    # The system's own temperature, applied when calibration.apply_calibration is "auto".
+    calibration_ref: CalibrationRef | None = None
 
     @field_validator("name")
     @classmethod
@@ -248,6 +301,39 @@ class TierRule(BaseModel):
         return self.limits.get(tier, self.default) if tier is not None else self.default
 
 
+class CalibrationSettings(BaseModel):
+    """Probability reads from each file's logits: raw, cross-fitted, and the system's own.
+
+    Every system's file must carry ``<logit_prefix><label>`` for each declared label. ``raw`` is
+    their softmax. ``cross_fit`` comes from ``folds``-fold cross-fitting over the fit population
+    (the scored rows of this split, or of its named slice ``fit_column`` = ``fit_value``), so no
+    row is scored with a temperature its own cluster helped fit. ``applied`` uses a source's
+    ``calibration_ref`` when ``apply_calibration`` is ``auto``. The three are reported apart, and
+    no temperature selects anything.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    logit_prefix: str = "logit_"
+    fit_column: str | None = None
+    fit_value: str | None = None
+    folds: int = Field(default=2, ge=2, le=10)
+    ece_bins: int = Field(default=ECE_BINS, ge=1, le=100)
+    apply_calibration: Literal["auto", "none"] = "auto"
+
+    @field_validator("logit_prefix", "fit_column", "fit_value")
+    @classmethod
+    def _text(cls, value: str | None) -> str | None:
+        return None if value is None else _bounded_text(value, "a calibration field")
+
+    @model_validator(mode="after")
+    def _named_slice(self) -> CalibrationSettings:
+        if (self.fit_column is None) != (self.fit_value is None):
+            msg = "fit_column and fit_value name the fit slice together"
+            raise ValueError(msg)
+        return self
+
+
 class EvalSettings(BaseModel):
     """What to evaluate and how; validated identically by the control plane and the runner."""
 
@@ -281,6 +367,7 @@ class EvalSettings(BaseModel):
     # An interval with more than this share of undefined resamples is ``unstable``: reported, and
     # never the basis of a gate read (which then says ``unresolved``).
     unstable_threshold: float = Field(default=0.01, ge=0, le=1)
+    calibration: CalibrationSettings | None = None
 
     @field_validator("labels")
     @classmethod
@@ -328,6 +415,9 @@ class EvalSettings(BaseModel):
         unknown = sorted({target for target in targets if target not in self.labels})
         if unknown:
             msg = f"label aliases map to undeclared labels: {unknown}"
+            raise ValueError(msg)
+        if self.calibration is None and any(s.calibration_ref for s in self.systems):
+            msg = "a calibration_ref needs calibration settings"
             raise ValueError(msg)
         rule = self.tier_rule
         limits = [*rule.limits.values(), rule.default] if rule else []
@@ -382,6 +472,8 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> EvalSpec:
         raise RunError(msg)
     for source in spec.evaluation.systems:
         validate_repo_id(source.repo_id, "predictions")
+        if source.calibration_ref is not None:
+            validate_repo_id(source.calibration_ref.repo_id, "calibration")
     if spec.output_repo_id is not None:
         validate_repo_id(spec.output_repo_id, "output repo")
     return spec
@@ -434,6 +526,7 @@ def _gold_columns(settings: EvalSettings) -> list[str]:
         rule.tier_column if rule else None,
         rule.token_column if rule else None,
         rule.token_method_column if rule else None,
+        settings.calibration.fit_column if settings.calibration else None,
     )
     for extra in extras:
         if extra is not None:
@@ -485,8 +578,94 @@ def _read_parquet(path: Path, columns: list[str]) -> dict[str, list[Any]]:
     return cast("dict[str, list[Any]]", table.to_pydict())
 
 
+def _logit_columns(settings: EvalSettings) -> list[str]:
+    if settings.calibration is None:
+        return []
+    return [f"{settings.calibration.logit_prefix}{label}" for label in settings.labels]
+
+
+CALIBRATION_SCHEMA = "strata.calibration/v1"
+VERIFIER_FILENAME = "strata_verifier.json"
+
+
+async def _pinned_json(
+    hub: HFHubClient, ref: CalibrationRef, path: str, who: str
+) -> tuple[dict[str, object], bytes]:
+    try:
+        local = await hub.download_file(
+            ref.repo_id, path, repo_type=ref.repo_type, revision=ref.commit_sha
+        )
+    except Exception as exc:
+        msg = f"could not download {path} for {who}: {exc}"
+        raise RunError(msg) from exc
+    raw = await asyncio.to_thread(local.read_bytes)
+    if len(raw) > _MAX_CALIBRATION_BYTES:
+        msg = f"{path} for {who} is larger than {_MAX_CALIBRATION_BYTES} bytes"
+        raise RunError(msg)
+    try:
+        data: object = json.loads(raw)
+    except ValueError as exc:
+        msg = f"{path} for {who} is not JSON"
+        raise RunError(msg) from exc
+    if not isinstance(data, dict):
+        msg = f"{path} for {who} is not a JSON object"
+        raise RunError(msg)
+    return cast("dict[str, object]", data), raw
+
+
+async def _fetch_calibration(
+    source: PredictionSource, labels: tuple[str, ...], token: str | Literal[False]
+) -> dict[str, Any]:
+    """The source's own temperature from the trainer's pinned ``calibration.json``.
+
+    The file is ``strata.calibration/v1`` (written by the seq-cls trainer): the temperature is
+    ``fit.temperature``. Its labels are the file's ``labels`` when it has them, else the
+    ``labels`` of the ``strata_verifier.json`` beside it in the same repo at the same commit; they
+    must be the declared labels in order, because the temperature scales logits in that order.
+    """
+    ref = source.calibration_ref
+    if ref is None:  # pragma: no cover - callers check
+        msg = "no calibration_ref"
+        raise RunError(msg)
+    who = f"the calibration of {source.name}"
+    hub = HFHubClient(token=token)
+    body, raw = await _pinned_json(hub, ref, ref.path, who)
+    if body.get("schema") != CALIBRATION_SCHEMA:
+        msg = f"{who} is not a {CALIBRATION_SCHEMA} file"
+        raise RunError(msg)
+    fit = body.get("fit")
+    temperature = (
+        cast("dict[str, object]", fit).get("temperature") if isinstance(fit, dict) else None
+    )
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, int | float)
+        or not math.isfinite(temperature)
+        or temperature <= 0
+    ):
+        msg = f"{who} has no positive finite fit.temperature"
+        raise RunError(msg)
+    labels_from = "calibration.json"
+    named: object = body.get("labels")
+    if named is None:
+        directory = ref.path.rpartition("/")[0]
+        sibling = f"{directory}/{VERIFIER_FILENAME}" if directory else VERIFIER_FILENAME
+        verifier, _ = await _pinned_json(hub, ref, sibling, who)
+        named = verifier.get("labels")
+        labels_from = sibling
+    if named != list(labels):
+        msg = f"{who} ({labels_from}) does not name the declared labels in order"
+        raise RunError(msg)
+    return {
+        "temperature": float(temperature),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "labels_from": labels_from,
+        "ref": ref.model_dump(),
+    }
+
+
 async def _fetch_predictions(
-    source: PredictionSource, token: str | Literal[False]
+    source: PredictionSource, token: str | Literal[False], logit_columns: list[str]
 ) -> dict[str, list[Any]]:
     hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
     try:
@@ -499,6 +678,7 @@ async def _fetch_predictions(
     columns = [source.id_column, source.prediction_column]
     if source.overflow_column is not None:
         columns.append(source.overflow_column)
+    columns.extend(logit_columns)
     return await asyncio.to_thread(_read_parquet, local, list(dict.fromkeys(columns)))
 
 
@@ -522,6 +702,8 @@ class _Gold(BaseModel):
     spaces: list[tuple[str, ...]]
     # The token-count method per tier (``tier_column`` value, or ``"*"`` with no tier column).
     token_methods: dict[str, str]
+    # Whether each row is in the calibration fit population's named slice (all True without one).
+    fit: list[bool]
 
     def common_out(self, row: int) -> bool:
         return self.excluded[row] or self.refused[row]
@@ -538,6 +720,8 @@ class _System(BaseModel):
     predictions: list[str | None]
     status: list[_Status]
     counts: dict[str, int]
+    # Finite logits in label order per gold row, None where absent; None without calibration.
+    logits: list[list[float] | None] | None = None
 
 
 def _label(value: object, aliases: Mapping[str, str], labels: tuple[str, ...]) -> str | None:
@@ -631,6 +815,7 @@ def _prepare_gold(columns: dict[str, list[Any]], settings: EvalSettings) -> _Gol
         fallback=fallback,
         spaces=_spaces(columns, settings, labels),
         token_methods=_token_methods(columns, settings, len(ids)),
+        fit=_fit_rows(columns, settings, len(ids)),
     )
 
 
@@ -662,6 +847,13 @@ def _declared(rows: _Population, gold: _Gold, settings: EvalSettings) -> tuple[s
     """The labels a population declares: the union of its rows' spaces, in ``labels`` order."""
     seen = {label for i in rows for label in gold.spaces[i]}
     return tuple(label for label in settings.labels if label in seen)
+
+
+def _fit_rows(columns: dict[str, list[Any]], settings: EvalSettings, n: int) -> list[bool]:
+    calibration = settings.calibration
+    if calibration is None or calibration.fit_column is None:
+        return [True] * n
+    return [calibration.fit_value in _slice_values(v) for v in columns[calibration.fit_column]]
 
 
 def _check_premise_counts(columns: dict[str, list[Any]], settings: EvalSettings) -> None:
@@ -755,8 +947,23 @@ def _refused(columns: dict[str, list[Any]], settings: EvalSettings, n: int) -> l
     return out
 
 
+def _logit_row(values: list[object]) -> list[float] | None:
+    out: list[float] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        if not math.isfinite(value):
+            return None
+        out.append(float(value))
+    return out
+
+
 def _align(
-    gold: _Gold, columns: dict[str, list[Any]], source: PredictionSource, labels: tuple[str, ...]
+    gold: _Gold,
+    columns: dict[str, list[Any]],
+    source: PredictionSource,
+    labels: tuple[str, ...],
+    logit_columns: list[str] | None = None,
 ) -> _System:
     by_id: dict[str, tuple[object, bool]] = {}
     _check_identifiers(columns[source.id_column], source.id_column)
@@ -806,9 +1013,156 @@ def _align(
         status.append(state)
     counts["scored"] = sum(1 for row in range(len(gold.ids)) if not gold.common_out(row))
     keys = ("scored", "missing", "invalid", "overflow", "unmatched")
+    logits: list[list[float] | None] | None = None
+    if logit_columns:
+        rows_by_id = {_item_id(raw): row for row, raw in enumerate(columns[source.id_column])}
+        logits = []
+        for item, state in zip(gold.ids, status, strict=True):
+            row = rows_by_id.get(item)
+            usable = row is not None and state in ("ok", "missing")
+            logits.append(
+                _logit_row([columns[c][row] for c in logit_columns])
+                if usable and row is not None
+                else None
+            )
     return _System(
-        predictions=predictions, status=status, counts={key: counts[key] for key in keys}
+        predictions=predictions,
+        status=status,
+        counts={key: counts[key] for key in keys},
+        logits=logits,
     )
+
+
+# ------------------------------------------------------------------ probabilities
+
+
+type _Probs = list[tuple[float, ...] | None]
+
+
+class _Probabilities(BaseModel):
+    """One system's probability reads per gold row (None where it has none)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    raw: _Probs
+    cross_fit: _Probs
+    applied: _Probs | None
+    fit: CrossFitTemperature | None
+    own: dict[str, Any] | None
+
+
+def _scaled(logits: list[list[float] | None], rows: list[int], t: float, n: int) -> _Probs:
+    out: _Probs = [None] * n
+    if rows:
+        scaled = temperature_scale([logits[i] or [] for i in rows], temperature=t)
+        for i, probs in zip(rows, scaled, strict=True):
+            out[i] = probs
+    return out
+
+
+def _probabilities(
+    gold: _Gold,
+    system: _System,
+    settings: EvalSettings,
+    calibration: CalibrationSettings,
+    own: dict[str, Any] | None,
+) -> _Probabilities:
+    n = len(gold.ids)
+    logits: list[list[float] | None] = system.logits or [None] * n
+    have = [i for i, row in enumerate(logits) if row is not None]
+    fit_rows = [i for i in have if gold.fit[i] and not gold.common_out(i)]
+    cross: _Probs = [None] * n
+    fitted: CrossFitTemperature | None = None
+    if len({gold.clusters[i] for i in fit_rows}) >= calibration.folds:
+        fitted = cross_fit_temperature(
+            [logits[i] or [] for i in fit_rows],
+            [gold.labels[i] for i in fit_rows],
+            labels=settings.labels,
+            clusters=[gold.clusters[i] for i in fit_rows],
+            seed=settings.seed,
+            folds=calibration.folds,
+        )
+        for i, probs in zip(fit_rows, fitted.probabilities, strict=True):
+            cross[i] = probs
+    return _Probabilities(
+        raw=_scaled(logits, have, 1.0, n),
+        cross_fit=cross,
+        applied=None if own is None else _scaled(logits, have, own["temperature"], n),
+        fit=fitted,
+        own=own,
+    )
+
+
+def _brier_term(gold: str, probs: tuple[float, ...], labels: tuple[str, ...]) -> float:
+    """One row's multiclass Brier term in sum form, on [0, 2]; ``metrics.brier`` averages it."""
+    return math.fsum((p - (label == gold)) ** 2 for p, label in zip(probs, labels, strict=True))
+
+
+def _probability_block(
+    rows: _Population, gold: _Gold, probs: _Probs | None, settings: EvalSettings, bins: int
+) -> dict[str, Any] | None:
+    if probs is None:
+        return None
+    keep = [i for i in rows if probs[i] is not None]
+    if not keep:
+        return None
+    labels = settings.labels
+    actual = [gold.labels[i] for i in keep]
+    vectors = [probs[i] or () for i in keep]
+    terms = [_brier_term(g, v, labels) for g, v in zip(actual, vectors, strict=True)]
+    interval = cluster_mean_bootstrap(
+        terms,
+        clusters=[gold.clusters[i] for i in keep],
+        seed=settings.seed,
+        resamples=settings.resamples,
+    ).interval
+    point = brier(actual, vectors, labels=labels, probability_kind="class_probabilities").value
+    coverage = len(keep) / len(rows)
+    return {
+        "n": len(keep),
+        "n_population": len(rows),
+        "coverage": coverage,
+        # A probability metric over fewer than every row decides no gate (unresolved = not met).
+        "gate": "resolved" if coverage == 1 else "unresolved",
+        "brier": _stability({**interval.model_dump(), "point": point}, settings),
+        "nll": nll(actual, vectors, labels=labels, probability_kind="class_probabilities").value,
+        "ece": expected_calibration_error(
+            actual, vectors, labels=labels, bins=bins, item_ids=[gold.ids[i] for i in keep]
+        ).value,
+    }
+
+
+def _brier_delta(
+    rows: _Population,
+    gold: _Gold,
+    baseline: _Probabilities,
+    candidate: _Probabilities,
+    settings: EvalSettings,
+) -> dict[str, Any] | None:
+    """Candidate minus baseline raw Brier on the rows both scored, paired by cluster, with the
+    SD of the per-item differences."""
+    shared = [i for i in rows if baseline.raw[i] is not None and candidate.raw[i] is not None]
+    if len(shared) < 2:
+        return None
+    labels = settings.labels
+    paired = paired_cluster_mean_bootstrap(
+        [_brier_term(gold.labels[i], baseline.raw[i] or (), labels) for i in shared],
+        [_brier_term(gold.labels[i], candidate.raw[i] or (), labels) for i in shared],
+        clusters=[gold.clusters[i] for i in shared],
+        seed=settings.seed,
+        resamples=settings.resamples,
+    )
+    delta = _stability(paired.delta.model_dump(), settings)
+    coverage = len(shared) / len(rows)
+    return {
+        "n": len(shared),
+        "n_population": len(rows),
+        "coverage": coverage,
+        **delta,
+        # Unresolved, which counts as NOT met, when either side lacks probabilities for a row.
+        "excludes_zero": _excludes_zero(delta) if coverage == 1 else "unresolved",
+        "sd": _stability(paired.delta_sd.model_dump(), settings),
+    }
 
 
 # ------------------------------------------------------------------ scoring
@@ -906,8 +1260,21 @@ def _system_read(
     return entry, result.settings.model_dump()
 
 
-def _discordance(rows: _Population, gold: _Gold, base: _System, cand: _System) -> dict[str, Any]:
-    """The paired discordance rate p_d: the share of rows exactly one of the two got right."""
+def _discordance(
+    rows: _Population,
+    gold: _Gold,
+    base: _System,
+    cand: _System,
+    with_probabilities: tuple[_Probabilities, _Probabilities] | None = None,
+) -> dict[str, Any]:
+    """The paired discordance rate p_d: the share of rows exactly one of the two got right.
+
+    With calibration it is read on the rows BOTH systems have probabilities for, beside the Brier
+    delta, and reports that n and its coverage of the population."""
+    population = len(rows)
+    if with_probabilities is not None:
+        left, right = with_probabilities
+        rows = [i for i in rows if left.raw[i] is not None and right.raw[i] is not None]
     base_only = sum(
         1
         for i in rows
@@ -918,11 +1285,15 @@ def _discordance(rows: _Population, gold: _Gold, base: _System, cand: _System) -
         for i in rows
         if cand.predictions[i] == gold.labels[i] and base.predictions[i] != gold.labels[i]
     )
+    coverage = len(rows) / population
     return {
         "n": len(rows),
+        "n_population": population,
+        "coverage": coverage,
         "baseline_only_correct": base_only,
         "candidate_only_correct": cand_only,
-        "p_d": (base_only + cand_only) / len(rows),
+        "p_d": (base_only + cand_only) / len(rows) if rows else None,
+        "gate": "resolved" if coverage == 1 else "unresolved",
     }
 
 
@@ -933,6 +1304,7 @@ def _score_population(
     settings: EvalSettings,
     *,
     detail: bool,
+    probabilities: dict[str, _Probabilities] | None = None,
 ) -> dict[str, Any]:
     """The primary read over the shared (no-overflow) rows, and each system's full-tier read."""
     shared = [i for i in rows if all(s.status[i] != "overflow" for s in systems.values())]
@@ -974,6 +1346,17 @@ def _score_population(
                 label: sum(1 for i in shared if system.predictions[i] == label) for label in absent
             },
         }
+        if probabilities is not None and settings.calibration is not None:
+            bins = settings.calibration.ece_bins
+            probs = probabilities[name]
+            for read, values in (
+                ("raw", probs.raw),
+                ("cross_fit", probs.cross_fit),
+                ("applied", probs.applied),
+            ):
+                out["systems"][name][read] = _probability_block(
+                    shared, gold, values, settings, bins
+                )
     candidate = settings.predictions.name
     for baseline in settings.compare_to if shared else ():
         paired = paired_cluster_bootstrap(
@@ -991,7 +1374,22 @@ def _score_population(
                 "candidate": candidate,
                 "delta": _intervals(paired.delta, settings, delta=True),
                 "discordance": _discordance(
-                    shared, gold, systems[baseline.name], systems[candidate]
+                    shared,
+                    gold,
+                    systems[baseline.name],
+                    systems[candidate],
+                    None
+                    if probabilities is None
+                    else (probabilities[baseline.name], probabilities[candidate]),
+                ),
+                "brier_delta": None
+                if probabilities is None
+                else _brier_delta(
+                    shared,
+                    gold,
+                    probabilities[baseline.name],
+                    probabilities[candidate],
+                    settings,
                 ),
             }
         )
@@ -1036,6 +1434,15 @@ def _headline(report: dict[str, Any], settings: EvalSettings) -> dict[str, float
     # Its share (undefined over all resamples) rides beside it, so a reader of the event alone can
     # tell an unstable interval (over ``unstable_threshold``) from a defined one.
     metrics["macro_f1_undefined_share"] = float(candidate["macro_f1"]["undefined_share"])
+    raw = candidate.get("raw")
+    if isinstance(raw, dict):
+        block = cast("dict[str, Any]", raw)
+        metrics["brier_coverage"] = float(block["coverage"])
+        # Under full coverage only: a read over part of the rows is unresolved, so no bounds.
+        brier_read = (
+            block["brier"] if block["coverage"] == 1 else {**block["brier"], "unstable": True}
+        )
+        _put_interval(metrics, "brier", brier_read)
     for comparison in overall["comparisons"]:
         for name in ("accuracy", "macro_f1"):
             delta = comparison["delta"][name]
@@ -1162,14 +1569,49 @@ def _build_manifest(
     }
 
 
+def _calibration_report(
+    spec: EvalSpec, probabilities: dict[str, _Probabilities] | None
+) -> dict[str, Any] | None:
+    calibration = spec.evaluation.calibration
+    if calibration is None or probabilities is None:
+        return None
+    return {
+        "fit_on": {
+            "split": spec.split,
+            "column": calibration.fit_column,
+            "value": calibration.fit_value,
+        },
+        "folds": calibration.folds,
+        "fold_rule": "seeded permutation of sorted cluster keys; the first ceil(C/2) are fold 0",
+        "ece_bins": calibration.ece_bins,
+        "ece_scheme": "equal_mass",
+        "apply_calibration": calibration.apply_calibration,
+        "systems": {
+            name: {
+                "cross_fit": None
+                if probs.fit is None
+                else {
+                    "temperatures": [fit.model_dump() for fit in probs.fit.folds],
+                    "fold_rows": list(probs.fit.fold_rows),
+                    "cross_fit_version": probs.fit.cross_fit_version,
+                },
+                "own": probs.own,
+            }
+            for name, probs in probabilities.items()
+        },
+    }
+
+
 def _report(
     spec: EvalSpec,
     gold: _Gold,
     systems: dict[str, _System],
     slices: list[dict[str, Any]],
+    probabilities: dict[str, _Probabilities] | None = None,
 ) -> dict[str, Any]:
     settings = spec.evaluation
     return {
+        "calibration": _calibration_report(spec, probabilities),
         "schema": REPORT_SCHEMA,
         "labels": list(settings.labels),
         "candidate": settings.predictions.name,
@@ -1247,10 +1689,26 @@ async def _execute(spec: EvalSpec, secrets: RunSecrets, writer: JsonlProgressWri
         async with ticking_phase(
             phase, f"Loading the predictions of {source.name}", stage="load_model"
         ):
-            raw = await _fetch_predictions(source, hub_token)
+            logit_columns = _logit_columns(settings)
+            raw = await _fetch_predictions(source, hub_token, logit_columns)
             systems[source.name] = await asyncio.to_thread(
-                _align, gold, raw, source, settings.labels
+                _align, gold, raw, source, settings.labels, logit_columns
             )
+    probabilities: dict[str, _Probabilities] | None = None
+    if settings.calibration is not None:
+        calibration = settings.calibration
+        own: dict[str, dict[str, Any] | None] = {}
+        for source in settings.systems:
+            apply = calibration.apply_calibration == "auto" and source.calibration_ref is not None
+            own[source.name] = (
+                await _fetch_calibration(source, settings.labels, hub_token) if apply else None
+            )
+        async with ticking_phase(phase, "Fitting temperatures", stage="run"):
+            probabilities = {}
+            for name, system in systems.items():
+                probabilities[name] = await asyncio.to_thread(
+                    _probabilities, gold, system, settings, calibration, own[name]
+                )
 
     populations = _populations(gold)
     if not populations[0][2]:  # also true when the tier rule refused every row
@@ -1262,7 +1720,15 @@ async def _execute(spec: EvalSpec, secrets: RunSecrets, writer: JsonlProgressWri
         for step, (column, value, rows, refused) in enumerate(populations, start=1):
             scored: dict[str, Any] = (
                 await asyncio.to_thread(
-                    _score_population, rows, gold, systems, settings, detail=column is None
+                    partial(
+                        _score_population,
+                        rows,
+                        gold,
+                        systems,
+                        settings,
+                        detail=column is None,
+                        probabilities=probabilities,
+                    )
                 )
                 if rows
                 else _empty_population(settings)
@@ -1272,7 +1738,7 @@ async def _execute(spec: EvalSpec, secrets: RunSecrets, writer: JsonlProgressWri
                 writer,
                 ProgressEvent(kind="step", stage="run", step=step, total_steps=len(populations)),
             )
-    report = _report(spec, gold, systems, slices)
+    report = _report(spec, gold, systems, slices, probabilities)
 
     async with ticking_phase(phase, "Writing the report", stage="push"):
         outdir = results_dir(spec.run_id, name=_RESULTS_DIR_NAME)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from fractions import Fraction
 from typing import TYPE_CHECKING, Literal
 
@@ -40,11 +41,15 @@ __all__ = [
     "MAX_CLUSTER_BOOTSTRAP_SEED",
     "ClusterBootstrap",
     "ClusterBootstrapSettings",
+    "ClusterMeanBootstrap",
     "MetricInterval",
     "PairedClusterBootstrap",
+    "PairedClusterMeanBootstrap",
     "SystemIntervals",
     "cluster_bootstrap",
+    "cluster_mean_bootstrap",
     "paired_cluster_bootstrap",
+    "paired_cluster_mean_bootstrap",
 ]
 
 ABSENT_GOLD_CLASS = "absent_gold_class:"
@@ -470,3 +475,151 @@ def paired_cluster_bootstrap(
         candidate=_system(cand_point, cand_values, present),
         delta=_system(delta_point, delta_values, present),
     )
+
+
+class ClusterMeanBootstrap(_Frozen):
+    """The mean of a per-row score (for example a Brier term) with a cluster percentile interval."""
+
+    settings: ClusterBootstrapSettings
+    interval: MetricInterval
+
+
+class PairedClusterMeanBootstrap(_Frozen):
+    """Two systems' per-row scores on the same rows; ``delta`` is candidate minus baseline."""
+
+    settings: ClusterBootstrapSettings
+    baseline: MetricInterval
+    candidate: MetricInterval
+    delta: MetricInterval
+    # The sample SD (n - 1) of the per-row differences, with its interval over the same resamples.
+    delta_sd: MetricInterval
+
+
+def _row_values(values: Iterable[object], what: str) -> list[float]:
+    out: list[float] = []
+    for value in values:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            raise ValidationError(f"cluster_bootstrap_{what}_invalid")
+        out.append(float(value))
+    return out
+
+
+def _resampled_means(
+    systems: list[list[float]], codes: list[int], clusters: int, *, seed: int, resamples: int
+) -> list[list[float]]:
+    """Per system, the resampled row-weighted means: cluster sums over cluster sizes."""
+    import numpy as np
+
+    index = np.asarray(codes, dtype=np.int64)
+    sizes = np.bincount(index, minlength=clusters).astype(np.float64)
+    sums = [
+        np.bincount(index, weights=np.asarray(values, dtype=np.float64), minlength=clusters)
+        for values in systems
+    ]
+    out: list[list[float]] = [[] for _ in systems]
+    for weights in _weights(clusters, seed=seed, resamples=resamples):
+        rows = weights @ sizes
+        for total, target in zip(sums, out, strict=True):
+            target.extend(float(v) for v in ((weights @ total) / rows).tolist())
+    return out
+
+
+def _mean_run(
+    systems: list[Iterable[object]], clusters: Iterable[object], *, seed: object, resamples: object
+) -> tuple[ClusterBootstrapSettings, list[float], list[list[float]]]:
+    chosen_seed = _setting(
+        seed, MAX_CLUSTER_BOOTSTRAP_SEED, "cluster_bootstrap_seed_invalid", low=0
+    )
+    count = _setting(
+        resamples, MAX_CLUSTER_BOOTSTRAP_RESAMPLES, "cluster_bootstrap_resamples_invalid", low=1
+    )
+    rows = [_row_values(values, "value") for values in systems]
+    if not rows[0]:
+        raise ValidationError("cluster_bootstrap_empty")
+    if any(len(values) != len(rows[0]) for values in rows):
+        raise ValidationError("cluster_bootstrap_population_mismatch")
+    codes, cluster_count = _cluster_codes(clusters, len(rows[0]))
+    numpy_version = _require_numpy()
+    resampled = _resampled_means(rows, codes, cluster_count, seed=chosen_seed, resamples=count)
+    settings = ClusterBootstrapSettings(
+        seed=chosen_seed,
+        resamples=count,
+        n=len(rows[0]),
+        clusters=cluster_count,
+        numpy_version=numpy_version,
+    )
+    return settings, [math.fsum(values) / len(values) for values in rows], resampled
+
+
+def cluster_mean_bootstrap(
+    values: Iterable[object],
+    *,
+    clusters: Iterable[object],
+    seed: int,
+    resamples: int = CLUSTER_BOOTSTRAP_RESAMPLES,
+) -> ClusterMeanBootstrap:
+    """Bound the mean of finite per-row scores by resampling whole clusters (same contract)."""
+    settings, points, resampled = _mean_run([values], clusters, seed=seed, resamples=resamples)
+    return ClusterMeanBootstrap(settings=settings, interval=_interval(points[0], resampled[0]))
+
+
+def paired_cluster_mean_bootstrap(
+    baseline: Iterable[object],
+    candidate: Iterable[object],
+    *,
+    clusters: Iterable[object],
+    seed: int,
+    resamples: int = CLUSTER_BOOTSTRAP_RESAMPLES,
+) -> PairedClusterMeanBootstrap:
+    """Two systems' per-row scores on the same rows, differenced per resample (candidate minus
+    baseline) before the quantiles, and the SD of the per-row differences. Needs two rows."""
+    baseline_rows, candidate_rows, cluster_rows = list(baseline), list(candidate), list(clusters)
+    if len(baseline_rows) < 2:
+        raise ValidationError("cluster_bootstrap_too_few_rows")
+    settings, points, resampled = _mean_run(
+        [baseline_rows, candidate_rows], cluster_rows, seed=seed, resamples=resamples
+    )
+    delta = [c - b for b, c in zip(resampled[0], resampled[1], strict=True)]
+    diffs = [
+        c - b
+        for b, c in zip(
+            _row_values(baseline_rows, "value"), _row_values(candidate_rows, "value"), strict=True
+        )
+    ]
+    return PairedClusterMeanBootstrap(
+        settings=settings,
+        baseline=_interval(points[0], resampled[0]),
+        candidate=_interval(points[1], resampled[1]),
+        delta=_interval(points[1] - points[0], delta),
+        delta_sd=_interval(
+            statistics.stdev(diffs),
+            _resampled_sd(diffs, cluster_rows, seed=settings.seed, resamples=settings.resamples),
+        ),
+    )
+
+
+def _resampled_sd(
+    values: list[float], clusters: list[object], *, seed: int, resamples: int
+) -> list[float]:
+    """The sample SD of ``values`` in every resample, from weighted sums of x and x squared."""
+    import numpy as np
+
+    codes, count = _cluster_codes(clusters, len(values))
+    index = np.asarray(codes, dtype=np.int64)
+    x = np.asarray(values, dtype=np.float64)
+    sizes = np.bincount(index, minlength=count).astype(np.float64)
+    first = np.bincount(index, weights=x, minlength=count)
+    second = np.bincount(index, weights=x * x, minlength=count)
+    out: list[float] = []
+    for weights in _weights(count, seed=seed, resamples=resamples):
+        n = weights @ sizes
+        s1 = weights @ first
+        s2 = weights @ second
+        with np.errstate(invalid="ignore", divide="ignore"):
+            var = np.where(n > 1, (s2 - s1 * s1 / n) / (n - 1), np.nan)
+        out.extend(float(v) for v in np.sqrt(np.maximum(var, 0.0)).tolist())
+    return out

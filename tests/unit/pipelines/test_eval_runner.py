@@ -74,6 +74,7 @@ class _Hub:
     """Stand-in for HFHubClient: serves local parquet files, records pushes."""
 
     files: ClassVar[dict[tuple[str, str], Path]] = {}
+    named: ClassVar[dict[tuple[str, str, str], Path]] = {}
     calls: ClassVar[list[tuple[str, Any]]] = []
     private: ClassVar[bool] = True
 
@@ -82,7 +83,8 @@ class _Hub:
 
     async def download_file(self, repo_id: str, filename: str, **kwargs: Any) -> Path:
         _Hub.calls.append(("download_file", (repo_id, filename, kwargs)))
-        return _Hub.files[(repo_id, kwargs["revision"])]
+        by_name = _Hub.named.get((repo_id, kwargs["revision"], filename))
+        return by_name if by_name is not None else _Hub.files[(repo_id, kwargs["revision"])]
 
     async def create_repo(self, repo_id: str, **kwargs: Any) -> None:
         _Hub.calls.append(("create_repo", (repo_id, kwargs)))
@@ -111,7 +113,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     fake = types.ModuleType("datasets")
     fake.load_dataset = _load_dataset  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "datasets", fake)
-    _Hub.files, _Hub.calls, _Hub.private = {}, [], True
+    _Hub.files, _Hub.named, _Hub.calls, _Hub.private = {}, {}, [], True
     monkeypatch.setattr(er, "HFHubClient", _Hub)
     state["cand"] = _predictions(gold, accuracy=0.85, seed=2)
     state["base"] = _predictions(gold, accuracy=0.6, seed=3)
@@ -553,6 +555,9 @@ async def test_comparisons_report_the_paired_discordance_rate(
         "baseline_only_correct": b,
         "candidate_only_correct": c,
         "p_d": (b + c) / 60,
+        "n_population": 60,
+        "coverage": 1.0,
+        "gate": "resolved",
     }
     manifest = json.loads((_outdir(env) / "manifest.json").read_text())
     bootstrap = manifest["bootstrap"]
@@ -828,3 +833,238 @@ async def test_absence_is_the_gold_s_whatever_a_system_predicts(
     cand_present = overall["systems"]["candidate"]["macro_f1_present_classes"]["classes"]
     base_present = overall["systems"]["baseline"]["macro_f1_present_classes"]["classes"]
     assert cand_present == base_present == ["entailment", "contradiction"]
+
+
+def _with_logits(state: dict[str, Any]) -> None:
+    """Give both systems logit columns consistent with their predictions."""
+    rng = random.Random(9)  # noqa: S311 — synthetic fixture.
+    for name in ("cand", "base"):
+        table = state[name]
+        for label in LABELS:
+            table[f"logit_{label}"] = [
+                (2.0 if pred == label else 0.0) + rng.uniform(-0.5, 0.5) for pred in table["pred"]
+            ]
+
+
+async def test_calibration_reports_raw_cross_fit_and_applied_reads_apart(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    import math
+    import statistics
+
+    from strata_forge.metrics.calibration import temperature_scale
+    from strata_forge.metrics.classification import brier
+
+    _with_logits(env)
+    own = env["tmp"] / "calibration.json"
+    own.write_text(
+        json.dumps(
+            {
+                "schema": "strata.calibration/v1",
+                "fit": {"temperature": 1.5, "nll_before": 0.7, "nll_after": 0.6},
+                "labels": LABELS,
+            }
+        )
+    )
+    _Hub.files[("u/model", "d" * 40)] = own
+    cand = {
+        "name": "candidate",
+        "repo_id": "u/cand",
+        "commit_sha": SHA_CAND,
+        "calibration_ref": {"repo_id": "u/model", "commit_sha": "d" * 40},
+    }
+    spec = _spec(
+        evaluation=_settings(
+            predictions=cand, calibration={"fit_column": "tier", "fit_value": "easy"}
+        )
+    )
+    code, events = await _run(monkeypatch, env, spec)
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    calibration = report["calibration"]
+    assert calibration["fit_on"] == {"split": "test", "column": "tier", "value": "easy"}
+    assert len(calibration["systems"]["candidate"]["cross_fit"]["temperatures"]) == 2
+    assert calibration["systems"]["candidate"]["own"]["temperature"] == 1.5
+    assert calibration["systems"]["baseline"]["own"] is None
+    overall = report["slices"][0]
+    entry = overall["systems"]["candidate"]
+    logits = [[env["cand"][f"logit_{x}"][i] for x in LABELS] for i in range(60)]
+
+    def expected(t: float) -> float | None:
+        return brier(
+            env["gold"]["label"],
+            temperature_scale(logits, temperature=t),
+            labels=LABELS,
+            probability_kind="class_probabilities",
+        ).value
+
+    assert entry["raw"]["brier"]["point"] == expected(1.0)
+    assert entry["applied"]["brier"]["point"] == expected(1.5)
+    assert 0 <= entry["raw"]["brier"]["point"] <= 2
+    assert entry["raw"]["n"] == 60
+    assert math.isfinite(entry["raw"]["nll"])
+    assert overall["systems"]["baseline"]["applied"] is None
+    # The cross-fit read covers only the named fit slice (the 45 "easy" rows).
+    assert entry["cross_fit"]["n"] == 45
+    hard = next(s for s in report["slices"] if s["value"] == "hard")
+    assert hard["systems"]["candidate"]["cross_fit"] is None
+    (comparison,) = overall["comparisons"]
+    delta = comparison["brier_delta"]
+    assert delta["n"] == 60
+    base_logits = [[env["base"][f"logit_{x}"][i] for x in LABELS] for i in range(60)]
+
+    def terms(rows: list[list[float]]) -> list[float]:
+        probs = temperature_scale(rows, temperature=1.0)
+        return [
+            sum((p - (lab == g)) ** 2 for p, lab in zip(row, LABELS, strict=True))
+            for row, g in zip(probs, env["gold"]["label"], strict=True)
+        ]
+
+    diffs = [c - b for b, c in zip(terms(base_logits), terms(logits), strict=True)]
+    assert delta["sd"]["point"] == pytest.approx(statistics.stdev(diffs))
+    assert delta["sd"]["lower"] <= delta["sd"]["upper"]
+    assert events[-1]["metrics"]["brier"] == expected(1.0)
+
+
+async def test_an_own_calibration_must_name_the_labels_in_order(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    _with_logits(env)
+    own = env["tmp"] / "calibration.json"
+    own.write_text(
+        json.dumps(
+            {
+                "schema": "strata.calibration/v1",
+                "fit": {"temperature": 1.5},
+                "labels": list(reversed(LABELS)),
+            }
+        )
+    )
+    _Hub.files[("u/model", "d" * 40)] = own
+    cand = {
+        "name": "candidate",
+        "repo_id": "u/cand",
+        "commit_sha": SHA_CAND,
+        "calibration_ref": {"repo_id": "u/model", "commit_sha": "d" * 40},
+    }
+    code, events = await _run(
+        monkeypatch, env, _spec(evaluation=_settings(predictions=cand, calibration={}))
+    )
+    assert code == 1
+    assert "labels in order" in events[-1]["message"]
+
+
+async def test_calibration_needs_every_logit_column(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    _with_logits(env)
+    del env["base"]["logit_neutral"]
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(calibration={})))
+    assert code == 1
+    assert "logit_neutral" in events[-1]["message"]
+
+
+async def test_a_fit_slice_is_named_by_column_and_value_together(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    code, events = await _run(
+        monkeypatch, env, _spec(evaluation=_settings(calibration={"fit_column": "tier"}))
+    )
+    assert code == 1
+    assert "fit_column and fit_value" in events[-1]["message"]
+
+
+def _own_calibration(
+    env: dict[str, Any], body: dict[str, Any], verifier: Any = None
+) -> dict[str, Any]:
+    own = env["tmp"] / "calibration.json"
+    own.write_text(json.dumps(body))
+    _Hub.named[("u/model", "d" * 40, "artifact/calibration.json")] = own
+    if verifier is not None:
+        sibling = env["tmp"] / "strata_verifier.json"
+        sibling.write_text(json.dumps(verifier))
+        _Hub.named[("u/model", "d" * 40, "artifact/strata_verifier.json")] = sibling
+    return {
+        "name": "candidate",
+        "repo_id": "u/cand",
+        "commit_sha": SHA_CAND,
+        "calibration_ref": {
+            "repo_id": "u/model",
+            "commit_sha": "d" * 40,
+            "path": "artifact/calibration.json",
+        },
+    }
+
+
+async def test_the_trainer_s_calibration_takes_its_labels_from_the_verifier_beside_it(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    _with_logits(env)
+    cand = _own_calibration(
+        env,
+        {"schema": "strata.calibration/v1", "fit": {"temperature": 2.0}, "rows": 10},
+        {"schema": "strata.verifier/v1", "labels": LABELS},
+    )
+    spec = _spec(evaluation=_settings(predictions=cand, calibration={}))
+    code, events = await _run(monkeypatch, env, spec)
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    own = report["calibration"]["systems"]["candidate"]["own"]
+    assert own["temperature"] == 2.0
+    assert own["labels_from"] == "artifact/strata_verifier.json"
+
+
+@pytest.mark.parametrize(
+    ("body", "needle"),
+    [
+        ({"fit": {"temperature": 2.0}, "labels": LABELS}, "strata.calibration/v1"),
+        (
+            {"schema": "strata.calibration/v1", "temperature": 2.0, "labels": LABELS},
+            "fit.temperature",
+        ),
+    ],
+)
+async def test_a_calibration_file_must_follow_the_trainer_s_schema(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any], body: dict[str, Any], needle: str
+) -> None:
+    _with_logits(env)
+    cand = _own_calibration(env, body)
+    code, events = await _run(
+        monkeypatch, env, _spec(evaluation=_settings(predictions=cand, calibration={}))
+    )
+    assert code == 1
+    assert needle in events[-1]["message"]
+
+
+async def test_a_calibration_ref_needs_calibration_settings(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    cand = _own_calibration(env, {})
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(predictions=cand)))
+    assert code == 1
+    assert "needs calibration settings" in events[-1]["message"]
+
+
+async def test_probability_reads_short_of_full_coverage_decide_no_gate(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    _with_logits(env)
+    # The baseline has no logits on three rows: its read covers 57/60, and every paired
+    # probability read is on the 57 rows both have, unresolved.
+    for label in LABELS:
+        env["base"][f"logit_{label}"][:3] = [None, None, None]
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(calibration={})))
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    overall = report["slices"][0]
+    base = overall["systems"]["baseline"]["raw"]
+    assert (base["n"], base["n_population"], base["gate"]) == (57, 60, "unresolved")
+    assert base["coverage"] == pytest.approx(57 / 60)
+    cand = overall["systems"]["candidate"]["raw"]
+    assert (cand["coverage"], cand["gate"]) == (1.0, "resolved")
+    (comparison,) = overall["comparisons"]
+    assert comparison["brier_delta"]["n"] == 57
+    assert comparison["brier_delta"]["excludes_zero"] == "unresolved"
+    assert comparison["discordance"]["n"] == 57
+    assert comparison["discordance"]["gate"] == "unresolved"
+    assert events[-1]["metrics"]["brier_coverage"] == 1.0
