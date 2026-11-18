@@ -26,26 +26,32 @@ configuration of typed scalars.
 - **Checked as data.** The orchestrator reads the manifest at the pinned commit and checks a
   request against it (`preflight`) without building, importing or executing anything from the
   repository.
-- **Exact artifact, installed by the runner.** The runner installs the pinned build into a
-  dedicated per-build environment beside (never inside) the engine's venv, cached by the pin and
-  the engine build, with no credential in the install's environment. A git source installs
-  anonymously at its commit and is pinned also by the digest of the files its build installs (a
-  commit pins source, not what a build produces); a Hugging Face wheel is pinned by its SHA-256,
-  checked before anything installs it. The runner accepts the environment only when the
-  installed version is the pinned one, PEP 610's `direct_url.json` records the pinned commit or
-  wheel hash (an index install or an editable checkout never matches), every file matches its
-  RECORD hash, the files digest matches the pin, and the engine there is its own.
-  The resolved package set is recorded. The entry point is looked up by name inside that
-  distribution's own metadata only.
+- **Exact artifact, installed by the runner, with no plugin code outside the sandbox.** The
+  runner installs the pinned build into a dedicated per-build directory beside (never inside)
+  the engine's venv, keyed by the pin, the engine build and the interpreter, with no credential
+  in the install's environment. Every pin carries the digest of the files its build installs (a
+  commit pins source, not what a build produces; a wheel's hash pins the file only until it is
+  unpacked), and every dependency beyond the engine's environment is locked with its version and
+  wheel hashes. Dependencies and an `hf` wheel (checked against its SHA-256 first) are only
+  unpacked (`--require-hashes --only-binary=:all: --no-deps`), which runs nothing; a git source is
+  fetched anonymously and built INSIDE the sandbox with only its locked build requirements, no
+  network and the engine read-only. The directory is read from its files, never run, and never a
+  site directory, so no `.pth` file in it is processed; one with an executable line is refused.
+  The runner accepts it only when the pinned version is there, every file matches its RECORD
+  hash, the files digest matches the pin, and every requirement is present, after the build and
+  on every reuse. The resolved package set is recorded. The entry point is looked up by name
+  inside that distribution's own metadata only.
 - **Credential separation, enforced by a sandbox.** The runner reads the token from the secrets
   file into memory, unlinks the file, and refuses a token delivered in an environment variable
   (a process's starting environment stays readable in `/proc`). It downloads the declared inputs
-  at their commits and pushes the output to a private repository itself. The plugin runs from its
-  own environment's interpreter with `-I`, in the strongest sandbox the machine has: bubblewrap
-  as another uid (passwordless sudo), else bubblewrap as the runner's uid (new PID and network
-  namespaces, only the environment, inputs and one output directory bound, no home directory),
-  else, only when the operator allowed it for that plugin and the kernel restricts ptrace, a
-  plain child process. The isolation used is recorded. Its environment holds no credential and
+  at their commits and pushes the output to a private repository itself. The plugin runs on the
+  engine's interpreter with `-I`, its own directory appended to the import path, in the strongest
+  sandbox the machine has: bubblewrap as another uid (passwordless sudo), else bubblewrap as the
+  runner's uid (new PID and network namespaces, the engine, the plugin's directory and the inputs
+  bound read-only, one output directory writable, no home directory). There is no unsandboxed
+  mode: a process of the runner's uid outside a sandbox can rewrite the engine the runner imports
+  and read its starting environment whatever the ptrace scope, so a machine with no sandbox runs
+  no plugin. The isolation used is recorded. Its environment holds no credential and
   an offline, empty Hub cache, its time and resources are limited, and its progress reaches the
   runner only through a pipe the runner validates. Model files in formats that run code when
   loaded are not downloaded.
@@ -71,9 +77,10 @@ configuration of typed scalars.
 Running a plugin needs two parties to agree: the operator allow-lists the build, and the request
 names it; the runner installs exactly that build on the owner's machine. The control plane never
 runs plugin code, and a plugin never holds the run's credential, at install or at run time. The
-sandbox is what keeps a misbehaving plugin from the credential and the runner; without one
-(`none`, operator opt-in) the plugin can read whatever the runner's uid can and reach the
-network, and only the operator's review of the build vouches for it. The build backend runs
-unsandboxed at install time, as the runner's uid with no credential in its environment. No
-deploy key reaches the machine, so a git source must be publicly readable; a private build is
-published as an `hf` wheel, pinned by its hash.
+sandbox is what keeps a misbehaving plugin from the credential and the runner, at install as at
+run time: plugin code, its build backend included, runs nowhere else, so a machine without
+bubblewrap cannot run plugins. An operator locks a plugin's dependencies with hashes (a lock file
+compiled against the engine's environment) and a git source's build backend; a dependency
+published only as an sdist cannot be used, since building it would run its code outside the
+sandbox. No deploy key reaches the machine, so a git source must be publicly readable; a private
+build is published as an `hf` wheel, pinned by its hash.

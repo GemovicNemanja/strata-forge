@@ -7,13 +7,18 @@ built from at one full commit, either a git repository or a Hugging Face reposit
 picks an allowed plugin and one of its declared entry points; it never carries a repository,
 a commit, a path or an import string of its own.
 
-The **installed check** (:func:`installed_mismatch`) runs on the compute target, against the
-plugin's own environment, which the runner builds from the pin
-(:mod:`strata_forge.plugins.environment`). It compares the installed distribution's metadata with
-the pin: the version must be the pinned one, and PEP 610's ``direct_url.json`` must record the
-pinned source: the git repository at the pinned commit, or, for a Hugging Face wheel, the
-wheel's pinned SHA-256. An index install records neither and an editable checkout records a
-directory, so neither can pass: the only build that matches is the one built from the pin.
+Every pin names its artifact by content: ``files_sha256`` is the digest of the files the build
+installs (:func:`files_digest`), for a git source and a Hugging Face wheel alike, and every
+dependency the plugin needs beyond the engine's own is listed with its version and the SHA-256 of
+each wheel that may be installed for it (:class:`LockedDependency`). Nothing outside the pin is
+ever installed into a plugin's environment.
+
+The **installed checks** run on the compute target, against the plugin's own environment, which
+the runner builds from the pin (:mod:`strata_forge.plugins.environment`):
+:func:`installed_mismatch` (the distribution and its pinned version are there) and
+:func:`record_mismatch` (every file matches its RECORD hash and the files' digest is the pinned
+``files_sha256``). They are repeated on every reuse of an environment and again by the host,
+inside the sandbox, before any plugin module is imported.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ __all__ = [
     "ALLOWED_PLUGINS_ENV",
     "AllowedPlugin",
     "Isolation",
+    "LockedDependency",
     "PluginLimits",
     "PluginPin",
     "PluginSource",
@@ -67,19 +73,45 @@ _REPO = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
 _SLUG = r"^[a-z0-9][a-z0-9-]{0,63}$"
 _FILE = r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}\.whl$"
 _SHA256 = r"^[0-9a-f]{64}$"
+_DIST = r"^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$"
+# A PEP 440 version as an ``==`` pin writes it: no spaces, no operators, no markers.
+_VERSION = r"^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,63}$"
+
+
+class LockedDependency(BaseModel):
+    """One distribution a plugin needs beyond the engine's environment, pinned like a lock file
+    with hashes: the exact version and the SHA-256 of every wheel that may be installed for it
+    (one per platform the operator allows). The runner installs it with ``--require-hashes`` and
+    ``--only-binary=:all:``: a wheel is unpacked, never run, so installing a dependency executes
+    no code, and a file whose hash is not listed is refused."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: Annotated[str, StringConstraints(pattern=_DIST)]
+    version: Annotated[str, StringConstraints(pattern=_VERSION)]
+    sha256: tuple[Annotated[str, StringConstraints(pattern=_SHA256)], ...] = Field(
+        min_length=1, max_length=64
+    )
+
+    def requirement_line(self) -> str:
+        """The line in a ``pip --require-hashes`` requirements file."""
+        hashes = " ".join(f"--hash=sha256:{h}" for h in self.sha256)
+        return f"{self.name}=={self.version} {hashes}"
 
 
 class PluginSource(BaseModel):
     """Where a plugin is built from, at one full commit.
 
-    ``git`` names a GitHub repository (``owner/name``), installed anonymously from the commit,
-    with ``files_sha256``: the digest of the files the build installs (:func:`files_digest`),
+    ``git`` names a GitHub repository (``owner/name``): the runner fetches the commit anonymously
+    and builds a wheel from it INSIDE the sandbox, with no network and only the pinned build
+    requirements. ``hf`` names a Hugging Face model repository holding a built wheel (``wheel``)
+    at the commit, with the wheel's SHA-256 (``wheel_sha256``): the runner downloads that file
+    and refuses it unless its hash is the pinned one.
+
+    Both carry ``files_sha256``: the digest of the files the build installs (:func:`files_digest`),
     which the operator takes from a build they inspected. A commit pins the source, not what a
-    build of it produces, so the digest is what pins the artifact.
-    ``hf`` names a Hugging Face model repository holding a built wheel (``wheel``) at the commit,
-    with the wheel's SHA-256 (``wheel_sha256``): the runner downloads that file at the commit,
-    refuses it unless its hash is the pinned one, and installs the verified local copy.
-    ``files_sha256`` is optional there (the wheel hash already fixes every file).
+    build of it produces; a wheel's hash pins the file only until it is unpacked. The digest is
+    what pins the artifact, and it is checked again every time an environment is reused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -91,8 +123,8 @@ class PluginSource(BaseModel):
     wheel: Annotated[str, StringConstraints(pattern=_FILE)] | None = None
     #: The SHA-256 of the wheel in an ``hf`` source (lowercase hex); refused on a ``git`` source.
     wheel_sha256: Annotated[str, StringConstraints(pattern=_SHA256)] | None = None
-    #: The digest of the installed files (:func:`files_digest`); required on a ``git`` source.
-    files_sha256: Annotated[str, StringConstraints(pattern=_SHA256)] | None = None
+    #: The digest of the installed files (:func:`files_digest`).
+    files_sha256: Annotated[str, StringConstraints(pattern=_SHA256)]
 
     @model_validator(mode="after")
     def _wheel_matches_kind(self) -> PluginSource:
@@ -101,9 +133,6 @@ class PluginSource(BaseModel):
             raise ValueError(msg)
         if self.kind == "git" and (self.wheel is not None or self.wheel_sha256 is not None):
             msg = "a git plugin source installs from the repository, not a wheel"
-            raise ValueError(msg)
-        if self.kind == "git" and self.files_sha256 is None:
-            msg = "a git plugin source pins the digest of its built files (files_sha256)"
             raise ValueError(msg)
         if ".." in self.repo:
             msg = "invalid repository name"
@@ -130,22 +159,50 @@ class PluginSource(BaseModel):
 
 
 class PluginPin(BaseModel):
-    """A plugin build, pinned completely."""
+    """A plugin build, pinned completely: the artifact, everything installed beside it, and, for
+    a git source, everything its build may use."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    distribution: Annotated[
-        str, StringConstraints(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$")
-    ]
+    distribution: Annotated[str, StringConstraints(pattern=_DIST)]
     version: Annotated[str, StringConstraints(min_length=1, max_length=64)]
     source: PluginSource
+    #: Every distribution the plugin needs that the engine's environment does not provide,
+    #: transitively, hash-pinned. Empty when the engine's environment is enough.
+    dependencies: tuple[LockedDependency, ...] = Field(default=(), max_length=512)
+    #: A git source's build backend and what it needs, hash-pinned; the build sees nothing else.
+    build_requires: tuple[LockedDependency, ...] = Field(default=(), max_length=128)
+
+    @model_validator(mode="after")
+    def _locks(self) -> PluginPin:
+        if self.source.kind != "git" and self.build_requires:
+            msg = "build_requires apply to a git source only (an hf source is a built wheel)"
+            raise ValueError(msg)
+        if self.source.kind == "git" and not self.build_requires:
+            msg = "a git plugin source pins its build backend (build_requires)"
+            raise ValueError(msg)
+        for name, locked in (
+            ("dependencies", self.dependencies),
+            ("build_requires", self.build_requires),
+        ):
+            names = [d.name for d in locked]
+            if len(set(names)) != len(names):
+                msg = f"{name} lists a distribution twice"
+                raise ValueError(msg)
+            if normalize_distribution(self.distribution) in {
+                normalize_distribution(n) for n in names
+            }:
+                msg = f"{name} lists the plugin itself"
+                raise ValueError(msg)
+        return self
 
 
-#: How a plugin process is kept from the runner. ``uid``: a sandbox (bubblewrap, started with
+#: How plugin code is kept from the runner. ``uid``: a sandbox (bubblewrap, started with
 #: passwordless sudo) in which the plugin runs as another, unprivileged uid; ``bwrap``: the same
-#: sandbox as the runner's own uid; ``none``: a plain child process, only when the operator's
-#: allow-list entry asks for it.
-type Isolation = Literal["uid", "bwrap", "none"]
+#: sandbox as the runner's own uid. There is no unsandboxed mode: a process of the runner's own
+#: uid outside a sandbox can rewrite the engine the runner imports, so a machine with no sandbox
+#: does not run plugins.
+type Isolation = Literal["uid", "bwrap"]
 
 
 class PluginLimits(BaseModel):
@@ -164,10 +221,7 @@ class PluginLimits(BaseModel):
 
 class AllowedPlugin(BaseModel):
     """One operator allow-list entry: a pinned plugin and, optionally, which of its entry points
-    may run (``None``: every entry point its manifest declares).
-
-    ``allow_unisolated`` lets the runner fall back to ``none`` isolation on a machine that has no
-    usable sandbox; without it such a machine refuses the run. ``limits`` bound the process."""
+    may run (``None``: every entry point its manifest declares). ``limits`` bound the process."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -177,7 +231,6 @@ class AllowedPlugin(BaseModel):
     entry_points: tuple[Annotated[str, StringConstraints(max_length=64)], ...] | None = Field(
         default=None, max_length=32
     )
-    allow_unisolated: bool = False
     limits: PluginLimits = Field(default_factory=PluginLimits)
 
     def allows(self, entry_point: str) -> bool:
@@ -264,24 +317,12 @@ def _distribution(name: str, path: Sequence[str] | None) -> metadata.Distributio
     return None
 
 
-def _direct_url(dist: metadata.Distribution) -> dict[str, object] | None:
-    try:
-        raw = dist.read_text("direct_url.json")
-    except OSError, ValueError:
-        return None
-    if not raw:
-        return None
-    try:
-        info: object = json.loads(raw)
-    except ValueError:
-        return None
-    return cast("dict[str, object]", info) if isinstance(info, dict) else None
-
-
 def installed_mismatch(pin: PluginPin, *, path: Sequence[str] | None = None) -> str | None:
-    """Why the distribution installed on ``path`` is not the pinned build, or ``None`` when it is.
+    """Why the distribution installed on ``path`` is not the pinned name and version, or ``None``.
 
     ``path`` is the plugin environment's site directories (``None``: this interpreter's own).
+    Which artifact it is, :func:`record_mismatch` decides, from the files themselves: an install
+    record (PEP 610) says where a build came from, which proves nothing about what is on disk.
     """
     dist = _distribution(pin.distribution, path)
     if dist is None:
@@ -289,36 +330,6 @@ def installed_mismatch(pin: PluginPin, *, path: Sequence[str] | None = None) -> 
     version = dist.version
     if version != pin.version:
         return f"{pin.distribution} {version} is installed, but the run pins {pin.version}"
-    info = _direct_url(dist)
-    if info is None:
-        return (
-            f"{pin.distribution} was not installed from its pinned source (no PEP 610 record), "
-            f"not {pin.source.describe()}"
-        )
-    url = info.get("url")
-    source = pin.source
-    if source.kind == "git":
-        vcs = info.get("vcs_info")
-        commit = cast("dict[str, object]", vcs).get("commit_id") if isinstance(vcs, dict) else None
-        tool = cast("dict[str, object]", vcs).get("vcs") if isinstance(vcs, dict) else None
-        if (
-            tool != "git"
-            or commit != source.commit
-            or _strip_git(url) != _strip_git(source.install_url())
-        ):
-            return (
-                f"{pin.distribution} is installed from {_shown(url)} at {_shown(commit)}, not "
-                f"from {source.repo} at {source.commit[:12]}"
-            )
-        return None
-    archive = info.get("archive_info")
-    hashes = cast("dict[str, object]", archive).get("hashes") if isinstance(archive, dict) else None
-    sha256 = cast("dict[str, object]", hashes).get("sha256") if isinstance(hashes, dict) else None
-    if sha256 != source.wheel_sha256:
-        return (
-            f"{pin.distribution} is installed from {_shown(url)} with sha256 {_shown(sha256)}, "
-            f"not the pinned wheel (sha256 {source.wheel_sha256})"
-        )
     return None
 
 
@@ -338,18 +349,6 @@ def registered_entry_point(
         if ep.group == ENTRY_POINT_GROUP and ep.name == name:
             return ep
     return None
-
-
-def _strip_git(url: object) -> str:
-    text = str(url or "").lower()
-    if text.startswith("git+"):
-        text = text[4:]
-    return text.removesuffix("/").removesuffix(".git")
-
-
-def _shown(value: object) -> str:
-    text = str(value) if value is not None else "an unknown source"
-    return text[:120]
 
 
 # Files a dist-info directory holds that an installer writes, not the build: they differ between
@@ -400,7 +399,7 @@ def _file_hash(path: Path) -> str:
 def record_mismatch(pin: PluginPin, *, path: Sequence[str] | None = None) -> str | None:
     """Why the installed files of the pinned distribution are not the pinned artifact, or
     ``None``: every hashed RECORD entry must match the file on disk, and the files' digest must
-    equal the pin's ``files_sha256`` when it has one."""
+    equal the pin's ``files_sha256``."""
     dist = _distribution(pin.distribution, path)
     if dist is None:
         return f"{pin.distribution} is not installed in the plugin environment"
@@ -418,19 +417,20 @@ def record_mismatch(pin: PluginPin, *, path: Sequence[str] | None = None) -> str
         if actual != recorded:
             return f"{pin.distribution}'s file {name} does not match its RECORD hash"
     expected = pin.source.files_sha256
-    if expected is not None:
-        actual_digest = files_digest(dist)
-        if actual_digest != expected:
-            return (
-                f"{pin.distribution}'s installed files have digest {actual_digest}, not the "
-                f"pinned {expected}"
-            )
+    actual_digest = files_digest(dist)
+    if actual_digest != expected:
+        return (
+            f"{pin.distribution}'s installed files have digest {actual_digest}, not the "
+            f"pinned {expected}"
+        )
     return None
 
 
-def distribution_files(pin: PluginPin) -> frozenset[Path] | None:
-    """The resolved paths of every file the pinned distribution installed (this interpreter)."""
-    dist = _distribution(pin.distribution, None)
+def distribution_files(
+    pin: PluginPin, *, path: Sequence[str] | None = None
+) -> frozenset[Path] | None:
+    """The resolved paths of every file the pinned distribution installed on ``path``."""
+    dist = _distribution(pin.distribution, path)
     if dist is None or dist.files is None:
         return None
     return frozenset(Path(str(dist.locate_file(f))).resolve() for f in dist.files)

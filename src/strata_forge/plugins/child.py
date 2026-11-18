@@ -9,7 +9,9 @@ session of its own and:
   kind of event, a forge-shaped metric, a line too long, text that is not an event) is dropped,
   and events are relayed at a bounded rate;
 - keeps only the last :data:`STDERR_TAIL_BYTES` of its standard error;
-- enforces the operator's wall-clock limit;
+- enforces the operator's wall-clock limit, and ends the run early when any process of the
+  plugin's stays stopped (a ptrace stop, or ``SIGSTOP``) for :data:`STOPPED_LIMIT_SECONDS`: a
+  stopped sandbox init never reaps its children, and the run would otherwise hang to its limit;
 - after the process exits, whether it finished, failed, ran out of time or was cancelled, signals
   its whole process group, waits for it, and confirms that no process of the run is left (by its
   process group, and by the job file's path on any process's command line). Only then does the
@@ -45,6 +47,7 @@ __all__ = [
     "PluginStillRunningError",
     "relayable",
     "run_plugin_process",
+    "stopped_in_tree",
 ]
 
 #: The longest progress line relayed; a longer one is dropped whole.
@@ -57,6 +60,10 @@ MIN_STEP_INTERVAL_S = 0.5
 TERMINATE_GRACE_SECONDS = 10.0
 #: How long the group is given to disappear after SIGKILL before the run fails.
 GONE_TIMEOUT_SECONDS = 10.0
+#: How long any process of the plugin's may stay stopped before the run is ended.
+STOPPED_LIMIT_SECONDS = 30.0
+#: How often the process tree is looked at for a stopped process.
+_STOPPED_CHECK_SECONDS = 1.0
 _READ_CHUNK = 64 * 1024
 
 
@@ -69,6 +76,43 @@ class ChildResult:
     code: int
     stderr_tail: str
     timed_out: bool
+    #: Ended because a process of the plugin's stayed stopped (traced or suspended).
+    stopped: bool = False
+
+
+def _process_table(proc: Path) -> dict[int, tuple[int, str]]:
+    """``{pid: (parent pid, state)}`` from ``/proc/<pid>/stat`` (empty off Linux)."""
+    table: dict[int, tuple[int, str]] = {}
+    if not proc.is_dir():
+        return table
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="ascii", errors="replace")
+        except OSError:
+            continue
+        # ``pid (comm) state ppid ...``: comm may hold spaces and parentheses, so split after
+        # the LAST closing parenthesis.
+        fields = stat[stat.rfind(")") + 2 :].split()
+        if len(fields) >= 2 and fields[1].lstrip("-").isdigit():
+            table[int(entry.name)] = (int(fields[1]), fields[0])
+    return table
+
+
+def stopped_in_tree(root: int, proc: Path = Path("/proc")) -> bool:
+    """Whether ``root`` or any process descended from it is stopped (state ``T`` or ``t``).
+    By ancestry, not process group: the sandbox starts the plugin in a session of its own."""
+    table = _process_table(proc)
+    tree = {root}
+    grew = True
+    while grew:
+        grew = False
+        for pid, (parent, _) in table.items():
+            if parent in tree and pid not in tree:
+                tree.add(pid)
+                grew = True
+    return any(table.get(pid, (0, ""))[1] in ("T", "t") for pid in tree)
 
 
 def relayable(line: bytes) -> ProgressEvent | None:
@@ -235,14 +279,27 @@ async def run_plugin_process(
         asyncio.create_task(_relay(proc.stdout, sink)),
         asyncio.create_task(_tail(proc.stderr, stderr)),
     ]
-    timed_out = False
+    timed_out = stopped = False
     try:
         try:
             async with asyncio.timeout(timeout_s):
                 # The exit itself, not ``wait()``: that also waits for the pipes to close, which a
                 # process the plugin left behind can hold open until the time limit.
-                while proc.returncode is None:  # noqa: ASYNC110 -- the exit has no event of its own
+                stopped_since: float | None = None
+                next_check = time.monotonic()
+                while proc.returncode is None:
                     await asyncio.sleep(0.2)
+                    now = time.monotonic()
+                    if now < next_check:
+                        continue
+                    next_check = now + _STOPPED_CHECK_SECONDS
+                    if not await asyncio.to_thread(stopped_in_tree, proc.pid):
+                        stopped_since = None
+                    elif stopped_since is None:
+                        stopped_since = now
+                    elif now - stopped_since >= STOPPED_LIMIT_SECONDS:
+                        stopped = True
+                        break
         except TimeoutError:
             timed_out = True
     finally:
@@ -262,4 +319,5 @@ async def run_plugin_process(
         code=proc.returncode if proc.returncode is not None else -1,
         stderr_tail=bytes(stderr).decode("utf-8", "replace"),
         timed_out=timed_out,
+        stopped=stopped,
     )

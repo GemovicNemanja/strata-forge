@@ -6,9 +6,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import subprocess
 import sys
-import sysconfig
+import types
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -67,9 +66,7 @@ def _allow(
     monkeypatch: pytest.MonkeyPatch, pin: PluginPin, *, entry_points: tuple[str, ...] | None = None
 ) -> None:
     allowance = RunnerAllowance(
-        plugin=AllowedPlugin(
-            id="toy", label="Toy", pin=pin, entry_points=entry_points, allow_unisolated=True
-        ),
+        plugin=AllowedPlugin(id="toy", label="Toy", pin=pin, entry_points=entry_points),
         entry_points=tuple(EntryPointDecl.model_validate(e) for e in ENTRIES),
     )
     monkeypatch.setenv(ALLOWED_PLUGINS_ENV, json.dumps([allowance.model_dump(mode="json")]))
@@ -169,11 +166,14 @@ def test_the_plugin_environment_holds_no_credential(tmp_path: Path) -> None:
         assert name not in env
 
 
-def _host_job(pin: PluginPin, entry: str, steps: Path, out: Path, **changes: Any) -> HostJob:
+def _host_job(
+    pin: PluginPin, site: Path, entry: str, steps: Path, out: Path, **changes: Any
+) -> HostJob:
     decl = _decl(entry)
     decl.update(changes.pop("decl", {}))
     return HostJob(
         pin=pin,
+        plugin_paths=(site,),
         entry=EntryPointDecl.model_validate(decl),
         config=changes.pop("config", {}),
         datasets={"steps": steps},
@@ -183,14 +183,13 @@ def _host_job(pin: PluginPin, entry: str, steps: Path, out: Path, **changes: Any
     )
 
 
-@pytest.mark.usefixtures("toy_site")
 def test_the_host_scores_every_step_and_carries_the_input_columns(
-    tmp_path: Path, pin: PluginPin
+    toy_site: Path, tmp_path: Path, pin: PluginPin
 ) -> None:
     steps = tmp_path / "steps.parquet"
     _steps_parquet(steps, step_type=True)
     out = tmp_path / "out"
-    run(_host_job(pin, "prm", steps, out, config={"scale": 2.0}, batch_size=2))
+    run(_host_job(pin, toy_site, "prm", steps, out, config={"scale": 2.0}, batch_size=2))
     table = pq.read_table(str(out / SCORES_FILENAME)).to_pydict()
     assert list(table) == ["item_id", "step_index", "step_type", "score", "reason"]
     assert table["step_type"] == ["claim", "skip", "claim", "claim", "claim"]
@@ -198,7 +197,6 @@ def test_the_host_scores_every_step_and_carries_the_input_columns(
     assert table["reason"] == [None, "not_scored_type", None, None, None]
 
 
-@pytest.mark.usefixtures("toy_site")
 @pytest.mark.parametrize(
     ("entry", "match"),
     [
@@ -210,12 +208,12 @@ def test_the_host_scores_every_step_and_carries_the_input_columns(
     ],
 )
 def test_a_scorer_outside_the_contract_fails(
-    tmp_path: Path, pin: PluginPin, entry: str, match: str
+    toy_site: Path, tmp_path: Path, pin: PluginPin, entry: str, match: str
 ) -> None:
     steps = tmp_path / "steps.parquet"
     _steps_parquet(steps)
     with pytest.raises(PluginManifestError, match=match):
-        run(_host_job(pin, entry, steps, tmp_path / "out"))
+        run(_host_job(pin, toy_site, entry, steps, tmp_path / "out"))
     assert not (tmp_path / "out" / SCORES_FILENAME).exists()
 
 
@@ -226,12 +224,23 @@ def test_the_host_refuses_a_build_that_changed_after_install(
     _steps_parquet(steps)
     (toy_site / "toy_prm" / "__init__.py").write_text("raise SystemExit('planted')\n")
     with pytest.raises(PluginManifestError, match="RECORD hash"):
-        run(_host_job(pin, "prm", steps, tmp_path / "out"))
+        run(_host_job(pin, toy_site, "prm", steps, tmp_path / "out"))
 
 
-@pytest.mark.usefixtures("toy_site")
+def test_the_host_does_not_trust_a_module_already_in_sys_modules(
+    toy_site: Path, tmp_path: Path, pin: PluginPin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps = tmp_path / "steps.parquet"
+    _steps_parquet(steps)
+    planted = types.ModuleType("toy_prm")
+    planted.__file__ = str(tmp_path / "elsewhere.py")
+    monkeypatch.setitem(sys.modules, "toy_prm", planted)
+    with pytest.raises(PluginManifestError, match="not one of toy-prm's files"):
+        run(_host_job(pin, toy_site, "prm", steps, tmp_path / "out"))
+
+
 def test_a_structured_context_and_declared_columns_pass_through_unchanged(
-    tmp_path: Path, pin: PluginPin
+    toy_site: Path, tmp_path: Path, pin: PluginPin
 ) -> None:
     steps = tmp_path / "steps.parquet"
     context = [
@@ -257,7 +266,7 @@ def test_a_structured_context_and_declared_columns_pass_through_unchanged(
         "score_kind": "unconstrained",
     }
     out = tmp_path / "out"
-    run(_host_job(pin, "contexts", steps, out, decl=decl))
+    run(_host_job(pin, toy_site, "contexts", steps, out, decl=decl))
     table = pq.read_table(str(out / SCORES_FILENAME))
     assert table.column_names == ["item_id", "step_index", "source", "score", "reason"]
     assert table.column("score").to_pylist() == [2.0, 1.0]  # the segments, never joined
@@ -269,20 +278,10 @@ def test_a_structured_context_and_declared_columns_pass_through_unchanged(
 
 @pytest.fixture(scope="session")
 def plugin_env(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A real plugin environment: its own venv holding the toy build, run with ``-I``; the
-    engine and its dependencies reach it through a site directory, as an install would put them."""
-    root = tmp_path_factory.mktemp("plugin-env") / "venv"
-    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root)], check=True)  # noqa: S603
-    python = root / "bin" / "python"
-    site = subprocess.run(  # noqa: S603 -- the test's own interpreter
-        [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    engine_site = sysconfig.get_path("purelib")
-    Path(site, "_engine.pth").write_text(f"import site; site.addsitedir({engine_site!r})\n")
-    build_toy(Path(site))
+    """A plugin directory as the runner builds it (``pip --target``): the toy build alone. The
+    host runs on the engine's own interpreter with ``-I`` and appends it to its path."""
+    root = tmp_path_factory.mktemp("plugin-env")
+    build_toy(root / "site")
     return root
 
 
@@ -311,16 +310,13 @@ class _FakeHub:
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, plugin_env: Path) -> None:
-    site = next((plugin_env / "lib").glob("python*/site-packages"))
-
     async def environment(*_: Any) -> PluginEnvironment:
         return PluginEnvironment(
             key="k",
             root=plugin_env,
-            python=plugin_env / "bin" / "python",
-            site_paths=(str(site),),
+            site=plugin_env / "site",
             packages=({"name": "toy-prm", "version": "0.1.0"},),
-            requirements=("strata-forge[hf]==0.6.0", "toy-prm @ git+x"),
+            requirements=("toy-prm==0.1.0 @ git+x",),
             reused=False,
         )
 
@@ -334,12 +330,17 @@ def _wire(monkeypatch: pytest.MonkeyPatch, plugin_env: Path) -> None:
             pq.write_table(pa.table({"text": ["a", "b"]}), str(dest))
         return {role: dest}, {}, {role: 5 if role == "steps" else 2}
 
-    async def unisolated(**_: Any) -> Sandbox:
-        return Sandbox("none", None)
+    async def sandbox() -> Sandbox:
+        return Sandbox("bwrap", None)
+
+    def no_bwrap(_: Sandbox, inner: list[str], *, env: dict[str, str], **__: Any) -> list[str]:
+        # bubblewrap's --clearenv and --setenv, without its namespaces (not on this machine).
+        return ["/usr/bin/env", "-i", *(f"{k}={v}" for k, v in env.items()), *inner]
 
     monkeypatch.setattr(plugin_runner, "_prepare_environment", environment)
     monkeypatch.setattr(plugin_runner, "_download_inputs", inputs)
-    monkeypatch.setattr(plugin_runner, "choose_sandbox", unisolated)
+    monkeypatch.setattr(plugin_runner, "choose_sandbox", sandbox)
+    monkeypatch.setattr(plugin_runner, "sandbox_command", no_bwrap)
     monkeypatch.setattr(plugin_runner, "HFHubClient", _FakeHub)
     monkeypatch.delenv(LEGACY_TOKEN_ENV, raising=False)
     _FakeHub.pushed = []
@@ -369,7 +370,7 @@ def test_a_step_scoring_run_end_to_end(
     assert manifest["plugin"]["score_kind"] == "probability"
     assert manifest["inputs"][0]["commit"] == SHA
     assert manifest["environment"]["packages"] == [{"name": "toy-prm", "version": "0.1.0"}]
-    assert manifest["sandbox"]["isolation"] == "none"
+    assert manifest["sandbox"]["isolation"] == "bwrap"
     assert manifest["output"]["scoring"] == {
         "score_kind": "probability",
         "rows": 5,
@@ -449,3 +450,43 @@ def test_a_commit_url_is_not_reported_as_a_commit(
     _wire(monkeypatch, plugin_env)
     _FakeHub.commit = "https://huggingface.co/datasets/acme/out/commit/abc"
     assert _execute(_spec(pin)) == "acme/out"
+
+
+def test_a_git_source_s_build_runs_through_the_sandbox_and_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from strata_forge.plugins.environment import BuildJob
+
+    seen: list[dict[str, Any]] = []
+
+    def no_bwrap(
+        _: Sandbox, inner: Any, *, paths: Any, env: dict[str, str], gpu: bool
+    ) -> list[str]:
+        seen.append({"paths": paths, "env": env, "gpu": gpu})
+        return ["/usr/bin/env", "-i", *(f"{k}={v}" for k, v in env.items()), *inner]
+
+    monkeypatch.setattr(plugin_runner, "sandbox_command", no_bwrap)
+    source, out, deps = tmp_path / "source", tmp_path / "dist", tmp_path / "deps"
+    for d in (source, out, deps):
+        d.mkdir()
+    build = plugin_runner._sandboxed_builder(Sandbox("bwrap", None), tmp_path)  # pyright: ignore[reportPrivateUsage]
+
+    def job(code: str) -> BuildJob:
+        return BuildJob(
+            command=(sys.executable, "-I", "-c", code),
+            env={"PATH": "/usr/bin:/bin"},
+            readonly=(deps,),
+            writable=(source, out),
+            source=source,
+            out=out,
+        )
+
+    asyncio.run(build(job(f"open({str(out / 'w.whl')!r}, 'w').write('x')")))
+    assert (out / "w.whl").exists()
+    (call,) = seen
+    assert call["gpu"] is False
+    assert call["paths"].writable == (source, out)
+    assert deps in call["paths"].readonly
+    assert Path(sys.prefix).resolve() in call["paths"].readonly  # the engine, read-only
+    with pytest.raises(PluginManifestError, match=r"failed \(exit 3\).*broken backend"):
+        asyncio.run(build(job("import sys; sys.stderr.write('broken backend'); sys.exit(3)")))

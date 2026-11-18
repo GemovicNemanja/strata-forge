@@ -14,16 +14,19 @@ happens before any plugin code runs:
 2. the pinned build must be the one the orchestrator allowed for this job, the entry point one
    the operator's entry allows, and its interface is the orchestrator's copy of the manifest,
    never the spec's; the bindings and configuration must fit it;
-3. a sandbox is chosen (:mod:`~strata_forge.plugins.sandbox`): another uid, else bubblewrap, else
-   nothing only when the operator allowed that for this plugin;
-4. the plugin's own environment is built from the pin, or reused when it still verifies
-   (:mod:`~strata_forge.plugins.environment`: never the engine's interpreter, a credential-free
-   install, an ``hf`` wheel checked against its pinned SHA-256 first, every RECORD hash and the
-   pinned files digest checked after), and its distribution must register the entry point;
+3. a sandbox is chosen (:mod:`~strata_forge.plugins.sandbox`): another uid, else bubblewrap; a
+   machine with neither runs no plugin;
+4. the plugin's own directory is built from the pin, or reused when it still verifies
+   (:mod:`~strata_forge.plugins.environment`). No plugin code runs outside the sandbox while it
+   is built: hash-pinned wheels are only unpacked, an ``hf`` wheel is checked against its pinned
+   SHA-256 first, a git source is built INSIDE the sandbox, and the result is read from its files,
+   never run; every RECORD hash and the pinned files digest are checked, and its distribution
+   must register the entry point;
 5. the declared inputs are downloaded HERE, with the run's credential, at their full commits:
    dataset splits to local parquet (each checked for its required columns), model inputs as
    snapshots without pickle-capable files;
-6. the plugin runs from its environment's interpreter with ``-I`` in the sandbox
+6. the plugin runs on the engine's interpreter with ``-I`` in the sandbox, the engine bound
+   read-only and the plugin's directory appended to its path
    (:mod:`~strata_forge.plugins.child`): an environment with no credential, the Hub offline on
    an empty cache, the operator's time and resource limits, progress relayed through a pipe the
    runner validates, the GPU sampled from THIS process meanwhile. However it ends, its whole
@@ -45,6 +48,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,8 +72,12 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
-from strata_forge.plugins.child import PluginStillRunningError, run_plugin_process
-from strata_forge.plugins.environment import PluginEnvironment, ensure_environment
+from strata_forge.plugins.child import (
+    STOPPED_LIMIT_SECONDS,
+    PluginStillRunningError,
+    run_plugin_process,
+)
+from strata_forge.plugins.environment import BuildJob, PluginEnvironment, ensure_environment
 from strata_forge.plugins.host import SCORES_FILENAME, HostJob, score_columns
 from strata_forge.plugins.manifest import (
     STEP_INPUT_ROLE,
@@ -91,6 +99,7 @@ from strata_forge.plugins.sandbox import (
     SandboxUnavailableError,
     chmod_for_uid,
     choose_sandbox,
+    engine_paths,
     sandbox_command,
 )
 from strata_forge.plugins.step_scoring import Aggregation, aggregate
@@ -131,6 +140,8 @@ PICKLE_WEIGHT_PATTERNS: tuple[str, ...] = (
 DIAGNOSTICS_FILENAME = "aggregates.diagnostic.parquet"
 #: How much of a failed plugin's standard error the run record keeps (scrubbed).
 STDERR_TAIL_CHARS = 2000
+#: The wall-clock limit on building a git source's wheel inside the sandbox.
+BUILD_TIMEOUT_SECONDS = 1800
 
 # The environment a plugin process may see. Everything else (the spec, the secrets file's
 # path, any credential the job inherited, the runner's HOME) stays with the runner.
@@ -273,25 +284,74 @@ def admit(spec: PluginRunSpec) -> Admitted:
     return Admitted(allowance=allowance, entry=entry, config=config)
 
 
+def _sandboxed_builder(sandbox: Sandbox, scratch: Path) -> Any:
+    """Run a git source's build (its backend is the plugin's code) inside ``sandbox``: no
+    network, the engine and the build requirements read-only, only the source tree and the
+    output directory writable, killed and confirmed gone like the plugin's own process."""
+
+    async def build(job: BuildJob) -> None:
+        if sandbox.isolation == "uid":
+            chmod_for_uid(readable=list(job.readonly), writable=list(job.writable))
+        paths = SandboxPaths(readonly=(*engine_paths(), *job.readonly), writable=job.writable)
+        command = sandbox_command(sandbox, job.command, paths=paths, env=job.env, gpu=False)
+        try:
+            result = await run_plugin_process(
+                command,
+                sandbox=sandbox,
+                env={"PATH": job.env.get("PATH", "/usr/bin:/bin")},
+                cwd=scratch,
+                marker=str(job.source),
+                timeout_s=float(BUILD_TIMEOUT_SECONDS),
+                sink=lambda _event: None,
+            )
+        except PluginStillRunningError as exc:
+            raise PluginManifestError(str(exc)) from exc
+        if result.timed_out or result.stopped or result.code != 0:
+            tail = result.stderr_tail.strip()[-STDERR_TAIL_CHARS:]
+            why = (
+                "ran past its time limit"
+                if result.timed_out
+                else "was stopped"
+                if result.stopped
+                else f"failed (exit {result.code})"
+            )
+            raise PluginManifestError(f"building the plugin {why}" + (f": {tail}" if tail else ""))
+
+    return build
+
+
 async def _prepare_environment(
-    spec: PluginRunSpec, entry: EntryPointDecl, secrets: RunSecrets, workdir: Path, phase: Any
+    spec: PluginRunSpec,
+    entry: EntryPointDecl,
+    secrets: RunSecrets,
+    workdir: Path,
+    phase: Any,
+    sandbox: Sandbox,
 ) -> PluginEnvironment:
     """The plugin's verified environment, and the entry point registered in it."""
     pin = spec.plugin
+    scratch = workdir / "environment"
+    scratch.mkdir()
 
-    async def fetch_wheel() -> Path:
+    async def fetch_wheel(into: Path) -> Path:
         source = pin.source
         hub = HFHubClient(token=secrets.hub_credential())
         return await hub.download_file(
             source.repo,
             str(source.wheel),
-            local_dir=workdir / "wheel",
+            local_dir=into,
             repo_type="model",
             revision=source.commit,
         )
 
     try:
-        env = await ensure_environment(pin, fetch_wheel=fetch_wheel, phase=phase)
+        env = await ensure_environment(
+            pin,
+            scratch=scratch,
+            fetch_wheel=fetch_wheel,
+            build=_sandboxed_builder(sandbox, scratch),
+            phase=phase,
+        )
     except PluginManifestError as exc:
         raise RunError(str(exc)) from exc
     if registered_entry_point(pin, entry.name, path=env.site_paths) is None:
@@ -439,7 +499,7 @@ async def _execute(
     admitted = admit(spec)
     entry, allowance = admitted.entry, admitted.allowance
     try:
-        sandbox = await choose_sandbox(allow_unisolated=allowance.plugin.allow_unisolated)
+        sandbox = await choose_sandbox()
     except SandboxUnavailableError as exc:
         raise RunError(str(exc)) from exc
     # Sampled HERE, outside the plugin's process, so the GPU numbers are forge's own reading and
@@ -449,7 +509,7 @@ async def _execute(
     workdir = Path(tempfile.mkdtemp(prefix="strata-plugin-"))
     try:
         async with ticking_phase(phase, "preparing the plugin environment", stage="load_model"):
-            env = await _prepare_environment(spec, entry, secrets, workdir, phase)
+            env = await _prepare_environment(spec, entry, secrets, workdir, phase, sandbox)
         inputs = workdir / "inputs"
         async with ticking_phase(phase, "reading the inputs", stage="load_model"):
             datasets, models, rows = await _download_inputs(spec, entry, secrets, inputs)
@@ -458,6 +518,7 @@ async def _execute(
         output.mkdir()
         job = HostJob(
             pin=spec.plugin,
+            plugin_paths=(env.site,),
             entry=entry,
             config=admitted.config,
             datasets=datasets,
@@ -468,29 +529,23 @@ async def _execute(
         )
         job_path = workdir / "job.json"
         job_path.write_text(job.model_dump_json(), encoding="utf-8")
+        # The engine read-only (what runs the host), the plugin's directory, the job and the
+        # inputs read-only; only the output is writable.
         paths = SandboxPaths(
-            environment=env.root,
-            interpreter_home=env.interpreter_home(),
-            job=job_path,
-            inputs=inputs,
-            output=output,
+            readonly=(*engine_paths(), env.site, job_path, inputs),
+            writable=(output,),
         )
         if sandbox.isolation == "uid":
-            chmod_for_uid(paths)
+            chmod_for_uid(readable=[job_path, inputs], writable=[output])
         home = workdir / "home"
         home.mkdir()
         hf_home = home / "hf"
         hf_home.mkdir()
         child_env = plugin_environ(gpu=entry.gpu, home=home, hf_home=hf_home)
-        inner = [str(env.python), "-I", "-m", "strata_forge.plugins.host", str(job_path)]
+        inner = [sys.executable, "-I", "-m", "strata_forge.plugins.host", str(job_path)]
         command = sandbox_command(sandbox, inner, paths=paths, env=child_env, gpu=entry.gpu)
-        # The sandboxes clear the environment and set the child's inside; only a plain child
-        # process takes it from here.
-        spawn_env = (
-            child_env
-            if sandbox.isolation == "none"
-            else {"PATH": child_env.get("PATH", "/usr/bin:/bin")}
-        )
+        # The sandbox clears the environment and sets the child's inside.
+        spawn_env = {"PATH": child_env.get("PATH", "/usr/bin:/bin")}
 
         def relay(event: ProgressEvent) -> None:
             if event.kind == "phase":
@@ -519,6 +574,12 @@ async def _execute(
             msg = (
                 f"the plugin ran past its limit of {allowance.plugin.limits.max_runtime_seconds} "
                 "seconds and was stopped; nothing is pushed"
+            )
+            raise RunError(msg)
+        if result.stopped:
+            msg = (
+                "a plugin process stayed stopped (traced or suspended) for over "
+                f"{STOPPED_LIMIT_SECONDS:.0f} seconds, so the run was ended; nothing is pushed"
             )
             raise RunError(msg)
         if result.code != 0:

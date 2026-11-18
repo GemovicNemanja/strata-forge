@@ -10,21 +10,30 @@ whose code runs on a user's machine; every rule below is a security property.
 - **The allow-list is the orchestrator's, not the spec's.** `plugin_runner` reads it from
   `STRATA_ALLOWED_PLUGINS`, which an orchestrator sets from its own configuration. Never add a
   spec field, hyperparameter or request field that widens it.
-- **Exact pins only.** A build is distribution + version + source + full commit, and an artifact
-  hash: a git build's `files_sha256`, an `hf` wheel's `wheel_sha256`. No ranges, no branches, no short ids, no local versions. An index install
-  or an editable checkout never satisfies a pin.
-- **The runner installs, without credentials.** `environment.py` builds each pin its own venv,
-  never the engine's, with `install_environ` (no credential-shaped name, a fresh `HOME`, no pip or
-  git configuration). An `hf` wheel is hash-checked before pip sees it. Never pass a token into
-  the install, and never reuse an environment without re-verifying it.
+- **Exact pins only.** A build is distribution + version + source + full commit, and the digest
+  of its installed files (`files_sha256`, both kinds; an `hf` wheel also its `wheel_sha256`).
+  Every dependency is a `LockedDependency` with its version and wheel hashes; a git source's
+  build backend is locked in `build_requires`. No ranges, no branches, no short ids, no local
+  versions, nothing installed that the pin does not list.
+- **No plugin code outside the sandbox, ever, the build included.** `environment.py` installs
+  only hash-pinned wheels (`--require-hashes --only-binary=:all: --no-deps`), which unpack and run
+  nothing; a git source's wheel is built through the `build` callable, which the runner runs in
+  the sandbox. Never start an interpreter with a plugin directory on its path outside the
+  sandbox (not to inspect it, not to list it: read its files with `importlib.metadata`), never
+  make a plugin directory a site directory (`site.addsitedir`, a `.pth`), and never let an sdist
+  or a build backend run in the runner's process tree. pip runs from the tools venv with
+  `install_environ` (no credential-shaped name, a fresh `HOME`); never pass a token into it, and
+  never reuse an environment without re-verifying it.
 - **The control-plane half is pure.** `manifest.py`, `pins.py` (apart from `installed_mismatch`
   and `registered_entry_point`, which read local metadata on the target) and `preflight.py` do no
   I/O and import nothing from a plugin. A control plane must be able to call them on a manifest
   it read as bytes.
 - **Never run plugin code next to the token.** The runner runs with `-I`, refuses a token from
-  the environment, and starts the host only through `sandbox.sandbox_command` with the
-  isolation `choose_sandbox` picked; never weaken that order or fall back to `none` without the
-  operator's `allow_unisolated`. Never import anything from a plugin environment into the runner.
+  the environment, and starts the host (and a git build) only through
+  `sandbox.sandbox_command` with the isolation `choose_sandbox` picked; there is no unsandboxed
+  mode, and none may be added: a process of the runner's uid outside a sandbox can rewrite the
+  engine environment the runner imports from. The engine is bound read-only into every sandbox.
+  Never import anything from a plugin environment into the runner.
 - **Never touch the plugin's output in place.** `child.run_plugin_process` must have confirmed
   the group gone; then `output.stage_output` copies it and everything after reads the copy.
 - **The plugin never holds a credential.** The runner downloads every input and pushes every

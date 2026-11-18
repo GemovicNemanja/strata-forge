@@ -11,6 +11,7 @@ import pytest
 from strata_forge.plugins.manifest import PluginManifestError, parse_manifest
 from strata_forge.plugins.pins import (
     AllowedPlugin,
+    LockedDependency,
     PluginPin,
     PluginSource,
     RunnerAllowance,
@@ -23,7 +24,7 @@ from strata_forge.plugins.pins import (
 )
 from strata_forge.plugins.pins import main as pins_main
 
-from .conftest import MANIFEST, OTHER_SHA, SHA, write_dist
+from .conftest import MANIFEST, SHA, TOY_BUILD_REQUIRES, write_dist
 
 WHEEL_SHA = "c" * 64
 
@@ -42,6 +43,7 @@ def test_an_allow_list_parses_and_refuses_bad_entries() -> None:
             "commit": SHA,
             "files_sha256": WHEEL_SHA,
         },
+        "build_requires": [{"name": "setuptools", "version": "80.9.0", "sha256": [WHEEL_SHA]}],
     }
     entry: dict[str, object] = {
         "id": "toy",
@@ -56,6 +58,9 @@ def test_an_allow_list_parses_and_refuses_bad_entries() -> None:
         parse_allow_list(json.dumps([{**entry, "pin": {**pin, "extra": 1}}]))
     with pytest.raises(PluginManifestError):
         parse_allow_list("{}")
+    # An unsandboxed mode no longer exists: an entry that asks for one is refused, not ignored.
+    with pytest.raises(PluginManifestError):
+        parse_allow_list(json.dumps([{**entry, "allow_unisolated": True}]))
 
 
 @pytest.mark.parametrize(
@@ -76,6 +81,14 @@ def test_an_allow_list_parses_and_refuses_bad_entries() -> None:
         {"kind": "git", "repo": "acme/toy", "commit": SHA, "wheel_sha256": WHEEL_SHA},
         {"kind": "git", "repo": "../etc", "commit": SHA},
         {"kind": "hf", "repo": "acme/toy", "commit": SHA, "wheel": "../toy.whl"},
+        # Both kinds pin the digest of their installed files.
+        {
+            "kind": "hf",
+            "repo": "acme/toy",
+            "commit": SHA,
+            "wheel": "toy-0.1.0-py3-none-any.whl",
+            "wheel_sha256": WHEEL_SHA,
+        },
     ],
 )
 def test_sources_are_pinned_and_well_formed(source: dict[str, str]) -> None:
@@ -90,6 +103,7 @@ def test_the_hf_install_url_names_the_commit() -> None:
         commit=SHA,
         wheel="toy-0.1.0-py3-none-any.whl",
         wheel_sha256=WHEEL_SHA,
+        files_sha256=WHEEL_SHA,
     )
     assert source.install_url() == (
         f"https://huggingface.co/acme/toy/resolve/{SHA}/toy-0.1.0-py3-none-any.whl"
@@ -104,36 +118,69 @@ def test_the_manifest_must_describe_the_pin(pin: PluginPin) -> None:
 
 
 @pytest.mark.usefixtures("toy_site")
-def test_the_installed_build_matches_the_pin(pin: PluginPin) -> None:
+def test_the_installed_build_matches_the_pin_s_name_and_version(pin: PluginPin) -> None:
     assert installed_mismatch(pin) is None
-    moved = pin.model_copy(update={"source": pin.source.model_copy(update={"commit": OTHER_SHA})})
-    assert "not from acme/toy-prm" in (installed_mismatch(moved) or "")
     newer = pin.model_copy(update={"version": "0.2.0"})
     assert "pins 0.2.0" in (installed_mismatch(newer) or "")
     absent = pin.model_copy(update={"distribution": "not-installed"})
     assert "is not installed" in (installed_mismatch(absent) or "")
 
 
-def test_an_index_or_editable_install_never_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pin: PluginPin
+def test_a_build_from_elsewhere_fails_on_its_files_whatever_its_install_record_says(
+    tmp_path: Path, pin: PluginPin
 ) -> None:
-    write_dist(tmp_path, direct_url=None, entry_points="")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-    assert "no PEP 610 record" in (installed_mismatch(pin) or "")
-
-
-def test_an_editable_checkout_never_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pin: PluginPin
-) -> None:
+    # An install record (PEP 610) claiming the pinned commit proves nothing: the files decide.
     write_dist(
         tmp_path,
-        direct_url={"url": "file:///src/toy-prm", "dir_info": {"editable": True}},
-        entry_points="",
+        direct_url={
+            "url": "https://github.com/acme/toy-prm.git",
+            "vcs_info": {"vcs": "git", "commit_id": SHA},
+        },
+        entry_points="[strata_forge.plugins]\nprm = os:system\n",
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-    assert installed_mismatch(pin) is not None
+    assert installed_mismatch(pin, path=[str(tmp_path)]) is None
+    assert "not the pinned" in (record_mismatch(pin, path=[str(tmp_path)]) or "")
+
+
+def test_locks_are_hash_pinned_and_never_name_the_plugin(pin: PluginPin) -> None:
+    dep = LockedDependency(name="numpy", version="2.4.0", sha256=("a" * 64, "b" * 64))
+    assert dep.requirement_line() == (
+        f"numpy==2.4.0 --hash=sha256:{'a' * 64} --hash=sha256:{'b' * 64}"
+    )
+    for bad in (
+        {"name": "numpy", "version": ">=2", "sha256": ["a" * 64]},
+        {"name": "numpy", "version": "2.4.0", "sha256": []},
+        {"name": "numpy", "version": "2.4.0", "sha256": ["XYZ"]},
+        {"name": "numpy; os_name=='nt'", "version": "2.4.0", "sha256": ["a" * 64]},
+    ):
+        with pytest.raises(ValueError, match="validation error"):
+            LockedDependency.model_validate(bad)
+    with pytest.raises(ValueError, match="twice"):
+        PluginPin.model_validate({**pin.model_dump(), "dependencies": [dep.model_dump()] * 2})
+    itself = LockedDependency(name="toy-prm", version="0.1.0", sha256=("a" * 64,))
+    with pytest.raises(ValueError, match="the plugin itself"):
+        PluginPin.model_validate({**pin.model_dump(), "dependencies": [itself.model_dump()]})
+
+
+def test_a_git_source_locks_its_build_backend_and_an_hf_one_has_none(pin: PluginPin) -> None:
+    data = pin.model_dump()
+    with pytest.raises(ValueError, match="build_requires"):
+        PluginPin.model_validate({**data, "build_requires": []})
+    hf = {
+        **data,
+        "source": {
+            "kind": "hf",
+            "repo": "acme/toy",
+            "commit": SHA,
+            "wheel": "toy-0.1.0-py3-none-any.whl",
+            "wheel_sha256": WHEEL_SHA,
+            "files_sha256": WHEEL_SHA,
+        },
+    }
+    with pytest.raises(ValueError, match="git source only"):
+        PluginPin.model_validate(hf)
+    assert PluginPin.model_validate({**hf, "build_requires": []}).build_requires == ()
+    assert pin.build_requires == TOY_BUILD_REQUIRES
 
 
 def test_an_entry_point_is_found_only_in_the_pinned_distribution(
@@ -165,47 +212,6 @@ def test_the_check_reads_only_the_named_environment(tmp_path: Path, pin: PluginP
     assert installed_mismatch(pin, path=[str(env_site)]) is None
     assert registered_entry_point(pin, "prm", path=[str(env_site)]) is not None
     assert registered_entry_point(pin, "prm", path=[str(tmp_path / "empty")]) is None
-
-
-def test_an_hf_wheel_matches_only_by_its_pinned_hash(tmp_path: Path) -> None:
-    pin = PluginPin(
-        distribution="toy-prm",
-        version="0.1.0",
-        source=PluginSource(
-            kind="hf",
-            repo="acme/toy",
-            commit=SHA,
-            wheel="toy_prm-0.1.0-py3-none-any.whl",
-            wheel_sha256=WHEEL_SHA,
-        ),
-    )
-    good = tmp_path / "good"
-    write_dist(
-        good,
-        direct_url={
-            "url": "file:///tmp/w/toy_prm-0.1.0-py3-none-any.whl",
-            "archive_info": {"hash": f"sha256={WHEEL_SHA}", "hashes": {"sha256": WHEEL_SHA}},
-        },
-        entry_points="",
-    )
-    assert installed_mismatch(pin, path=[str(good)]) is None
-    other = tmp_path / "other"
-    write_dist(
-        other,
-        direct_url={
-            "url": "file:///tmp/w/toy_prm-0.1.0-py3-none-any.whl",
-            "archive_info": {"hashes": {"sha256": "d" * 64}},
-        },
-        entry_points="",
-    )
-    assert "not the pinned wheel" in (installed_mismatch(pin, path=[str(other)]) or "")
-    unhashed = tmp_path / "unhashed"
-    write_dist(
-        unhashed,
-        direct_url={"url": "https://huggingface.co/x.whl", "archive_info": {}},
-        entry_points="",
-    )
-    assert "not the pinned wheel" in (installed_mismatch(pin, path=[str(unhashed)]) or "")
 
 
 def test_every_installed_file_must_match_its_record_and_the_pinned_digest(

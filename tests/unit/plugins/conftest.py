@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from strata_forge.plugins.manifest import PluginManifest, parse_manifest
-from strata_forge.plugins.pins import AllowedPlugin, PluginPin, PluginSource, files_digest
+from strata_forge.plugins.pins import (
+    AllowedPlugin,
+    LockedDependency,
+    PluginPin,
+    PluginSource,
+    files_digest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -144,6 +150,7 @@ def write_dist(
     direct_url: dict[str, Any] | None,
     entry_points: str,
     files: tuple[str, ...] = (),
+    requires: tuple[str, ...] = (),
 ) -> None:
     """A dist-info as pip writes it: METADATA, entry points, the PEP 610 record and a RECORD
     hashing every file (``files`` are further site-relative paths the distribution owns)."""
@@ -151,6 +158,7 @@ def write_dist(
     info.mkdir(parents=True)
     (info / "METADATA").write_text(
         f"Metadata-Version: 2.1\nName: {name.replace('_', '-')}\nVersion: {version}\n"
+        + "".join(f"Requires-Dist: {r}\n" for r in requires)
     )
     (info / "entry_points.txt").write_text(entry_points)
     (info / "INSTALLER").write_text("pip\n")
@@ -162,7 +170,7 @@ def write_dist(
     (info / "RECORD").write_text("\n".join(lines) + "\n")
 
 
-def build_toy(site: Path) -> None:
+def build_toy(site: Path, *, requires: tuple[str, ...] = ()) -> None:
     (site / "toy_prm").mkdir(parents=True)
     (site / "toy_prm" / "__init__.py").write_text(TOY_MODULE)
     write_dist(
@@ -170,6 +178,7 @@ def build_toy(site: Path) -> None:
         direct_url=TOY_DIRECT_URL,
         entry_points=TOY_ENTRY_POINTS,
         files=("toy_prm/__init__.py",),
+        requires=requires,
     )
 
 
@@ -199,14 +208,18 @@ def toy_site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     sys.modules.pop("toy_prm", None)
 
 
+#: The build backend a git toy pin locks.
+TOY_BUILD_REQUIRES = (LockedDependency(name="setuptools", version="80.9.0", sha256=("5" * 64,)),)
+
+
 def toy_pin(**source: Any) -> PluginPin:
+    merged = {"kind": "git", "repo": "acme/toy-prm", "commit": SHA, "files_sha256": TOY_DIGEST}
+    merged |= source
     return PluginPin(
         distribution="toy-prm",
         version="0.1.0",
-        source=PluginSource.model_validate(
-            {"kind": "git", "repo": "acme/toy-prm", "commit": SHA, "files_sha256": TOY_DIGEST}
-            | source
-        ),
+        source=PluginSource.model_validate(merged),
+        build_requires=TOY_BUILD_REQUIRES if merged["kind"] == "git" else (),
     )
 
 

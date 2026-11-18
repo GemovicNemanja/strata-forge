@@ -24,7 +24,7 @@ from strata_forge.training.progress import ProgressEvent
 if TYPE_CHECKING:
     from pathlib import Path
 
-NONE = Sandbox("none", None)
+NONE = Sandbox("bwrap", None)  # signalled as the runner's own group, like bubblewrap
 
 
 @pytest.fixture(autouse=True)
@@ -120,3 +120,80 @@ def test_a_process_ignoring_sigterm_is_killed(tmp_path: Path) -> None:
     _, rc, _, timed_out = _run(tmp_path, code, timeout_s=1.0)
     assert timed_out
     assert rc == -signal.SIGKILL
+
+
+def _fake_proc(root: Path, table: dict[int, tuple[int, str]]) -> Path:
+    for pid, (parent, state) in table.items():
+        (root / str(pid)).mkdir(parents=True)
+        # A comm with spaces and parentheses, as a hostile process may name itself.
+        (root / str(pid) / "stat").write_text(f"{pid} (evil ) name) {state} {parent} 1 1 0\n")
+    return root
+
+
+def test_a_stopped_process_anywhere_under_the_plugin_is_found(tmp_path: Path) -> None:
+    from strata_forge.plugins.child import stopped_in_tree
+
+    # 10 is the runner's child; 11 its sandbox init in a session of its own; 12 the plugin.
+    proc = _fake_proc(tmp_path, {10: (1, "S"), 11: (10, "t"), 12: (11, "S"), 20: (1, "T")})
+    assert stopped_in_tree(10, proc)
+    assert not stopped_in_tree(12, proc)  # 20 is stopped, but not the plugin's
+    assert not stopped_in_tree(10, tmp_path / "no-proc")
+
+
+def test_a_plugin_that_stays_stopped_ends_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from strata_forge.plugins import child
+
+    monkeypatch.setattr(child, "STOPPED_LIMIT_SECONDS", 0.5)
+    monkeypatch.setattr(child, "_STOPPED_CHECK_SECONDS", 0.1)
+
+    def always_stopped(_pid: int) -> bool:
+        return True
+
+    monkeypatch.setattr(child, "stopped_in_tree", always_stopped)
+    marker = str(tmp_path / "job-marker.json")
+    result = asyncio.run(
+        run_plugin_process(
+            [sys.executable, "-c", "import time; time.sleep(300)", marker],
+            sandbox=NONE,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            cwd=tmp_path,
+            marker=marker,
+            timeout_s=60.0,
+            sink=lambda _e: None,
+        )
+    )
+    assert result.stopped
+    assert not result.timed_out
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_sigstopped_child_is_seen_on_linux(tmp_path: Path) -> None:
+    import subprocess
+    import time
+
+    from strata_forge.plugins.child import stopped_in_tree
+
+    parent = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+            "print(p.pid, flush=True); time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert parent.stdout is not None
+    grandchild = int(parent.stdout.readline())
+    try:
+        assert not stopped_in_tree(parent.pid)
+        os.kill(grandchild, signal.SIGSTOP)
+        time.sleep(0.3)
+        assert stopped_in_tree(parent.pid)
+    finally:
+        os.kill(grandchild, signal.SIGKILL)
+        parent.kill()
+        parent.wait()

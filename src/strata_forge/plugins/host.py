@@ -1,21 +1,24 @@
 """The child process a plugin's code runs in, on the compute target.
 
-``<plugin env>/bin/python -I -m strata_forge.plugins.host <job.json>`` is started by
+``<engine python> -I -m strata_forge.plugins.host <job.json>`` is started by
 :mod:`strata_forge.pipelines.plugin_runner` inside the sandbox
-(:mod:`strata_forge.plugins.sandbox`), from the plugin's own environment
-(:mod:`strata_forge.plugins.environment`), never the engine's. ``-I`` keeps the user site
-directory, ``PYTHON*`` variables and the working directory off ``sys.path``. The job file names
-the pin, the entry point's declared interface, the validated configuration, the local input
-paths, the output directory and the operator's limits; nothing else crosses over:
+(:mod:`strata_forge.plugins.sandbox`), where the engine's environment is bound read-only. ``-I``
+keeps the user site directory, ``PYTHON*`` variables and the working directory off ``sys.path``.
+The plugin's own directory (:mod:`strata_forge.plugins.environment`) is APPENDED to the import
+path here, after the engine's, and never processed as a site directory (no ``.pth`` file in it
+runs). The job file names the pin, the plugin directory, the entry point's declared interface,
+the validated configuration, the local input paths, the output directory and the operator's
+limits; nothing else crosses over:
 
 - the runner holds the run's Hub credential in memory only, and this process never receives it:
   not in its environment (an allow-list with every credential-shaped name removed, the Hub
   offline on an empty cache), not in a file, and not through ``/proc`` (the sandbox gives it a
   PID namespace of its own, or another uid);
 - before any plugin module is imported, this process applies the operator's limits to itself and
-  checks again that its environment holds exactly the pinned build (PEP 610 and every RECORD
-  hash); the entry point is looked up by name in that distribution's own metadata, and each
-  module on its import path must come from that distribution's own files before it is imported;
+  checks again that its directory holds exactly the pinned build (every RECORD hash, and the
+  files' pinned digest); the entry point is looked up by name in that distribution's own
+  metadata, and each module on its import path must come from that distribution's own files
+  before it is imported (a module already in ``sys.modules`` included);
 - a ``step_scorer`` never touches files: this process reads the steps, calls the scorer in
   batches and writes the scores; a ``runner`` gets read-only input paths and one output
   directory;
@@ -77,6 +80,7 @@ __all__ = [
     "SCORES_FILENAME",
     "HostJob",
     "PluginContext",
+    "add_plugin_paths",
     "apply_limits",
     "checked_load",
     "main",
@@ -100,6 +104,8 @@ class HostJob(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     pin: PluginPin
+    #: The plugin's own directory (or directories), appended to the import path.
+    plugin_paths: tuple[Path, ...] = Field(min_length=1, max_length=4)
     #: The entry point as its manifest declares it (its name, type and scoring contract).
     entry: EntryPointDecl
     config: dict[str, ScalarValue]
@@ -183,17 +189,41 @@ def apply_limits(limits: PluginLimits) -> None:
         lower(resource.RLIMIT_AS, limits.max_memory_mb * 1024 * 1024)
 
 
-def verify_build(pin: PluginPin) -> None:
-    """Refuse to go on unless this interpreter's environment holds exactly the pinned build."""
-    problem = installed_mismatch(pin) or record_mismatch(pin)
+def add_plugin_paths(paths: tuple[Path, ...]) -> list[str]:
+    """Append the plugin's directories to the import path, after the engine's own, so nothing in
+    them shadows the engine. ``sys.path``, not ``site.addsitedir``: their ``.pth`` files never
+    run."""
+    added = [str(p) for p in paths]
+    for entry in added:
+        if entry not in sys.path:
+            sys.path.append(entry)
+    importlib.invalidate_caches()
+    return added
+
+
+def verify_build(pin: PluginPin, paths: list[str] | None = None) -> None:
+    """Refuse to go on unless ``paths`` (the plugin's directories; ``None``: this interpreter's
+    own path) hold exactly the pinned build."""
+    problem = installed_mismatch(pin, path=paths) or record_mismatch(pin, path=paths)
     if problem is not None:
         raise PluginManifestError(problem)
 
 
-def checked_load(pin: PluginPin, ep: EntryPoint) -> Any:
+def _origin(name: str) -> str | None:
+    """Where ``name`` is (or would be) loaded from. A module already imported is judged by its
+    own file, never by a spec something may have left in ``sys.modules`` for it."""
+    loaded = sys.modules.get(name)
+    if loaded is not None:
+        origin = getattr(loaded, "__file__", None)
+        return origin if isinstance(origin, str) else None
+    spec = importlib.util.find_spec(name)
+    return spec.origin if spec is not None else None
+
+
+def checked_load(pin: PluginPin, ep: EntryPoint, paths: list[str] | None = None) -> Any:
     """Import ``ep``'s module, one package at a time, each only after its file is found to be
     one of the pinned distribution's own files; then resolve its attribute."""
-    files = distribution_files(pin)
+    files = distribution_files(pin, path=paths)
     if files is None:
         msg = f"{pin.distribution} lists no installed files"
         raise PluginManifestError(msg)
@@ -201,12 +231,15 @@ def checked_load(pin: PluginPin, ep: EntryPoint) -> Any:
     module: Any = None
     for depth in range(1, len(parts) + 1):
         name = ".".join(parts[:depth])
-        spec = importlib.util.find_spec(name)
-        origin = spec.origin if spec is not None else None
+        origin = _origin(name)
         if origin is None or Path(origin).resolve() not in files:
             msg = f"the entry point's module {name!r} is not one of {pin.distribution}'s files"
             raise PluginManifestError(msg)
         module = importlib.import_module(name)
+        loaded = getattr(module, "__file__", None)
+        if not isinstance(loaded, str) or Path(loaded).resolve() not in files:
+            msg = f"the entry point's module {name!r} did not load from {pin.distribution}'s files"
+            raise PluginManifestError(msg)
     target: Any = module
     for attr in (ep.attr or "").split("."):
         if attr:
@@ -214,12 +247,12 @@ def checked_load(pin: PluginPin, ep: EntryPoint) -> Any:
     return target
 
 
-def _load(job: HostJob) -> Any:
-    ep = registered_entry_point(job.pin, job.entry.name)
+def _load(job: HostJob, paths: list[str]) -> Any:
+    ep = registered_entry_point(job.pin, job.entry.name, path=paths)
     if ep is None:
         msg = f"{job.pin.distribution} registers no plugin entry point {job.entry.name!r}"
         raise PluginManifestError(msg)
-    return checked_load(job.pin, ep)
+    return checked_load(job.pin, ep, paths)
 
 
 def _pyarrow() -> tuple[Any, Any]:
@@ -281,8 +314,9 @@ def run_step_scorer(factory: Any, job: HostJob, channel: Channel) -> int:
 
 def run(job: HostJob, channel: Channel | None = None) -> None:
     pipe = channel if channel is not None else Channel(None)
-    verify_build(job.pin)
-    target = _load(job)
+    paths = add_plugin_paths(job.plugin_paths)
+    verify_build(job.pin, paths)
+    target = _load(job, paths)
     if job.entry.type == "step_scorer":
         run_step_scorer(target, job, pipe)
         return

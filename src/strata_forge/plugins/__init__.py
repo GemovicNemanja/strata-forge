@@ -37,6 +37,7 @@ from strata_forge.plugins.manifest import (
 from strata_forge.plugins.pins import (
     ALLOWED_PLUGINS_ENV,
     AllowedPlugin,
+    LockedDependency,
     PluginPin,
     PluginSource,
     installed_mismatch,
@@ -62,6 +63,7 @@ __all__ = [
     "EntryPointDecl",
     "InputBinding",
     "InputDecl",
+    "LockedDependency",
     "OutputDecl",
     "PluginManifest",
     "PluginManifestError",
