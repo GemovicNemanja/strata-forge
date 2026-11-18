@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from strata_forge.core.errors import ForgeError
 from strata_forge.training.classifier_heads import (
     AUX_HEADS_FILENAME,
     DECODER_LM_HEAD,
@@ -935,7 +936,14 @@ class SeqClsRunner:
         if pooling is not None and pooling != "cls":
             model.config.classifier_pooling = "cls"
             receipt.pooling_changed_from = str(pooling)
-        frozen = self._frozen_parameters(checkpoint, receipt)
+        receipt.zero_parameters = self._zero_held(model, checkpoint, receipt)
+        if cfg.head_init == "existing":
+            # A continued checkpoint's zero-held parameters are checked before any training.
+            try:
+                _require_zero(model, receipt.zero_parameters, when="in the continued checkpoint")
+            except ArtifactCheckError as exc:
+                raise PreflightError(str(exc), exc.receipt) from exc
+        frozen = sorted({*self._frozen_parameters(checkpoint, receipt), *receipt.zero_parameters})
         params = dict(model.named_parameters())
         unknown = [name for name in frozen if name not in params]
         if unknown:
@@ -983,6 +991,25 @@ class SeqClsRunner:
                 f"{list(self._config.labels)}"
             )
             raise PreflightError(msg, {})
+
+    def _zero_held(self, model: Any, checkpoint: Path, receipt: LoadReceipt) -> list[str]:
+        """The parameters to hold at exactly zero: those this run added as zero and, when
+        continuing a classifier, those the checkpoint holds at zero. A continued checkpoint names
+        them in its ``strata_verifier.json``; one that predates the field, on a decoder whose config
+        says ``classifier_bias``, holds ``head.dense.bias`` there (see ``_add_classifier_bias``)."""
+        zeros = [p.split(" ")[0] for p in receipt.added_parameters if "zero" in p]
+        if self._config.head_init == "existing":
+            listed: Any = (_read_verifier(checkpoint) or {}).get("zero_parameters")
+            if isinstance(listed, list):
+                zeros += [str(p) for p in listed]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+            elif self.decoder and getattr(model.config, "classifier_bias", False):
+                zeros.append("head.dense.bias")
+        params = dict(model.named_parameters())
+        unknown = [name for name in zeros if name not in params]
+        if unknown:
+            msg = f"zero-held parameters the model does not have: {sorted(set(unknown))}"
+            raise PreflightError(msg, {})
+        return sorted(set(zeros))
 
     def _frozen_parameters(self, checkpoint: Path, receipt: LoadReceipt) -> list[str]:
         frozen = [p.split(" ")[0] for p in receipt.added_parameters if "frozen" in p]
@@ -1153,6 +1180,19 @@ class SeqClsRunner:
 
     # ------------------------------------------------------------- the run
 
+    def _classifier_bias(self, module: Any, receipt: LoadReceipt) -> dict[str, Any]:
+        """Whether the decoder classifier carries a bias, read from the model's own config."""
+        value = bool(getattr(module.classifier.config, "classifier_bias", False))
+        if not self.decoder:
+            return {"value": value, "reason": None}
+        if "classifier.bias" in receipt.added_parameters:
+            reason: str | None = _CLASSIFIER_BIAS_REASON
+        elif value:
+            reason = f"continued from a checkpoint trained with it: {_CLASSIFIER_BIAS_REASON}"
+        else:
+            reason = None
+        return {"value": value, "reason": reason}
+
     def build_trainer(self, module: Any, train: Any, evaluation: Any, tokenizer: Any) -> Any:
         torch, transformers = _modules()
         cfg = self._config
@@ -1243,6 +1283,7 @@ class SeqClsRunner:
             "outputs": outputs,
             "aux_heads_file": AUX_HEADS_FILENAME if aux_path else None,
             "frozen_parameters": frozen,
+            "zero_parameters": list(receipt.zero_parameters),
         }
         (artifact_dir / VERIFIER_CONFIG_FILENAME).write_text(
             json.dumps(verifier, indent=2, sort_keys=True) + "\n"
@@ -1282,7 +1323,8 @@ class SeqClsRunner:
             )
             check_loading_info(cast("Mapping[str, Any]", info), head_prefixes=_HEAD_PREFIXES)
         except (LoadRefusedError, OSError, ValueError) as exc:
-            msg = f"the saved classifier does not reload cleanly: {exc}"
+            # The exception's type only: the library's text names paths on the machine.
+            msg = f"the saved classifier does not reload cleanly ({type(exc).__name__})"
             raise ArtifactCheckError(msg, {}) from exc
         zeros = _zero_parameters(prepared.load_receipt)
         _require_zero(model, zeros, when="after reload")
@@ -1450,7 +1492,12 @@ class SeqClsRunner:
                     gold.append(label)
                     line = json.dumps([list(feature["input_ids"]), label], separators=(",", ":"))
                     digest.update(line.encode() + b"\n")
-        fit: Any = fitter.fit_temperature(logits, gold, labels=labels)
+        try:
+            fit: Any = fitter.fit_temperature(logits, gold, labels=labels)
+        except (ValueError, ForgeError) as exc:
+            # Refused like any other artifact check: the run's GPU time and a refusal manifest.
+            msg = f"the temperature fit refused the calibration split ({type(exc).__name__})"
+            raise ArtifactCheckError(msg, {"rows": len(picked)}) from exc
         record: dict[str, Any] = {
             "schema": "strata.calibration/v1",
             # The ordered output labels the temperature applies to: an evaluator applies the
@@ -1533,11 +1580,7 @@ class SeqClsRunner:
         with _check_stage("load"):
             module, load_receipt, frozen = self.load_model(checkpoint, tokenizer, roles=roles)
         receipts["load"] = {**asdict(load_receipt), "frozen_parameters": frozen}
-        receipts["load"]["classifier_bias"] = (
-            {"value": True, "reason": _CLASSIFIER_BIAS_REASON}
-            if "classifier.bias" in load_receipt.added_parameters
-            else None
-        )
+        receipts["load"]["classifier_bias"] = self._classifier_bias(module, load_receipt)
         receipts["loss"] = {
             "form": LOSS_FORM,
             "brier_weight": cfg.brier_weight,
@@ -1695,8 +1738,8 @@ def _exact_fp32(torch: Any) -> Generator[None]:
 
 
 def _zero_parameters(receipt: LoadReceipt) -> list[str]:
-    """The parameters this method added as exactly zero (and frozen there)."""
-    return [p.split(" ")[0] for p in receipt.added_parameters if "zero" in p]
+    """The parameters held at exactly zero (and frozen there), added or continued."""
+    return list(receipt.zero_parameters)
 
 
 def _require_zero(model: Any, names: list[str], *, when: str) -> None:

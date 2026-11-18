@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import SecretStr
@@ -100,7 +100,12 @@ def checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _drive(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checkpoint: Path, spec: fr.FinetuneSpec
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    checkpoint: Path,
+    spec: fr.FinetuneSpec,
+    *,
+    push: Any = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     pushed: dict[str, Any] = {}
 
@@ -127,7 +132,7 @@ def _drive(
     monkeypatch.setattr(fr, "_open_split", _open)
     monkeypatch.setattr(fr, "_fetch_checkpoint", _fetch)
     monkeypatch.setattr(fr, "ensure_private_repo", _private)
-    monkeypatch.setattr(fr, "_push_artifact", _push)
+    monkeypatch.setattr(fr, "_push_artifact", push or _push)
     monkeypatch.setattr(fr, "results_dir", _dir)
     progress = tmp_path / "progress.jsonl"
     writer = JsonlProgressWriter(progress)
@@ -244,6 +249,34 @@ class TestAcceptanceSmoke:
         assert refused["compute"]["gpu_seconds"] == 0.0
         assert refused["checks"]["receipt"]["rows_over_max_length"] > 0
         assert refused["model"]["requested_revision"] == _SHA
+
+
+class TestTerminalErrorsCarryGpuTime:
+    """A failed push or a crash ends on an error event that still books the run's GPU time."""
+
+    def test_a_failed_push_carries_gpu_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checkpoint: Path
+    ) -> None:
+        async def _fail(*_a: Any, **_k: Any) -> Any:
+            msg = "the Hub said no"
+            raise OSError(msg)
+
+        with pytest.raises(RunError, match="push failed") as exc:
+            _drive(monkeypatch, tmp_path, checkpoint, _spec(), push=_fail)
+        assert set(exc.value.metrics) >= {"gpu_seconds", "gpu_count"}
+
+    def test_a_crash_carries_gpu_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checkpoint: Path
+    ) -> None:
+        def _boom(*_a: Any, **_k: Any) -> Any:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(fr, "_build_manifest", _boom)
+        with pytest.raises(RuntimeError, match="boom") as exc:
+            _drive(monkeypatch, tmp_path, checkpoint, _spec())
+        metrics = cast("dict[str, float]", getattr(exc.value, "metrics", {}))
+        assert set(metrics) >= {"gpu_seconds", "gpu_count"}
 
 
 class TestCalibrationSpec:
