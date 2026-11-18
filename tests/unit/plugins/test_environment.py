@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import json
 import sys
 import zipfile
 from importlib import metadata
@@ -41,9 +42,9 @@ class FakeMachine:
     async def __call__(self, args: Sequence[str], env: Mapping[str, str]) -> tuple[int, str]:
         self.calls.append(list(args))
         self.envs.append(env)
-        if args[1:3] == ["-m", "venv"]:
-            (Path(args[3]) / "bin").mkdir(parents=True)
-            (Path(args[3]) / "bin" / "python").write_text("")
+        if args[1:4] == ["-I", "-m", "venv"]:
+            (Path(args[4]) / "bin").mkdir(parents=True)
+            (Path(args[4]) / "bin" / "python").write_text("")
             return 0, ""
         if "--version" in args:
             return 0, "pip 26.0"
@@ -189,6 +190,55 @@ def test_an_environment_whose_files_changed_is_rebuilt(tmp_path: Path) -> None:
     assert len([c for c in machine.calls if "install" in c]) == 2
 
 
+def test_a_changed_dependency_file_outside_the_plugin_s_record_is_rebuilt(tmp_path: Path) -> None:
+    fetch, sha = _wheel(tmp_path)
+    pin = _hf_pin(sha, dependencies=(DEP,))
+    machine = FakeMachine()
+    built = _ensure(pin, tmp_path, machine, fetch_wheel=fetch)
+    # The plugin's own RECORD still verifies: only the whole-directory digest sees these.
+    dependency = next(built.site.glob("dep_a*"))
+    (dependency / "data.bin").write_bytes(b"planted")
+    assert environment._verify(pin, built.site) is None  # pyright: ignore[reportPrivateUsage]
+    again = _ensure(pin, tmp_path, machine, fetch_wheel=fetch)
+    assert not again.reused
+    assert not (dependency / "data.bin").exists()
+    assert _ensure(pin, tmp_path, machine, fetch_wheel=fetch).reused
+
+
+def test_a_file_added_beside_the_plugin_or_a_marker_without_a_digest_is_rebuilt(
+    tmp_path: Path,
+) -> None:
+    fetch, sha = _wheel(tmp_path)
+    pin = _hf_pin(sha)
+    machine = FakeMachine()
+    built = _ensure(pin, tmp_path, machine, fetch_wheel=fetch)
+    (built.site / "sitecustomize.py").write_text("print('planted')\n")
+    assert not _ensure(pin, tmp_path, machine, fetch_wheel=fetch).reused
+    marker = built.root / ".strata-plugin-env.json"
+    data = json.loads(marker.read_text())
+    del data["tree_sha256"]
+    marker.write_text(json.dumps(data))
+    assert not _ensure(pin, tmp_path, machine, fetch_wheel=fetch).reused
+
+
+def test_the_directory_digest_covers_paths_modes_and_refuses_links(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    (site / "pkg").mkdir(parents=True)
+    (site / "pkg" / "a.py").write_text("x = 1\n")
+    first = environment.tree_digest(site)
+    assert environment.tree_digest(site) == first
+    (site / "pkg" / "a.py").chmod(0o755)
+    assert environment.tree_digest(site) != first
+    (site / "pkg" / "a.py").chmod(0o644)
+    (site / "pkg" / "empty").mkdir()
+    assert environment.tree_digest(site) != first
+    (site / "pkg" / "empty").rmdir()
+    assert environment.tree_digest(site) == first
+    (site / "link").symlink_to(site / "pkg" / "a.py")
+    with pytest.raises(PluginManifestError, match="link"):
+        environment.tree_digest(site)
+
+
 def test_a_build_that_is_not_the_pin_is_refused_and_removed(tmp_path: Path) -> None:
     fetch, sha = _wheel(tmp_path)
     pin = _hf_pin(sha)
@@ -281,8 +331,8 @@ def test_a_failed_install_reports_its_output(tmp_path: Path) -> None:
     fetch, sha = _wheel(tmp_path)
 
     async def failing(args: Sequence[str], env: Mapping[str, str]) -> tuple[int, str]:
-        if args[1:3] == ["-m", "venv"]:
-            (Path(args[3]) / "bin").mkdir(parents=True)
+        if args[1:4] == ["-I", "-m", "venv"]:
+            (Path(args[4]) / "bin").mkdir(parents=True)
             return 0, ""
         if "--version" in args:
             return 0, "pip"

@@ -46,6 +46,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   per input step and the declared pass-through columns, re-checked against the input before the
   push. The manifest records the counts by reason. `min`, `mean`, `last` and `product`
   reductions are opt-in only and go to `aggregates.diagnostic.parquet`, never the scores.
+- Plugin runner hardening: a reused plugin directory must also match the digest of the whole
+  directory recorded when it was built (dependencies and their data files included, not only the
+  plugin's RECORD); the scores are parsed by `plugins/checker.py` inside the sandbox, never in
+  the token-holding runner, which reads back only a bounded, validated record; a git source's
+  build is stopped after 10 minutes without output as well as at its 30-minute limit; in a `uid`
+  sandbox `plugins/supervisor.py` ends the sandbox when the runner's lifeline pipe closes, so a
+  plugin dies with the runner rather than with `sudo`; the tools venv is created with `-I`.
 
 ### Changed
 

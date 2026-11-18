@@ -20,8 +20,8 @@ happens before any plugin code runs:
    (:mod:`~strata_forge.plugins.environment`). No plugin code runs outside the sandbox while it
    is built: hash-pinned wheels are only unpacked, an ``hf`` wheel is checked against its pinned
    SHA-256 first, a git source is built INSIDE the sandbox, and the result is read from its files,
-   never run; every RECORD hash and the pinned files digest are checked, and its distribution
-   must register the entry point;
+   never run; every RECORD hash and the pinned files digest are checked (on a reuse, the whole
+   directory's digest too), and its distribution must register the entry point;
 5. the declared inputs are downloaded HERE, with the run's credential, at their full commits:
    dataset splits to local parquet (each checked for its required columns), model inputs as
    snapshots without pickle-capable files;
@@ -34,7 +34,9 @@ happens before any plugin code runs:
 7. its output is copied, without following any link and refusing hard links and special files,
    into a directory the runner owns, and only that copy is read from then on
    (:mod:`~strata_forge.plugins.output`): a step scorer's scores are checked against the input
-   by the runner itself; the opt-in diagnostic aggregations are written beside them; a manifest
+   in the sandbox (:mod:`~strata_forge.plugins.checker`; this process, which holds the
+   credential, never parses them), which also writes the opt-in diagnostic aggregations, copied
+   beside them; a manifest
    records the build, the environment, the sandbox, the inputs and every file's hash; and the
    copy is pushed to the run's private output repository.
 
@@ -55,6 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import ValidationError as PydanticValidationError
 
 from strata_forge.pipelines._common import (
     COMMIT_SHA_RE,
@@ -77,6 +80,7 @@ from strata_forge.pipelines._common import (
     write_manifest,
     write_receipt,
 )
+from strata_forge.plugins.checker import DIAGNOSTICS_FILENAME, RECORD_FILENAME, CheckJob
 from strata_forge.plugins.child import (
     STOPPED_LIMIT_SECONDS,
     PluginStillRunningError,
@@ -90,7 +94,7 @@ from strata_forge.plugins.manifest import (
     PluginManifestError,
     ScalarValue,
 )
-from strata_forge.plugins.output import OutputError, check_scores_file, stage_output
+from strata_forge.plugins.output import OutputError, stage_output
 from strata_forge.plugins.pins import (
     ALLOWED_PLUGINS_ENV,
     PluginPin,
@@ -107,7 +111,9 @@ from strata_forge.plugins.sandbox import (
     engine_paths,
     sandbox_command,
 )
-from strata_forge.plugins.step_scoring import Aggregation, aggregate
+from strata_forge.plugins.step_scoring import (
+    Aggregation,  # noqa: TC001 — Pydantic needs runtime resolution
+)
 from strata_forge.storage.hf_hub import HFHubClient
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
@@ -141,12 +147,16 @@ PICKLE_WEIGHT_PATTERNS: tuple[str, ...] = (
     "*.h5",
     "*.hdf5",
 )
-#: Where a step-scoring run's opt-in per-item aggregations land: beside the scores, never in them.
-DIAGNOSTICS_FILENAME = "aggregates.diagnostic.parquet"
 #: How much of a failed plugin's standard error the run record keeps (scrubbed).
 STDERR_TAIL_CHARS = 2000
 #: The wall-clock limit on building a git source's wheel inside the sandbox.
 BUILD_TIMEOUT_SECONDS = 1800
+#: How long a git source's build may write nothing before it is treated as stalled and stopped.
+BUILD_IDLE_SECONDS = 600
+#: The wall-clock limit on checking a step scorer's scores in the sandbox.
+CHECK_TIMEOUT_SECONDS = 900
+#: The largest check record read back from the sandbox.
+MAX_CHECK_RECORD_BYTES = 64 * 1024
 
 # The environment a plugin process may see. Everything else (the spec, the secrets file's
 # path, any credential the job inherited, the runner's HOME) stays with the runner.
@@ -308,14 +318,17 @@ def _sandboxed_builder(sandbox: Sandbox, scratch: Path) -> Any:
                 marker=str(job.source),
                 timeout_s=float(BUILD_TIMEOUT_SECONDS),
                 sink=lambda _event: None,
+                idle_timeout_s=float(BUILD_IDLE_SECONDS),
             )
         except PluginStillRunningError as exc:
             raise PluginManifestError(str(exc)) from exc
-        if result.timed_out or result.stopped or result.code != 0:
+        if result.timed_out or result.stopped or result.stalled or result.code != 0:
             tail = result.stderr_tail.strip()[-STDERR_TAIL_CHARS:]
             why = (
                 "ran past its time limit"
                 if result.timed_out
+                else f"made no progress for {BUILD_IDLE_SECONDS} seconds and was stopped"
+                if result.stalled
                 else "was stopped"
                 if result.stopped
                 else f"failed (exit {result.code})"
@@ -419,65 +432,146 @@ async def _download_inputs(
     return datasets, models, rows
 
 
-def _write_diagnostics(
-    outdir: Path, rows: list[tuple[str, int, float | None]], how: tuple[Aggregation, ...]
-) -> dict[str, Any] | None:
-    """Write the opt-in per-item aggregations, labelled diagnostic, beside the scores."""
-    if not how:
-        return None
-    pa: Any = __import__("pyarrow")
-    pq: Any = __import__("pyarrow.parquet", fromlist=["parquet"])
-    columns: dict[str, list[Any]] = {
-        "item_id": [],
-        "aggregation": [],
-        "value": [],
-        "scored_steps": [],
-        "unscored_steps": [],
-    }
-    for name in how:
-        for item_id, (value, n_scored, n_unscored) in aggregate(rows, name).items():
-            columns["item_id"].append(item_id)
-            columns["aggregation"].append(name)
-            columns["value"].append(value)
-            columns["scored_steps"].append(n_scored)
-            columns["unscored_steps"].append(n_unscored)
-    table = pa.table(
-        {
-            "item_id": pa.array(columns["item_id"], type=pa.string()),
-            "aggregation": pa.array(columns["aggregation"], type=pa.string()),
-            "value": pa.array(columns["value"], type=pa.float64()),
-            "scored_steps": pa.array(columns["scored_steps"], type=pa.int64()),
-            "unscored_steps": pa.array(columns["unscored_steps"], type=pa.int64()),
-        }
-    ).replace_schema_metadata({"strata.diagnostic": "true"})
-    pq.write_table(table, str(outdir / DIAGNOSTICS_FILENAME))
-    return {"path": DIAGNOSTICS_FILENAME, "diagnostic": True, "aggregations": list(how)}
+class _Scoring(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    score_kind: str = Field(max_length=64)
+    rows: int = Field(ge=0)
+    scored: int = Field(ge=0)
+    unscored: dict[
+        Annotated[str, StringConstraints(max_length=128)], Annotated[int, Field(ge=0)]
+    ] = Field(max_length=16)
 
 
-def _check_staged(
-    spec: PluginRunSpec, entry: EntryPointDecl, staged: Path, datasets: dict[str, Path]
+class _Diagnostics(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: Literal["aggregates.diagnostic.parquet"]
+    diagnostic: Literal[True]
+    aggregations: list[Aggregation] = Field(min_length=1, max_length=4)
+
+
+class _CheckRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ok: bool
+    error: str | None = Field(default=None, max_length=2000)
+    scoring: _Scoring | None = None
+    diagnostics: _Diagnostics | None = None
+
+
+def _check_record(raw: bytes, entry: EntryPointDecl, rows: int) -> dict[str, Any]:
+    """The checker's record, validated field by field: it was written inside the sandbox, by a
+    process that read the plugin's bytes, so only the expected shape is believed."""
+    if len(raw) > MAX_CHECK_RECORD_BYTES:
+        msg = "infrastructure fault: the scores check returned an oversized record"
+        raise RunError(msg)
+    try:
+        record = _CheckRecord.model_validate_json(raw)
+    except PydanticValidationError as exc:
+        msg = "infrastructure fault: the scores check returned a malformed record"
+        raise RunError(msg) from exc
+    if not record.ok:
+        raise RunError(record.error or "the scores were refused")
+    scoring = record.scoring
+    if (
+        scoring is None
+        or scoring.score_kind != entry.score_kind
+        or scoring.rows != rows
+        or not set(scoring.unscored) <= set(entry.unscored_reasons)
+        or scoring.scored + sum(scoring.unscored.values()) != rows
+    ):
+        msg = "infrastructure fault: the scores check returned counts that do not add up"
+        raise RunError(msg)
+    return record.model_dump(mode="json", exclude_none=True)
+
+
+async def _check_staged(
+    spec: PluginRunSpec,
+    entry: EntryPointDecl,
+    staged: Path,
+    datasets: dict[str, Path],
+    *,
+    sandbox: Sandbox,
+    workdir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """The output record from the runner's own copy, and the diagnostics record if asked."""
+    """The output record from the runner's own copy, and the diagnostics record if asked.
+
+    A step scorer's ``scores.parquet`` is the plugin's bytes, so this process, which holds the
+    run's credential, never parses it: :mod:`strata_forge.plugins.checker` does, in the sandbox,
+    and only its small validated record and the diagnostics file it wrote come back."""
     if entry.type != "step_scorer":
-        count = sum(1 for p in staged.rglob("*") if p.is_file())
+        count = await asyncio.to_thread(lambda: sum(1 for p in staged.rglob("*") if p.is_file()))
         if not count:
             msg = "the plugin wrote nothing to its output directory"
             raise RunError(msg)
         return {"count": count}, None
     scores = staged / SCORES_FILENAME
-    if not scores.is_file():
+    if scores.is_symlink() or not scores.is_file():
         msg = "infrastructure fault: the step scorer wrote no scores"
         raise RunError(msg)
     steps = datasets[STEP_INPUT_ROLE]
+    # The steps file is the runner's own download, not the plugin's output.
     pq: Any = __import__("pyarrow.parquet", fromlist=["parquet"])
-    keep = score_columns(entry, list(pq.ParquetFile(str(steps)).schema_arrow.names))
+    meta = pq.ParquetFile(str(steps))
+    keep = score_columns(entry, list(meta.schema_arrow.names))
+    expected_rows = int(meta.metadata.num_rows)
+    check = workdir / "check"
+    out = check / "out"
+    out.mkdir(parents=True)
+    job_path = check / "job.json"
+    job_path.write_text(
+        CheckJob(
+            entry=entry,
+            scores=scores,
+            steps=steps,
+            keep=keep,
+            aggregations=spec.diagnostic_aggregations,
+            out=out,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    readable = [job_path, scores, steps]
+    if sandbox.isolation == "uid":
+        chmod_for_uid(readable=readable, writable=[out])
+    paths = SandboxPaths(readonly=(*engine_paths(), *readable), writable=(out,))
+    env = plugin_environ(gpu=False, home=check, hf_home=check)
+    inner = [sys.executable, "-I", "-m", "strata_forge.plugins.checker", str(job_path)]
+    command = sandbox_command(sandbox, inner, paths=paths, env=env, gpu=False)
     try:
-        record = check_scores_file(entry, scores, steps, keep)
-    except OutputError as exc:
+        result = await run_plugin_process(
+            command,
+            sandbox=sandbox,
+            env={"PATH": env.get("PATH", "/usr/bin:/bin")},
+            cwd=check,
+            marker=str(job_path),
+            timeout_s=float(CHECK_TIMEOUT_SECONDS),
+            sink=lambda _event: None,
+        )
+    except PluginStillRunningError as exc:
         raise RunError(str(exc)) from exc
-    rows = record.pop("_rows")
-    diagnostics = _write_diagnostics(staged, rows, spec.diagnostic_aggregations)
-    return {"path": SCORES_FILENAME, "scoring": record}, diagnostics
+    if result.timed_out or result.stopped or result.code != 0:
+        msg = f"infrastructure fault: checking the scores failed (exit {result.code})"
+        raise RunError(msg)
+    written = out / RECORD_FILENAME
+    if written.is_symlink() or not written.is_file():
+        msg = "infrastructure fault: the scores check wrote no record"
+        raise RunError(msg)
+    with written.open("rb") as handle:
+        checked = _check_record(handle.read(MAX_CHECK_RECORD_BYTES + 1), entry, expected_rows)
+    diagnostics: dict[str, Any] | None = checked.get("diagnostics")
+    if diagnostics is not None:
+        made = out / DIAGNOSTICS_FILENAME
+        if made.is_symlink() or not made.is_file():
+            msg = "infrastructure fault: the scores check wrote no diagnostics"
+            raise RunError(msg)
+        # Copied by the runner, refusing links, special files and hard links, beside the scores.
+        try:
+            stage_output(out, check / "staged")
+        except OutputError as exc:
+            raise RunError(f"infrastructure fault: {exc}") from exc
+        shutil.copyfile(check / "staged" / DIAGNOSTICS_FILENAME, staged / DIAGNOSTICS_FILENAME)
+    return {"path": SCORES_FILENAME, "scoring": checked["scoring"]}, diagnostics
 
 
 def _remove(path: Path, sandbox: Sandbox | None) -> None:
@@ -597,7 +691,9 @@ async def _execute(
             hashes = stage_output(output, staged)
         except OutputError as exc:
             raise RunError(str(exc)) from exc
-        record, diagnostics = _check_staged(spec, entry, staged, datasets)
+        record, diagnostics = await _check_staged(
+            spec, entry, staged, datasets, sandbox=sandbox, workdir=workdir
+        )
         write_manifest(
             {
                 "schema": MANIFEST_SCHEMA,

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,15 @@ def _probe(sandbox: sb.Sandbox) -> dict[str, Any]:
         command = sb.sandbox_command(
             sandbox, inner, paths=paths, env={"PATH": "/usr/bin:/bin"}, gpu=False
         )
-        done = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)  # noqa: S603
+        # A uid sandbox's supervisor needs the runner's lifeline on its standard input.
+        read, write = os.pipe()
+        try:
+            done = subprocess.run(  # noqa: S603
+                command, stdin=read, capture_output=True, text=True, timeout=120, check=False
+            )
+        finally:
+            os.close(read)
+            os.close(write)
         assert done.returncode == 0, done.stderr[-2000:]
         return json.loads((p["output"] / "report.json").read_text())
     finally:
@@ -114,6 +123,57 @@ def test_the_sandbox_this_machine_offers_runs_plugin_code_apart() -> None:
     else:
         assert report["uid"] == os.getuid()
     print(f"isolation={sandbox.isolation} report={report}")
+
+
+def _marked(marker: str) -> list[int]:
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            try:
+                if marker.encode() in (entry / "cmdline").read_bytes():
+                    found.append(int(entry.name))
+            except OSError:
+                continue
+    return found
+
+
+def test_a_uid_sandbox_dies_with_the_runner_not_with_sudo() -> None:
+    """``sudo`` outlives a killed runner, so bubblewrap's ``--die-with-parent`` alone would not
+    end the plugin: the supervisor does, when the runner's end of its lifeline closes."""
+    sandbox = asyncio.run(sb.choose_sandbox())
+    if sandbox.isolation != "uid":
+        pytest.skip("only a uid sandbox has sudo between the runner and bubblewrap")
+    work, p = _layout()
+    marker = str(p["job"])
+    try:
+        sb.chmod_for_uid(readable=[p["job"]], writable=[p["output"]])
+        paths = sb.SandboxPaths(readonly=(*sb.engine_paths(), p["job"]), writable=(p["output"],))
+        started = p["output"] / "started"
+        code = f"import time; open({str(started)!r}, 'w').write('1'); time.sleep(600)"
+        inner = [sys.executable, "-I", "-c", code, marker]
+        command = sb.sandbox_command(
+            sandbox, inner, paths=paths, env={"PATH": "/usr/bin:/bin"}, gpu=False
+        )
+        read, write = os.pipe()
+        proc = subprocess.Popen(  # noqa: S603
+            command, stdin=read, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        os.close(read)
+        deadline = time.monotonic() + 60
+        while not started.exists():
+            assert time.monotonic() < deadline, "the plugin never started"
+            time.sleep(0.1)
+        assert _marked(marker)
+        os.close(write)  # what the kernel does when the runner dies, however it dies
+        proc.wait(timeout=30)
+        deadline = time.monotonic() + 10
+        while _marked(marker):
+            assert time.monotonic() < deadline, "the plugin outlived the runner"
+            time.sleep(0.1)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        if work.exists():
+            subprocess.run(["sudo", "-n", "rm", "-rf", "--", str(work)], check=False)  # noqa: S603, S607
 
 
 def _wheel(directory: Path, files: dict[str, bytes]) -> tuple[Path, str, str]:

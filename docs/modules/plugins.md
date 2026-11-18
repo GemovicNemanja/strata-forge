@@ -97,7 +97,8 @@ overrides it), with `pip install --target`, and never runs it:
   (`engine_requirement`: its PEP 610 git commit or archive, else the exact release), the
   interpreter's cache tag and the platform, so any change gets a new directory.
 - pip runs from a tools environment of its own (a `venv` of the engine's interpreter holding only
-  the pip the standard library bundles, created offline once per machine), isolated (`-I`), with
+  the pip the standard library bundles, created offline once per machine by an isolated
+  `python -I -m venv`), isolated (`-I`), with
   `install_environ`: the locale and `PATH` only, every credential-shaped name dropped, a fresh
   empty `HOME` (no `~/.netrc`, no git or pip configuration of the machine's), no prompts. The
   plugin directory is never on its path.
@@ -112,7 +113,10 @@ overrides it), with `pip install --target`, and never runs it:
   and its wheel is built INSIDE THE SANDBOX by `pip wheel --no-build-isolation --no-index`, with
   only the locked `build_requires` on its path, no network, the engine read-only, and only the
   source tree and an output directory writable; the build is killed and confirmed gone like the
-  plugin's process. The wheel it produces is unpacked as above.
+  plugin's process. It runs verbose (`-v`) so the backend's output streams, and is stopped when
+  it writes nothing for 10 minutes (`BUILD_IDLE_SECONDS`) as well as at its 30-minute limit
+  (`BUILD_TIMEOUT_SECONDS`): a stalled build ends there, not at the wall clock. The wheel it
+  produces is unpacked as above.
 - What the directory holds is read from its files (`importlib.metadata`), in the runner, and never
   executed: no interpreter is started with it on its path outside the sandbox, and it is never a
   site directory anywhere, so a `.pth` file in it is never processed. A build that ships a `.pth`
@@ -120,7 +124,11 @@ overrides it), with `pip install --target`, and never runs it:
 - After the build and on every reuse, the directory must hold exactly the pinned build (the
   pinned name and version, every RECORD hash, the pinned files digest), with every distribution
   the plugin requires present in it or in the engine's environment; one that does not, or whose
-  build never finished (no marker), is removed and rebuilt. Builds of one environment are
+  build never finished (no marker), is removed and rebuilt. A reuse also requires the digest of
+  the WHOLE directory to be the one recorded in the marker when it was built (`tree_digest`:
+  every directory, and every file's path, executable bit and SHA-256, a link or special file
+  refusing the directory). The pin's RECORD covers only the plugin's own files; this covers its
+  dependencies, their `.data` files and anything planted beside them. Builds of one environment are
   serialised with a lock file. The directory is made readable to every uid (the `uid` sandbox
   reads it as `nobody`) and writable only by the runner.
 - The resolved package set (name and version) is recorded in the run's manifest (`environment`).
@@ -142,7 +150,7 @@ running it:
 
 | Isolation | When | What plugin code can reach |
 |---|---|---|
-| `uid` | `bwrap`, `setpriv` and passwordless `sudo` all work | the `bwrap` sandbox below, running as `nobody` (65534) with no supplementary groups and no new privileges |
+| `uid` | `bwrap`, `setpriv` and passwordless `sudo` all work | the `bwrap` sandbox below, running as `nobody` (65534) with no supplementary groups and no new privileges; it dies with the runner through the supervisor (below), not with `sudo` |
 | `bwrap` | `bwrap` works for the runner's uid | new PID, network, IPC, UTS and cgroup namespaces: no runner process is visible, there is no network at all; read-only `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt`, the engine's environment and its base interpreter, the plugin's directory, the job file and the inputs; only its output writable; a private `/tmp`, which is also `HOME`; no home directory of the runner's; `/sys` read-only and the GPU device nodes for a GPU entry point; dies with the runner |
 
 There is no unsandboxed mode. A plain child process of the runner's uid could write the engine
@@ -154,12 +162,24 @@ sandbox), it would make them `0700`, and `nobody` could reach nothing beneath th
 isolation used and the `ptrace_scope` are recorded in the manifest (`sandbox`) and shown with
 the run.
 
+In a `uid` sandbox bubblewrap's parent is `sudo`, so `--die-with-parent` follows `sudo`, which
+outlives a killed runner. The sandbox's first process is therefore
+`python -I -m strata_forge.plugins.supervisor` (still root, before `setpriv` drops to `nobody`):
+it starts the rest of the command with `/dev/null` as its standard input and watches its own, a
+pipe whose write end only the runner holds (`run_plugin_process` opens it; descriptors from
+`os.pipe` are not inherited). Nothing is written to it, so it reaches end of file only when the
+runner closes it, which the kernel does when the runner dies, however it dies; the supervisor
+then kills its child and exits, and as the sandbox's first process its exit ends everything left
+in the sandbox's PID namespace. Started without such a pipe, it ends its child at once.
+
 The sandbox itself is tested for real by `tests/unit/plugins/test_sandbox_live.py`, skipped
 unless `STRATA_SANDBOX_LIVE=1` (CI runners have no usable bubblewrap): in a privileged Linux
 container, once as a user without sudo (`bwrap`) and once as one with passwordless sudo (`uid`),
 it runs code in the sandbox the machine offers (it must read the job and inputs, and must not
 write the engine, read the runner's home or reach the network) and a whole run of a wheel that
-ships a token-stealing `.pth` (refused before anything runs) and of the same build without it.
+ships a token-stealing `.pth` (refused before anything runs) and of the same build without it,
+whose scores are checked by the sandboxed checker; in the `uid` container it also checks that
+closing the runner's lifeline ends a running plugin.
 
 ## The runner (compute target))
 
@@ -248,9 +268,15 @@ reaches the scorer as `ContextSegment`s in input order, never joined.
 NaN and infinity fail the run whatever the kind. `scores.parquet` has exactly one row per input
 step, in input order: `item_id`, `step_index`, `step_type` (when the input has it), the declared
 pass-through columns (copied from the input file, type and value unchanged), `score` (float64,
-null when unscored) and `reason` (null when scored). Before anything is pushed, the runner checks
-its own copy of that file against the input, trusting nothing the plugin's process checked (it
-shared that process): the schema (`score` float64, `reason` string, each kept column of the
+null when unscored) and `reason` (null when scored). Before anything is pushed, the runner's own
+copy of that file is checked against the input, trusting nothing the plugin's process checked (it
+shared that process). The runner, which holds the run's credential, never parses it: it runs
+`<engine python> -I -m strata_forge.plugins.checker <job.json>` in the same sandbox (no network,
+no credential, the engine, the copied scores and the input steps read-only, one directory
+writable), which writes a small record and the diagnostics file; the runner reads the record
+(at most 64 KiB, validated field by field, its counts required to add up to the input's rows and
+its reasons to be declared ones) and copies the diagnostics without following links. The check:
+the schema (`score` float64, `reason` string, each kept column of the
 input's type), one row per input step with the exact `(item_id, step_index)` sequence and every
 kept column equal to the input's (a missing or extra row is an infrastructure fault that fails
 the run), every score finite and inside its `score_kind`, and a null score exactly where a

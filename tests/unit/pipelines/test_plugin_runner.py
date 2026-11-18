@@ -404,6 +404,32 @@ def test_opt_in_aggregations_go_to_a_separate_diagnostic_file(
     assert manifest["diagnostics"]["diagnostic"] is True
 
 
+def test_the_scores_are_parsed_in_a_process_of_their_own(
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
+) -> None:
+    from strata_forge.plugins import checker, output
+
+    def never(*_: Any) -> Any:
+        msg = "the token-holding process parsed the plugin's scores"
+        raise AssertionError(msg)
+
+    _allow(monkeypatch, pin)
+    _wire(monkeypatch, plugin_env)
+    commands: list[list[str]] = []
+    wired = plugin_runner.sandbox_command
+
+    def recording(sandbox: Sandbox, inner: list[str], **kwargs: Any) -> list[str]:
+        commands.append(list(inner))
+        return wired(sandbox, inner, **kwargs)
+
+    monkeypatch.setattr(plugin_runner, "sandbox_command", recording)
+    monkeypatch.setattr(output, "check_scores_file", never)
+    monkeypatch.setattr(checker, "check_scores_file", never)
+    _execute(_spec(pin, diagnostic_aggregations=["min"]))
+    assert [c[3] for c in commands] == ["strata_forge.plugins.host", "strata_forge.plugins.checker"]
+    assert plugin_runner.DIAGNOSTICS_FILENAME in _FakeHub.pushed[0][2]
+
+
 def test_the_plugin_process_never_sees_a_credential(
     monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
 ) -> None:

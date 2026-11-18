@@ -4,6 +4,7 @@ command that binds nothing of the runner's but read-only what the code needs."""
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -147,6 +148,10 @@ def test_the_uid_sandbox_drops_to_nobody_inside_bubblewrap() -> None:
     tail = args[-len(INNER) - 5 : -len(INNER)]
     assert Path(tail[0]).name == "setpriv"
     assert tail[1:] == ["--reuid=65534", "--regid=65534", "--clear-groups", "--no-new-privs"]
+    # Still root, the supervisor ties the sandbox's life to the runner's, then drops to nobody.
+    supervisor = args[-len(INNER) - 10 : -len(INNER) - 5]
+    assert supervisor == [sys.executable, "-I", "-m", "strata_forge.plugins.supervisor", "--"]
+    assert args.index("--") < args.index(sys.executable)
 
 
 def test_the_engine_is_bound_read_only_from_its_own_installation() -> None:
