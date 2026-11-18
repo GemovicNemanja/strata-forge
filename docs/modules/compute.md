@@ -998,6 +998,21 @@ with both pins required (``model_revision`` and ``dataset_commit_sha``, full
 | ``prefix_caching`` | ``vllm_chat`` only, default ``false``: the model server is launched with ``--no-enable-prefix-caching``, since every pass replays the same prompts and a cached prefill would understate the time. Recorded in the engine facts. |
 | ``require_gpu`` | Optional. Refuse to measure unless every visible GPU's reported name contains it (``H100``). |
 
+**Sealed and locked repos.** The runner does not know which repos are
+protected: forge keeps no record of protections, so it never checks them.
+strata-server enforces them at admission, before a run is persisted or a VM
+is touched, and again on a retry: a sealed model or workload is refused
+outright, a locked one runs only at its pinned commit, and a protected repo
+is never the output. A spec run outside that server has no such check, so
+held-out data must never be named in one.
+
+**Prefix reuse and transformers.** Rolling a sliding-window layer's cache
+back to the prefix needs ``DynamicCache.activate_past_recording``. Under a
+transformers without it, a decoder verifier with sliding-window layers is
+refused ``prefix_reuse`` at load, with a reason naming the installed
+release, rather than failing mid-pass; the engine facts record the
+transformers version whenever ``prefix_reuse`` is on.
+
 **Timing boundaries.** ``total_ms`` (the headline) is read from
 ``time.perf_counter_ns``. On the verifier path it runs from the raw
 ``(premises, hypothesis)`` cells in memory through the verifier's own
@@ -1070,7 +1085,8 @@ in ONE commit to a private output repo that holds nothing else; with no write
 token they stay on the machine. A copy of the summary is left in the workdir
 as ``benchmark-summary.json`` for the orchestrator to read. If the model
 server dies mid-run, the measured configurations are still written and pushed
-(the rest ``not_measured``) and the run then fails as incomplete.
+(the rest ``not_measured``) and the run then fails as incomplete, coded
+``server_died`` even when it died in the last (or only) configuration.
 
 **The environment receipt** is what the machine reports, never what the run
 asked for: per visible GPU from ``nvidia-smi`` (index, name, total memory,

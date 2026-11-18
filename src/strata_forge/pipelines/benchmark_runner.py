@@ -111,6 +111,7 @@ from strata_forge.pipelines._scoring import (
     prefix_reuse_error,
     timed_prefix_request,
     timed_verifier_request,
+    transformers_version,
 )
 from strata_forge.pipelines.inference_runner import Hyperparams, RunSpec, render_template
 from strata_forge.storage import HFHubClient
@@ -840,8 +841,14 @@ _SERVER_DIED = "the model server died (its log is in the job directory)"
 
 def _incomplete(
     results: Sequence[bench.ConfigurationResult],
+    *,
+    server_died: bool = False,
 ) -> tuple[str | None, tuple[bench.IncompleteCode, ...]]:
-    """Why the run is incomplete, in a sentence and as codes; ``(None, ())`` when it is complete."""
+    """Why the run is incomplete, in a sentence and as codes; ``(None, ())`` when it is complete.
+
+    ``server_died`` is the model server's death, wherever it happened: in the last (or only)
+    configuration no configuration is left ``not_measured`` to carry it.
+    """
     total = len(results)
     measured = sum(1 for r in results if bench.measured_cleanly(r))
     if measured == total:
@@ -882,9 +889,13 @@ def _incomplete(
             f"the no-cache diagnostic pass of configuration {diagnostic[0].index} did not finish"
         )
     died = [r for r in results if r.status == "not_measured" and r.error == _SERVER_DIED]
-    if died:
+    if died or server_died:
         codes.append("server_died")
-        parts.append("the model server died before the remaining configurations")
+        parts.append(
+            "the model server died before the remaining configurations"
+            if died
+            else "the model server died during the last configuration"
+        )
     skipped = [r for r in results if r.status == "not_measured"]
     if skipped:
         codes.append("not_measured")
@@ -1287,7 +1298,7 @@ async def _finish(
             for outcome in outcomes
         ]
     )
-    reason, codes = _incomplete(results)
+    reason, codes = _incomplete(results, server_died=stopped == _SERVER_DIED)
     if reason is None:
         unreadable = (
             None
@@ -1488,6 +1499,8 @@ async def _execute_classifier(
             "decoder": verifier.rendering.decoder,
             "calibration_temperature_applied": verifier.temperature,
             "prefix_reuse": hp.prefix_reuse,
+            # The cache rollback prefix reuse depends on is a transformers capability.
+            "transformers": transformers_version() if hp.prefix_reuse else None,
         }
         if verifier is not None
         else {

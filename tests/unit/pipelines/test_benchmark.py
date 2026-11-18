@@ -1269,6 +1269,97 @@ async def test_a_model_server_that_dies_mid_run_still_writes_what_was_measured(
     assert summary.headline_readable is False
 
 
+async def test_a_model_server_that_dies_in_the_only_configuration_is_coded_server_died(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    # With no configuration left to mark not_measured, the death still has to carry its code.
+    state: dict[str, Any] = {"alive": True, "requests": 0}
+
+    @contextlib.asynccontextmanager
+    async def _serving(_backend: Any, task: Any, **_kw: Any) -> AsyncGenerator[Any]:
+        async def _alive() -> bool:
+            return state["alive"]
+
+        yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1", is_alive=_alive)
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def complete(self, messages: Any, **kwargs: Any) -> Any:
+            state["requests"] += 1
+            if state["requests"] > 4:
+                state["alive"] = False
+                raise ConnectionError("connection refused")
+            return types.SimpleNamespace(usage=types.SimpleNamespace(output_tokens=3))
+
+    async def _config(spec: Any, token: Any) -> tuple[dict[str, Any], str]:
+        return {"model_type": "qwen3"}, _SHA
+
+    async def _no_len(*_a: Any) -> None:
+        return None
+
+    def _lengths(_snapshot: Path, prompts: Sequence[str], kwargs: Any = None) -> list[int | None]:
+        del kwargs
+        return [5] * len(prompts)
+
+    monkeypatch.setattr(br, "serving_endpoint", _serving)
+    monkeypatch.setattr(br, "LLMClient", _Client)
+    monkeypatch.setattr(br, "_read_model_config", _config)
+    monkeypatch.setattr(br, "_chat_lengths", _lengths)
+    monkeypatch.setattr(br, "_served_max_model_len", _no_len)
+    _launch(
+        monkeypatch,
+        bench_run,
+        engine_settings=_CHAT,
+        boundaries=["end_to_end"],
+        batch_sizes=[1],
+        concurrency=[1],
+        passes=1,
+        warmup=1,
+    )
+    assert await br.main() == 1
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    assert [c.status for c in summary.configurations] == ["stopped_on_failure"]
+    assert "server_died" in summary.incomplete_codes
+    assert "not_measured" not in summary.incomplete_codes
+    assert "during the last configuration" in (summary.incomplete_reason or "")
+
+
+@pytest.mark.parametrize(
+    ("config", "sliding"),
+    [
+        ({"layer_types": ["full_attention", "sliding_attention"]}, True),
+        ({"layer_types": ["full_attention", "full_attention"]}, False),
+        ({"sliding_window": 4096}, True),
+        ({"sliding_window": 4096, "use_sliding_window": False}, False),
+        ({"sliding_window": None}, False),
+        ({"sliding_window": True}, False),
+        ({}, False),
+    ],
+)
+def test_sliding_window_layers_are_read_off_the_config(
+    config: dict[str, Any], *, sliding: bool
+) -> None:
+    from strata_forge.pipelines import _scoring
+
+    has = _scoring._has_sliding_layers  # pyright: ignore[reportPrivateUsage]
+    assert has(types.SimpleNamespace(**config)) is sliding
+
+
+def test_sliding_rollback_is_a_transformers_capability() -> None:
+    from strata_forge.pipelines._scoring import sliding_rollback_supported
+
+    class _Recording:
+        def activate_past_recording(self) -> None: ...
+
+    class _Plain: ...
+
+    assert sliding_rollback_supported(types.SimpleNamespace(DynamicCache=_Recording)) is True
+    assert sliding_rollback_supported(types.SimpleNamespace(DynamicCache=_Plain)) is False
+    assert sliding_rollback_supported(types.SimpleNamespace()) is False
+
+
 def test_visible_devices_follow_cuda_visible_devices(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env.visible_tokens(None) is None
     assert env.visible_tokens("") == []

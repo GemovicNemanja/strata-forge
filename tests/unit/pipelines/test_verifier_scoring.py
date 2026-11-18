@@ -372,18 +372,26 @@ def test_premise_prefix_reuse_scores_exactly_as_the_full_forward(
     decoder_artifact: tuple[Any, Path], encoder_artifact: tuple[Any, Path]
 ) -> None:
     import time
+    from importlib import import_module
 
     from strata_forge.pipelines._scoring import (
         PrefixCache,
         prefix_reuse_error,
         score_with_prefix,
+        sliding_rollback_supported,
         timed_prefix_request,
+        transformers_version,
     )
 
     _, artifact = decoder_artifact
     scorer = load_verifier(
         artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
     )
+    if not sliding_rollback_supported(import_module("transformers")):
+        # The tiny decoder alternates sliding and global layers: a transformers that cannot roll
+        # a sliding cache back refuses prefix reuse at load rather than mis-scoring a hit.
+        assert "sliding-window" in (prefix_reuse_error(scorer) or "")
+        pytest.skip(f"transformers {transformers_version()} cannot roll a sliding cache back")
     assert prefix_reuse_error(scorer) is None
     base = tiny.rows(6, seed=11)
     # The same premise set under two hypotheses, then a new set: miss, hit, miss.
@@ -425,6 +433,41 @@ def test_premise_prefix_reuse_scores_exactly_as_the_full_forward(
         enc, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
     )
     assert "decoder verifier only" in (prefix_reuse_error(encoder) or "")
+
+
+def test_prefix_reuse_is_refused_where_transformers_cannot_roll_a_sliding_cache_back(
+    decoder_artifact: tuple[Any, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from strata_forge.pipelines import _scoring
+
+    _, artifact = decoder_artifact
+    scorer = load_verifier(
+        artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+    )
+    config: Any = scorer._model.config  # pyright: ignore[reportPrivateUsage]
+    # The tiny decoder (ModernBERT's) alternates sliding and global layers.
+    assert any("sliding" in kind for kind in config.layer_types)
+
+    def _unsupported(transformers: Any) -> bool:
+        del transformers
+        return False
+
+    def _supported(transformers: Any) -> bool:
+        del transformers
+        return True
+
+    monkeypatch.setattr(_scoring, "sliding_rollback_supported", _unsupported)
+    reason = _scoring.prefix_reuse_error(scorer) or ""
+    assert "sliding-window" in reason
+    assert f"transformers {_scoring.transformers_version()}" in reason
+    monkeypatch.setattr(_scoring, "sliding_rollback_supported", _supported)
+    assert _scoring.prefix_reuse_error(scorer) is None
+    # Without sliding layers the capability is never asked for.
+    layers = len(config.layer_types)
+    monkeypatch.setattr(config, "layer_types", ["full_attention"] * layers)
+    monkeypatch.setattr(config, "sliding_window", None)
+    monkeypatch.setattr(_scoring, "sliding_rollback_supported", _unsupported)
+    assert _scoring.prefix_reuse_error(scorer) is None
 
 
 def test_the_prefix_cache_evicts_least_recently_used_first() -> None:

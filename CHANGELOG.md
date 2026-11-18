@@ -96,7 +96,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   configuration adds a no-cache diagnostic pass. `prefix_cache_hit`
   and `pass_kind` in `timings.parquet`; `prefix_cache`, `no_cache_diagnostic` and `prefix_reuse`
   in the summary. `score_with_prefix` / `timed_prefix_request` / `PrefixCache` on the scoring
-  engine, exact against the full forward pass.
+  engine, exact against the full forward pass. A decoder with sliding-window layers is refused
+  prefix reuse at load under a transformers without `DynamicCache.activate_past_recording`
+  (`sliding_rollback_supported`), and the engine facts record the transformers version.
 - `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
   NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
   and the pooled percentiles) and the opt-in, diagnostic-only `latency_bootstrap` interval.

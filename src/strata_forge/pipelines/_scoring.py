@@ -103,11 +103,13 @@ __all__ = [
     "resolve_labels",
     "result_rows",
     "score_with_prefix",
+    "sliding_rollback_supported",
     "softmax",
     "tally",
     "tf32_state",
     "timed_prefix_request",
     "timed_verifier_request",
+    "transformers_version",
     "verifier_result_rows",
 ]
 
@@ -1406,11 +1408,50 @@ def _cache_bytes(cache: Any) -> int:
     return total
 
 
+def sliding_rollback_supported(transformers: Any) -> bool:
+    """Whether the installed transformers can roll a sliding-window KV cache back to a prefix.
+
+    A sliding-window layer keeps only its window, so cropping it back past the window needs the
+    cache to have recorded the states it dropped (``DynamicCache.activate_past_recording``).
+    Releases without it cannot, and their ``crop`` raises once a sequence outgrows the window.
+    """
+    cache: Any = getattr(transformers, "DynamicCache", None)
+    return cache is not None and hasattr(cache, "activate_past_recording")
+
+
+def _has_sliding_layers(config: Any) -> bool:
+    kinds: object = getattr(config, "layer_types", None)
+    if isinstance(kinds, list | tuple) and any(
+        "sliding" in str(kind) for kind in cast("list[object]", kinds)
+    ):
+        return True
+    window: object = getattr(config, "sliding_window", None)
+    used: object = getattr(config, "use_sliding_window", True)
+    return (
+        isinstance(window, int)
+        and not isinstance(window, bool)
+        and window > 0
+        and used is not False
+    )
+
+
+def transformers_version() -> str | None:
+    """The installed transformers' version, for the record; ``None`` when it is not installed."""
+    try:
+        module: Any = import_module("transformers")
+    except ImportError:
+        return None
+    version: object = getattr(module, "__version__", None)
+    return version if isinstance(version, str) else None
+
+
 def prefix_reuse_error(scorer: VerifierScorer) -> str | None:
     """Why ``scorer`` cannot reuse a premise prefix, or ``None`` when it can.
 
     Only a decoder verifier reads its input left to right, so only its premise tokens' cache is
-    the same whatever hypothesis follows; and the premises must come first in its template.
+    the same whatever hypothesis follows; and the premises must come first in its template. A
+    model with sliding-window layers also needs a transformers that can roll that cache back
+    (:func:`sliding_rollback_supported`); the reason names the installed release.
     """
     template = scorer.rendering.decoder_template
     if not scorer.rendering.decoder or template is None:
@@ -1419,6 +1460,15 @@ def prefix_reuse_error(scorer: VerifierScorer) -> str | None:
     if first < 0 or second < 0 or first > second:
         return (
             "prefix reuse needs a decoder template that renders the premises before the hypothesis"
+        )
+    config: Any = getattr(scorer._model, "config", None)  # pyright: ignore[reportPrivateUsage]
+    if _has_sliding_layers(config) and not sliding_rollback_supported(
+        import_module("transformers")
+    ):
+        return (
+            "prefix reuse needs to roll a sliding-window cache back to its prefix, and the "
+            f"installed transformers {transformers_version() or 'unknown'} cannot "
+            "(no DynamicCache.activate_past_recording); this model has sliding-window layers"
         )
     return None
 
@@ -1520,7 +1570,11 @@ def score_with_prefix(
             past_key_values=entry.cache,
             use_cache=True,
         )
-        entry.cache.crop(-(len(ids) - k))
+        try:
+            entry.cache.crop(-(len(ids) - k))
+        except (RuntimeError, ValueError) as exc:  # refused at load; kept as a clear failure
+            msg = "the KV cache could not be rolled back to the premise prefix"
+            raise RunError(msg) from exc
         aux: dict[str, Any] = {}
         if scorer.heads and hidden:
             rest: Any = hidden[-1]
