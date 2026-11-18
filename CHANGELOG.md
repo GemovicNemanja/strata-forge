@@ -8,6 +8,47 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.metrics.cluster_bootstrap` adds `cluster_bootstrap` and
+  `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`): seeded percentile intervals
+  for accuracy, macro-F1 and invalid rate that resample whole caller-declared clusters with
+  `numpy.random.Generator(PCG64(seed))` (default 10,000 resamples), score paired systems on the
+  same resamples and difference them before the Hyndman-Fan type 7 quantiles.
+- `strata_forge.pipelines.eval_runner` is an evaluation run kind: it joins pinned prediction
+  parquet files to a pinned gold split on a stable item id, computes the candidate's and each
+  baseline's metrics overall and per declared slice with cluster bootstrap intervals and paired
+  deltas, marks slices under `min_slice_rows` diagnostic, and pushes `items.parquet`,
+  `metrics.json`, `manifest.json` and a dataset card to a private repo in one commit (or keeps
+  them on the machine). `EvalSpec` / `EvalSettings` / `PredictionSource` are its spec models.
+  Every row has a status (`ok` / `tier_refused` / `excluded` / `overflow` / `missing`): a
+  declared `tier_rule` refuses rows for every system, the primary read is over the rows no system
+  overflowed with each system's full-tier read beside it, missing rows are always invalid,
+  comparisons report the paired discordance rate `p_d`, rows without a cluster cluster on the
+  SHA-256 of their normalised premises, and the manifest records the bootstrap contract.
+  Resamples where macro-F1 is undefined are counted, never zeroed. An interval with more than
+  `unstable_threshold` (default 0.01) of its resamples undefined is flagged `unstable`, and a
+  delta's `excludes_zero` gate read is then `unresolved`. A tier's token-count method is
+  recorded and must not mix, a declared premise count must match the platform's, and rows keyed
+  on the premise-hash fallback are counted per slice.
+- The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
+- `strata_forge.metrics.calibration_fit`: `fit_temperature` (NLL bisection on 1/T within
+  [0.05, 20], the bound reported when taken), `cross_fit_temperature` (the seeded permutation of
+  sorted cluster keys dealt into folds, the first ceil(C/2) in fold 0 for two, each fold scored
+  with the temperature fitted on the others) and `expected_calibration_error` (top-label, 15
+  equal-mass bins with ties by item id, or equal-width).
+- `cluster_mean_bootstrap` / `paired_cluster_mean_bootstrap` bound the mean of a per-row score
+  (a Brier term) under the cluster bootstrap contract; the paired form adds the SD of the per-row
+  differences with its interval.
+- The evaluation runner's optional `calibration` settings report three probability reads apart
+  (raw, a temperature cross-fitted by cluster over the split or a named slice of it, and the
+  system's own pinned `calibration.json` temperature) with sum-form Brier and its interval, NLL and
+  ECE, plus a paired Brier delta and the SD of the per-item Brier differences per baseline.
+
+### Changed
+
+- `pipelines._common.ensure_private_output` is the one private-output-repo check, shared by the
+  inference and evaluation runners.
 ### Fixed
 
 - `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a

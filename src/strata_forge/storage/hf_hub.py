@@ -330,7 +330,8 @@ class HFHubClient:
         """Upload exactly ``files`` (``{path_in_repo: local_path}``) in ONE commit.
 
         Unlike :meth:`upload_folder`, nothing else is listed or considered: the commit is exactly
-        these files, all or nothing. Returns the commit URL / hash.
+        these files, all or nothing. Returns the new commit's id when the Hub reports one, else
+        the commit URL.
         """
         if not files:
             msg = "upload_files needs at least one file"
@@ -348,7 +349,8 @@ class HFHubClient:
             "commit_message": commit_message or f"upload {len(operations)} files",
         }
         result: Any = await asyncio.to_thread(api.create_commit, **kwargs)
-        return str(result)
+        oid: Any = getattr(result, "oid", None)
+        return str(oid) if isinstance(oid, str) and oid else str(result)
 
     # -----------------------------------------------------------------
     # Convenience wrappers

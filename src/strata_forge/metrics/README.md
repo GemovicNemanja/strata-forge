@@ -37,4 +37,15 @@ and preserves a finite log probability when the floating p-value underflows. `ho
 adjusts an explicitly named hypothesis family, retaining caller order without choosing alpha.
 These comparisons need no numerical extra; resampling and research thresholds are not inferred.
 
+`cluster_bootstrap` and `paired_cluster_bootstrap` (`metrics.cluster_bootstrap`, NumPy from
+`[scoring]`) give seeded percentile intervals for accuracy, macro-F1 and invalid rate by
+resampling whole caller-declared clusters, and a candidate-minus-baseline delta whose two systems
+share every resample. `cluster_mean_bootstrap` and `paired_cluster_mean_bootstrap` do the same
+for the mean of a per-row score such as a Brier term.
+
+`metrics.calibration_fit` fits one softmax temperature by minimising NLL (`fit_temperature`),
+cross-fits it by cluster so every row is scored with a temperature its own cluster did not
+influence (`cross_fit_temperature`), and computes top-label expected calibration error over
+equal-mass or equal-width bins (`expected_calibration_error`). NumPy from `[scoring]`.
+
 Reference: [metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).

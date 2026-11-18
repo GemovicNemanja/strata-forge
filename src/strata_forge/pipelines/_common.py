@@ -99,6 +99,7 @@ __all__ = [
     "check_engine_version",
     "emit",
     "engine_version_required",
+    "ensure_private_output",
     "ensure_private_repo",
     "install_termination_handlers",
     "installed_engine_commit",
@@ -870,6 +871,26 @@ async def ensure_private_repo(hub: HFHubClient, repo_id: str, *, repo_type: Repo
     if not private:
         msg = (
             f"the output repo {repo_id} is public; a run pushes only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)
+
+
+async def ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
+    """Create the dataset output repo private if it is missing, and refuse one that is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and
+    a run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    try:
+        await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
+        private = await hub.is_private(out_repo, repo_type="dataset")
+    except Exception as exc:
+        msg = f"could not prepare the output repo {out_repo}: {exc}"
+        raise RunError(msg) from exc
+    if not private:
+        msg = (
+            f"the output repo {out_repo} is public; results are pushed only to a private repo. "
             "Make it private or choose another output repo"
         )
         raise RunError(msg)

@@ -45,6 +45,7 @@ Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 - [Task and ResourceSpec](#task-and-resourcespec)
   - [Secrets](#secrets)
 - [Job lifecycle](#job-lifecycle)
+  - [Evaluation runner](#evaluation-runner)
   - [The runner contract](#the-runner-contract)
 - [Backend protocol](#backend-protocol)
   - [Cleanup is verified](#cleanup-is-verified)
@@ -590,6 +591,181 @@ length limit and its source, the overflow policy, the padding side, dtype,
 the TF32 switches, the batch plan, device and the ignored checkpoint keys. Like the pair
 template, the prefill and the kwargs are left out of the manifest's
 ``hyperparams`` dump: only their digests are pushed.
+### Evaluation runner
+
+``strata_forge.pipelines.eval_runner`` scores pinned prediction files against a
+pinned gold split; it loads no model. Its spec (``EvalSpec``) names the gold
+dataset, ``dataset_commit_sha`` (required), config and split, plus an
+``evaluation`` block (``EvalSettings``, the model a control plane validates a
+submission with):
+
+- ``labels``: the ordered label space; ``gold_column`` and ``id_column`` on the
+  gold split; ``gold_aliases`` mapping gold values onto labels.
+- ``predictions``: the candidate system and ``compare_to`` up to eight
+  baselines. Each is a ``PredictionSource``: a ``name``, a dataset ``repo_id``,
+  a full ``commit_sha`` (required), a ``.parquet`` ``path`` (default
+  ``results.parquet``), its ``id_column`` (default ``item_id``) and
+  ``prediction_column`` (default ``pred``), an optional boolean
+  ``overflow_column`` and ``label_aliases``.
+- ``cluster_column`` (each item is its own cluster when unset),
+  ``slice_columns`` (up to eight; a list value puts a row in each listed slice;
+  at most 64 values per column), an optional boolean ``exclude_column``,
+  ``seed``, ``resamples`` (default 10,000) and ``min_slice_rows`` (default 500).
+
+Every read is pinned, so a run reads only data it was explicitly pointed at,
+and only the declared gold columns are materialised. Every row has a status per
+system (``status__<name>`` in ``items.parquet``):
+
+- ``tier_refused``: over the ``tier_rule`` limit for its tier
+  (``limits[<tier_column value>]``, else ``default``; ``max_premises`` counts the
+  ``premises_column`` list, ``max_tokens`` reads the gold ``token_column``), and
+  ``excluded``: flagged in ``exclude_column``. Both are common to every system,
+  left out of every population and counted in ``population``.
+- ``overflow``: the system's ``overflow_column`` is true.
+- ``missing``: no prediction, a null one, or a value outside the label space. A
+  missing row is always invalid (a false negative for its gold class, no false
+  positive) and is never excluded.
+- ``ok`` otherwise. A prediction id with no gold item is counted and ignored; a
+  repeated id refuses.
+
+The primary read is over the **shared** population, the rows no system
+overflowed, so every system and comparison is read on the same rows; each slice
+reports ``n`` (shared), ``n_tier``, ``overflow_excluded`` and ``overflow_share``.
+Each system also gets a ``full_tier`` secondary read over every non-refused row,
+its own overflow counted as invalid. A slice lists ``absent_classes`` (declared
+labels with no gold row and no prediction in it).
+
+``tier_rule.token_method_column`` names how ``token_column`` was counted (for
+example ``tokenizer:<repo>@<commit>``): every row needs one, a tier that mixes
+methods refuses, and each tier's method is echoed in ``population.token_methods``.
+A declared ``premise_count_column`` must equal the platform's count of the
+``premises_column`` list on every row, else the run refuses naming the row.
+Premises are ``{pid, text}`` objects; a plain-string premise refuses.
+
+``label_space_column`` with ``label_spaces`` (``{<value>: [labels]}``, each two or
+more of the declared ``labels``) gives each row its declared label space (a 2-way
+tier declares its own two labels; a row with no entry declares ``labels``). A
+population declares the union of its rows' spaces (``labels`` on each slice), so
+a 2-way slice is never missing the 3-way classes; a gold label outside its row's
+space refuses, and a prediction outside the population's labels is invalid.
+
+**Absent classes are the gold's.** A class is absent from a population when its
+GOLD has no row of it, whatever any system predicted. Then every system's
+macro-F1 and every paired macro-F1 delta have NO value: ``point``, ``lower`` and
+``upper`` are null with ``reason: "absent_gold_class:<label>[,<label>…]"`` and
+``absent_classes`` (null by rule, not unstable; never a mean with a zero in it).
+The slice's ``absent_classes`` and every system's are the same list, both read
+from the shared rows' gold. The ``end`` event carries ``macro_f1_undefined_share`` always, and ``macro_f1_undefined: 1``
+(and ``delta_macro_f1_undefined__<baseline>``) in place of the value. Beside it,
+``macro_f1_present_classes`` averages the classes the gold has (listed in
+``classes``, the same set for every system); it is a diagnostic with
+``gate_read: false`` and decides nothing. ``absent_class_predictions`` counts,
+per system, its predictions of each gold-absent class (a diagnostic, never
+gated). Within the bootstrap a resample whose own gold lacks a declared class is
+undefined and counts toward the ``unstable`` threshold. Label spaces are per row
+(below), so a 2-way tier is never missing the 3-way classes. Each slice also
+reports its ``tier_refused`` rows. ``tier_rule.token_column`` and
+``token_method_column`` are declared together, and a ``label_space_column``
+value with no entry in ``label_spaces`` refuses, naming the row.
+
+``population.fallback_keyed`` and each slice's ``fallback_keyed`` count the rows
+clustered on the premise-hash fallback (0 on a suite tier, whose rows all carry a
+cluster value).
+
+Every interval carries ``undefined_share`` (its undefined resamples over
+``resamples``) and ``unstable``: true when that share exceeds
+``unstable_threshold`` (default 0.01, recorded in ``population``) or no resample
+was defined. An unstable interval never decides a gate: a delta's
+``excludes_zero`` is then ``"unresolved"``, and the ``end`` event leaves its
+bounds out.
+
+Id, cluster and slice columns must be short identifiers, never text: their
+values are written to ``items.parquet``, so a value over 256 characters refuses,
+as does a column that mixes value types (``1`` and ``"1"``, ``True`` and
+``"True"``). A list slice value names each slice once per row. An
+``overflow_column`` must be boolean, like ``exclude_column``. A pushed run's
+``end`` message is ``<repo>@<commit>``, the commit it made, so the report is read
+back at that commit rather than at a head another run may have moved.
+
+The cluster is ``cluster_column``. A row without one (or every row, when only
+``premises_column`` is declared) clusters on ``premise_cluster_key`` of its
+premises: each premise text (a string, or the ``text`` of a ``{pid, text}``
+object) NFC-normalised with whitespace runs collapsed and ends stripped, the
+texts sorted, encoded as a compact UTF-8 JSON array, and hashed with SHA-256
+(``premises:sha256:<hex>``); case is kept. Without either, each item is its own
+cluster. A slice resamples only the clusters present in it.
+
+The overall population and each slice get accuracy, macro-F1 and invalid rate
+per system with the [cluster percentile
+bootstrap](metrics.md#cluster-percentile-bootstrap), and a paired
+candidate-minus-baseline delta per baseline with its paired discordance rate
+(``discordance``: ``baseline_only_correct``, ``candidate_only_correct``,
+``p_d`` = their sum over ``n``). A slice whose shared population is under
+``min_slice_rows`` rows is reported with ``diagnostic: true``. An interval
+records ``undefined_resamples`` (see the metrics reference); a one-sided bound is
+the matching end of the two-sided interval. The outputs are ``items.parquet``
+(per gold item: id, gold, cluster, ``excluded``, ``slice__<column>``, and per
+system ``pred__<name>`` and ``correct__<name>``), ``metrics.json`` (schema
+``strata.eval.report/v1``: the systems with their join counts, the population,
+and one entry per slice with ``n``, ``clusters``, ``diagnostic``, per-system
+intervals, the overall per-class scores and confusion, and the comparisons),
+``manifest.json`` (``kind`` ``evaluation``: the pinned inputs, settings,
+engine, counts, and the overall read's ``bootstrap`` contract id, NumPy version,
+seed, resamples and cluster count) and a dataset card whose ``configs:`` points the Hub viewer
+at ``items.parquet``. They are pushed in one commit to a private output dataset
+repo, refused when public, or kept on the machine under
+``~/strata-eval-results/<run_id>``. The ``end`` event carries the candidate's
+overall figures and bounds and each baseline's accuracy and macro-F1 deltas.
+The machine needs ``strata-forge[scoring,storage,hf]``.
+
+``EvalSettings.calibration`` (``CalibrationSettings``) adds probability reads on the
+shared rows. Every file must carry ``<logit_prefix><label>`` (default ``logit_``)
+for each declared label; an overflowed, refused or non-finite row has none. Three
+reads are reported apart, per system and slice, each with ``n``, ``coverage``,
+sum-form Brier (Σ_k (p_k − y_k)² on [0, 2]) with a cluster interval, NLL and
+top-label ECE (``ece_bins``, default 15, equal mass, ties by item id):
+
+- ``raw``: the logits' softmax.
+- ``cross_fit``: ``cross_fit_temperature`` over the fit population (the scored
+  rows of this split, or of its named slice ``fit_column`` = ``fit_value``), with
+  ``folds`` (default 2) folds by cluster: the seeded permutation of the sorted
+  cluster keys, the first ``ceil(C/2)`` in fold 0. Null outside the fit population.
+- ``applied``: the system's own temperature, from the ``calibration.json`` its
+  ``PredictionSource.calibration_ref`` pins (a model or dataset repo, a commit and
+  a path), when ``apply_calibration`` is ``auto``. A ``calibration_ref`` without
+  ``calibration`` settings refuses. Its SHA-256 and where its labels came from
+  (``labels_from``) are recorded.
+
+**The calibration file contract** (one schema, shared by the seq-cls trainer that
+writes it and the evaluation runner that reads it):
+
+- ``calibration.json`` is a JSON object (at most 64 KiB) with
+  ``"schema": "strata.calibration/v1"`` and ``fit``, the trainer's
+  ``TemperatureFit``: ``fit.temperature`` (positive, finite) is the temperature
+  applied, with ``nll_before`` / ``nll_after`` / ``at_bound`` beside it. The
+  trainer also records ``split``, ``rows``, ``excluded_rows`` and ``rows_sha256``
+  (the ID-dev rows fitted on).
+- Labels: the file's ``labels`` (the class order of the logits the temperature
+  scales) when present, else the ``labels`` of ``strata_verifier.json``
+  (``strata.verifier/v1``) in the same directory of the same repo at the same
+  commit. Either way they must equal the evaluation's declared ``labels`` in
+  order, or the run refuses.
+
+Each probability block reports ``n`` (rows with probabilities),
+``n_population`` and ``coverage`` (their ratio), and is computed on those rows
+only, with no "no mass" term for the rest. Each comparison gains ``brier_delta``:
+the paired candidate-minus-baseline raw Brier on the rows BOTH systems have
+probabilities for, with that ``n`` and ``coverage`` and ``sd``, the SD of the
+per-item Brier differences and its interval; with calibration the comparison's
+``discordance`` (p_d) is read on those same rows, with its ``n`` and
+``coverage``. **Gate rule:** a probability read with ``coverage`` < 1 is
+unresolved (``gate: "unresolved"`` on a block or p_d, ``excludes_zero:
+"unresolved"`` on the Brier delta), and unresolved counts as NOT met. The
+``end`` event carries ``brier_coverage`` and leaves the Brier bounds out below
+full coverage. The report's ``calibration`` block records the fit
+population, the fold rule, each system's per-fold temperatures and its own
+temperature. No temperature selects a system, a reference or a threshold. The
+``end`` event adds the candidate's raw ``brier`` and its bounds.
 
 ### Fine-tuning pins, checks and manifest
 
