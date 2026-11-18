@@ -8,6 +8,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-18
+
 ### Added
 
 - Trusted plugins (`strata_forge.plugins`, ADR 0021). A plugin repository declares its entry
@@ -53,6 +55,17 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   build is stopped after 10 minutes without output as well as at its 30-minute limit; in a `uid`
   sandbox `plugins/supervisor.py` ends the sandbox when the runner's lifeline pipe closes, so a
   plugin dies with the runner rather than with `sudo`; the tools venv is created with `-I`.
+- Premise-prefix KV reuse for a decoder verifier's latency benchmark (`prefix_reuse`,
+  `prefix_cache_max_bytes`; batch size 1): per timed pass, the first request of each premise set
+  fills its prefix inside its clock and a later one in the same pass reuses it; the entries are
+  dropped after each pass's warmup (the process stays warm), each pass's hits, fills and
+  evictions are recorded with the byte limit, an in-pass eviction is flagged, and each
+  configuration adds a no-cache diagnostic pass. `prefix_cache_hit`
+  and `pass_kind` in `timings.parquet`; `prefix_cache`, `no_cache_diagnostic` and `prefix_reuse`
+  in the summary. `score_with_prefix` / `timed_prefix_request` / `PrefixCache` on the scoring
+  engine, exact against the full forward pass. A decoder with sliding-window layers is refused
+  prefix reuse at load under a transformers without `DynamicCache.activate_past_recording`
+  (`sliding_rollback_supported`), and the engine facts record the transformers version.
 
 ### Changed
 
@@ -152,17 +165,6 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `benchmark`) are pushed in one commit to a private output repo of the run's own, also when the
   model server dies mid-run (the run then fails as incomplete). The `end` event carries
   `gpu_count` and `gpu_seconds` over the GPUs `CUDA_VISIBLE_DEVICES` exposes.
-- Premise-prefix KV reuse for a decoder verifier's latency benchmark (`prefix_reuse`,
-  `prefix_cache_max_bytes`; batch size 1): per timed pass, the first request of each premise set
-  fills its prefix inside its clock and a later one in the same pass reuses it; the entries are
-  dropped after each pass's warmup (the process stays warm), each pass's hits, fills and
-  evictions are recorded with the byte limit, an in-pass eviction is flagged, and each
-  configuration adds a no-cache diagnostic pass. `prefix_cache_hit`
-  and `pass_kind` in `timings.parquet`; `prefix_cache`, `no_cache_diagnostic` and `prefix_reuse`
-  in the summary. `score_with_prefix` / `timed_prefix_request` / `PrefixCache` on the scoring
-  engine, exact against the full forward pass. A decoder with sliding-window layers is refused
-  prefix reuse at load under a transformers without `DynamicCache.activate_past_recording`
-  (`sliding_rollback_supported`), and the engine facts record the transformers version.
 - `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
   NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
   and the pooled percentiles) and the opt-in, diagnostic-only `latency_bootstrap` interval.
@@ -726,7 +728,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 The first release this changelog records. Earlier history is in the git log.
 
-[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.4.0...v0.5.0
