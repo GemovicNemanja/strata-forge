@@ -33,6 +33,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `strata_forge.pipelines._grading`: the LLM grader's rubric (`Rubric`, `Criterion`: pass/fail
   or a bounded integer scale), the judge's guided-JSON answer schema (`rubric_schema`, rationale
   first), its digest and `parse_grade`, which reads a reply as unscored unless it is complete.
+  A criterion id that would collide with the run's headline keys is refused: `cases`, `graded`,
+  `coverage`, a `delta_` or `agreement_` prefix, a `_lower`, `_upper` or `_unresolved` suffix, or
+  `__`.
 - `strata_forge.metrics.calibration_fit.reliability_bins` returns the bins the top-label ECE
   weighs (`ReliabilityBin`: `lo`, `hi`, `n`, `mean_confidence`, `accuracy`), and the evaluation
   report carries them as `reliability_bins` in every raw, cross-fit and applied probability read.
@@ -75,6 +78,67 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (raw, a temperature cross-fitted by cluster over the split or a named slice of it, and the
   system's own pinned `calibration.json` temperature) with sum-form Brier and its interval, NLL and
   ECE, plus a paired Brier delta and the SD of the per-item Brier differences per baseline.
+- A latency benchmark runner, `strata_forge.pipelines.benchmark_runner`, measuring one pinned
+  model (`model_revision` required) on every row of one pinned workload split
+  (`dataset_commit_sha` required; a split past `item_cap` is refused) over a grid of batch sizes
+  and concurrent request streams. The headline path is `hf_classify` with
+  `artifact: strata_verifier`: `total_ms` runs from the raw cells through the verifier's own
+  rendering, the forward pass and heads, the 3-way softmax, `p_inconsistent` and
+  `support_scores` to ONE `torch.cuda.synchronize()`; `forward_ms` is CUDA events around the
+  forward pass in the same request, a diagnostic. The plain AutoModel path is recorded as a
+  third-party reference model. `vllm_chat` times each chat request end to end, with no client
+  cache, one attempt and the server's prefix cache off unless declared. Three recorded seeds
+  (`sample_seed`, `order_seed + pass`, `warmup_seed + pass`); warmup before every pass; lengths
+  and L/P buckets measured with each model's own tokenizer and template; exclusions counted by
+  reason. A GPU another process holds refuses the run at the start and stops it as incomplete
+  (`gpu_busy`) before a pass; clocks, power and temperature are recorded around every pass. Only
+  completed passes are summarized, and the headline is the median of the per-pass p95 with min
+  and max, readable only for a complete run on a GPU checked idle. `timings.parquet`,
+  `summary.json` (`BenchmarkSummary`, finite numbers only) and `manifest.json` (`kind`
+  `benchmark`) are pushed in one commit to a private output repo of the run's own, also when the
+  model server dies mid-run (the run then fails as incomplete). The `end` event carries
+  `gpu_count` and `gpu_seconds` over the GPUs `CUDA_VISIBLE_DEVICES` exposes.
+- `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
+  NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
+  and the pooled percentiles) and the opt-in, diagnostic-only `latency_bootstrap` interval.
+- `Classifier.timed_forward`, `Classifier.forward_timer` (`ForwardTimer`: CUDA events, no added
+  synchronization), `Classifier.synchronize`, `Classifier.attention` and
+  `timed_verifier_request` on the scoring engine.
+- The clean-install matrix gains the benchmark machine's extras, `serving,storage,hf,scoring`,
+  and the smoke script a `check_benchmark` on the tiny classifier.
+- The batch-inference runner names rows by a declared column: `RunSpec.id_column` makes each
+  results row's `custom_id` that column's value (present, at most 512 characters and unique, else
+  the run is refused naming the row position, never the value); unset, rows keep their position
+  `row-<i>`. `RunSpec.row_ids` (1-100,000 distinct ids) runs only those rows, selected from the
+  whole split whatever `row_limit` says, and refuses a run whose ids are not all found. Both are
+  chat-only. The manifest records `id_column` and `row_ids` as `{count, sha256}`.
+- Results rows gain `latency_ms` (the client's per-request measure, `None` without a response) and
+  `error_kind` (`timeout`, `rate_limited`, `model_error`, `invalid_output` or `other`, from the
+  exception's type; `None` on success).
+- A chat run writes `receipt.json` (`strata.run.receipt/v1`) into its working directory, where the
+  orchestrator reads it before the workdir is removed: the manifest's SHA-256, the model and
+  dataset pins requested and served, the template digest, the engine version, `id_column`,
+  `row_ids`, row counts and the output repo with the commit the push made. `_push_results` returns
+  that commit id beside the repo (`commit_oid`).
+- A chat run records its failed rows in `failed_rows.json` beside its receipt (`failed_rows_record`:
+  the distinct failed ids when rows are named by `id_column`, bounded by count and size, with
+  `complete`), the commit it read its split at (`dataset.commit`, resolved before the load when the
+  run is unpinned), and checks one id rule shared with the control plane (`valid_row_id`: 1-512
+  printable characters, not blank). `row_ids` are selected from the rows the run reads, so
+  `row_limit` bounds a retry's window, and its id uniqueness check, as it bounded its source run.
+- A pushing chat, scoring or fine-tuning run ends with `repo@commit` (`_common.pushed_at`), as an
+  evaluation run already did, so the orchestrator records the commit the output landed in
+  (`output_commit_sha`) rather than a repo whose head can move; a push the Hub named no commit for
+  ends with the repo alone.
+- The chat receipt names a prompt-build run's builds: `prompt` and `system_prompt`, each
+  `{build_id, build_hash}` from the manifest's prompt blocks (null for a template run).
+- Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):
+  scoring (`hf_classify`, `hf_label_logits`, verifier artifacts), fine-tuning (incl. `seq_cls`) and
+  evaluation runs write `_common.build_receipt`'s shape (manifest digest, the model, dataset and
+  engine their manifest records, row counts where they have rows, and `output` `{repo_id,
+  commit_sha}` of the commit the push made). The commit is what links one run's output to the run
+  that reads it next. `finetune_runner._push_artifact` and `eval_runner._push` return
+  `(repo_id, commit_sha)`; a push failure still leaves the receipt before the run fails.
 - `hf_classify` scores a verifier trained by `seq_cls` as it was trained
   (`hyperparams.artifact: strata_verifier`): rendering, labels, pooling and
   auxiliary heads come only from its `strata_verifier.json`, through the one

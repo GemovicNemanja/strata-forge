@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -89,6 +90,8 @@ __all__ = [
     "MAX_PHASE_CHARS",
     "MAX_SECRETS_FILE_BYTES",
     "PHASE_TICK_SECONDS",
+    "RECEIPT_FILENAME",
+    "RECEIPT_SCHEMA",
     "REPO_ID_RE",
     "REQUIRE_ENGINE_VERSION_ENV",
     "SAFE_NAME_RE",
@@ -96,7 +99,9 @@ __all__ = [
     "PhaseSink",
     "RunError",
     "RunSecrets",
+    "build_receipt",
     "check_engine_version",
+    "commit_oid",
     "emit",
     "engine_version_required",
     "ensure_private_output",
@@ -111,6 +116,7 @@ __all__ = [
     "model_server_environ",
     "phase_sink",
     "progress_path",
+    "pushed_at",
     "require_commit_sha",
     "results_dir",
     "run_redactor",
@@ -120,6 +126,7 @@ __all__ = [
     "ticking_phase",
     "validate_repo_id",
     "write_manifest",
+    "write_receipt",
 ]
 
 # An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
@@ -894,3 +901,80 @@ async def ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
             "Make it private or choose another output repo"
         )
         raise RunError(msg)
+
+
+# ------------------------------ run receipt ------------------------------
+
+#: The execution receipt a runner leaves in its job WORKDIR (its working directory), where the
+#: orchestrator can read it before it removes that directory. The manifest lives beside the
+#: results, outside the workdir, so the receipt carries the manifest's digest and the facts an
+#: orchestrator compares against what it admitted: no row text and no secret.
+RECEIPT_SCHEMA = "strata.run.receipt/v1"
+RECEIPT_FILENAME = "receipt.json"
+
+_COMMIT_AT_END_RE = re.compile(r"([0-9a-f]{40})/?$")
+
+
+def commit_oid(commit: str | None) -> str | None:
+    """The 40-character commit id a Hub commit answer names (an oid or a ``.../commit/<oid>``
+    URL), or None when it names none."""
+    if not commit:
+        return None
+    match = _COMMIT_AT_END_RE.search(commit.strip())
+    return match.group(1) if match else None
+
+
+def build_receipt(
+    kind: str,
+    manifest_path: Path,
+    output: tuple[str, str | None] | None,
+    *,
+    rows: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """The execution receipt of a run of ``kind`` (``chat`` has its own, with its row ids): the
+    digest of the manifest it wrote, the model, dataset and engine that manifest records where it
+    records them, its row counts when it has rows, and the repo and COMMIT its push made (None
+    when nothing was pushed). The commit is what links a run's output to the run that reads it
+    next, exactly; a repo's head can move."""
+    raw = manifest_path.read_bytes()
+    manifest: dict[str, Any] = json.loads(raw)
+
+    def block(key: str) -> dict[str, Any]:
+        value: Any = manifest.get(key)
+        return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+    model, dataset, engine = block("model"), block("dataset"), block("engine")
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "kind": kind,
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "model": {
+            "id": model.get("id"),
+            "requested_revision": model.get("requested_revision"),
+            "commit": model.get("commit"),
+        },
+        "dataset": {
+            "id": dataset.get("id"),
+            "config": dataset.get("config"),
+            "split": dataset.get("split"),
+            "requested_revision": dataset.get("requested_revision"),
+        },
+        "engine_version": engine.get("version"),
+        "rows": rows,
+        "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},
+    }
+
+
+def pushed_at(pushed: tuple[str, str | None]) -> str:
+    """Where a push landed as a run's end message names it: ``repo@commit`` when the push made a
+    commit (the orchestrator reads the run's outputs back at that commit, never at a head another
+    run may have moved), else the repo alone."""
+    repo, commit = pushed
+    return f"{repo}@{commit}" if commit else repo
+
+
+def write_receipt(receipt: dict[str, Any], workdir: Path) -> Path:
+    """Write ``receipt`` as ``receipt.json`` in ``workdir`` (the runner's working directory)."""
+    path = workdir / RECEIPT_FILENAME
+    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    return path

@@ -34,9 +34,22 @@ from strata_forge.metrics.comparison import (
     mcnemar_exact,
     wilson_interval,
 )
+from strata_forge.metrics.latency import (
+    LATENCY_BOOTSTRAP_VERSION,
+    LATENCY_QUANTILES,
+    LATENCY_VERSION,
+    LatencyBootstrap,
+    LatencySummary,
+    latency_bootstrap,
+    latency_summary,
+    percentile,
+)
 
 __all__ = [
     "COMPARISON_VERSION",
+    "LATENCY_BOOTSTRAP_VERSION",
+    "LATENCY_QUANTILES",
+    "LATENCY_VERSION",
     "MAX_EXACT_DISCORDANT",
     "METRIC_VERSION",
     "NLL_CLIP_EPSILON",
@@ -48,6 +61,8 @@ __all__ = [
     "ConfusionMatrix",
     "HolmCorrection",
     "LabelSpace",
+    "LatencyBootstrap",
+    "LatencySummary",
     "McNemarResult",
     "MetricValue",
     "ProbabilityKind",
@@ -59,9 +74,12 @@ __all__ = [
     "confusion_matrix",
     "holm_correction",
     "invalid_rate",
+    "latency_bootstrap",
+    "latency_summary",
     "macro_f1",
     "mcnemar_exact",
     "nll",
+    "percentile",
     "temperature_scale",
     "wilson_interval",
 ]

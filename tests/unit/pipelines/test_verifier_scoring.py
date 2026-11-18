@@ -335,3 +335,34 @@ def test_every_head_reads_the_same_token_alone_or_padded(
         assert max(abs(a - b) for a, b in zip(alone.logits, joint.logits, strict=True)) < 1e-5
         if alone.flag is not None and joint.flag is not None:
             assert abs(alone.flag - joint.flag) < 1e-5
+
+
+@pytest.mark.parametrize("which", ["encoder_artifact", "decoder_artifact"])
+def test_a_timed_verifier_request_renders_scores_and_syncs_once(
+    which: str, request: pytest.FixtureRequest
+) -> None:
+    import time
+
+    from strata_forge.pipelines._scoring import timed_verifier_request
+
+    _, artifact = request.getfixturevalue(which)
+    scorer = load_verifier(
+        artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+    )
+    syncs = 0
+    real = scorer.synchronize
+
+    def _counted() -> None:
+        nonlocal syncs
+        syncs += 1
+        real()
+
+    scorer.synchronize = _counted  # type: ignore[method-assign]
+    rows = tiny.rows(3, seed=9)
+    cells = [(r["premises"], r["hypothesis"]) for r in rows]
+    start, end, forward = timed_verifier_request(scorer, cells, clock=time.perf_counter_ns)
+    assert end > start
+    assert 0 < forward * 1_000_000 <= end - start
+    # The one synchronization ends the request; the forward pass adds none of its own.
+    assert syncs == 1
+    assert scorer.forward_timer().method == "perf_counter_ns_cpu"

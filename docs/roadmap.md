@@ -545,7 +545,10 @@ labels. Chat runs can constrain every reply to one JSON Schema
 (`guided_json`, vLLM structured outputs) with a single validated repair
 turn and per-row validity in the results, draw up to 16 seeded samples
 per row keyed by `sample_index`, and pass chat-template kwargs such as
-`enable_thinking`. Reference doc:
+`enable_thinking`. The benchmark runner times a pinned model on a pinned
+workload split with either the classifier or the chat engine, model-only and
+end-to-end boundaries reported separately, warmup excluded and the machine's
+environment recorded. Reference doc:
 [`docs/modules/compute.md`](modules/compute.md).
 
 `strata_forge.training` ships fine-tuning primitives: `SFTConfig` /

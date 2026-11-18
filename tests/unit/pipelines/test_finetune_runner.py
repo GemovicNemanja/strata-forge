@@ -562,6 +562,8 @@ def _drive(
 
     progress = tmp_path / "progress.jsonl"
     writer = JsonlProgressWriter(progress)
+    # The job's working directory, where the runner leaves its receipt.
+    monkeypatch.chdir(tmp_path)
 
     def _rows(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
         return [{"prompt": "q", "completion": "a"}]
@@ -595,24 +597,30 @@ def _drive(
 
 
 class TestExecute:
-    def test_a_pushed_run_reports_the_repo_id(
+    def test_a_pushed_run_reports_the_repo_at_its_commit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        async def _push(_spec_arg: Any, _dir: Any, _token: str) -> str:
-            return "org/out"
+        async def _push(_spec_arg: Any, _dir: Any, _token: str) -> tuple[str, str | None]:
+            return "org/out", "c" * 40
 
         destination, events = _drive(monkeypatch, tmp_path, push=_push)
-        assert destination == "org/out"
+        # repo@commit: the orchestrator records the commit the model landed in, never a head.
+        assert destination == "org/out@" + "c" * 40
+        # The receipt names the repo and the commit the push made, for the run that reads it next.
+        receipt = json.loads((tmp_path / "receipt.json").read_text())
+        assert receipt["kind"] == "training"
+        assert receipt["output"] == {"repo_id": "org/out", "commit_sha": "c" * 40}
+        assert len(receipt["manifest_sha256"]) == 64
         assert events[-1]["kind"] == "end"
-        assert events[-1]["message"] == "org/out"
+        assert events[-1]["message"] == "org/out@" + "c" * 40
 
     def test_the_terminal_event_carries_the_step_count(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # It is the last event anybody reads; without the count a finished run's progress reads
         # as unknown rather than as complete.
-        async def _push(*_a: Any) -> str:
-            return "org/out"
+        async def _push(*_a: Any) -> tuple[str, str | None]:
+            return "org/out", "c" * 40
 
         _, events = _drive(monkeypatch, tmp_path, push=_push)
         assert events[-1]["step"] == 12
@@ -625,9 +633,9 @@ class TestExecute:
     ) -> None:
         pushed: list[Path] = []
 
-        async def _push(_spec_arg: Any, directory: Path, _token: str) -> str:
+        async def _push(_spec_arg: Any, directory: Path, _token: str) -> tuple[str, str | None]:
             pushed.append(directory)
-            return "org/out"
+            return "org/out", "c" * 40
 
         spec = _spec(model_revision=_SHA, dataset_commit_sha=_SHA)
         _drive(monkeypatch, tmp_path, spec=spec, push=_push)
@@ -733,8 +741,8 @@ class TestExecute:
     def test_the_phases_narrate_the_uncountable_stretches(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        async def _push(*_a: Any) -> str:
-            return "org/out"
+        async def _push(*_a: Any) -> tuple[str, str | None]:
+            return "org/out", "c" * 40
 
         _, events = _drive(monkeypatch, tmp_path, push=_push)
         phases = [e["message"] for e in events if e["kind"] == "phase"]

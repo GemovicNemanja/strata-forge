@@ -19,6 +19,11 @@ and reports the bootstrap interval and a non-gating user-versus-solver kappa bes
 No annotation resource, rater pooling, model opinion, dataset reading or research acceptance
 is supplied. See the direct-import agreement surface in the reference docs.
 
+`metrics.latency` summarizes latency measurements: `percentile` (type 7, equal to
+`numpy.percentile` with no NumPy), `latency_summary` (per-pass p50/p95/p99, their median across
+passes with min and max, and the pooled percentiles) and the opt-in `latency_bootstrap` interval
+for the pooled percentiles, which needs NumPy from `[scoring]`.
+
 `classification_report` returns accuracy, macro-F1, invalid-output rate, class scores, and a
 confusion matrix. Invalid outputs remain wrong predictions in the denominator and in gold
 support. Every declared class contributes to macro-F1, including absent classes with F1 zero.

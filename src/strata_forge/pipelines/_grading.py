@@ -44,6 +44,13 @@ GRADE_SCHEMA_VERSION = "strata.grade/v1"
 OUTPUT_PLACEHOLDER = "output"
 CRITERIA_PLACEHOLDER = "criteria"
 _CRITERION_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+#: Names a criterion id may not take, because the ``end`` event's headline keys are built from
+#: criterion ids (``<id>``, ``<id>_lower``, ``delta_<id>__<baseline>``, ``agreement_<id>``) beside
+#: fixed ones: a criterion named ``coverage`` would overwrite the coverage figure, one named
+#: ``tone_lower`` another's bound, and ``a__b`` would make ``delta_a__b__c`` ambiguous.
+HEADLINE_NAMES = ("cases", "graded", "coverage")
+HEADLINE_PREFIXES = ("delta_", "agreement_")
+HEADLINE_SUFFIXES = ("_lower", "_upper", "_unresolved")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
 #: A rubric's template is a prompt, not a corpus; the whole spec rides to the machine in one blob.
 _MAX_TEMPLATE_CHARS = 32 * 1024
@@ -78,6 +85,18 @@ class Criterion(BaseModel):
     def _identifier(cls, value: str) -> str:
         if not _CRITERION_ID_RE.fullmatch(value):
             msg = "a criterion id is lowercase letters, digits and '_', starting with a letter"
+            raise ValueError(msg)
+        if (
+            value in HEADLINE_NAMES
+            or value.startswith(HEADLINE_PREFIXES)
+            or value.endswith(HEADLINE_SUFFIXES)
+            or "__" in value
+        ):
+            msg = (
+                f"criterion id {value!r} is reserved for the run's headline figures: not "
+                f"{', '.join(HEADLINE_NAMES)}, no {' or '.join(HEADLINE_PREFIXES)} prefix, no "
+                f"{', '.join(HEADLINE_SUFFIXES)} suffix and no '__'"
+            )
             raise ValueError(msg)
         return value
 

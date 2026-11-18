@@ -63,6 +63,31 @@ def test_criterion_refusals(criterion: dict[str, Any], message: str) -> None:
         _rubric(criteria=[criterion])
 
 
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "cases",
+        "graded",
+        "coverage",
+        "delta_policy",
+        "agreement_policy",
+        "tone_lower",
+        "tone_upper",
+        "tone_unresolved",
+        "a__b",
+    ],
+)
+def test_criterion_ids_cannot_take_a_headline_key(reserved: str) -> None:
+    criterion = {"id": reserved, "description": "Anything.", "scale": "pass_fail"}
+    with pytest.raises(ValidationError, match="reserved for the run's headline figures"):
+        _rubric(criteria=[criterion])
+
+
+def test_a_criterion_id_may_contain_a_reserved_word_inside_it() -> None:
+    criterion = {"id": "coverage_of_policy", "description": "Anything.", "scale": "pass_fail"}
+    assert _rubric(criteria=[criterion]).criteria[0].id == "coverage_of_policy"
+
+
 def test_criterion_ids_are_unique() -> None:
     same = {"id": "a", "description": "x", "scale": "pass_fail"}
     with pytest.raises(ValidationError, match="unique"):

@@ -324,10 +324,34 @@ set; ``max_model_len`` bounds the context the KV cache must hold. The ``[serving
 ``vllm>=0.24,<1`` range serves gpt-oss's MXFP4 checkpoints with the harmony parser on every
 release in it.
 
-Each results row is ``{custom_id, output, reasoning, error, finish_reason,
-input_tokens, output_tokens}``; ``reasoning`` is ``None`` when the server
-returned none, and a failed row carries ``None`` in it and in the last
-three. ``finish_reason`` is the client's normalized value (``stop``,
+Each results row is ``{custom_id, output, reasoning, error, error_kind,
+finish_reason, input_tokens, output_tokens, latency_ms}``; ``reasoning`` is
+``None`` when the server returned none, and a failed row carries ``None`` in
+it, ``finish_reason``, the token counts and ``latency_ms``. ``latency_ms`` is
+the client's own measure of the row's request, in whole milliseconds (a
+guided-JSON retry counts both attempts). ``error_kind`` is ``None`` on a
+row that succeeded and, on a failed one, a stable class read off the
+exception's type, never its text: ``timeout``, ``rate_limited``,
+``model_error`` (any other provider error), ``invalid_output`` (a
+structured-output or validation error) or ``other``; a fallback chain is
+classed by its last attempt.
+
+A row is named by ``custom_id``: the value of the spec's ``id_column`` when
+one is declared (it must be a column of the split, and its values present,
+1 to 512 printable characters, not blank (``valid_row_id``, the rule the
+control plane applies to a retry's ids) and unique across the rows the run
+reads, else the run is refused naming the row position, never the value),
+else its position
+``row-<i>``. A position names a different row as soon as anything before it
+changes, so a declared id is what lets a later run name the same rows.
+``row_ids`` (1-100,000 distinct ids, as ``custom_id`` names them) runs only
+those rows, selected in split order from the rows the run reads (the first
+``row_limit`` rows, or the whole split without one): a retry that carries
+its source run's ``row_limit`` reads the same rows and checks their ids for
+uniqueness over the same window. A run whose requested ids are not all
+among those rows is refused with the count it could not find. Both are
+chat-only: a scoring engine's rows carry their own declared ``item_id``,
+and a spec setting either with another engine is refused. ``finish_reason`` is the client's normalized value (``stop``,
 ``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
 client does not recognise is reported as ``stop``; ``length`` (the output
 hit ``max_tokens``) is always preserved. Beside ``results.parquet`` the runner writes ``manifest.json``
@@ -352,10 +376,59 @@ the machine. It records:
   gpt-oss system message stated;
 - a SHA-256 of the template (never its text), the column mapping and the
   hyperparameters;
+- the ``id_column`` the rows were named by (``None`` for positions) and,
+  for a run given ``row_ids``, their ``count`` and a ``sha256`` of the ids
+  sorted and joined by newlines (never the ids themselves), else ``None``;
 - row, success and failure counts, a ``finish_reason`` histogram and token
   totals.
 
 It holds no row content and no credential.
+
+The runner also writes ``receipt.json`` (``RECEIPT_FILENAME``, schema
+``strata.run.receipt/v1``) into its **working directory**, the job
+workdir an orchestrator reads before it removes it; the manifest sits
+beside the results, outside that directory. Written once the results and
+manifest are written, whether the push succeeded or failed, it carries the
+SHA-256 of the ``manifest.json`` bytes as written and the facts an
+orchestrator compares with what it admitted: ``model`` (``id``,
+``requested_revision``, ``commit``), ``dataset`` (``id``, ``config``,
+``split``, ``requested_revision`` and the ``commit`` the split was read at:
+an unpinned run resolves the head to a commit before the load and loads at
+it, so this names the rows read), ``template_sha256`` (null on a run that
+rendered a pinned prompt build), ``prompt`` and ``system_prompt`` (each
+``{build_id, build_hash}`` from the manifest's prompt blocks, or ``None``),
+``engine_version``, ``id_column``, ``row_ids`` (``{count, sha256}`` or
+``None``), ``rows`` (``total``, ``succeeded``, ``failed``) and ``output``
+(``repo_id`` and the ``commit_sha`` of the Hub commit the push made, or
+``None`` when nothing was pushed). No row text, no prompt text and no
+credential. Its ``kind`` is ``chat``.
+
+Beside it the chat runner writes ``failed_rows.json``
+(``FAILED_ROWS_FILENAME``, schema ``strata.run.failed_rows/v1``): the
+``id_column``, the ``count`` of distinct failed rows and, when rows are
+named by ``id_column``, their ``row_ids`` in split order, bounded by
+``MAX_FAILED_ROW_IDS`` (10,000) and ``MAX_FAILED_ROW_ID_BYTES`` (64 KiB),
+with ``complete`` saying whether every failed row is listed. Positional
+names are counted and never listed. It is what a retry of the failed rows
+may name; the ids are the user's data and appear nowhere else.
+
+A run that pushed ends with ``repo@commit`` as its end event's message
+(``_common.pushed_at``; the repo alone when the Hub named no commit), so an
+orchestrator records the commit the output landed in. Chat, scoring,
+fine-tuning and evaluation runs all end this way.
+
+Every other pushing runner writes one too, through
+``_common.build_receipt(kind, manifest_path, output, rows=...)``: a scoring
+run (``kind`` ``scoring``: ``hf_classify``, ``hf_label_logits``, verifier
+artifacts), a fine-tuning run including ``seq_cls`` (``training``) and an
+evaluation run (``eval``). It carries the manifest digest, the ``model``,
+``dataset`` and ``engine_version`` the manifest records (null where that
+manifest has none), ``rows`` where the run has rows, and ``output`` with the
+commit the push made. That commit is what an orchestrator links runs by: a
+scoring run that reads a trained model at that commit, and an evaluation
+that reads a scoring run's predictions at theirs, link exactly, where a
+repo's head could have moved. A model registry pinning a training output
+reads the same commit.
 
 A pushed run goes only to a **private** output dataset repo: the runner
 creates it private when it is missing and refuses a public one, first
@@ -886,7 +959,10 @@ and a card they are pushed in one commit to a private output repo; the ``end`` e
 (at most 64) are ``cases``, ``graded``, ``coverage``, each criterion's candidate
 mean (bounds only at full coverage; ``<criterion>_unresolved: 1`` below it),
 ``delta_<criterion>__<baseline>`` (with ``delta_<criterion>_unresolved__<baseline>: 1``
-below full coverage) and ``agreement_<criterion>``. The machine needs
+below full coverage) and ``agreement_<criterion>``. Because those keys are built from
+criterion ids, an id may not be ``cases``, ``graded`` or ``coverage``, start with ``delta_`` or
+``agreement_``, end with ``_lower``, ``_upper`` or ``_unresolved``, or contain ``__``: any of
+them could overwrite another figure or make a key ambiguous. The machine needs
 ``strata-forge[serving,scoring,storage,hf]`` and a GPU for the judge.
 
 ### Fine-tuning pins, checks and manifest
@@ -970,6 +1046,113 @@ download or GPU time and again at push time, as for batch inference. The push
 never uploads ``checkpoint-*``: a ``seq_cls`` run writes its intermediate
 checkpoints beside the artifact, and the causal-LM methods' are excluded from
 the upload by name.
+
+### Latency benchmark (`benchmark_runner`)
+
+``python -m strata_forge.pipelines.benchmark_runner`` measures one pinned
+model on one pinned workload split. It is a bounded measurement job, not a
+serving deployment: nothing it reports is an online-serving latency or a
+production target. The spec (``BenchmarkSpec``) has the batch spec's shape
+with both pins required (``model_revision`` and ``dataset_commit_sha``, full
+40-character commits) and ``hyperparams`` a ``BenchmarkHyperparams``:
+
+| Field | Meaning |
+|---|---|
+| ``engine_settings`` | Required. A batch run's own ``Hyperparams``, whose ``engine`` picks the engine: ``hf_classify`` or ``vllm_chat`` (``max_tokens`` required: a generation's length decides its latency). ``hf_classify`` with ``artifact: strata_verifier`` times a verifier trained by ``seq_cls`` through its own rendering and heads (the **headline path**, its templates fixed to ``{premises}`` / ``{hypothesis}``; ``apply_calibration`` applies); without ``artifact`` it is the plain AutoModel path, recorded as a **third-party reference model**. An allow-list per engine: a knob the benchmark does not apply (``row_limit``, ``scoring_batch_size``, ``slice_column``, ``n``, ...) is refused. |
+| ``boundaries`` | ``end_to_end`` (required: ``total_ms``, the headline) and optionally ``model_only`` (``forward_ms``, a diagnostic). ``vllm_chat`` measures ``end_to_end`` only. |
+| ``batch_sizes`` / ``concurrency`` | The grid; their product is the configurations, at most 32. ``hf_classify`` runs one request stream (``concurrency`` ``[1]``); ``vllm_chat`` sends one request per iteration (``batch_sizes`` ``[1]``). |
+| ``warmup`` | Requests (full batches above batch size one) run untimed before EVERY timed pass, on the same workload, with no restart and no cache clear, drawn with ``random.Random(warmup_seed + pass_index)``. Default 50. |
+| ``passes`` | Timed passes per configuration, each over the whole sample in the order ``random.Random(order_seed + pass_index)`` shuffles it, never length-sorted. Default 5. |
+| ``item_cap`` | Every row of the pinned split is read; a split with more rows than this is refused (read up to one past it), never truncated. Default 100,000. |
+| ``sample_size`` / ``sample_seed`` | Optional ``random.Random(sample_seed).sample`` of the eligible rows, in row order; unset, every eligible row. |
+| ``order_seed`` / ``warmup_seed`` | Defaults 1000 and 2000; at least ``passes`` apart, so a warmup never replays another pass's order. All three seeds are in the manifest. |
+| ``wall_clock_cap_s`` | A hard stop on measuring, checked before each iteration starts. Reaching it marks the results incomplete and every unstarted configuration ``not_measured``. Default 1800, at most 6 hours. |
+| ``max_input_tokens`` / ``item_count_column`` / ``max_items`` | Exclusions (the protocol's are 8,192 tokens and 20 premises), counted by reason (``unmeasurable``, ``over_model_limit``, ``over_max_input_tokens``, ``over_max_items``) and never timed. Lengths are measured at run time with this model's own tokenizer and template: the verifier's own rendering, the pair with special tokens for the reference path, the prompt after the chat template for ``vllm_chat``. |
+| ``length_buckets`` / ``item_buckets`` | Inclusive ascending upper edges (``[512, 2048, 4096, 8192]`` gives ``0-512``, ``513-2048``, ...). At a batch size of one each bucket (L by tokens, P by items) gets its own percentiles. |
+| ``bootstrap_resamples`` / ``bootstrap_seed`` | Optional, off by default, diagnostic only: percentile-bootstrap intervals for the pooled percentiles (``metrics.latency_bootstrap``). Never the headline and never a pass/fail input. |
+| ``prefix_caching`` | ``vllm_chat`` only, default ``false``: the model server is launched with ``--no-enable-prefix-caching``, since every pass replays the same prompts and a cached prefill would understate the time. Recorded in the engine facts. |
+| ``require_gpu`` | Optional. Refuse to measure unless every visible GPU's reported name contains it (``H100``). |
+
+**Timing boundaries.** ``total_ms`` (the headline) is read from
+``time.perf_counter_ns``. On the verifier path it runs from the raw
+``(premises, hypothesis)`` cells in memory through the verifier's own
+rendering, tokenization, the host-to-device copy, the forward pass and the
+auxiliary heads, the copies back to the host, the 3-way softmax, the flag
+head's sigmoid (``p_inconsistent``) and the support head's per-premise
+sigmoids (``support_scores``), and stops after ONE
+``torch.cuda.synchronize()``. On the reference path it runs from the text
+pair through tokenization, the forward pass and a softmax to the
+probabilities on the host, and stops after the same single synchronization.
+``forward_ms`` (diagnostic) is two CUDA events recorded around the forward
+pass in the same request and read after that synchronization; no
+synchronization is added to take it (on a CPU, ``perf_counter_ns`` around
+the forward pass). The dtype (bf16 accepted) and the attention
+implementation are recorded. A batch above one is consecutive rows of the
+order, padded to its longest pair; the rows that do not fill a last batch are
+counted, not timed. With ``vllm_chat`` the model is served on loopback, and
+end to end is one chat request: the HTTP request, templating, tokenization,
+queueing, prefill and decode, and the response; the client has no cache and
+makes one attempt. An iteration that raises stops its configuration, with its
+exception text redacted.
+
+**The GPU.** Before anything is loaded, ``nvidia-smi`` is asked for compute
+processes on the GPUs ``CUDA_VISIBLE_DEVICES`` exposes, other than this
+runner and its model server: one refuses the run. The same check runs before
+every pass's warmup; a process found then stops the run as incomplete,
+``gpu_busy``. Clocks are never locked: the SM and memory clocks, power limit
+and draw, temperature and persistence mode are recorded at the start and end
+of every pass (``gpu_telemetry``). The probes run between passes, never
+while an iteration is timed. Without ``nvidia-smi`` the check is
+``unavailable`` and the headline is not readable.
+
+**Statistics.** Only completed passes are summarized: a pass cut short (a
+failure, the cap, a busy GPU) stays in ``timings.parquet`` with
+``pass_completed`` false and never enters a percentile, the across-pass
+median, the throughput or a bucket. Per configuration and boundary: per-pass
+p50/p95/p99 (Hyndman-Fan type 7, equal to ``numpy.percentile``), their median
+across passes with min and max, and the pooled percentiles; throughput is
+items (and tokens) per second over the union of the measured intervals.
+Latency is per request at a batch size of one and per batch above it. The
+**headline** of each configuration is the median of the per-pass end-to-end
+p95 with their minimum and maximum (``headline``). ``headline_readable`` is
+true only for a complete run whose GPU was checked idle throughout: an
+incomplete run has no T13 read, and ``headline_unreadable_reason`` says why.
+Every summary number is finite: NaN and infinity are refused.
+
+**Outputs.** ``timings.parquet`` (one row per measured iteration: the
+configuration, pass and ``pass_completed``, the iteration, the row indices,
+token and item counts, buckets, ``total_ms``, ``forward_ms`` and output
+tokens; never row text), ``summary.json`` (``BenchmarkSummary``, ``format``
+``strata.benchmark.summary/v1``: completeness, its reason and
+``incomplete_codes`` (``gpu_busy``, ``wall_clock_cap``,
+``stopped_on_failure``, ``server_died``, ``not_measured``), the headline
+readability, the model path, the GPU idle check and telemetry, the sample and
+exclusion counts, the cold start, a short GPU receipt and every
+configuration's result) and ``manifest.json`` (``kind`` ``benchmark``: both
+pins and commits, the protocol in words with its seeds, the engine facts, the
+full environment receipt, the counts and ``compute``). They are written
+outside the workdir under ``~/strata-benchmark-results/<run_id>`` and pushed
+in ONE commit to a private output repo that holds nothing else; with no write
+token they stay on the machine. A copy of the summary is left in the workdir
+as ``benchmark-summary.json`` for the orchestrator to read. If the model
+server dies mid-run, the measured configurations are still written and pushed
+(the rest ``not_measured``) and the run then fails as incomplete.
+
+**The environment receipt** is what the machine reports, never what the run
+asked for: per visible GPU from ``nvidia-smi`` (index, name, total memory,
+driver, persistence mode, current and maximum SM clock, power limit, PCI bus
+id) and how many compute processes held one before the model loaded; from
+torch, its version, CUDA runtime, cuDNN, and the device; the installed
+versions of torch, transformers, tokenizers, safetensors, vLLM, NumPy,
+datasets and huggingface-hub; and ``CUDA_VISIBLE_DEVICES``. A field the
+machine could not report is ``null``. The cold start is recorded separately
+from every percentile.
+
+The ``end`` event's metrics are ``iterations_measured``,
+``configurations_measured``, ``configurations``, ``complete`` and
+``headline_readable`` (1 or 0), ``gpu_count`` and ``gpu_seconds`` (this
+process's wall time times the visible GPUs). A run that measured no
+iteration at all fails after writing its files.
 
 ### The runner contract
 
