@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from strata_forge.datasets.recipe import (
+    ConcatStep,
     GenerationResult,
     Recipe,
     RecipeError,
@@ -24,6 +25,7 @@ from strata_forge.datasets.recipe import (
     profile_table,
     recipe_sha256,
     render_prompt,
+    split_class,
 )
 
 if TYPE_CHECKING:
@@ -390,9 +392,15 @@ def test_append_keeps_the_seed_rows_before_the_generated_ones() -> None:
 
 
 def test_synthesis_never_reads_held_out_rows_and_needs_a_generator() -> None:
-    recipe = _recipe({"kind": "concat", "source": "held"}, _synth(max_seed_rows=10))
+    with pytest.raises(ValidationError, match="training splits only; held"):
+        _recipe({"kind": "concat", "source": "held"}, _synth(max_seed_rows=10))
+    # The engine re-checks every seed row's origin even for a recipe built without validation.
+    valid = _recipe(_synth(max_seed_rows=10))
+    forged = valid.model_copy(
+        update={"steps": (valid.steps[0], ConcatStep(source="held"), *valid.steps[1:])}
+    )
     with pytest.raises(RecipeError, match="held-out data \\(held\\)"):
-        execute(recipe, _read, generate=_Fake())
+        execute(forged, _read, generate=_Fake())
     with pytest.raises(RecipeError, match="no generator"):
         execute(_recipe(_synth()), _read)
     with pytest.raises(ValidationError, match="does not declare"):
@@ -470,3 +478,143 @@ def test_the_golden_fixture_is_what_the_engine_produces() -> None:
         _GOLDEN.write_text(json.dumps(case, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
     stored: Mapping[str, Any] = json.loads(_GOLDEN.read_text())
     assert stored == json.loads(json.dumps(case, ensure_ascii=False))
+
+
+# ------------------------------------------------------------------ held-out data, bounds
+
+
+@pytest.mark.parametrize(
+    "split",
+    [
+        "train+test",
+        "train[:10]+validation",
+        "train[:10%]",
+        "train[-5:]",
+        "train(closest)",
+        " train",
+        "train[9:3]",
+    ],
+)
+def test_a_source_reads_exactly_one_split(split: str) -> None:
+    with pytest.raises(ValidationError, match="one split name"):
+        _recipe(sources=[_source("tickets", split=split)])
+
+
+@pytest.mark.parametrize("split", ["train", "train[0:100]", "train[:5]", "train_v2"])
+def test_a_plain_or_row_sliced_split_is_accepted(split: str) -> None:
+    assert _recipe(sources=[_source("tickets", split=split)]).sources[0].split == split
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("train", "train"),
+        ("training", "train"),
+        ("train_v2", "train"),
+        ("train2024", "train"),
+        ("test", "held_out"),
+        ("validation", "held_out"),
+        ("val", "held_out"),
+        ("dev", "held_out"),
+        ("devSet", "held_out"),
+        ("eval_v2", "held_out"),
+        ("private_test", "held_out"),
+        ("public_test", "held_out"),
+        ("held_out", "held_out"),
+        ("hold-out", "held_out"),
+        ("heldOut", "held_out"),
+        ("testset", "held_out"),
+        ("train_test", "held_out"),
+        ("default", "ambiguous"),
+        ("full", "ambiguous"),
+        ("train_extra", "ambiguous"),
+    ],
+)
+def test_split_names_are_classified_by_their_tokens(name: str, expected: str) -> None:
+    assert split_class(name) == expected
+
+
+@pytest.mark.parametrize("split", ["private_test", "held_out", "default", "test[0:5]"])
+def test_a_generating_recipe_refuses_any_split_that_is_not_training(split: str) -> None:
+    with pytest.raises(ValidationError, match="training splits only"):
+        _recipe(_synth(), sources=[_source("tickets", split=split)])
+
+
+def test_held_out_rows_keep_a_held_out_name_without_generation() -> None:
+    held = [_source("tickets", split="validation")]
+    with pytest.raises(ValidationError, match=r"would relabel it"):
+        _recipe(sources=held)  # the default output split is `train`
+    with pytest.raises(ValidationError, match=r"would relabel it"):
+        _recipe({"kind": "split", "ratios": {"train": 0.5, "test": 0.5}, "seed": 1}, sources=held)
+    kept = Recipe.model_validate(
+        {
+            "name": "relabel-check",
+            "sources": held,
+            "steps": [{"kind": "load", "source": "tickets"}],
+            "default_split": "validation",
+        }
+    )
+    assert kept.holdout_sources == ("tickets",)
+    assert _recipe({"kind": "split", "ratios": {"test": 0.5, "dev": 0.5}, "seed": 1}, sources=held)
+
+
+def test_a_declared_but_unread_held_out_source_does_not_mark_the_output() -> None:
+    recipe = _recipe(_synth())  # declares `held` (validation) and never reads it
+    assert recipe.used_sources == ("tickets",)
+    assert recipe.holdout_sources == ()
+
+
+def test_the_byte_cap_stops_a_source_while_it_loads() -> None:
+    with pytest.raises(RecipeError, match="MiB of values"):
+        execute(_recipe(), lambda _s: [{**_TICKETS[0], "text": "x" * 4096}] * 600, byte_cap=1024**2)
+
+
+def test_the_row_cap_stops_a_join_while_it_grows() -> None:
+    left = [{"ticket": 1, "text": "a", "lang": "en", "priority": 1}] * 40
+    right = [{"ticket": 1, "label": "l"}] * 40
+    rows = {"tickets": left, "labels": right}
+    recipe = _recipe({"kind": "join", "source": "labels", "on": ["ticket"]})
+    with pytest.raises(RecipeError, match="step 2 holds more than 100 rows"):
+        execute(recipe, lambda s: rows[s.name], row_cap=100)
+
+
+def test_text_in_a_recipe_is_bounded() -> None:
+    with pytest.raises(ValidationError):
+        _recipe({"kind": "map_columns", "templates": {"t": "x" * 20_001}})
+    with pytest.raises(ValidationError):
+        _recipe({"kind": "map_columns", "constants": {"t": "x" * 10_001}})
+    with pytest.raises(ValidationError, match="at most 1,000 values"):
+        _recipe(
+            {
+                "kind": "filter",
+                "conditions": [{"column": "lang", "op": "in", "value": ["en"] * 1001}],
+            }
+        )
+    with pytest.raises(ValidationError, match="KiB"):
+        _recipe(
+            *[
+                {"kind": "map_columns", "templates": {f"c{i}": "x" * 19_000 for i in range(16)}}
+                for _ in range(2)
+            ]
+        )
+
+
+def test_an_output_schema_the_engine_cannot_guide_is_refused_in_the_recipe() -> None:
+    with pytest.raises(ValidationError, match="output_schema"):
+        _recipe(
+            _synth(
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "customer": {"type": "nonsense"},
+                        "response": {"type": "string"},
+                    },
+                }
+            )
+        )
+
+
+def test_a_dataset_version_reference_is_a_record_id() -> None:
+    with pytest.raises(ValidationError):
+        _recipe(sources=[_source("tickets", dataset_version="../etc")])
+    assert _recipe(sources=[_source("tickets", dataset_version="a" * 32)])

@@ -32,9 +32,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - Dataset recipes, `strata_forge.datasets.recipe`: a declarative, versioned record (`Recipe`,
   `strata.dataset_recipe/v1`) of pinned sources and ordered steps (load, concat, join, filter,
   map_columns, dedupe, split, synthesize), executed by a pure engine with stable row ids, recorded
-  exclusions and per-step counts; generation is injected, marks every generated row synthetic and
-  refuses held-out splits. `profile_table`, `diff_tables` and `recipe_sha256` for review and
-  revisions.
+  exclusions and per-step counts; generation is injected and marks every generated row synthetic.
+  A source reads one split (a name and at most a `[start:end]` row slice, no `+`), classified by
+  normalized tokens (`split_class`: train, held-out or ambiguous). A generating recipe reads
+  training splits only, and a recipe that reads any other split must name every output split as
+  held out. Row and byte caps hold while sources load and joins grow, and the document's text is
+  size-bounded. `profile_table`, `diff_tables` and `recipe_sha256` for review and revisions.
 
 ## [0.8.0] - 2026-11-18
 

@@ -17,22 +17,32 @@ split), a joined row ``<left>+<right>``, a generated one ``gen:<seed row>:<sampl
 drops is recorded as an exclusion with its reason, so a materialized version can say exactly what
 it left out.
 
-Two rules are enforced here rather than left to the caller. A ``synthesize`` step refuses any row
-that came from a validation, test or other held-out split: generation reads training data only.
-Generation itself is injected (:class:`Generator`), so this module never loads a model; the
-recipe runner supplies one that calls the batch engine, and tests supply a fake.
+Held-out data never reaches generation, and is never relabelled as training data. A source's
+``split`` is one split name with at most a ``[start:end]`` row slice (no ``+`` combinations, no
+percent, parsed with the engine's split-syntax parser), and its name is classified by normalized
+tokens (:func:`split_class`): ``train`` only when every token says training, ``held_out`` when any
+token says test, validation, dev, eval or held-out, and ``ambiguous`` otherwise. A recipe that
+generates may read ``train`` sources only (an ambiguous name is refused like a held-out one), and a
+``synthesize`` step re-checks every seed row's origin. A recipe that reads any source not
+classified ``train`` must name every output split as held out, so its output cannot be read back
+as training data by a later recipe. Generation itself is injected (:class:`Generator`), so this
+module never loads a model; the recipe runner supplies one that calls the batch engine, and tests
+supply a fake.
 
-Pure Python over ``dict`` rows, bounded by ``row_cap``; no I/O.
+Pure Python over ``dict`` rows, bounded by ``row_cap`` rows and ``byte_cap`` bytes held (both
+checked while a source is loaded and while a join is built, not only after); no I/O.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import random
 import re
+from collections.abc import Sized
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 
 from pydantic import (
     BaseModel,
@@ -42,17 +52,21 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     StrictStr,
+    field_validator,
     model_validator,
 )
 
 from strata_forge.core.errors import ValidationError
 from strata_forge.core.repro import content_hash
+from strata_forge.pipelines._guided import schema_problem
+from strata_forge.pipelines._split_overlap import parse_single_split
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
-    "HOLDOUT_SPLIT",
+    "MAX_BYTE_CAP",
+    "MAX_RECIPE_BYTES",
     "RECIPE_SCHEMA",
     "Condition",
     "Exclusion",
@@ -64,6 +78,7 @@ __all__ = [
     "RecipeOutput",
     "Row",
     "Source",
+    "SplitClass",
     "StepCount",
     "Table",
     "diff_tables",
@@ -71,13 +86,10 @@ __all__ = [
     "profile_table",
     "recipe_sha256",
     "render_prompt",
+    "split_class",
 ]
 
 RECIPE_SCHEMA = "strata.dataset_recipe/v1"
-#: A split whose name says it is held out. Its rows may be transformed but never generated from.
-HOLDOUT_SPLIT = re.compile(
-    r"^(validation|valid|val|dev|test|eval|evaluation|holdout|heldout)", re.I
-)
 _NAME = r"^[a-z][a-z0-9_-]{0,63}$"
 _COLUMN = r"^[A-Za-z_][A-Za-z0-9_ .-]{0,127}$"
 _SHA = r"^[0-9a-f]{40}$"
@@ -86,9 +98,76 @@ _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 #: Column names the engine writes into every output row; a recipe may not produce them itself.
 RESERVED_COLUMNS = frozenset({"_row_id", "_synthetic", "_seed_row_id"})
 MAX_ROW_CAP = 2_000_000
+#: The most bytes of row values one execution holds (estimated from the values themselves).
+MAX_BYTE_CAP = 16 * 1024**3
+DEFAULT_BYTE_CAP = 2 * 1024**3
+#: The largest recipe document, as canonical JSON.
+MAX_RECIPE_BYTES = 256 * 1024
+_MAX_TEXT = 10_000
 
-type Scalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
+type Scalar = (
+    Annotated[StrictStr, Field(max_length=_MAX_TEXT)] | StrictInt | StrictFloat | StrictBool | None
+)
 type Column = Annotated[str, Field(pattern=_COLUMN)]
+
+type SplitClass = Literal["train", "held_out", "ambiguous"]
+
+_TRAIN_TOKENS = frozenset({"train", "training"})
+_FILLER_TOKEN = re.compile(r"^(?:v|v?\d+)$")
+_HELD_OUT_TOKENS = frozenset(
+    {
+        "val",
+        "dev",
+        "test",
+        "tests",
+        "testing",
+        "valid",
+        "validation",
+        "validate",
+        "eval",
+        "evals",
+        "evaluation",
+        "evaluate",
+        "holdout",
+        "heldout",
+        "hidden",
+        "blind",
+        "unseen",
+        "gold",
+    }
+)
+#: Held-out words that also count inside a longer token (``testset``, ``devtest``, ``evalv2``).
+_HELD_OUT_PARTS = ("test", "valid", "eval", "holdout", "heldout")
+_HELD_OUT_PAIRS = frozenset({("held", "out"), ("hold", "out")})
+
+
+def _tokens(name: str) -> list[str]:
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
+    spaced = re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", spaced)
+    return [t for t in re.split(r"[^a-z0-9]+", spaced.lower()) if t]
+
+
+def split_class(name: str) -> SplitClass:
+    """What a split's NAME says it holds: ``train``, ``held_out`` or ``ambiguous``.
+
+    Tokens are the name lowercased and cut at every non-alphanumeric character, case change and
+    letter/digit boundary. Any held-out signal wins (``private_test``, ``public-test``,
+    ``held_out``, ``hold-out``, ``devSet``, ``train_test``); ``train`` needs a training token and
+    nothing but version numbers besides (``train``, ``train_v2``); anything else is ambiguous.
+    """
+    tokens = _tokens(name)
+    if not tokens:
+        return "ambiguous"
+    if any(
+        t in _HELD_OUT_TOKENS or t.startswith("dev") or any(p in t for p in _HELD_OUT_PARTS)
+        for t in tokens
+    ) or any(pair in _HELD_OUT_PAIRS for pair in itertools.pairwise(tokens)):
+        return "held_out"
+    if any(t in _TRAIN_TOKENS for t in tokens) and all(
+        t in _TRAIN_TOKENS or _FILLER_TOKEN.match(t) for t in tokens
+    ):
+        return "train"
+    return "ambiguous"
 
 
 class RecipeError(ValidationError):
@@ -106,15 +185,37 @@ class Source(_Frozen):
     hf_repo_id: str = Field(pattern=_REPO)
     revision: str = Field(pattern=_SHA)
     config: str | None = Field(default=None, min_length=1, max_length=128)
+    # One split name with at most a `[start:end]` row slice (`train`, `train[0:5000]`).
     split: str = Field(min_length=1, max_length=128)
     # Only these columns are read; unset, every column of the split.
     columns: tuple[Column, ...] | None = Field(default=None, max_length=512)
-    # The project dataset version this pin came from, when it came from one (a record id).
-    dataset_version: str | None = Field(default=None, max_length=64)
+    # The project dataset version this pin came from, when it came from one (a record id the
+    # control plane checks belongs to the project).
+    dataset_version: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+
+    @model_validator(mode="after")
+    def _split_is_one_split(self) -> Source:
+        if parse_single_split(self.split) is None:
+            msg = (
+                f"source {self.name!r}: split {self.split!r} must be one split name with at most a "
+                "[start:end] row slice (no '+', percent, negative index or rounding)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def split_name(self) -> str:
+        parsed = parse_single_split(self.split)
+        return parsed.name if parsed is not None else self.split
+
+    @property
+    def split_class(self) -> SplitClass:
+        return split_class(self.split_name)
 
     @property
     def holdout(self) -> bool:
-        return HOLDOUT_SPLIT.match(self.split) is not None
+        """Whether this split may hold held-out rows: anything not classified ``train``."""
+        return self.split_class != "train"
 
 
 class Condition(_Frozen):
@@ -124,7 +225,15 @@ class Condition(_Frozen):
     op: Literal[
         "eq", "ne", "lt", "le", "gt", "ge", "in", "not_in", "contains", "is_null", "not_null"
     ]
-    value: Scalar | tuple[Scalar, ...] = None
+    value: Scalar | tuple[Scalar, ...] = Field(default=None)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _bounded_list(cls, value: object) -> object:
+        if isinstance(value, Sized) and not isinstance(value, str) and len(value) > 1000:
+            msg = "a condition lists at most 1,000 values"
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="after")
     def _value_fits_the_op(self) -> Condition:
@@ -174,7 +283,9 @@ class MapColumnsStep(_Frozen):
     """Derive, then select, then rename. ``templates`` fill ``{column}`` from the same row."""
 
     kind: Literal["map_columns"] = "map_columns"
-    templates: dict[Column, str] = Field(default_factory=dict[str, str], max_length=64)
+    templates: dict[Column, Annotated[str, Field(max_length=20_000)]] = Field(
+        default_factory=dict[str, str], max_length=64
+    )
     constants: dict[Column, Scalar] = Field(default_factory=dict[str, Scalar], max_length=64)
     select: tuple[Column, ...] | None = Field(default=None, max_length=512)
     rename: dict[Column, Column] = Field(default_factory=dict[str, str], max_length=512)
@@ -246,6 +357,10 @@ class SynthesizeStep(_Frozen):
         if len(json.dumps(schema)) > 20_000:
             msg = "output_schema is over 20,000 characters"
             raise ValueError(msg)
+        problem = schema_problem(schema)
+        if problem is not None:
+            msg = f"output_schema: {problem}"
+            raise ValueError(msg)
         return self
 
 
@@ -296,7 +411,57 @@ class Recipe(BaseModel):
             if step.kind == "split" and index != len(self.steps) - 1:
                 msg = "a split step must be the last step"
                 raise ValueError(msg)
+        self._held_out_stays_held_out()
+        if len(json.dumps(self.canonical(), separators=(",", ":"))) > MAX_RECIPE_BYTES:
+            msg = f"the recipe is over {MAX_RECIPE_BYTES // 1024} KiB"
+            raise ValueError(msg)
         return self
+
+    def _held_out_stays_held_out(self) -> None:
+        used = set(self.used_sources)
+        not_train = [s for s in self.sources if s.holdout and s.name in used]
+        if not not_train:
+            return
+        named = ", ".join(
+            f"{s.name} ({s.split_name}: {s.split_class.replace('_', '-')})" for s in not_train
+        )
+        if self.generates:
+            msg = (
+                f"a recipe that generates reads training splits only; {named} "
+                "is not a training split"
+            )
+            raise ValueError(msg)
+        outputs = list(self.output_splits)
+        relabelled = [o for o in outputs if split_class(o) != "held_out"]
+        if relabelled:
+            msg = (
+                f"this recipe reads {named}, so every output split must be named as held out "
+                f"(such as test or validation); {relabelled} would relabel it"
+            )
+            raise ValueError(msg)
+
+    @property
+    def output_splits(self) -> tuple[str, ...]:
+        last = self.steps[-1]
+        if isinstance(last, SplitStep):
+            return tuple(last.ratios)
+        return (self.default_split,)
+
+    @property
+    def used_sources(self) -> tuple[str, ...]:
+        """The sources a step reads, in first-use order (a declared, unread source is never read)."""
+        seen: dict[str, None] = {}
+        for step in self.steps:
+            source = getattr(step, "source", None)
+            if isinstance(source, str):
+                seen.setdefault(source, None)
+        return tuple(seen)
+
+    @property
+    def holdout_sources(self) -> tuple[str, ...]:
+        """The read sources not classified ``train``: an output derived from them is held out."""
+        used = set(self.used_sources)
+        return tuple(s.name for s in self.sources if s.holdout and s.name in used)
 
     def source(self, name: str) -> Source:
         return next(s for s in self.sources if s.name == name)
@@ -423,30 +588,61 @@ def render_prompt(template: str, values: Mapping[str, Any]) -> str:
     return _PLACEHOLDER.sub(_sub, template)
 
 
+def _size(value: Any) -> int:
+    """An estimate of the bytes ``value`` holds: text and bytes by length, containers summed."""
+    if isinstance(value, str | bytes | bytearray):
+        return 8 + len(value)
+    if isinstance(value, dict):
+        mapping = cast("dict[Any, Any]", value)
+        return 8 + sum(_size(k) + _size(v) for k, v in mapping.items())
+    if isinstance(value, list | tuple):
+        return 8 + sum(_size(v) for v in value)  # pyright: ignore[reportUnknownVariableType]
+    return 8
+
+
+@dataclass(slots=True)
+class _Budget:
+    """The rows and bytes one execution may hold, checked as rows are added."""
+
+    row_cap: int
+    byte_cap: int
+
+    def check(self, rows: int, held: int, where: str) -> None:
+        if rows > self.row_cap:
+            msg = f"{where} holds more than {self.row_cap} rows"
+            raise RecipeError(msg)
+        if held > self.byte_cap:
+            msg = f"{where} holds more than {self.byte_cap // 1024**2} MiB of values"
+            raise RecipeError(msg)
+
+
+def _held(table: Table) -> int:
+    return sum(_size(row.values) for row in table.rows)
+
+
 def _load(
-    source: Source, read: Callable[[Source], Sequence[Mapping[str, Any]]], row_cap: int
+    source: Source, read: Callable[[Source], Sequence[Mapping[str, Any]]], budget: _Budget
 ) -> Table:
     raw = read(source)
-    if len(raw) > row_cap:
-        msg = f"source {source.name!r} holds more than {row_cap} rows"
-        raise RecipeError(msg)
+    where = f"source {source.name!r}"
+    budget.check(len(raw), 0, where)
     columns = list(source.columns) if source.columns is not None else list(raw[0]) if raw else []
     clash = sorted(RESERVED_COLUMNS & set(columns))
     if clash:
         msg = f"source {source.name!r} has engine-reserved columns {clash}"
         raise RecipeError(msg)
     rows: list[Row] = []
+    held = 0
     for index, record in enumerate(raw):
         missing = [c for c in columns if c not in record]
         if missing:
             msg = f"source {source.name!r} row {index} lacks columns {missing}"
             raise RecipeError(msg)
+        values = {c: record[c] for c in columns}
+        held += _size(values)
+        budget.check(len(rows) + 1, held, where)
         rows.append(
-            Row(
-                id=f"{source.name}:{index}",
-                values={c: record[c] for c in columns},
-                origins=frozenset({source.name}),
-            )
+            Row(id=f"{source.name}:{index}", values=values, origins=frozenset({source.name}))
         )
     return Table(rows, columns)
 
@@ -515,7 +711,9 @@ def _key(values: Mapping[str, Any], columns: Sequence[str], normalize: str = "ex
     return json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def _join(left: Table, right: Table, step: JoinStep, index: int) -> tuple[Table, list[Exclusion]]:
+def _join(
+    left: Table, right: Table, step: JoinStep, index: int, budget: _Budget
+) -> tuple[Table, list[Exclusion]]:
     _need(left, step.on, index)
     _need(right, step.on, index)
     extra = [c for c in (step.right_columns or right.columns) if c not in step.on]
@@ -532,6 +730,10 @@ def _join(left: Table, right: Table, step: JoinStep, index: int) -> tuple[Table,
         by_key.setdefault(_key(row.values, step.on), []).append(row)
     rows: list[Row] = []
     excluded: list[Exclusion] = []
+    # The join is checked as it grows: a many-to-many key can multiply rows far past the cap, and
+    # the check must stop it before it is held, not after.
+    held = _held(left) + _held(right)
+    where = f"step {index}"
     for row in left.rows:
         matches = (
             by_key.get(_key(row.values, step.on), [])
@@ -543,12 +745,16 @@ def _join(left: Table, right: Table, step: JoinStep, index: int) -> tuple[Table,
                 rows.append(
                     Row(row.id, {**row.values, **dict.fromkeys(names.values())}, row.origins)
                 )
+                held += _size(rows[-1].values)
+                budget.check(len(rows), held, where)
             else:
                 excluded.append(Exclusion(row.id, index, "no_join_match"))
             continue
         for match in matches:
             values = {**row.values, **{names[c]: match.values.get(c) for c in extra}}
             rows.append(Row(f"{row.id}+{match.id}", values, row.origins | match.origins))
+            held += _size(values)
+            budget.check(len(rows), held, where)
     return Table(rows, [*left.columns, *names.values()]), excluded
 
 
@@ -696,16 +902,22 @@ def execute(
     *,
     generate: Generator | None = None,
     row_cap: int = 1_000_000,
+    byte_cap: int = DEFAULT_BYTE_CAP,
 ) -> RecipeOutput:
     """Run ``recipe`` over the rows ``read`` returns for each pinned source.
 
     ``read`` receives a :class:`Source` and returns its split's rows in order (the caller reads the
     pinned commit; this module does not). ``generate`` runs ``synthesize`` steps; a recipe with
-    one and no generator is refused. A table past ``row_cap`` rows is refused, never truncated.
+    one and no generator is refused. A table past ``row_cap`` rows or ``byte_cap`` bytes of values
+    is refused, never truncated; a source and a join are checked while they are built.
     """
     if not 1 <= row_cap <= MAX_ROW_CAP:
         msg = f"row_cap is from 1 to {MAX_ROW_CAP}"
         raise RecipeError(msg)
+    if not 1 <= byte_cap <= MAX_BYTE_CAP:
+        msg = f"byte_cap is from 1 to {MAX_BYTE_CAP}"
+        raise RecipeError(msg)
+    budget = _Budget(row_cap, byte_cap)
     output = RecipeOutput(splits={})
     table = Table([], [])
     splits: dict[str, Table] | None = None
@@ -715,16 +927,16 @@ def execute(
         excluded: list[Exclusion] = []
         generated = 0
         if isinstance(step, LoadStep):
-            table = _load(recipe.source(step.source), read, row_cap)
+            table = _load(recipe.source(step.source), read, budget)
         elif isinstance(step, ConcatStep):
-            other = _load(recipe.source(step.source), read, row_cap)
+            other = _load(recipe.source(step.source), read, budget)
             table = Table(
                 [*table.rows, *other.rows],
                 [*table.columns, *[c for c in other.columns if c not in table.columns]],
             )
         elif isinstance(step, JoinStep):
             table, excluded = _join(
-                table, _load(recipe.source(step.source), read, row_cap), step, index
+                table, _load(recipe.source(step.source), read, budget), step, index, budget
             )
         elif isinstance(step, FilterStep):
             _need(table, [c.column for c in step.conditions], index)
@@ -754,9 +966,7 @@ def execute(
             splits = _split(table, step, index)
         else:
             table, excluded, generated = _synthesize(table, step, index, recipe, generate)
-        if len(table.rows) > row_cap:
-            msg = f"step {index} produced more than {row_cap} rows"
-            raise RecipeError(msg)
+        budget.check(len(table.rows), _held(table), f"step {index}")
         output.exclusions.extend(excluded)
         output.counts.append(
             StepCount(index, step.kind, before, len(table.rows), len(excluded), generated)
