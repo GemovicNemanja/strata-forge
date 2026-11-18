@@ -102,11 +102,14 @@ from strata_forge.pipelines._environment import (
     short_receipt,
 )
 from strata_forge.pipelines._scoring import (
+    PrefixCache,
     VerifierRunScorer,
     VerifierScorer,
     build_inputs,
     load_classifier,
     load_verifier,
+    prefix_reuse_error,
+    timed_prefix_request,
     timed_verifier_request,
 )
 from strata_forge.pipelines.inference_runner import Hyperparams, RunSpec, render_template
@@ -305,6 +308,13 @@ class BenchmarkHyperparams(BaseModel):
     # replays the same prompts, so a cached prefill would understate the end-to-end time. Recorded
     # in the manifest either way.
     prefix_caching: StrictBool = False
+    # A decoder verifier only (`artifact: strata_verifier`, batch size 1): reuse the premise
+    # prefix's KV cache. A request whose premise prefix is not cached fills it inside its own
+    # clock; one whose prefix is cached reuses it. The cache is never cleared (warmup, passes and
+    # configurations share it) and is bounded by `prefix_cache_max_bytes`, least recently used
+    # first out. Each configuration then makes one extra pass without the cache, a diagnostic.
+    prefix_reuse: StrictBool = False
+    prefix_cache_max_bytes: StrictInt = Field(default=8 * 1024**3, ge=1024**2, le=1024**4)
     # Refuse to measure unless every visible GPU's reported name contains this (e.g. "H100").
     require_gpu: str | None = Field(default=None, max_length=64)
 
@@ -388,7 +398,21 @@ class BenchmarkHyperparams(BaseModel):
         elif self.concurrency != [1]:
             msg = "engine 'hf_classify' runs one request stream in this process: concurrency must be [1]"
             raise ValueError(msg)
-        if abs(self.order_seed - self.warmup_seed) < self.passes:
+        if self.prefix_reuse:
+            if engine.engine != "hf_classify" or engine.artifact is None:
+                msg = (
+                    "prefix_reuse applies to a trained decoder verifier (artifact: strata_verifier)"
+                )
+                raise ValueError(msg)
+            if self.batch_sizes != [1]:
+                msg = "prefix_reuse reuses one request's premise prefix: batch_sizes must be [1]"
+                raise ValueError(msg)
+        elif "prefix_cache_max_bytes" in self.model_fields_set:
+            msg = "prefix_cache_max_bytes applies to prefix_reuse only"
+            raise ValueError(msg)
+        # The no-cache diagnostic pass of a prefix-reuse run uses the next pass index's seeds.
+        spacing = self.passes + (1 if self.prefix_reuse else 0)
+        if abs(self.order_seed - self.warmup_seed) < spacing:
             msg = (
                 "order_seed and warmup_seed are each offset by the pass index, so they must be at "
                 "least `passes` apart, or a pass's warmup would replay another pass's order"
@@ -416,7 +440,8 @@ class BenchmarkHyperparams(BaseModel):
 
 def planned_iterations(hp: BenchmarkHyperparams, sample: int) -> int:
     """The measured iterations a sample of ``sample`` rows plans over every configuration."""
-    return sum(hp.passes * (sample // b) for b in hp.batch_sizes for _ in hp.concurrency)
+    passes = hp.passes + (1 if hp.prefix_reuse else 0)
+    return sum(passes * (sample // b) for b in hp.batch_sizes for _ in hp.concurrency)
 
 
 class BenchmarkSpec(BaseModel):
@@ -555,6 +580,22 @@ def _verifier_step(scorer: VerifierScorer, cells: list[tuple[Any, Any]]) -> benc
     return _step
 
 
+def _prefix_step(
+    scorer: VerifierScorer, cache: PrefixCache, cells: list[tuple[Any, Any]]
+) -> bench.Step:
+    """A decoder verifier's request through the premise-prefix cache (batch size 1)."""
+
+    async def _step(rows: list[int]) -> bench.StepTiming:
+        start, end, forward, hit = await asyncio.to_thread(
+            timed_prefix_request, scorer, cache, cells[rows[0]], clock=time.perf_counter_ns
+        )
+        return bench.StepTiming(
+            start_ns=start, end_ns=end, forward_ms=forward, prefix_cache_hit=hit
+        )
+
+    return _step
+
+
 def _chat_step(client: LLMClient, prompts: list[str], hp: Hyperparams) -> bench.Step:
     extras = _sampling_extras(hp)
 
@@ -633,6 +674,7 @@ class _GpuGuard:
     def __init__(self) -> None:
         self.checked = True
         self.configuration = 0
+        self.kind: bench.PassKind = "timed"
         self.telemetry: list[bench.PassTelemetry] = []
 
     @staticmethod
@@ -671,6 +713,7 @@ class _GpuGuard:
             bench.PassTelemetry(
                 configuration=self.configuration,
                 pass_index=pass_index,
+                kind=self.kind,
                 at=at,
                 gpus=tuple(bench.GpuState.model_validate(g) for g in state[:16]),
             )
@@ -685,11 +728,16 @@ async def _measure(
     progress: _Progress,
     guard: _GpuGuard,
     is_alive: Callable[[], Any] | None = None,
+    no_cache_step: bench.Step | None = None,
+    diagnostics: dict[int, bench.ConfigurationOutcome] | None = None,
 ) -> tuple[list[bench.ConfigurationOutcome], str | None]:
     """Every configuration in grid order, under one wall-clock cap. Returns the stop reason.
 
     A stop (the cap, a busy GPU, a model server that died) leaves the configurations after it
     ``not_measured`` with that reason, so the measured ones are still summarized and pushed.
+    With ``no_cache_step`` (prefix reuse), each cleanly measured configuration then makes one
+    more pass through it, without the cache, under the next pass index's seeds; its outcome goes
+    into ``diagnostics`` by configuration index.
     """
     hp = spec.hyperparams
     deadline = time.perf_counter_ns() + int(hp.wall_clock_cap_s * 1e9)
@@ -734,6 +782,28 @@ async def _measure(
         )
         progress.finished(outcome)
         outcomes.append(outcome)
+        if no_cache_step is not None and diagnostics is not None and outcome.status == "measured":
+            guard.kind = "no_cache_diagnostic"
+            diagnostic = await bench.measure_configuration(
+                configuration,
+                sample=sample,
+                passes=1,
+                warmup=hp.warmup,
+                order_seed=hp.order_seed + hp.passes,
+                warmup_seed=hp.warmup_seed + hp.passes,
+                step=no_cache_step,
+                clock_ns=time.perf_counter_ns,
+                deadline_ns=deadline,
+                on_iteration=progress.iteration,
+                before_pass=guard.before_pass,
+                after_pass=guard.after_pass,
+                kind="no_cache_diagnostic",
+            )
+            guard.kind = "timed"
+            progress.finished(diagnostic)
+            diagnostics[configuration.index] = diagnostic
+            if diagnostic.status in ("wall_clock_cap", "gpu_busy"):
+                outcome = diagnostic  # the stop below names what ended the run
         if outcome.status == "wall_clock_cap":
             stopped = "the wall-clock cap was reached before this configuration started"
         elif outcome.status == "gpu_busy":
@@ -756,26 +826,44 @@ def _incomplete(
 ) -> tuple[str | None, tuple[bench.IncompleteCode, ...]]:
     """Why the run is incomplete, in a sentence and as codes; ``(None, ())`` when it is complete."""
     total = len(results)
-    measured = sum(1 for r in results if r.status == "measured" and not r.iterations_failed)
+    measured = sum(1 for r in results if bench.measured_cleanly(r))
     if measured == total:
         return None, ()
     codes: list[bench.IncompleteCode] = []
     parts: list[str] = []
-    busy = [r for r in results if r.status == "gpu_busy"]
+
+    def statuses(r: bench.ConfigurationResult) -> set[str]:
+        found: set[str] = {r.status}
+        if r.no_cache_diagnostic is not None:
+            found.add(r.no_cache_diagnostic.status)
+        return found
+
+    busy = [r for r in results if "gpu_busy" in statuses(r)]
     if busy:
         codes.append("gpu_busy")
         parts.append(
             f"gpu_busy: another process took the GPU before a pass of configuration "
             f"{busy[0].index}, so the run stopped there"
         )
-    capped = [r for r in results if r.status == "wall_clock_cap"]
+    capped = [r for r in results if "wall_clock_cap" in statuses(r)]
     if capped:
         codes.append("wall_clock_cap")
         parts.append(f"the wall-clock cap cut configuration {capped[0].index} short")
-    failed = [r for r in results if r.status == "stopped_on_failure"]
+    failed = [r for r in results if "stopped_on_failure" in statuses(r)]
     if failed:
         codes.append("stopped_on_failure")
         parts.append(f"{len(failed)} configuration(s) stopped on a failed iteration")
+    diagnostic = [
+        r
+        for r in results
+        if r.status == "measured"
+        and r.no_cache_diagnostic is not None
+        and r.no_cache_diagnostic.status != "measured"
+    ]
+    if diagnostic:
+        parts.append(
+            f"the no-cache diagnostic pass of configuration {diagnostic[0].index} did not finish"
+        )
     died = [r for r in results if r.status == "not_measured" and r.error == _SERVER_DIED]
     if died:
         codes.append("server_died")
@@ -862,6 +950,23 @@ def _protocol(spec: BenchmarkSpec, sample: dict[str, int]) -> dict[str, Any]:
         "sample": sample,
         "wall_clock_cap_s": float(hp.wall_clock_cap_s),
         "on_failure": "an iteration that raises stops its configuration",
+        "prefix_reuse": (
+            {
+                "applies_to": "a decoder verifier at batch size 1",
+                "key": "the token ids of the row's own encoding that end within the premises",
+                "miss": "the prefix forward pass that fills the entry runs inside the request clock",
+                "hit": "the cached prefix is reused; the cache is rolled back to it afterwards",
+                "scope": "never cleared: warmup, passes and configurations share it",
+                "eviction": "least recently used first, past max_bytes",
+                "max_bytes": hp.prefix_cache_max_bytes,
+                "no_cache_diagnostic": (
+                    "one extra pass per configuration without the cache, seeded with "
+                    "order_seed + passes and warmup_seed + passes; never the headline"
+                ),
+            }
+            if hp.prefix_reuse
+            else None
+        ),
         "gpu": {
             "idle_check": (
                 "nvidia-smi compute processes on the visible GPUs, other than this runner and its "
@@ -1114,6 +1219,8 @@ async def _finish(
     hf_token: str | None,
     started: float,
     stopped: str | None = None,
+    prefix_cache: PrefixCache | None = None,
+    diagnostics: dict[int, bench.ConfigurationOutcome] | None = None,
 ) -> str:
     """Summarize, write the three files, push them in one commit, and report the verdict.
 
@@ -1148,6 +1255,7 @@ async def _finish(
                 length_of=length_of,
                 items_of=items_of,
                 bootstrap=bootstrap,
+                diagnostic=(diagnostics or {}).get(outcome.configuration.index),
             )
             for outcome in outcomes
         ]
@@ -1182,6 +1290,11 @@ async def _finish(
         headline_unreadable_reason=unreadable,
         gpu_idle_check="checked" if guard.checked else "unavailable",
         gpu_telemetry=tuple(guard.telemetry),
+        prefix_reuse=(
+            bench.PrefixReuseRecord.model_validate(prefix_cache.record())
+            if prefix_cache is not None
+            else None
+        ),
         sample=counts,
         excluded=excluded,
         cold_start=cold_start,
@@ -1192,7 +1305,7 @@ async def _finish(
     all_counts = {**counts, "excluded": excluded, "iterations_measured": measured}
     outdir = results_dir(spec.run_id, name=_RESULTS_DIR_NAME)
     timing_rows = bench.iteration_rows(
-        outcomes,
+        [*outcomes, *(diagnostics or {}).values()],
         boundaries=hp.boundaries,
         tokens=tokens,
         items=items,
@@ -1311,13 +1424,34 @@ async def _execute_classifier(
     sample, excluded, counts = _admit(spec, lengths, items, classifier.max_length)
     progress = _Progress(writer, planned_iterations(hp, len(sample)))
     emit(writer, ProgressEvent(kind="start", stage="run", total_steps=progress.total))
-    step = (
-        _verifier_step(verifier, inputs.cells or [])
-        if verifier is not None
-        else _reference_step(classifier, inputs.texts, inputs.pairs)
-    )
+    cells = inputs.cells or []
+    prefix_cache: PrefixCache | None = None
+    diagnostics: dict[int, bench.ConfigurationOutcome] = {}
+    no_cache_step: bench.Step | None = None
+    if hp.prefix_reuse:
+        if verifier is None:  # refused at spec load; kept for the type checker
+            msg = "prefix_reuse needs a trained verifier"
+            raise RunError(msg)
+        refusal = prefix_reuse_error(verifier)
+        if refusal is not None:
+            raise RunError(refusal)
+        prefix_cache = PrefixCache(hp.prefix_cache_max_bytes)
+        step = _prefix_step(verifier, prefix_cache, cells)
+        no_cache_step = _verifier_step(verifier, cells)
+    elif verifier is not None:
+        step = _verifier_step(verifier, cells)
+    else:
+        step = _reference_step(classifier, inputs.texts, inputs.pairs)
     async with ticking_phase(quiet, "Measuring", stage="run"):
-        outcomes, _ = await _measure(spec, sample, step, progress=progress, guard=guard)
+        outcomes, _ = await _measure(
+            spec,
+            sample,
+            step,
+            progress=progress,
+            guard=guard,
+            no_cache_step=no_cache_step,
+            diagnostics=diagnostics,
+        )
     path_facts: dict[str, Any] = (
         {
             "model_path": "strata_verifier",
@@ -1325,6 +1459,7 @@ async def _execute_classifier(
             "heads": verifier.heads,
             "decoder": verifier.rendering.decoder,
             "calibration_temperature_applied": verifier.temperature,
+            "prefix_reuse": hp.prefix_reuse,
         }
         if verifier is not None
         else {
@@ -1363,6 +1498,8 @@ async def _execute_classifier(
         phase=phase,
         hf_token=hf_token,
         started=started,
+        prefix_cache=prefix_cache,
+        diagnostics=diagnostics,
     )
 
 

@@ -34,6 +34,7 @@ import hashlib
 import json
 import math
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
@@ -57,7 +58,9 @@ from strata_forge.training.verifier_render import (
     RenderedRow,
     Rendering,
     encode_rows,
+    fill_template,
     marker_tokens,
+    render_premises,
     render_row,
 )
 
@@ -79,6 +82,7 @@ __all__ = [
     "Classifier",
     "ClassifierScorer",
     "ForwardTimer",
+    "PrefixCache",
     "ScoringInputs",
     "VerifierRunScorer",
     "VerifierScorer",
@@ -92,14 +96,17 @@ __all__ = [
     "load_verifier",
     "manifest_frame",
     "plan_batches",
+    "prefix_reuse_error",
     "read_calibration",
     "read_verifier",
     "render_scoring_text",
     "resolve_labels",
     "result_rows",
+    "score_with_prefix",
     "softmax",
     "tally",
     "tf32_state",
+    "timed_prefix_request",
     "timed_verifier_request",
     "verifier_result_rows",
 ]
@@ -1265,6 +1272,15 @@ def timed_verifier_request(
     rows = scorer.render([c[0] for c in cells], [c[1] for c in cells])
     timer = scorer.forward_timer()
     values = scorer.score(rows, timer=timer, clock=clock)
+    _ship(scorer, values)
+    scorer.synchronize()
+    end = clock()
+    return start, end, timer.elapsed_ms()
+
+
+def _ship(scorer: VerifierScorer, values: Sequence[VerifierScores]) -> None:
+    """What a request returns from its scores: the class probabilities, ``p_inconsistent`` and the
+    per-premise support probabilities (computed and discarded: they are inside the clock)."""
     temperature = scorer.temperature or 1.0
     included = [i for i, label in enumerate(scorer.outputs) if label is not None]
     for value in values:
@@ -1273,9 +1289,237 @@ def timed_verifier_request(
             _sigmoid(value.flag)
         for _, logit in value.support or []:
             _sigmoid(logit)
+
+
+# ----------------------------------------------------------------- premise-prefix reuse
+
+
+@dataclass(slots=True)
+class _PrefixEntry:
+    cache: Any  # the model's KV cache, holding exactly the prefix tokens between requests
+    markers: Any  # the base model's last hidden state at each premise marker, [P, H], or None
+    length: int
+    nbytes: int
+
+
+class PrefixCache:
+    """A decoder verifier's premise-prefix KV caches, least recently used first out, in bytes.
+
+    Keyed by the prefix's token ids, so a hit is an exact match of what the model would have
+    read. It is never cleared: it persists across warmup, passes and configurations. An entry
+    larger than ``max_bytes`` is used for its own request and not kept (``uncacheable``).
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._entries: OrderedDict[tuple[int, ...], _PrefixEntry] = OrderedDict()
+        self.bytes = 0
+        self.peak_bytes = 0
+        self.evictions = 0
+        self.uncacheable = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, key: tuple[int, ...]) -> _PrefixEntry | None:
+        entry = self._entries.get(key)
+        if entry is not None:
+            self._entries.move_to_end(key)
+        return entry
+
+    def put(self, key: tuple[int, ...], entry: _PrefixEntry) -> None:
+        if entry.nbytes > self.max_bytes:
+            self.uncacheable += 1
+            return
+        while self._entries and self.bytes + entry.nbytes > self.max_bytes:
+            _, old = self._entries.popitem(last=False)
+            self.bytes -= old.nbytes
+            self.evictions += 1
+        self._entries[key] = entry
+        self.bytes += entry.nbytes
+        self.peak_bytes = max(self.peak_bytes, self.bytes)
+
+    def record(self) -> dict[str, int]:
+        return {
+            "max_bytes": self.max_bytes,
+            "peak_bytes": self.peak_bytes,
+            "bytes_at_end": self.bytes,
+            "entries_at_end": len(self._entries),
+            "evictions": self.evictions,
+            "uncacheable": self.uncacheable,
+        }
+
+
+def _cache_bytes(cache: Any) -> int:
+    layers: Any = getattr(cache, "layers", None)
+    total = 0
+    if layers is not None:
+        for layer in layers:
+            for name in ("keys", "values"):
+                tensor: Any = getattr(layer, name, None)
+                if tensor is not None and hasattr(tensor, "nbytes"):
+                    total += int(tensor.nbytes)
+        return total
+    for name in ("key_cache", "value_cache"):
+        tensors: list[Any] = list(getattr(cache, name, None) or [])
+        total += sum(int(t.nbytes) for t in tensors)
+    return total
+
+
+def prefix_reuse_error(scorer: VerifierScorer) -> str | None:
+    """Why ``scorer`` cannot reuse a premise prefix, or ``None`` when it can.
+
+    Only a decoder verifier reads its input left to right, so only its premise tokens' cache is
+    the same whatever hypothesis follows; and the premises must come first in its template.
+    """
+    template = scorer.rendering.decoder_template
+    if not scorer.rendering.decoder or template is None:
+        return "prefix reuse applies to a decoder verifier only; an encoder reads the whole pair"
+    first, second = template.find("{premises}"), template.find("{hypothesis}")
+    if first < 0 or second < 0 or first > second:
+        return (
+            "prefix reuse needs a decoder template that renders the premises before the hypothesis"
+        )
+    return None
+
+
+def timed_prefix_request(
+    scorer: VerifierScorer,
+    cache: PrefixCache,
+    cell: tuple[Any, Any],
+    *,
+    clock: Callable[[], int],
+) -> tuple[int, int, float, bool]:
+    """One decoder-verifier request with premise-prefix reuse: ``(start, end, forward_ms, hit)``.
+
+    Inside the clock, as :func:`timed_verifier_request`: the rendering, tokenization, the prefix
+    fill on a miss (:func:`score_with_prefix`), the rest of the forward pass and the heads, every
+    returned score, and the ONE final synchronization.
+    """
+    start = clock()
+    timer = scorer.forward_timer()
+    value, hit = score_with_prefix(scorer, cache, cell, timer=timer, clock=clock)
+    _ship(scorer, [value])
     scorer.synchronize()
     end = clock()
-    return start, end, timer.elapsed_ms()
+    return start, end, timer.elapsed_ms(), hit
+
+
+def score_with_prefix(
+    scorer: VerifierScorer,
+    cache: PrefixCache,
+    cell: tuple[Any, Any],
+    *,
+    timer: ForwardTimer | None = None,
+    clock: Callable[[], int] | None = None,
+) -> tuple[VerifierScores, bool]:
+    """One row's scores through the premise-prefix cache, and whether the prefix was a hit.
+
+    On a MISS the forward pass over the premise prefix fills its cache entry; then the forward
+    pass over the rest (the hypothesis and the template's tail) runs on that cache, and the
+    auxiliary heads read the prefix's cached marker states and the rest's. The prefix is the
+    leading tokens of the row's own encoding that end within the premises, so prefix plus rest is
+    exactly the sequence a full forward reads; afterwards the cache is rolled back to the prefix.
+    ``timer`` (with ``clock``) brackets the model work.
+    """
+    torch = scorer._torch  # pyright: ignore[reportPrivateUsage]
+    model: Any = scorer._model  # pyright: ignore[reportPrivateUsage]
+    (row,) = scorer.render([cell[0]], [cell[1]])
+    premises, _ = render_premises(cell[0], scorer.rendering.premise_format)
+    _, begins = fill_template(scorer.rendering.decoder_template or "", premises, "")
+    end_char = begins + len(premises)
+    support = scorer._aux.support is not None  # pyright: ignore[reportPrivateUsage]
+    features: Any = encode_rows(
+        scorer._tokenizer,  # pyright: ignore[reportPrivateUsage]
+        [row],
+        return_offsets_mapping=True,
+    )
+    ids = cast("list[int]", features["input_ids"][0])
+    if len(ids) > scorer.max_length:
+        msg = "a row exceeded the model's length limit after planning; nothing was timed"
+        raise RunError(msg)
+    offsets = cast("list[tuple[int, int]]", features["offset_mapping"][0])
+    k = 0
+    while k < len(ids) - 1 and offsets[k][1] <= end_char:
+        k += 1
+    positions: list[int] = []
+    if support:
+        found = marker_tokens(row.markers, offsets, features.sequence_ids(0))
+        if found is None or any(p >= k for p in found):
+            msg = "a premise id's first character is covered by no prefix token"
+            raise RunError(msg)
+        positions = found
+    key = tuple(ids[:k])
+    tensor: Any = torch.tensor([ids], device=scorer.device)
+    hidden: list[Any] = scorer._hidden  # pyright: ignore[reportPrivateUsage]
+    with torch.inference_mode():
+        if timer is not None and clock is not None:
+            timer.begin(clock)
+        entry = cache.get(key)
+        hit = entry is not None
+        if entry is None:
+            hidden.clear()
+            filled: Any = model.base_model(input_ids=tensor[:, :k], use_cache=True)
+            kv: Any = filled.past_key_values
+            activate: Any = getattr(kv, "activate_past_recording", None)
+            if activate is not None:
+                activate()  # a sliding-window layer can then roll back past its window
+            marked: Any = hidden[-1][0, positions] if support and hidden else None
+            entry = _PrefixEntry(
+                cache=kv,
+                markers=marked,
+                length=k,
+                nbytes=_cache_bytes(kv) + (int(marked.nbytes) if marked is not None else 0),
+            )
+            cache.put(key, entry)
+        hidden.clear()
+        mask: Any = torch.ones((1, len(ids)), dtype=torch.long, device=scorer.device)
+        output: Any = model(
+            input_ids=tensor[:, k:],
+            attention_mask=mask,
+            past_key_values=entry.cache,
+            use_cache=True,
+        )
+        entry.cache.crop(-(len(ids) - k))
+        aux: dict[str, Any] = {}
+        if scorer.heads and hidden:
+            rest: Any = hidden[-1]
+            parts = [entry.markers.unsqueeze(0), rest] if entry.markers is not None else [rest]
+            joined: Any = torch.cat(parts, dim=1)
+            aux = aux_outputs(
+                torch,
+                scorer._aux,  # pyright: ignore[reportPrivateUsage]
+                joined,
+                torch.ones(joined.shape[:2], dtype=torch.long, device=scorer.device),
+                last_token=True,
+                support_positions=(
+                    torch.arange(len(positions), device=scorer.device).unsqueeze(0)
+                    if support and positions
+                    else None
+                ),
+            )
+        if timer is not None and clock is not None:
+            timer.end(clock)
+    logits = cast("list[float]", output.logits.float().cpu().tolist()[0])
+    flags: Any = aux.get("flag_logits")
+    flag = float(flags.float().cpu().tolist()[0]) if flags is not None else None
+    marks: Any = aux.get("support_logits")
+    per: list[float] = (
+        cast("list[float]", marks.float().cpu().tolist()[0]) if marks is not None else []
+    )
+    value = VerifierScores(
+        logits=[float(v) for v in logits],
+        flag=flag,
+        support=[(pid, float(per[i])) for i, (pid, _) in enumerate(row.markers)]
+        if support
+        else None,
+    )
+    numbers = [*value.logits, *([value.flag] if value.flag is not None else [])]
+    numbers += [v for _, v in value.support or []]
+    if len(value.logits) != len(scorer.names) or not all(math.isfinite(v) for v in numbers):
+        msg = "the verifier returned a non-finite or mis-shaped score"
+        raise RunError(msg)
+    return value, hit
 
 
 def load_verifier(

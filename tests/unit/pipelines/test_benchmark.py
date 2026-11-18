@@ -375,6 +375,8 @@ async def test_iteration_rows_carry_indices_and_numbers_only() -> None:
         "pass_completed",
         "total_ms",
         "forward_ms",
+        "prefix_cache_hit",
+        "pass_kind",
         "output_tokens",
     }
     assert first["input_tokens"] == 20
@@ -1308,3 +1310,209 @@ async def test_a_summary_must_say_complete_only_when_every_configuration_was_mea
     assert nan != text
     with pytest.raises(ValidationError):
         bench.BenchmarkSummary.model_validate_json(nan)
+
+
+# ------------------------------ premise-prefix reuse ------------------------------
+
+
+def _verifier_engine() -> dict[str, Any]:
+    return {
+        "engine": "hf_classify",
+        "artifact": "strata_verifier",
+        "pair_template": "{hypothesis}",
+        "dtype": "bfloat16",
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"prefix_reuse": True, "batch_sizes": [1]}, "trained decoder verifier"),
+        (
+            {"prefix_reuse": True, "engine_settings": _verifier_engine(), "batch_sizes": [1, 2]},
+            "batch_sizes must be",
+        ),
+        ({"prefix_cache_max_bytes": 1 << 30}, "prefix_reuse only"),
+        (
+            {
+                "prefix_reuse": True,
+                "engine_settings": _verifier_engine(),
+                "batch_sizes": [1],
+                "passes": 5,
+                "order_seed": 100,
+                "warmup_seed": 105,
+            },
+            "apart",
+        ),
+    ],
+)
+def test_prefix_reuse_is_refused_where_it_cannot_apply(
+    overrides: dict[str, Any], message: str
+) -> None:
+    data = _spec_dict(**overrides) | {
+        "template": "{premises}",
+        "column_mapping": {"premises": "premises", "hypothesis": "hypothesis"},
+    }
+    if "engine_settings" not in overrides:
+        data = _spec_dict(**overrides)
+    with pytest.raises(ValidationError, match=message):
+        br.BenchmarkSpec.model_validate(data)
+
+
+def _fake_verifier() -> Any:
+    return types.SimpleNamespace(
+        max_length=32,
+        max_length_source="artifact",
+        dtype="bfloat16",
+        tf32={"matmul": False, "cudnn": False},
+        device="cpu",
+        pad_token="tokenizer",
+        attention="sdpa",
+        labels=["entailed", "contradicted", "neutral"],
+        verifier_sha256="ab" * 32,
+        heads=["flag", "support"],
+        rendering=types.SimpleNamespace(decoder=True),
+        temperature=None,
+        forward_timer=lambda: types.SimpleNamespace(method="perf_counter_ns_cpu"),
+    )
+
+
+def _wire_prefix_run(
+    monkeypatch: pytest.MonkeyPatch,
+    bench_run: dict[str, Any],
+    *,
+    refusal: str | None = None,
+    **hp: Any,
+) -> dict[str, Any]:
+    from strata_forge.pipelines._scoring import _PrefixEntry  # pyright: ignore[reportPrivateUsage]
+
+    verifier = _fake_verifier()
+    seen: dict[str, Any] = {"prefix": [], "full": []}
+    now = [0]
+
+    class _Lengths:
+        def __init__(self, scorer: Any) -> None:
+            del scorer
+
+        def lengths(self, inputs: Any) -> list[int | None]:
+            return [len(c[0]) + 3 for c in inputs.cells]
+
+    def _prefix(scorer: Any, cache: Any, cell: Any, *, clock: Any) -> tuple[int, int, float, bool]:
+        key = tuple(cell[0])
+        hit = cache.get(key) is not None
+        if not hit:
+            cache.put(key, _PrefixEntry(cache=None, markers=None, length=1, nbytes=10))
+        seen["prefix"].append(hit)
+        start = now[0]
+        now[0] += (2 if hit else 5) * 1_000_000
+        return start, now[0], 1.0, hit
+
+    def _full(scorer: Any, cells: Any, *, clock: Any) -> tuple[int, int, float]:
+        seen["full"].append(cells)
+        start = now[0]
+        now[0] += 6_000_000
+        return start, now[0], 4.0
+
+    def _load(snapshot: Path, **kwargs: Any) -> Any:
+        del snapshot, kwargs
+        return verifier
+
+    def _refuse(scorer: Any) -> str | None:
+        del scorer
+        return refusal
+
+    monkeypatch.setattr(br, "load_verifier", _load)
+    monkeypatch.setattr(br, "VerifierRunScorer", _Lengths)
+    monkeypatch.setattr(br, "timed_prefix_request", _prefix)
+    monkeypatch.setattr(br, "timed_verifier_request", _full)
+    monkeypatch.setattr(br, "prefix_reuse_error", _refuse)
+    spec = _spec_dict(
+        engine_settings=_verifier_engine(), batch_sizes=[1], prefix_reuse=True, **hp
+    ) | {
+        "template": "{premises}",
+        "column_mapping": {"premises": "premises", "hypothesis": "hypothesis"},
+        "progress_path": str(bench_run["progress"]),
+    }
+    monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(spec))
+    return seen
+
+
+async def test_prefix_reuse_times_hits_and_misses_and_a_no_cache_diagnostic_pass(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    seen = _wire_prefix_run(monkeypatch, bench_run, prefix_cache_max_bytes=1 << 20)
+    assert await br.main() == 0
+    # Two passes of 10 rows with 2 warmups each, through the cache; one more pass without it.
+    assert len(seen["prefix"]) == 2 * (2 + 10)
+    assert len(seen["full"]) == 2 + 10
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    assert summary.complete
+    assert summary.headline_readable
+    (config,) = summary.configurations
+    cache = config.prefix_cache
+    assert cache is not None
+    # The workload holds two premise sets, so at most two requests ever miss.
+    assert cache.hits + cache.misses == 20
+    assert cache.misses <= 2
+    assert cache.hit_latency["p50"] == pytest.approx(2.0)
+    diagnostic = config.no_cache_diagnostic
+    assert diagnostic is not None
+    assert (diagnostic.role, diagnostic.status, diagnostic.latency.n) == (
+        "diagnostic",
+        "measured",
+        10,
+    )
+    assert diagnostic.latency.pooled["p95"] == pytest.approx(6.0)
+    # The headline reads the cached passes only, never the diagnostic.
+    assert config.headline.passes == 2
+    assert config.headline.p95_max_ms is not None
+    assert config.headline.p95_max_ms < 6.0
+    record = summary.prefix_reuse
+    assert record is not None
+    assert (record.max_bytes, record.entries_at_end, record.scope) == (1 << 20, 2, "never_cleared")
+    kinds = [row["pass_kind"] for row in bench_run["timings"]]
+    assert kinds.count("timed") == 20
+    assert kinds.count("no_cache_diagnostic") == 10
+    hits = [row["prefix_cache_hit"] for row in bench_run["timings"] if row["pass_kind"] == "timed"]
+    assert all(isinstance(h, bool) for h in hits)
+    assert {t.kind for t in summary.gpu_telemetry} == {"timed", "no_cache_diagnostic"}
+    manifest = json.loads(_Hub.uploaded["manifest.json"])
+    protocol = manifest["benchmark"]["prefix_reuse"]
+    assert protocol["max_bytes"] == 1 << 20
+    assert "inside the request clock" in protocol["miss"]
+    assert manifest["engine_facts"]["prefix_reuse"] is True
+    start = next(e for e in _events(bench_run) if e["kind"] == "start")
+    assert start["total_steps"] == 30
+
+
+async def test_prefix_reuse_on_an_encoder_verifier_is_refused_before_measuring(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    seen = _wire_prefix_run(
+        monkeypatch, bench_run, refusal="prefix reuse applies to a decoder verifier only"
+    )
+    assert await br.main() == 1
+    error = next(e for e in _events(bench_run) if e["kind"] == "error")
+    assert "decoder verifier only" in error["message"]
+    assert seen["prefix"] == []
+    assert seen["full"] == []
+
+
+async def test_a_gpu_taken_before_the_diagnostic_pass_makes_the_run_incomplete(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    # Idle at the start and before both cached passes; busy before the no-cache pass.
+    def _pids() -> set[int]:
+        return {os.getpid()} if bench_run["probes"] <= 3 else {os.getpid(), 4242}
+
+    bench_run["pids"] = _pids
+    _wire_prefix_run(monkeypatch, bench_run)
+    assert await br.main() == 0
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    (config,) = summary.configurations
+    assert config.status == "measured"
+    assert config.no_cache_diagnostic is not None
+    assert config.no_cache_diagnostic.status == "gpu_busy"
+    assert summary.complete is False
+    assert summary.headline_readable is False
+    assert "gpu_busy" in summary.incomplete_codes

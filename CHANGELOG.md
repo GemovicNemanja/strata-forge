@@ -88,6 +88,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `benchmark`) are pushed in one commit to a private output repo of the run's own, also when the
   model server dies mid-run (the run then fails as incomplete). The `end` event carries
   `gpu_count` and `gpu_seconds` over the GPUs `CUDA_VISIBLE_DEVICES` exposes.
+- Premise-prefix KV reuse for a decoder verifier's latency benchmark (`prefix_reuse`,
+  `prefix_cache_max_bytes`; batch size 1): a request with an uncached premise prefix fills it
+  inside its clock, a cached one reuses it, the cache persists across warmup and passes with its
+  byte limit recorded, and each configuration adds a no-cache diagnostic pass. `prefix_cache_hit`
+  and `pass_kind` in `timings.parquet`; `prefix_cache`, `no_cache_diagnostic` and `prefix_reuse`
+  in the summary. `score_with_prefix` / `timed_prefix_request` / `PrefixCache` on the scoring
+  engine, exact against the full forward pass.
 - `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
   NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
   and the pooled percentiles) and the opt-in, diagnostic-only `latency_bootstrap` interval.

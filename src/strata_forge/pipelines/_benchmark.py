@@ -61,8 +61,12 @@ __all__ = [
     "Headline",
     "IncompleteCode",
     "Iteration",
+    "NoCacheDiagnostic",
     "PassHook",
+    "PassKind",
     "PassTelemetry",
+    "PrefixCacheResult",
+    "PrefixReuseRecord",
     "Step",
     "StepTiming",
     "Throughput",
@@ -73,6 +77,7 @@ __all__ = [
     "full_batches",
     "iteration_rows",
     "measure_configuration",
+    "measured_cleanly",
     "pass_order",
     "summarize",
     "union_seconds",
@@ -209,8 +214,11 @@ class StepTiming:
     end_ns: int
     forward_ms: float | None = None
     output_tokens: int | None = None
+    # Premise-prefix reuse: whether the request's premise prefix was already cached.
+    prefix_cache_hit: bool | None = None
 
 
+type PassKind = Literal["timed", "no_cache_diagnostic"]
 type Step = Callable[[list[int]], Awaitable[StepTiming]]
 
 
@@ -226,6 +234,9 @@ class Iteration:
     end_ns: int
     forward_ms: float | None
     output_tokens: int | None
+    prefix_cache_hit: bool | None = None
+    # `no_cache_diagnostic`: the extra pass a prefix-reuse run makes without the cache.
+    kind: PassKind = "timed"
 
 
 type Status = Literal[
@@ -265,6 +276,7 @@ async def measure_configuration(
     on_iteration: Callable[[ConfigurationOutcome], None] | None = None,
     before_pass: PassHook | None = None,
     after_pass: PassHook | None = None,
+    kind: PassKind = "timed",
 ) -> ConfigurationOutcome:
     """Run one configuration's warmups and timed passes through ``step``.
 
@@ -327,6 +339,8 @@ async def measure_configuration(
                             end_ns=timing.end_ns,
                             forward_ms=timing.forward_ms,
                             output_tokens=timing.output_tokens,
+                            prefix_cache_hit=timing.prefix_cache_hit,
+                            kind=kind,
                         )
                     )
                     if on_iteration is not None:
@@ -427,6 +441,30 @@ class Headline(_Frozen):
     unit: Literal["ms_per_request", "ms_per_batch"]
 
 
+class PrefixCacheResult(_Frozen):
+    """How a prefix-reuse configuration's summarized requests met the premise-prefix cache.
+
+    A miss filled its prefix inside its own clock; a hit reused it. The latencies are end to end
+    (``total_ms``), pooled over the completed passes, split by hit and miss.
+    """
+
+    hits: int = Field(ge=0)
+    misses: int = Field(ge=0)
+    hit_rate: float | None = Field(ge=0, le=1)
+    hit_latency: dict[str, float | None]
+    miss_latency: dict[str, float | None]
+
+
+class NoCacheDiagnostic(_Frozen):
+    """The configuration's extra pass without the prefix cache: a diagnostic, never a headline."""
+
+    role: Literal["diagnostic"] = "diagnostic"
+    status: Status
+    passes_completed: int = Field(ge=0)
+    error: str | None = Field(default=None, max_length=_MAX_ERROR_CHARS)
+    latency: LatencySummary
+
+
 class ConfigurationResult(_Frozen):
     """One configuration: what was planned, what was measured, and per boundary the numbers."""
 
@@ -447,6 +485,8 @@ class ConfigurationResult(_Frozen):
     error: str | None = Field(default=None, max_length=_MAX_ERROR_CHARS)
     headline: Headline
     boundaries: tuple[BoundaryResult, ...]
+    prefix_cache: PrefixCacheResult | None = None
+    no_cache_diagnostic: NoCacheDiagnostic | None = None
 
 
 class GpuState(_Frozen):
@@ -466,8 +506,21 @@ class PassTelemetry(_Frozen):
 
     configuration: int = Field(ge=0)
     pass_index: int = Field(ge=0)
+    kind: Literal["timed", "no_cache_diagnostic"] = "timed"
     at: Literal["start", "end"]
     gpus: tuple[GpuState, ...] = Field(max_length=16)
+
+
+class PrefixReuseRecord(_Frozen):
+    """The premise-prefix cache of a prefix-reuse run: its limit and what it held."""
+
+    scope: Literal["never_cleared"] = "never_cleared"
+    max_bytes: int = Field(ge=1)
+    peak_bytes: int = Field(ge=0)
+    bytes_at_end: int = Field(ge=0)
+    entries_at_end: int = Field(ge=0)
+    evictions: int = Field(ge=0)
+    uncacheable: int = Field(ge=0)
 
 
 type IncompleteCode = Literal[
@@ -494,7 +547,8 @@ class BenchmarkSummary(_Frozen):
     headline_unreadable_reason: str | None = Field(default=None, max_length=_MAX_ERROR_CHARS)
     # ``checked``: other compute processes were looked for at the start and before every pass.
     gpu_idle_check: Literal["checked", "unavailable"]
-    gpu_telemetry: tuple[PassTelemetry, ...] = Field(default=(), max_length=2 * 64 * 20)
+    gpu_telemetry: tuple[PassTelemetry, ...] = Field(default=(), max_length=2 * 64 * 21)
+    prefix_reuse: PrefixReuseRecord | None = None
     sample: dict[str, int]
     excluded: dict[str, int]
     cold_start: dict[str, float | None]
@@ -503,7 +557,7 @@ class BenchmarkSummary(_Frozen):
 
     @model_validator(mode="after")
     def _complete_means_every_configuration_measured(self) -> BenchmarkSummary:
-        clean = all(c.status == "measured" and not c.iterations_failed for c in self.configurations)
+        clean = all(measured_cleanly(c) for c in self.configurations)
         if self.complete != clean:
             msg = "complete must say whether every configuration was measured cleanly"
             raise ValueError(msg)
@@ -516,6 +570,16 @@ class BenchmarkSummary(_Frozen):
             msg = "the headline is readable only for a complete run on a GPU checked idle"
             raise ValueError(msg)
         return self
+
+
+def measured_cleanly(result: ConfigurationResult) -> bool:
+    """Every pass measured with no failure, the no-cache diagnostic pass included when made."""
+    diagnostic = result.no_cache_diagnostic
+    return (
+        result.status == "measured"
+        and not result.iterations_failed
+        and (diagnostic is None or diagnostic.status == "measured")
+    )
 
 
 def union_seconds(intervals: Sequence[tuple[int, int]]) -> float:
@@ -616,11 +680,13 @@ def summarize(
     length_of: Callable[[int], str | None],
     items_of: Callable[[int], str | None],
     bootstrap: tuple[int, int] | None,
+    diagnostic: ConfigurationOutcome | None = None,
 ) -> ConfigurationResult:
     """One configuration's result: per declared boundary, percentiles, throughput and buckets.
 
     ``tokens`` is every split row's input token count, by row index. ``bootstrap`` is
-    ``(seed, resamples)`` when the run asked for intervals, else ``None``.
+    ``(seed, resamples)`` when the run asked for intervals, else ``None``. ``diagnostic`` is a
+    prefix-reuse configuration's extra pass without the cache, summarized on its own.
     """
     configuration = outcome.configuration
     # Only completed passes are summarized: a pass cut short by a failure, the wall-clock cap or
@@ -659,6 +725,27 @@ def summarize(
         passes=len(p95s),
         unit=unit,
     )
+    reused = [i for i in iterations if i.prefix_cache_hit is not None]
+    prefix_cache: PrefixCacheResult | None = None
+    if reused or diagnostic is not None:
+        hit = [_ms(i, "end_to_end") or 0.0 for i in reused if i.prefix_cache_hit]
+        miss = [_ms(i, "end_to_end") or 0.0 for i in reused if not i.prefix_cache_hit]
+        prefix_cache = PrefixCacheResult(
+            hits=len(hit),
+            misses=len(miss),
+            hit_rate=len(hit) / len(reused) if reused else None,
+            hit_latency=latency_summary([hit]).pooled,
+            miss_latency=latency_summary([miss]).pooled,
+        )
+    no_cache: NoCacheDiagnostic | None = None
+    if diagnostic is not None:
+        done = [i for i in diagnostic.iterations if i.pass_index < diagnostic.passes_completed]
+        no_cache = NoCacheDiagnostic(
+            status=diagnostic.status,
+            passes_completed=diagnostic.passes_completed,
+            error=diagnostic.error,
+            latency=latency_summary([[_ms(i, "end_to_end") or 0.0 for i in done]]),
+        )
     return ConfigurationResult(
         index=configuration.index,
         batch_size=configuration.batch_size,
@@ -676,6 +763,8 @@ def summarize(
         error=outcome.error,
         headline=headline,
         boundaries=tuple(results),
+        prefix_cache=prefix_cache,
+        no_cache_diagnostic=no_cache,
     )
 
 
@@ -716,6 +805,9 @@ def iteration_rows(
                     # The headline column, and the forward pass inside the same request.
                     "total_ms": _ms(item, "end_to_end"),
                     "forward_ms": item.forward_ms,
+                    # Premise-prefix reuse only (else null); the no-cache pass is its diagnostic.
+                    "prefix_cache_hit": item.prefix_cache_hit,
+                    "pass_kind": item.kind,
                     "output_tokens": item.output_tokens,
                 }
             )

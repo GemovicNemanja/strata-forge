@@ -366,3 +366,88 @@ def test_a_timed_verifier_request_renders_scores_and_syncs_once(
     # The one synchronization ends the request; the forward pass adds none of its own.
     assert syncs == 1
     assert scorer.forward_timer().method == "perf_counter_ns_cpu"
+
+
+def test_premise_prefix_reuse_scores_exactly_as_the_full_forward(
+    decoder_artifact: tuple[Any, Path], encoder_artifact: tuple[Any, Path]
+) -> None:
+    import time
+
+    from strata_forge.pipelines._scoring import (
+        PrefixCache,
+        prefix_reuse_error,
+        score_with_prefix,
+        timed_prefix_request,
+    )
+
+    _, artifact = decoder_artifact
+    scorer = load_verifier(
+        artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+    )
+    assert prefix_reuse_error(scorer) is None
+    base = tiny.rows(6, seed=11)
+    # The same premise set under two hypotheses, then a new set: miss, hit, miss.
+    cells = [
+        (base[0]["premises"], base[0]["hypothesis"]),
+        (base[0]["premises"], base[1]["hypothesis"]),
+        (base[2]["premises"], base[2]["hypothesis"]),
+    ]
+    cache = PrefixCache(max_bytes=1 << 30)
+    hits: list[bool] = []
+    for premises, hypothesis in cells:
+        value, hit = score_with_prefix(scorer, cache, (premises, hypothesis))
+        hits.append(hit)
+        (full,) = scorer.score(scorer.render([premises], [hypothesis]))
+        assert value.logits == pytest.approx(full.logits, abs=1e-5)
+        assert value.flag == pytest.approx(full.flag, abs=1e-5)
+        assert [p for p, _ in value.support or []] == [p for p, _ in full.support or []]
+        assert [v for _, v in value.support or []] == pytest.approx(
+            [v for _, v in full.support or []], abs=1e-5
+        )
+    assert hits == [False, True, False]
+    assert len(cache) == 2
+    record = cache.record()
+    assert record["peak_bytes"] > 0
+    # The cache was rolled back to the prefix: the same row again is a hit with the same answer.
+    again, hit = score_with_prefix(scorer, cache, cells[0])
+    assert hit
+    _, end, forward, _ = timed_prefix_request(scorer, cache, cells[1], clock=time.perf_counter_ns)
+    assert end > 0
+    assert forward > 0
+    # A cache too small for one entry keeps none and still answers.
+    tiny_cache = PrefixCache(max_bytes=1)
+    assert score_with_prefix(scorer, tiny_cache, cells[0])[1] is False
+    assert score_with_prefix(scorer, tiny_cache, cells[0])[1] is False
+    assert tiny_cache.record()["uncacheable"] == 2
+    del again
+    _, enc = encoder_artifact
+    encoder = load_verifier(
+        enc, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+    )
+    assert "decoder verifier only" in (prefix_reuse_error(encoder) or "")
+
+
+def test_the_prefix_cache_evicts_least_recently_used_first() -> None:
+    from strata_forge.pipelines import _scoring as scoring
+
+    cache = scoring.PrefixCache(max_bytes=100)
+    make: Any = scoring._PrefixEntry  # pyright: ignore[reportPrivateUsage]
+
+    def entry(n: int) -> Any:
+        return make(cache=None, markers=None, length=1, nbytes=n)
+
+    cache.put((1,), entry(40))
+    cache.put((2,), entry(40))
+    assert cache.get((1,)) is not None  # (2,) is now the least recently used
+    cache.put((3,), entry(40))
+    assert cache.get((2,)) is None
+    assert cache.get((1,)) is not None
+    assert cache.get((3,)) is not None
+    assert cache.record() == {
+        "max_bytes": 100,
+        "peak_bytes": 80,
+        "bytes_at_end": 80,
+        "entries_at_end": 2,
+        "evictions": 1,
+        "uncacheable": 0,
+    }
