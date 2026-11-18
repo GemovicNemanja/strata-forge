@@ -758,6 +758,18 @@ def _with_usage_of(first: LLMResponse, final: LLMResponse) -> LLMResponse:
     )
 
 
+def _reply_problem(validator: OutputValidator, text: str | None) -> str | None:
+    """The reply's validation problem; a validator failure marks the ROW invalid, not the run.
+
+    One row's reply must never end a run whose other rows are good: anything the check raises
+    is recorded as that row's ``json_error``.
+    """
+    try:
+        return validator.error(text)
+    except Exception as exc:  # a per-row check: the row records why it failed
+        return f"the reply could not be validated: {type(exc).__name__}"
+
+
 async def _guide(
     runner: BatchInferenceRunner,
     hp: Hyperparams,
@@ -776,7 +788,7 @@ async def _guide(
     first_errors: dict[int, str] = {}
     for index, result in enumerate(results):
         if result.succeeded and result.response is not None:
-            problem = validator.error(result.response.text)
+            problem = _reply_problem(validator, result.response.text)
             if problem is None:
                 columns[index]["json_valid"] = True
             else:
@@ -803,7 +815,7 @@ async def _guide(
     for index, first, second in zip(order, replies, repaired, strict=True):
         columns[index]["json_retried"] = True
         if second.succeeded and second.response is not None:
-            problem = validator.error(second.response.text)
+            problem = _reply_problem(validator, second.response.text)
             results[index] = BatchInferenceResult(response=_with_usage_of(first, second.response))
         else:
             # The first reply stays the row's output; the record says the repair never answered.

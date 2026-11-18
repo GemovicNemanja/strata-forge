@@ -321,3 +321,76 @@ async def test_the_constraint_reaches_the_transport(monkeypatch: pytest.MonkeyPa
     )
     assert captured["extra_body"] == {"structured_outputs": {"json": _SCHEMA}}
     assert captured["seed"] == 3
+
+
+# ------------------------------ nesting depth ------------------------------
+
+
+def _nested(depth: int, leaf: Any = None) -> Any:
+    value: Any = leaf if leaf is not None else {"type": "string"}
+    for _ in range(depth):
+        value = {"type": "array", "items": value}
+    return value
+
+
+@pytest.mark.parametrize("depth", [40, 200, 5_000])
+def test_a_schema_nested_past_the_cap_is_a_spec_error_never_a_crash(depth: int) -> None:
+    schema = _nested(depth)
+    problem = gd.schema_problem(schema)
+    assert problem is not None
+    assert "nests more than 32" in problem
+    # pydantic-core refuses the deepest itself (recursion_loop): a spec error, never a crash.
+    with pytest.raises(ValueError, match=r"nests more than 32|[Rr]ecursion"):
+        ir.Hyperparams.model_validate({"guided_json": schema})
+
+
+def test_a_schema_within_the_cap_is_accepted() -> None:
+    assert gd.schema_problem(_nested(15)) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[" * 100 + "]" * 100,
+        "[" * 200_000 + "]" * 200_000,
+    ],
+)
+def test_an_over_deep_reply_is_invalid_not_fatal(text: str) -> None:
+    recursive: dict[str, JsonValue] = {
+        "$defs": {"n": {"type": "array", "items": {"$ref": "#/$defs/n"}}},
+        "$ref": "#/$defs/n",
+    }
+    error = gd.OutputValidator(recursive).error(text)
+    assert error is not None
+    assert "nests more than 64" in error
+
+
+async def test_a_reply_the_validator_cannot_check_marks_only_its_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _explode(self: Any, text: str | None) -> str | None:
+        if text == "boom":
+            raise RecursionError
+        return None
+
+    monkeypatch.setattr(gd.OutputValidator, "error", _explode)
+    _ScriptedRunner.calls = []
+    _ScriptedRunner.script = {
+        "Answer: a": _response("boom"),
+        "repair:Answer: a": _response("boom"),
+        "Answer: b": _response('{"verdict": "entailed"}'),
+    }
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _ScriptedRunner)
+    spec = _spec()
+    prompts, ids = ir._build_requests(spec, [{"question": "a"}, {"question": "b"}])  # pyright: ignore[reportPrivateUsage]
+    out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+        spec,
+        client=cast("LLMClient", object()),
+        prompts=prompts,
+        custom_ids=ids,
+        writer=None,
+        redactor=Redactor(),
+    )
+    assert (out[0]["json_valid"], out[0]["json_retried"]) == (False, True)
+    assert "could not be validated: RecursionError" in out[0]["json_error"]
+    assert out[1]["json_valid"] is True

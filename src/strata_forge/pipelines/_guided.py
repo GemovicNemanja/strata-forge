@@ -28,12 +28,16 @@ import jsonschema.exceptions
 import jsonschema.validators
 import referencing
 
+from strata_forge.pipelines._chat_template import nests_deeper_than
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from pydantic import JsonValue
 
 __all__ = [
+    "MAX_REPLY_DEPTH",
+    "MAX_SCHEMA_DEPTH",
     "MAX_SCHEMA_JSON_BYTES",
     "REPAIR_PROMPT",
     "OutputValidator",
@@ -46,6 +50,13 @@ __all__ = [
 #: The schema's size as canonical JSON. The whole run spec rides to the machine in one bounded
 #: blob, and a schema is a contract, not a corpus.
 MAX_SCHEMA_JSON_BYTES = 16 * 1024
+#: How deep a schema's objects and arrays may nest. Every walk over a schema (the size measure,
+#: the reference check, the draft check, validation) recurses, so the depth is bounded first,
+#: iteratively, and a schema past it is refused rather than allowed to raise ``RecursionError``.
+MAX_SCHEMA_DEPTH = 32
+#: How deep a reply may nest before it is recorded invalid without being validated: validation
+#: walks the reply recursively, and one row's reply must never end the run.
+MAX_REPLY_DEPTH = 64
 #: The one repair turn. ``{error}`` is the validator's message for the reply, capped.
 REPAIR_PROMPT = (
     "Your previous reply does not satisfy the required JSON schema: {error}\n"
@@ -94,6 +105,17 @@ def schema_problem(schema: Mapping[str, JsonValue]) -> str | None:
     """Why ``schema`` cannot be a run's guided JSON schema, or ``None`` when it can."""
     if not schema:
         return "guided_json is an empty schema, which admits anything; omit it instead"
+    if nests_deeper_than(dict(schema), MAX_SCHEMA_DEPTH):
+        return f"guided_json nests more than {MAX_SCHEMA_DEPTH} levels of objects and arrays"
+    try:
+        return _bounded_schema_problem(schema)
+    except RecursionError:
+        # Within the depth cap a schema cannot reach the interpreter's limit; this is the guard
+        # that keeps a spec check from ever surfacing as a server error.
+        return "guided_json is nested too deeply to check"
+
+
+def _bounded_schema_problem(schema: Mapping[str, JsonValue]) -> str | None:
     if len(_canonical(schema).encode()) > MAX_SCHEMA_JSON_BYTES:
         return f"guided_json is at most {MAX_SCHEMA_JSON_BYTES} bytes of JSON"
     foreign = _foreign_refs(dict(schema))
@@ -131,13 +153,21 @@ class OutputValidator:
         """Why ``text`` is not a valid instance of the schema, or ``None`` when it is."""
         if text is None:
             return "the reply has no text"
+        too_deep = f"the reply nests more than {MAX_REPLY_DEPTH} levels of objects and arrays"
         try:
             instance: object = json.loads(text, parse_constant=_no_constant)
+        except RecursionError:
+            return too_deep
         except ValueError as exc:
             return f"not valid JSON ({str(exc)[:_MAX_ERROR_CHARS]})"
-        errors: Any = self._validator.iter_errors(instance)
-        # jsonschema ships no types; the error it returns is read for two plain attributes.
-        best = cast("Any", jsonschema.exceptions.best_match)(errors)  # pyright: ignore[reportUnknownMemberType]
+        if nests_deeper_than(instance, MAX_REPLY_DEPTH):
+            return too_deep
+        try:
+            errors: Any = self._validator.iter_errors(instance)
+            # jsonschema ships no types; the error it returns is read for two plain attributes.
+            best = cast("Any", jsonschema.exceptions.best_match)(errors)  # pyright: ignore[reportUnknownMemberType]
+        except RecursionError:
+            return "the reply is nested too deeply to validate against the schema"
         if best is None:
             return None
         parts: list[object] = list(best.absolute_path)

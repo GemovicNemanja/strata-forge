@@ -377,8 +377,10 @@ schema's grammar admits. Every reply is still validated, because the
 constraint is not the whole schema: a reply cut off at ``max_tokens`` is
 not JSON at all, and a grammar backend does not enforce every keyword.
 
-At spec load the schema must be a non-empty JSON object of at most 16 KiB
-(canonical JSON), a valid schema for the draft its ``$schema`` names
+At spec load the schema must be a non-empty JSON object nested at most 32
+levels deep (found iteratively, before anything recursive walks it, so a
+deeper schema is a spec error rather than a ``RecursionError``), of at most
+16 KiB (canonical UTF-8 JSON), a valid schema for the draft its ``$schema`` names
 (2020-12 when it names none), and every ``$ref`` / ``$dynamicRef`` /
 ``$recursiveRef`` in it must point inside it (``#…``). ``jsonschema`` still
 retrieves a remote reference by default, so the validator is also built
@@ -391,7 +393,9 @@ invalid reply as the assistant turn, and the fixed message
 ``Reply again with only the corrected JSON.``, under the same constraint
 and sampling settings. The repaired reply becomes ``output``; tokens and
 latency are the sum of both attempts; a repair request that fails keeps
-the first reply. A row whose request failed is not repaired.
+the first reply. A row whose request failed is not repaired. A reply nested more than 64 levels deep is
+recorded invalid without being validated, and anything the validator raises
+on one reply marks only that row invalid: one reply never ends the run.
 
 Guided rows add ``json_valid`` (``None`` for a row with no reply),
 ``json_retried`` and ``json_error`` (the final validation error, at most
