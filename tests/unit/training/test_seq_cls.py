@@ -32,6 +32,7 @@ from strata_forge.training.seq_cls import (
 torch: Any = pytest.importorskip("torch")
 transformers: Any = pytest.importorskip("transformers")
 datasets: Any = pytest.importorskip("datasets")
+safetensors_torch: Any = pytest.importorskip("safetensors.torch")
 
 from tests.unit.training import tiny_classifier as tiny  # noqa: E402 - after the import skips
 
@@ -213,15 +214,13 @@ def _rewrite(
     """A copy of a checkpoint with one tensor dropped or one stray tensor added."""
     import shutil
 
-    from safetensors.torch import load_file, save_file
-
     shutil.copytree(source, target)
-    state = load_file(str(target / "model.safetensors"))
+    state = safetensors_torch.load_file(str(target / "model.safetensors"))
     if drop:
         del state[drop]
     if add:
         state[add] = torch.zeros(2)
-    save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
+    safetensors_torch.save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
     return target
 
 
@@ -314,12 +313,11 @@ class TestStep0:
     def test_step0_copies_the_output_projection_bias(
         self, tmp_path: Path, decoder_dir: Path
     ) -> None:
-        from safetensors.torch import load_file
 
         runner = SeqClsRunner(_decoder_config(tmp_path))
         tokenizer = runner.load_tokenizer(decoder_dir)
         module, receipt, _ = runner.load_model(decoder_dir, tokenizer, roles=frozenset())
-        state = load_file(str(decoder_dir / "model.safetensors"))
+        state = safetensors_torch.load_file(str(decoder_dir / "model.safetensors"))
         ids = [receipt.verbalizer_token_ids[label] for label in tiny.LABELS]
         classifier = module.classifier.classifier
         assert torch.equal(classifier.bias.detach(), state["decoder.bias"][ids])
@@ -428,9 +426,8 @@ class TestAcceptanceSmoke:
         assert verifier["frozen_parameters"] == ["head.dense.bias"]
         assert verifier["verbalizer_token_ids"] == result.receipts["step0"]["verbalizer_token_ids"]
         # The frozen bias is still exactly zero after training.
-        from safetensors.torch import load_file
 
-        state = load_file(str(artifact / "model.safetensors"))
+        state = safetensors_torch.load_file(str(artifact / "model.safetensors"))
         assert float(state["head.dense.bias"].abs().max()) == 0.0
 
     def test_smoke_continues_an_existing_classifier(
