@@ -543,7 +543,9 @@ after its chat template, with an assistant prefill and template kwargs
 (`engine="hf_label_logits"`), reporting the probability mass outside the
 labels. Chat runs can constrain every reply to one JSON Schema
 (`guided_json`, vLLM structured outputs) with a single validated repair
-turn and per-row validity in the results. Reference doc:
+turn and per-row validity in the results, draw up to 16 seeded samples
+per row keyed by `sample_index`, and pass chat-template kwargs such as
+`enable_thinking`. Reference doc:
 [`docs/modules/compute.md`](modules/compute.md).
 
 `strata_forge.training` ships fine-tuning primitives: `SFTConfig` /

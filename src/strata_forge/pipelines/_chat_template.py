@@ -167,6 +167,8 @@ def kwargs_problem(kwargs: Mapping[str, JsonValue]) -> str | None:
             f"chat_template_kwargs cannot set {reserved}: they control how the template is chosen "
             "or rendered, not what it says"
         )
+    if "enable_thinking" in kwargs and not isinstance(kwargs["enable_thinking"], bool):
+        return "chat_template_kwargs.enable_thinking must be true or false"
     if len(_canonical_json(kwargs).encode()) > MAX_KWARGS_JSON_BYTES:
         return f"chat_template_kwargs is at most {MAX_KWARGS_JSON_BYTES} bytes of JSON"
     return None
