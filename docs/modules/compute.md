@@ -1070,8 +1070,24 @@ with both pins required (``model_revision`` and ``dataset_commit_sha``, full
 | ``max_input_tokens`` / ``item_count_column`` / ``max_items`` | Exclusions (the protocol's are 8,192 tokens and 20 premises), counted by reason (``unmeasurable``, ``over_model_limit``, ``over_max_input_tokens``, ``over_max_items``) and never timed. Lengths are measured at run time with this model's own tokenizer and template: the verifier's own rendering, the pair with special tokens for the reference path, the prompt after the chat template for ``vllm_chat``. |
 | ``length_buckets`` / ``item_buckets`` | Inclusive ascending upper edges (``[512, 2048, 4096, 8192]`` gives ``0-512``, ``513-2048``, ...). At a batch size of one each bucket (L by tokens, P by items) gets its own percentiles. |
 | ``bootstrap_resamples`` / ``bootstrap_seed`` | Optional, off by default, diagnostic only: percentile-bootstrap intervals for the pooled percentiles (``metrics.latency_bootstrap``). Never the headline and never a pass/fail input. |
+| ``prefix_reuse`` / ``prefix_cache_max_bytes`` | A decoder verifier only (``artifact: strata_verifier``, ``batch_sizes`` ``[1]``; an encoder or a template that renders the hypothesis first is refused at load). Reuses the premise prefix's KV cache, keyed by the token ids of the row's own encoding that end within the premises. Hits are **per timed pass**: every entry is dropped after the pass's warmup and before its first timed request, so the first request of each premise set in a pass fills its prefix inside its own clock, a later one in the same pass reuses it, and no warmup fill becomes a timed hit. Only the entries are dropped: the process, its CUDA context and allocator stay warm (no ``empty_cache``, no restart). After each request the cache is rolled back to the prefix, so prefix plus rest is exactly what a full forward reads. It holds at most ``prefix_cache_max_bytes`` (default 8 GiB, least recently used first out; an entry larger than that is used once and not kept); an eviction inside a timed pass is counted and flagged. Each configuration then makes one extra pass without the cache (seeded with ``order_seed + passes`` and ``warmup_seed + passes``), the **no-cache diagnostic**, never the headline. |
 | ``prefix_caching`` | ``vllm_chat`` only, default ``false``: the model server is launched with ``--no-enable-prefix-caching``, since every pass replays the same prompts and a cached prefill would understate the time. Recorded in the engine facts. |
 | ``require_gpu`` | Optional. Refuse to measure unless every visible GPU's reported name contains it (``H100``). |
+
+**Sealed and locked repos.** The runner does not know which repos are
+protected: forge keeps no record of protections, so it never checks them.
+strata-server enforces them at admission, before a run is persisted or a VM
+is touched, and again on a retry: a sealed model or workload is refused
+outright, a locked one runs only at its pinned commit, and a protected repo
+is never the output. A spec run outside that server has no such check, so
+held-out data must never be named in one.
+
+**Prefix reuse and transformers.** Rolling a sliding-window layer's cache
+back to the prefix needs ``DynamicCache.activate_past_recording``. Under a
+transformers without it, a decoder verifier with sliding-window layers is
+refused ``prefix_reuse`` at load, with a reason naming the installed
+release, rather than failing mid-pass; the engine facts record the
+transformers version whenever ``prefix_reuse`` is on.
 
 **Timing boundaries.** ``total_ms`` (the headline) is read from
 ``time.perf_counter_ns``. On the verifier path it runs from the raw
@@ -1105,6 +1121,15 @@ of every pass (``gpu_telemetry``). The probes run between passes, never
 while an iteration is timed. Without ``nvidia-smi`` the check is
 ``unavailable`` and the headline is not readable.
 
+**Prefix reuse in the outputs.** ``timings.parquet`` gains ``prefix_cache_hit`` (null without
+prefix reuse) and ``pass_kind`` (``timed`` or ``no_cache_diagnostic``); a configuration's result
+gains ``prefix_cache`` (hits, misses, hit rate, and the pooled end-to-end percentiles of hits and of
+misses) and ``no_cache_diagnostic`` (its status and end-to-end latency, ``role`` ``diagnostic``);
+the summary gains ``prefix_reuse`` (``scope`` ``per_pass``, the limit, the peak bytes, per timed
+pass its hits, fills, evictions and peak, the evictions inside timed passes and
+``evicted_in_pass`` when there were any). A diagnostic pass that does not finish (a busy GPU,
+the cap, a failure) makes the run incomplete like any other pass.
+
 **Statistics.** Only completed passes are summarized: a pass cut short (a
 failure, the cap, a busy GPU) stays in ``timings.parquet`` with
 ``pass_completed`` false and never enters a percentile, the across-pass
@@ -1136,7 +1161,8 @@ in ONE commit to a private output repo that holds nothing else; with no write
 token they stay on the machine. A copy of the summary is left in the workdir
 as ``benchmark-summary.json`` for the orchestrator to read. If the model
 server dies mid-run, the measured configurations are still written and pushed
-(the rest ``not_measured``) and the run then fails as incomplete.
+(the rest ``not_measured``) and the run then fails as incomplete, coded
+``server_died`` even when it died in the last (or only) configuration.
 
 **The environment receipt** is what the machine reports, never what the run
 asked for: per visible GPU from ``nvidia-smi`` (index, name, total memory,
