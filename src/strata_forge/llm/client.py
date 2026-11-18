@@ -303,6 +303,7 @@ def _normalize_response(
     finish_reason = _normalize_finish_reason(_duck_get(choice, "finish_reason"))
 
     text = _duck_get(message, "content") or ""
+    reasoning = _parse_reasoning(message)
     tool_calls = _parse_tool_calls(_duck_get(message, "tool_calls"))
     # If the model emitted tool calls but the provider's finish_reason didn't
     # signal them, normalize to "tool_use" so callers can rely on it.
@@ -314,6 +315,7 @@ def _normalize_response(
 
     return LLMResponse(
         text=cast("str", text),
+        reasoning=reasoning,
         tool_calls=tool_calls,
         finish_reason=finish_reason,
         usage=usage,
@@ -322,6 +324,20 @@ def _normalize_response(
         cache_hit=False,
         latency_ms=latency_ms,
     )
+
+
+def _parse_reasoning(message: Any) -> str | None:
+    """The reasoning text a chat-completions server returned beside the answer, or ``None``.
+
+    LiteLLM moves vLLM's ``reasoning`` field (``reasoning_content`` before vLLM renamed it) onto
+    ``message.reasoning_content``; a bare ``reasoning`` is read too, for a message that did not
+    pass through LiteLLM's normalizer. An empty string is no reasoning.
+    """
+    for key in ("reasoning_content", "reasoning"):
+        value = _duck_get(message, key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _normalize_finish_reason(raw: Any) -> FinishReason:

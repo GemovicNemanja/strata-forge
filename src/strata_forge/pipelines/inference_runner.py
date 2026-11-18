@@ -36,7 +36,7 @@ credentials + the network):
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, error, finish_reason, input_tokens,
+    repo id; result rows are ``{custom_id, output, reasoning, error, finish_reason, input_tokens,
     output_tokens}`` (model text and its accounting only), and the ``manifest.json`` beside them
     records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
@@ -63,6 +63,7 @@ import hashlib
 import itertools
 import json
 import re
+import shlex
 import sys
 import time
 from collections import Counter, deque
@@ -70,7 +71,7 @@ from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, model_validator
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
@@ -181,6 +182,11 @@ SNAPSHOT_IGNORED = (
 #: earlier, unfiltered download of the same commit left there. Naming the format means the
 #: download's filter is not the only thing standing between a ``*.bin`` and the server.
 _SERVE_LOAD_FORMAT = ("--load-format", "safetensors")
+#: The ``model_type`` a gpt-oss checkpoint declares. The model server renders and parses it in the
+#: harmony format, whose analysis channel reaches the response's content unless a reasoning parser
+#: splits it out.
+_HARMONY_MODEL_TYPE = "gpt_oss"
+_HARMONY_REASONING_PARSER = "openai_gptoss"
 
 
 class Hyperparams(BaseModel):
@@ -203,7 +209,33 @@ class Hyperparams(BaseModel):
     tensor_parallel_size: int = Field(default=1, ge=1)
     max_model_len: int | None = Field(default=None, ge=1)
     dtype: str | None = None
+    # The share of GPU memory the model server may claim, and its per-step token budget. vLLM's
+    # defaults run gpt-oss-120b out of memory on a single 80 GB GPU; its recipe lowers the budget
+    # or raises the share. ``None`` keeps the server's default.
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+    max_num_batched_tokens: StrictInt | None = Field(default=None, ge=1)
+    # The model server's reasoning parser: it moves the model's reasoning out of the answer into
+    # the response's own reasoning field, which the runner stores in the ``reasoning`` column.
+    # Declared rather than guessed from the model id, and an allow-list because it becomes a
+    # command-line argument. A gpt-oss checkpoint requires ``openai_gptoss`` (checked against the
+    # downloaded config, see `_check_reasoning_parser`).
+    reasoning_parser: Literal["openai_gptoss", "qwen3"] | None = None
+    # gpt-oss's harmony reasoning effort, sent with every request.
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
+
+    @model_validator(mode="after")
+    def _effort_needs_the_harmony_parser(self) -> Hyperparams:
+        # Only gpt-oss reads an effort level. The model server would accept one for any other
+        # model and ignore it (or read it as "think"), and a run that records an effort its model
+        # never saw is a false record.
+        if self.reasoning_effort is not None and self.reasoning_parser != _HARMONY_REASONING_PARSER:
+            msg = (
+                "reasoning_effort applies only to gpt-oss models, served with "
+                f"reasoning_parser={_HARMONY_REASONING_PARSER!r}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class RunSpec(BaseModel):
@@ -407,7 +439,10 @@ async def _run_batches(
                 out.append(
                     {
                         "custom_id": cid,
+                        # The final answer only: the model server's reasoning parser keeps the
+                        # reasoning out of `text`, and it lands in its own column.
                         "output": response.text,
+                        "reasoning": response.reasoning,
                         "error": None,
                         "finish_reason": response.finish_reason,
                         "input_tokens": response.usage.input_tokens,
@@ -425,6 +460,7 @@ async def _run_batches(
                     {
                         "custom_id": cid,
                         "output": None,
+                        "reasoning": None,
                         "error": error,
                         "finish_reason": None,
                         "input_tokens": None,
@@ -455,14 +491,43 @@ def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | No
 
     ``seed`` is an OpenAI-compatible request field. ``top_k`` is not an OpenAI parameter, so it
     rides in ``extra_body``, the transport's explicit channel for server-specific body fields,
-    rather than depending on how the transport treats an unrecognised keyword.
+    rather than depending on how the transport treats an unrecognised keyword. So does
+    ``reasoning_effort``: the transport would otherwise decide per model id whether it supports
+    the field, and an operator's model id is one it has never seen.
     """
     extras: dict[str, Any] = {}
     if hp.seed is not None:
         extras["seed"] = hp.seed
+    body: dict[str, Any] = {}
     if hp.top_k is not None:
-        extras["extra_body"] = {"top_k": hp.top_k}
+        body["top_k"] = hp.top_k
+    if hp.reasoning_effort is not None:
+        body["reasoning_effort"] = hp.reasoning_effort
+    if body:
+        extras["extra_body"] = body
     return {"openai_compat": extras} if extras else None
+
+
+def _serve_args(hp: Hyperparams) -> tuple[str, ...]:
+    """The model-server flags the runner adds beyond the model, its address and its size."""
+    args: list[str] = list(_SERVE_LOAD_FORMAT)
+    if hp.reasoning_parser is not None:
+        args += ["--reasoning-parser", hp.reasoning_parser]
+    if hp.gpu_memory_utilization is not None:
+        args += ["--gpu-memory-utilization", str(hp.gpu_memory_utilization)]
+    if hp.max_num_batched_tokens is not None:
+        args += ["--max-num-batched-tokens", str(hp.max_num_batched_tokens)]
+    return tuple(args)
+
+
+def _serve_flags(run: str) -> list[str]:
+    """The flags of the model server's command line, from ``--host`` on.
+
+    What precedes them is the interpreter and the local snapshot path, which describe this
+    machine rather than the run; the manifest already records the model and its commit.
+    """
+    argv = shlex.split(run)
+    return argv[argv.index("--host") :] if "--host" in argv else argv
 
 
 def _throughput(
@@ -614,17 +679,44 @@ def _served_dtype(log_dir: Path) -> str | None:
     return None
 
 
-def _checkpoint_dtype(snapshot: Path) -> str | None:
-    """The dtype the checkpoint's ``config.json`` declares (``torch_dtype`` or ``dtype``)."""
+def _checkpoint_config(snapshot: Path) -> dict[str, Any]:
+    """The checkpoint's ``config.json``, or an empty mapping when it is missing or unreadable."""
     try:
         config: Any = json.loads((snapshot / "config.json").read_text())  # pyright: ignore[reportAny] - untyped JSON
     except OSError, ValueError:
-        return None
-    if not isinstance(config, dict):
-        return None
-    typed = cast("dict[str, Any]", config)
+        return {}
+    return cast("dict[str, Any]", config) if isinstance(config, dict) else {}
+
+
+def _checkpoint_dtype(snapshot: Path) -> str | None:
+    """The dtype the checkpoint's ``config.json`` declares (``torch_dtype`` or ``dtype``)."""
+    typed = _checkpoint_config(snapshot)
     value: Any = typed.get("torch_dtype") or typed.get("dtype")
     return value if isinstance(value, str) else None
+
+
+def _check_reasoning_parser(snapshot: Path, hp: Hyperparams) -> None:
+    """Refuse a gpt-oss run without the harmony reasoning parser, and that parser on anything else.
+
+    Without the parser the model server returns gpt-oss's analysis channel inside the answer, so
+    every row's ``output`` would carry the reasoning; with it on another model there is no
+    harmony output to split. Checked against the downloaded ``config.json``, before the server
+    starts, because the model id says nothing reliable about the architecture.
+    """
+    model_type = _checkpoint_config(snapshot).get("model_type")
+    harmony = model_type == _HARMONY_MODEL_TYPE
+    if harmony and hp.reasoning_parser != _HARMONY_REASONING_PARSER:
+        msg = (
+            f"a gpt-oss model needs reasoning_parser={_HARMONY_REASONING_PARSER!r}: without it the "
+            "model's reasoning is returned inside every output"
+        )
+        raise RunError(msg)
+    if not harmony and hp.reasoning_parser == _HARMONY_REASONING_PARSER:
+        msg = (
+            f"reasoning_parser={_HARMONY_REASONING_PARSER!r} is for gpt-oss models; this model "
+            f"declares model_type={model_type!r}"
+        )
+        raise RunError(msg)
 
 
 def _build_manifest(
@@ -656,7 +748,7 @@ def _build_manifest(
             "requested_revision": spec.dataset_commit_sha,
         },
         # What the model server actually ran with, next to what was asked for in `hyperparams`.
-        "serving": serving or {"max_model_len": None, "dtype": None},
+        "serving": serving or {"max_model_len": None, "dtype": None, "flags": None},
         "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
         "column_mapping": spec.column_mapping,
         "hyperparams": spec.hyperparams.model_dump(),
@@ -757,6 +849,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     model_commit = spec.model_revision or snapshot_commit(snapshot)
 
     hp = spec.hyperparams
+    await asyncio.to_thread(_check_reasoning_parser, snapshot, hp)
     task = build_vllm_task(
         str(snapshot),
         served_model_name=spec.model_id,  # the client below keeps addressing it by its Hub id
@@ -770,7 +863,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         # through a login shell, which re-sources the profile and drops this virtualenv from PATH:
         # a bare `vllm` is then "command not found" even though vLLM is installed right here.
         python_executable=sys.executable,
-        extra_args=_SERVE_LOAD_FORMAT,
+        extra_args=_serve_args(hp),
     )
     # Unbuffered: the served process writes through a pipe, so CPython would otherwise hold
     # its output in an 8 KiB block buffer — and a server that hangs before filling it leaves
@@ -822,6 +915,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
                 "checkpoint": await asyncio.to_thread(_checkpoint_dtype, snapshot),
                 "served": await asyncio.to_thread(_served_dtype, Path.cwd()),
             },
+            "flags": _serve_flags(task.run),
         }
         # The endpoint this runner just launched is on loopback and takes no credential, and
         # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back

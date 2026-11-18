@@ -61,11 +61,17 @@ class LLMResponse(BaseModel):
 
     ``provider_items`` carries a Responses API turn's replayable output (see
     :class:`~strata_forge.llm.messages.ProviderItems`); it is ``None`` on every other route.
+
+    ``reasoning`` is the plain-text reasoning a chat-completions server returned beside the
+    answer (vLLM's ``reasoning`` field, ``reasoning_content`` in LiteLLM's shape), kept apart from
+    ``text``. ``None`` when the server sent none, and always ``None`` on a Responses API route,
+    whose reasoning is encrypted and lives in ``provider_items``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     text: str = ""
+    reasoning: str | None = None
     tool_calls: list[ToolCall] = []
     finish_reason: FinishReason
     usage: Usage

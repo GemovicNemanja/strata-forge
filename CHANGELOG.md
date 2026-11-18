@@ -8,6 +8,28 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- The batch-inference runner serves reasoning models with their reasoning kept apart from the
+  answer. `Hyperparams.reasoning_parser` (`openai_gptoss` | `qwen3`) becomes vLLM's
+  `--reasoning-parser`, results rows gain a `reasoning` column (string or `None`) and `output`
+  holds the final text only. A gpt-oss checkpoint (`model_type` `gpt_oss`, read from the
+  downloaded `config.json` before the server starts) is refused without `openai_gptoss`, and
+  `openai_gptoss` is refused on any other model.
+- `Hyperparams.reasoning_effort` (`low` | `medium` | `high`) is sent in `extra_body` with every
+  request, and is refused unless `reasoning_parser` is `openai_gptoss`.
+- `Hyperparams.gpu_memory_utilization` and `Hyperparams.max_num_batched_tokens` set vLLM's
+  `--gpu-memory-utilization` and `--max-num-batched-tokens`, the two knobs vLLM's gpt-oss recipe
+  uses to fit gpt-oss-120b on one 80 GB GPU.
+- The inference manifest records the model server's command-line flags as `serving.flags`.
+- `LLMResponse.reasoning` carries the plain-text reasoning a chat-completions server returned
+  (`reasoning` / `reasoning_content`), separate from `text`.
+
+### Changed
+
+- A model whose response LiteLLM already split into `<think>` reasoning and content (Qwen3 with
+  no parser) now has that reasoning in the `reasoning` column instead of losing it.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added
