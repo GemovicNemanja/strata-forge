@@ -321,7 +321,10 @@ labeled = await distill(
 `strata_forge.datasets.recipe` is a declarative, versioned record that turns pinned source
 datasets into a new one (`schema` `strata.dataset_recipe/v1`). A `Recipe` names its `sources`
 (each a Hub dataset repo at a full 40-character `revision`, one `config` and one `split`, an
-optional column list, and optionally the project dataset version it came from) and an ordered list
+optional column list, and optionally the id of the project dataset version it came from). A
+`split` is one split name with at most a `[start:end]` row slice (`train`, `train[0:5000]`),
+parsed with the split-syntax parser in `pipelines/_split_overlap.py` (`parse_single_split`); `+`
+combinations, percent and negative slices and roundings are refused and an ordered list
 of `steps` over one working table:
 
 | Step | What it does |
@@ -342,12 +345,29 @@ row's `<left>+<right>`, a generated row's `gen:<seed row id>:<sample>`. Every ro
 materialized version states what it left out. Output records carry the recipe's columns and three
 engine columns: `_row_id`, `_synthetic` (true for every generated row) and `_seed_row_id`.
 
-**Rules the engine enforces.** A `synthesize` step refuses rows from a held-out split (one whose
-name starts with `validation`, `valid`, `val`, `dev`, `test`, `eval`, `holdout` or `heldout`):
-generation reads training data only. A table past `row_cap` rows is refused, never truncated.
-Column errors name the step, never row content.
+**Rules the engine enforces.** Held-out data never reaches generation and is never relabelled as
+training data. `split_class(name)` classifies a split's name by normalized tokens (lowercased, cut
+at non-alphanumerics, case changes and letter/digit boundaries): `held_out` when any token signals
+test, validation, dev, eval or held-out (`private_test`, `public_test`, `held_out`, `hold-out`,
+`devSet`, `testset`, even `train_test`), `train` when a training token is accompanied only by
+version numbers (`train`, `train_v2`), and `ambiguous` otherwise. Only the sources a step reads
+count (`Recipe.used_sources`):
 
-**Execution.** `execute(recipe, read, generate=None, row_cap=1_000_000)`: `read(source)` returns
+- a recipe that generates reads `train` sources only; an ambiguous name is refused like a held-out
+  one, and each `synthesize` step re-checks every seed row's origin;
+- a recipe that reads any source not classified `train` must name every output split
+  (`Recipe.output_splits`) as held out, so a later recipe cannot read its output as training data.
+  `Recipe.holdout_sources` lists those sources for the run's records.
+
+A table past `row_cap` rows or `byte_cap` bytes of values (estimated from the values) is refused,
+never truncated, and both are checked while a source loads and while a join grows, so a
+many-to-many join stops at the cap rather than after it. A recipe's text is bounded: templates
+20,000 characters, string constants and condition values 10,000, condition lists 1,000 values,
+the whole canonical document `MAX_RECIPE_BYTES` (256 KiB), and a `synthesize` step's
+`output_schema` must pass the guided-JSON schema check. Column errors name the step, never row
+content.
+
+**Execution.** `execute(recipe, read, generate=None, row_cap=1_000_000, byte_cap=2 GiB)`: `read(source)` returns
 the pinned split's rows (the caller reads the commit), and `generate(step, requests)` runs a
 synthesize step's `GenerationRequest`s in order, one `GenerationResult` each. The module loads no
 model and opens no file.
