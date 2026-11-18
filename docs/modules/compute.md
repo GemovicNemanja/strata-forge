@@ -841,9 +841,13 @@ carries ``grading`` (``GradeSettings``):
   (``custom_id`` = ``row-<i>``, a batch run's results), which is admitted only when
   the output file's ``manifest.json`` names this dataset, config, split and commit.
   A file with several samples per row is refused, and repeated ids are refused.
+  Ids are joined type-exactly (the integer 1 never joins the string "1") and
+  copied into the items file as declared.
 - ``cluster_column`` (each case its own cluster when null), up to eight
   ``slice_columns``, ``seed``, ``resamples`` (default 10,000) and
-  ``min_slice_rows`` (diagnostic below it).
+  ``min_slice_rows`` (diagnostic below it). A slice column is a declared label:
+  at most 64 values of at most 64 characters, else the run refuses it, because
+  its values are copied into the report and the items file.
 
 The judge is the batch-inference runner's ``vllm_chat`` path, run in-process with
 prepared rows: one request per (case, system with an output), the rubric rendered
@@ -861,21 +865,28 @@ and the answer schema's), the judge (requested revision, the commit served, its
 settings and serving facts), each output's pins, join and counts, and per slice
 (overall first): per system ``n``, ``graded``, ``coverage``, ``gate`` (``resolved``
 only at full coverage), unscored counts, and per criterion the cluster-bootstrap
-``mean`` (the pass rate on a pass/fail scale) and, with ``pass_at``, ``pass_rate``;
+``mean`` (the pass rate on a pass/fail scale) and, with ``pass_at``, ``pass_rate``
+(both null with ``reason: "no_graded_cases"`` when nothing was graded);
 per baseline the paired candidate-minus-baseline ``delta`` on the cases both had
-graded (``excludes_zero``, ``unresolved`` without bounds), with ``coverage``,
-``gate`` and pass/fail ``transitions``. ``agreement`` holds, per system and
+graded (``excludes_zero``, ``unresolved`` without bounds; null with
+``reason: "fewer_than_two_shared_cases"``), with ``coverage``, ``gate`` and pass/fail
+``transitions``. ``agreement`` holds, per system and
 criterion with a ``gold_column``, ``judge_agreement`` over the cases with both a
 gold and a judge score, plus ``n_gold``, ``coverage`` and cluster-bootstrap
 intervals of exact agreement and (ordinal) absolute error. ``items.parquet``
-holds one row per case: ``item_id``, ``cluster``, ``slice__<column>`` and per
-system ``status__<s>``, ``score__<criterion>__<s>``, ``gold__<criterion>__<s>``,
-``rationale__<s>`` and ``judge_retried__<s>``; never the input or the output
-text. With the manifest and a card they are pushed in one commit to a private
-output repo; the ``end`` event's message is ``<repo>@<commit>`` and its metrics
+holds one row per case: ``item_id``, ``cluster`` (null without a cluster
+column), ``slice__<column>`` and per system ``status__<s>``,
+``score__<criterion>__<s>``, ``gold__<criterion>__<s>`` and ``judge_retried__<s>``;
+it holds no input, output or rationale text. ``rationales.parquet`` holds
+``item_id``, ``system`` and the judge's ``rationale`` per graded case, capped at
+2,000 characters (a rubric may allow at most that much). **A rationale may quote
+the output it grades**, which is why it is kept apart: it is read by project
+members, and never reaches an agent beyond a capped excerpt. With the manifest
+and a card they are pushed in one commit to a private output repo; the ``end`` event's message is ``<repo>@<commit>`` and its metrics
 (at most 64) are ``cases``, ``graded``, ``coverage``, each criterion's candidate
-mean (bounds only at full coverage), ``delta_<criterion>__<baseline>`` and
-``agreement_<criterion>``. The machine needs
+mean (bounds only at full coverage; ``<criterion>_unresolved: 1`` below it),
+``delta_<criterion>__<baseline>`` (with ``delta_<criterion>_unresolved__<baseline>: 1``
+below full coverage) and ``agreement_<criterion>``. The machine needs
 ``strata-forge[serving,scoring,storage,hf]`` and a GPU for the judge.
 
 ### Fine-tuning pins, checks and manifest

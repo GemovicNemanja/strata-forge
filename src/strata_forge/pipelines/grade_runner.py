@@ -25,10 +25,16 @@ cases both systems had graded, with pass/fail transitions. A criterion with a ``
 adds the judge's agreement with those gold scores
 (:func:`strata_forge.metrics.judge_agreement.judge_agreement`).
 
-Outputs: ``items.parquet`` (one row per case: id, cluster, slices and, per system, the status,
-each score and the judge's rationale; never the input or output text), ``metrics.json``
-(``strata.eval.grades/v1``), ``manifest.json`` and a dataset card, pushed in one commit to a
-private output repo. The ``end`` event's message is ``<repo>@<commit>``.
+Outputs: ``items.parquet`` (one row per case: id, cluster, slice labels and, per system, the
+status and each score; never any input, output or rationale text), ``rationales.parquet`` (the
+judge's rationale per graded case and system, capped at 2,000 characters; a rationale may quote
+the output it grades, so it is kept apart), ``metrics.json`` (``strata.eval.grades/v1``),
+``manifest.json`` and a dataset card, pushed in one commit to a private output repo. The ``end``
+event's message is ``<repo>@<commit>``.
+
+Ids are joined type-exactly (the integer 1 never joins the string "1") and copied into the items
+file as declared. A slice column is a declared label: at most 64 values of at most 64 characters,
+else the run refuses it, because its values are copied into the report.
 """
 
 from __future__ import annotations
@@ -73,6 +79,7 @@ from strata_forge.pipelines._common import (
 from strata_forge.pipelines._grading import (
     CRITERIA_PLACEHOLDER,
     GRADE_SCHEMA_VERSION,
+    MAX_RATIONALE_CHARS,
     OUTPUT_PLACEHOLDER,
     Criterion,
     Rubric,
@@ -91,6 +98,7 @@ if TYPE_CHECKING:
 __all__ = [
     "GRADES_SCHEMA",
     "ITEMS_FILENAME",
+    "RATIONALES_FILENAME",
     "REPORT_FILENAME",
     "GradeSettings",
     "GradeSpec",
@@ -101,6 +109,7 @@ __all__ = [
 
 GRADES_SCHEMA = "strata.eval.grades/v1"
 ITEMS_FILENAME = "items.parquet"
+RATIONALES_FILENAME = "rationales.parquet"
 REPORT_FILENAME = "metrics.json"
 _CARD_FILENAME = "README.md"
 _MANIFEST_KIND = "graded_evaluation"
@@ -108,7 +117,10 @@ _RESULTS_DIR_NAME = "strata-grade-results"
 _RECORDED_DISTRIBUTIONS = ("numpy", "pyarrow", "datasets", "huggingface-hub", "vllm")
 _MAX_OUTPUTS = 4
 _MAX_SLICE_COLUMNS = 8
-_MAX_SLICE_VALUES = 256
+#: A slice column is a declared low-cardinality label: at most this many values, each at most
+#: ``_MAX_SLICE_CHARS`` long, copied into the report and the items file as they are.
+_MAX_SLICE_VALUES = 64
+_MAX_SLICE_CHARS = 64
 _MAX_CASES = 100_000
 _MAX_TEXT = 128
 _MAX_IDENTIFIER_CHARS = 256
@@ -337,6 +349,9 @@ class _Cases(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     ids: list[str]
+    #: The join key of each id: its text tagged with its type, so the integer 1 never joins the
+    #: string "1".
+    keys: list[str]
     clusters: list[str]
     slices: dict[str, list[str]]
     columns: dict[str, list[Any]]
@@ -382,20 +397,28 @@ def _identifier(value: object) -> str | None:
     return text if text and len(text) <= _MAX_IDENTIFIER_CHARS else None
 
 
-def _unique_ids(values: Sequence[object], what: str) -> list[str]:
+def _id_key(value: object, text: str) -> str:
+    return f"{'int' if isinstance(value, int) else 'str'}:{text}"
+
+
+def _unique_ids(values: Sequence[object], what: str) -> tuple[list[str], list[str]]:
+    """Each id's text (copied as declared) and its type-exact join key, refusing a repeat."""
     ids: list[str] = []
+    keys: list[str] = []
     seen: set[str] = set()
     for index, value in enumerate(values):
         text = _identifier(value)
         if text is None:
             msg = f"{what}: row {index} has no usable id (a non-empty string or integer)"
             raise RunError(msg)
-        if text in seen:
+        key = _id_key(value, text)
+        if key in seen:
             msg = f"{what} repeats the id {text[:64]!r}; ids must be unique"
             raise RunError(msg)
-        seen.add(text)
+        seen.add(key)
         ids.append(text)
-    return ids
+        keys.append(key)
+    return ids, keys
 
 
 def _prepare_cases(columns: dict[str, list[Any]], settings: GradeSettings) -> _Cases:
@@ -403,12 +426,12 @@ def _prepare_cases(columns: dict[str, list[Any]], settings: GradeSettings) -> _C
     if not n:
         msg = "the gold split is empty: there is nothing to grade"
         raise RunError(msg)
-    ids = (
-        _unique_ids(columns[settings.id_column], f"id_column {settings.id_column!r}")
-        if settings.id_column is not None
-        else [f"row-{i}" for i in range(n)]
-    )
-    clusters: list[str] = ids
+    if settings.id_column is not None:
+        ids, keys = _unique_ids(columns[settings.id_column], f"id_column {settings.id_column!r}")
+    else:
+        ids = [f"row-{i}" for i in range(n)]
+        keys = [_id_key(case, case) for case in ids]
+    clusters: list[str] = keys
     if settings.cluster_column is not None:
         clusters = []
         for index, value in enumerate(columns[settings.cluster_column]):
@@ -421,13 +444,18 @@ def _prepare_cases(columns: dict[str, list[Any]], settings: GradeSettings) -> _C
             clusters.append(text)
     slices: dict[str, list[str]] = {}
     for column in settings.slice_columns:
-        values = ["(null)" if v is None else str(v)[:_MAX_TEXT] for v in columns[column]]
-        if len(set(values)) > _MAX_SLICE_VALUES:
-            msg = f"slice column {column!r} has more than {_MAX_SLICE_VALUES} values"
+        values = ["(null)" if v is None else str(v) for v in columns[column]]
+        distinct = set(values)
+        if len(distinct) > _MAX_SLICE_VALUES or any(len(v) > _MAX_SLICE_CHARS for v in distinct):
+            msg = (
+                f"slice column {column!r} is not a slice label: it needs at most "
+                f"{_MAX_SLICE_VALUES} values of at most {_MAX_SLICE_CHARS} characters, since "
+                "its values are copied into the report"
+            )
             raise RunError(msg)
         slices[column] = values
     mapped = {column: columns[column] for column in settings.column_mapping.values()}
-    return _Cases(ids=ids, clusters=clusters, slices=slices, columns=mapped)
+    return _Cases(ids=ids, keys=keys, clusters=clusters, slices=slices, columns=mapped)
 
 
 # ------------------------------------------------------------------ the outputs
@@ -517,9 +545,9 @@ def _gold_score(value: object, criterion: Criterion, who: str) -> int | None:
 def _align_outputs(
     raw: dict[str, list[Any]], output: GradedOutput, cases: _Cases, rubric: Rubric
 ) -> _Outputs:
-    key = output.id_column or "custom_id"
-    ids = _unique_ids(raw[key], f"the outputs of {output.name}")
-    position = {case: index for index, case in enumerate(cases.ids)}
+    column = output.id_column or "custom_id"
+    ids, keys = _unique_ids(raw[column], f"the outputs of {output.name}")
+    position = {key: index for index, key in enumerate(cases.keys)}
     texts: list[str | None] = [None] * len(cases.ids)
     gold: dict[str, list[int | None]] = {
         c.id: [None] * len(cases.ids) for c in rubric.criteria if c.gold_column
@@ -529,7 +557,7 @@ def _align_outputs(
         if output.id_column is None and not _POSITION_RE.fullmatch(item):
             msg = f"the outputs of {output.name} have custom_id {item[:64]!r}, not row-<index>"
             raise RunError(msg)
-        index = position.get(item)
+        index = position.get(keys[row])
         if index is None:
             unmatched += 1
             continue
@@ -724,7 +752,11 @@ def _system_read(
     clusters = [cases.clusters[i] for i in graded]
     for criterion in settings.rubric.criteria:
         if not graded:
-            out["criteria"][criterion.id] = None
+            out["criteria"][criterion.id] = {
+                "mean": None,
+                "pass_rate": None,
+                "reason": "no_graded_cases",
+            }
             continue
         values = [float((judged.scores[name][i] or {})[criterion.id]) for i in graded]
         entry: dict[str, Any] = {"mean": _interval(values, clusters, settings), "pass_rate": None}
@@ -766,7 +798,7 @@ def _comparison(
     clusters = [cases.clusters[i] for i in shared]
     for criterion in settings.rubric.criteria:
         if len(shared) < 2:
-            out["criteria"][criterion.id] = None
+            out["criteria"][criterion.id] = {"delta": None, "reason": "fewer_than_two_shared_cases"}
             continue
         base = [float((judged.scores[baseline][i] or {})[criterion.id]) for i in shared]
         cand = [float((judged.scores[candidate][i] or {})[criterion.id]) for i in shared]
@@ -928,17 +960,24 @@ def _headline(report: dict[str, Any]) -> dict[str, float]:
     _put(metrics, "graded", candidate["graded"])
     _put(metrics, "coverage", candidate["coverage"])
     for cid, read in candidate["criteria"].items():
-        if read is None:
-            continue
         mean = read["mean"]
+        if mean is None:
+            continue
         _put(metrics, cid, mean["point"])
         if candidate["coverage"] == 1:
             _put(metrics, f"{cid}_lower", mean["lower"])
             _put(metrics, f"{cid}_upper", mean["upper"])
+        else:
+            # Over part of the cases: a point to read, never a gate.
+            _put(metrics, f"{cid}_unresolved", 1.0)
     for comparison in overall["comparisons"]:
+        baseline = comparison["baseline"]
         for cid, read in comparison["criteria"].items():
-            if read is not None:
-                _put(metrics, f"delta_{cid}__{comparison['baseline']}", read["delta"]["point"])
+            if read["delta"] is None:
+                continue
+            _put(metrics, f"delta_{cid}__{baseline}", read["delta"]["point"])
+            if comparison["coverage"] < 1:
+                _put(metrics, f"delta_{cid}_unresolved__{baseline}", 1.0)
     for cid, read in report["agreement"].get(report["candidate"], {}).items():
         _put(metrics, f"agreement_{cid}", read["percent_agreement"])
     return metrics
@@ -948,11 +987,16 @@ def _headline(report: dict[str, Any]) -> dict[str, float]:
 
 
 def _items_rows(
-    cases: _Cases, outputs: dict[str, _Outputs], judged: _Judged, rubric: Rubric
+    cases: _Cases, outputs: dict[str, _Outputs], judged: _Judged, settings: GradeSettings
 ) -> list[dict[str, Any]]:
+    """One text-free row per case: ids, cluster, slice labels, statuses and scores."""
+    rubric = settings.rubric
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(cases.ids):
-        row: dict[str, Any] = {"item_id": item, "cluster": cases.clusters[index]}
+        row: dict[str, Any] = {
+            "item_id": item,
+            "cluster": cases.clusters[index] if settings.cluster_column else None,
+        }
         for column, values in cases.slices.items():
             row[f"slice__{column}"] = values[index]
         for name in outputs:
@@ -964,10 +1008,20 @@ def _items_rows(
                 )
                 if criterion.gold_column:
                     row[f"gold__{criterion.id}__{name}"] = outputs[name].gold[criterion.id][index]
-            row[f"rationale__{name}"] = judged.rationales[name][index]
             row[f"judge_retried__{name}"] = judged.retried[name][index]
         rows.append(row)
     return rows
+
+
+def _rationale_rows(cases: _Cases, judged: _Judged) -> list[dict[str, Any]]:
+    """One row per graded (case, system): the judge's rationale, capped. A rationale may quote the
+    output it grades, so it is kept apart from the text-free items file."""
+    return [
+        {"item_id": item, "system": name, "rationale": (text or "")[:MAX_RATIONALE_CHARS]}
+        for index, item in enumerate(cases.ids)
+        for name, texts in judged.rationales.items()
+        if (text := texts[index]) is not None
+    ]
 
 
 _CARD = """---
@@ -980,8 +1034,10 @@ configs:
 # Graded evaluation
 
 Written by `strata_forge.pipelines.grade_runner`. `items.parquet` holds one row per case: its id,
-cluster, slice values and, per system, the grading status, each criterion's score and the
-judge's rationale. `metrics.json` holds the report and `manifest.json` the pinned inputs.
+cluster, slice labels and, per system, the grading status and each criterion's score; it holds no
+input or output text. `rationales.parquet` holds the judge's rationale per graded case and system,
+capped at 2,000 characters; a rationale may quote the output it grades. `metrics.json` holds the
+report and `manifest.json` the pinned inputs.
 """
 
 
@@ -997,8 +1053,15 @@ def _write_outputs(
     arrow: Any = __import__("pyarrow")  # pyright: ignore[reportAny] - optional extra
     outdir.mkdir(parents=True, exist_ok=True)
     items = outdir / ITEMS_FILENAME
-    rows = _items_rows(cases, outputs, judged, spec.grading.rubric)
+    rows = _items_rows(cases, outputs, judged, spec.grading)
     parquet.write_table(arrow.Table.from_pylist(rows), str(items))
+    rationales = outdir / RATIONALES_FILENAME
+    schema = arrow.schema(
+        [("item_id", arrow.string()), ("system", arrow.string()), ("rationale", arrow.string())]
+    )
+    parquet.write_table(
+        arrow.Table.from_pylist(_rationale_rows(cases, judged), schema=schema), str(rationales)
+    )
     (outdir / REPORT_FILENAME).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     (outdir / _CARD_FILENAME).write_text(_CARD)
     write_manifest(
@@ -1028,6 +1091,7 @@ def _write_outputs(
     )
     return {
         ITEMS_FILENAME: items,
+        RATIONALES_FILENAME: rationales,
         REPORT_FILENAME: outdir / REPORT_FILENAME,
         MANIFEST_FILENAME: outdir / MANIFEST_FILENAME,
         _CARD_FILENAME: outdir / _CARD_FILENAME,

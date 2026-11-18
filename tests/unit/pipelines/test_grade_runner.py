@@ -246,10 +246,20 @@ def test_a_graded_run_scores_aggregates_and_pushes_one_commit(env: dict[str, Any
     _write(env)
     destination, events = _run(_spec(), env["tmp"])
     assert destination == f"u/grades@{'e' * 40}"
-    assert [c for c in _Hub.calls if c[0] == "upload_files"] == [
+    uploads = [c for c in _Hub.calls if c[0] == "upload_files"]
+    assert uploads == [
         (
             "upload_files",
-            (["README.md", "items.parquet", "manifest.json", "metrics.json"], "u/grades"),
+            (
+                [
+                    "README.md",
+                    "items.parquet",
+                    "manifest.json",
+                    "metrics.json",
+                    "rationales.parquet",
+                ],
+                "u/grades",
+            ),
         )
     ]
     # One judge row per (case, system): every case had an output from both.
@@ -316,7 +326,7 @@ def test_a_graded_run_scores_aggregates_and_pushes_one_commit(env: dict[str, Any
     assert [e["kind"] for e in events].count("end") == 1
 
 
-def test_items_hold_statuses_scores_and_rationales_never_text(env: dict[str, Any]) -> None:
+def test_items_hold_statuses_and_scores_and_rationales_live_apart(env: dict[str, Any]) -> None:
     _write(env)
     _run(_spec(), env["tmp"])
     items = pq.read_table(str(_outdir(env) / "items.parquet")).to_pylist()
@@ -326,11 +336,20 @@ def test_items_hold_statuses_scores_and_rationales_never_text(env: dict[str, Any
     assert first["status__candidate"] == "graded"
     assert first["score__policy__candidate"] == 0
     assert first["score__helpfulness__candidate"] == 1
-    assert first["rationale__candidate"] == "the answer is wrong"
     assert first["gold__policy__candidate"] == 0
+    assert first["cluster"] == "g-000"
     flat = json.dumps(items)
     assert "synthetic question" not in flat
     assert "answer 0" not in flat
+    assert "the answer is" not in flat
+    assert not any(key.startswith("rationale") for key in first)
+    rationales = pq.read_table(str(_outdir(env) / "rationales.parquet")).to_pylist()
+    assert len(rationales) == 2 * _N
+    assert rationales[0] == {
+        "item_id": "q-000",
+        "system": "candidate",
+        "rationale": "the answer is wrong",
+    }
 
 
 def test_unscored_cases_stay_visible_and_never_pass(env: dict[str, Any]) -> None:
@@ -351,11 +370,11 @@ def test_unscored_cases_stay_visible_and_never_pass(env: dict[str, Any]) -> None
     assert items[3]["status__candidate"] == "output_missing"
     assert items[7]["status__candidate"] == "judge_error"
     assert items[7]["score__policy__candidate"] is None
-    # A run under full coverage carries no bounds in its headline.
-    assert (
-        "policy_lower"
-        not in json.loads((env["tmp"] / "progress.jsonl").read_text().splitlines()[-1])["metrics"]
-    )
+    # A read over part of the cases carries no bounds and is marked unresolved, deltas too.
+    headline = json.loads((env["tmp"] / "progress.jsonl").read_text().splitlines()[-1])["metrics"]
+    assert "policy_lower" not in headline
+    assert headline["policy_unresolved"] == 1.0
+    assert headline["delta_policy_unresolved__baseline"] == 1.0
 
 
 def test_an_invalid_judge_reply_is_unscored(env: dict[str, Any]) -> None:
@@ -460,3 +479,51 @@ def test_the_judge_keeps_tuning_knobs_and_the_grader_owns_the_rest() -> None:
     hp = gr.judge_hyperparams(settings)
     assert (hp.engine, hp.max_tokens, hp.temperature) == ("vllm_chat", 512, 0.2)
     assert hp.guided_json is not None
+
+
+def test_a_system_with_nothing_graded_reads_null_with_a_reason(env: dict[str, Any]) -> None:
+    env["base"] = _outputs(2, missing=tuple(range(_N)))
+    _write(env)
+    _run(_spec(), env["tmp"])
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    overall = report["slices"][0]
+    base = overall["systems"]["baseline"]
+    assert base["criteria"]["policy"] == {
+        "mean": None,
+        "pass_rate": None,
+        "reason": "no_graded_cases",
+    }
+    (comparison,) = overall["comparisons"]
+    assert comparison["criteria"]["policy"] == {
+        "delta": None,
+        "reason": "fewer_than_two_shared_cases",
+    }
+
+
+def test_ids_join_type_exactly(env: dict[str, Any]) -> None:
+    env["gold"]["uid"] = list(range(_N))  # integers
+    env["cand"]["uid"] = [str(i) for i in range(_N)]  # the same digits, as strings
+    env["base"]["uid"] = [str(i) for i in range(_N)]
+    _write(env)
+    with pytest.raises(RunError, match="nothing to grade"):
+        _run(_spec(), env["tmp"])
+
+
+def test_a_slice_value_too_long_to_be_a_label_is_refused(env: dict[str, Any]) -> None:
+    env["gold"]["tier"] = ["x" * 65] + ["easy"] * (_N - 1)
+    _write(env)
+    with pytest.raises(RunError, match="not a slice label"):
+        _run(_spec(), env["tmp"])
+
+
+def test_a_slice_column_with_too_many_values_is_refused(env: dict[str, Any]) -> None:
+    n = 2 * _N
+    env["gold"] = {
+        "uid": [f"q-{i:03d}" for i in range(n)],
+        "question": [f"synthetic question {i}" for i in range(n)],
+        "group": [f"g-{i // 2:03d}" for i in range(n)],
+        "tier": [f"free text {i}" for i in range(n)],
+    }
+    _write(env)
+    with pytest.raises(RunError, match="not a slice label"):
+        _run(_spec(), env["tmp"])
