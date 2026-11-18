@@ -10,6 +10,12 @@ dataset repo (when a write token + an output repo are supplied) OR keeps them as
 file on the VM (outside the per-run workdir, for the user to retrieve over SSH). Live
 progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestrator tails it).
 
+``hyperparams.engine = "hf_classify"`` swaps the middle of that for exact classifier scoring: each
+row renders into a text pair, a sequence-classification head is read with no model server, and
+the raw logits are persisted (see :mod:`strata_forge.pipelines._scoring`). The frame around it —
+the spec, the filtered model download, the private output repo and the one-commit push — is the
+same.
+
 Security boundary (the VM is where untrusted-but-allow-listed config meets real
 credentials + the network):
 
@@ -111,6 +117,16 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
+from strata_forge.pipelines._scoring import (
+    LABEL_RE,
+    SCORING_DTYPES,
+    build_inputs,
+    build_manifest,
+    load_classifier,
+    plan_batches,
+    result_rows,
+    tally,
+)
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
@@ -204,6 +220,20 @@ _QWEN3_MODEL_TYPES = frozenset({"qwen3", "qwen3_moe"})
 # days, and a long run can cross midnight.
 _HARMONY_DATE_ENV = "VLLM_SYSTEM_START_DATE"
 _ISO_DATE_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+# The pair template is bounded like the prompt template the control plane accepts.
+_MAX_PAIR_TEMPLATE = 8_192
+# Knobs only a scoring engine reads, and the ones both engines read.
+_SCORING_FIELDS = frozenset(
+    {
+        "pair_template",
+        "label_alias",
+        "id_column",
+        "slice_column",
+        "list_separator",
+        "scoring_batch_size",
+    }
+)
+_SHARED_FIELDS = frozenset({"row_limit", "max_model_len", "dtype"})
 
 
 class Hyperparams(BaseModel):
@@ -244,6 +274,47 @@ class Hyperparams(BaseModel):
     # serving machine's date at start-up. Either way the manifest records the date used.
     harmony_date: str | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
+    # What the run does with each rendered row: generate a reply through the model server
+    # (`vllm_chat`), or read a sequence-classification head's logits for the pair
+    # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`).
+    engine: Literal["vllm_chat", "hf_classify"] = "vllm_chat"
+    pair_template: str | None = Field(default=None, min_length=1, max_length=_MAX_PAIR_TEMPLATE)
+    label_alias: dict[str, str] | None = Field(default=None, min_length=2, max_length=64)
+    id_column: str | None = Field(default=None, min_length=1, max_length=255)
+    slice_column: str | None = Field(default=None, min_length=1, max_length=255)
+    list_separator: str = Field(default="\n", max_length=16)
+    scoring_batch_size: int = Field(default=16, ge=1, le=1024)
+
+    @model_validator(mode="after")
+    def _fields_match_the_engine(self) -> Hyperparams:
+        """Refuse a knob the chosen engine would ignore, so a spec means what it says."""
+        given = self.model_fields_set - {"engine"}
+        if self.engine == "vllm_chat":
+            stray = sorted(given & _SCORING_FIELDS)
+            if stray:
+                msg = f"{', '.join(stray)} apply only to engine 'hf_classify'"
+                raise ValueError(msg)
+            return self
+        stray = sorted(given - _SCORING_FIELDS - _SHARED_FIELDS)
+        if stray:
+            msg = f"engine 'hf_classify' generates no text and takes no {', '.join(stray)}"
+            raise ValueError(msg)
+        if self.pair_template is None:
+            msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
+            raise ValueError(msg)
+        if self.dtype is not None and self.dtype not in SCORING_DTYPES:
+            msg = f"engine 'hf_classify' loads in one of {', '.join(SCORING_DTYPES)}"
+            raise ValueError(msg)
+        if self.label_alias is not None:
+            bad = [
+                k
+                for k, v in self.label_alias.items()
+                if not (0 < len(k) <= 256 and LABEL_RE.fullmatch(v))
+            ]
+            if bad or len(set(self.label_alias.values())) != len(self.label_alias):
+                msg = "label_alias maps each model class name to a distinct label (1-64 of A-Z a-z 0-9 _ . -)"
+                raise ValueError(msg)
+        return self
 
     @field_validator("harmony_date")
     @classmethod
@@ -339,7 +410,8 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
     to survive to the model. That reading is rare, and it is not worth the run this protects.
     """
-    placeholders = {m.group(1) for m in _PLACEHOLDER_RE.finditer(spec.template)}
+    templates = (spec.template, spec.hyperparams.pair_template or "")
+    placeholders = {m.group(1) for t in templates for m in _PLACEHOLDER_RE.finditer(t)}
     unmapped = sorted(placeholders - set(spec.column_mapping))
     if not unmapped:
         return
@@ -924,6 +996,8 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
+    if spec.hyperparams.engine == "hf_classify":
+        return await _execute_scoring(spec, secrets, writer)
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, and the
@@ -1101,6 +1175,146 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # for a run that failed this way they are the diagnosis — they say every row failed and where
     # the per-row errors can be read.
     _check_produced_output(out, ok)
+    return destination
+
+
+async def _require_fresh_output(spec: RunSpec, hf_token: str) -> None:
+    """Refuse an output repo that already holds files: one scoring run, one repo.
+
+    Scores are read back by joining on the repo, so a repo holding an earlier run's commit would
+    let a reader mix two runs' rows. A repo the preflight just created holds only the Hub's own
+    ``.gitattributes``.
+    """
+    out_repo = validate_repo_id(cast("str", spec.output_repo_id), "output repo")
+    try:
+        files = await HFHubClient(token=hf_token).list_repo_files(out_repo, repo_type="dataset")
+    except Exception as exc:
+        msg = f"could not list the output repo {out_repo}: {exc}"
+        raise RunError(msg) from exc
+    held = sorted(name for name in files if name != ".gitattributes")
+    if held:
+        msg = (
+            f"the output repo {out_repo} already holds {len(held)} file(s); a scoring run pushes "
+            "to a repo of its own, so choose a new output repo"
+        )
+        raise RunError(msg)
+
+
+async def _execute_scoring(
+    spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
+) -> str:
+    """Score every row with the model's classification head; no model server is started.
+
+    The same frame as a chat run: the output repo is checked before any download, the model comes
+    from the same filtered snapshot, and the results and manifest are written outside the workdir
+    and pushed in one commit. What differs is the middle: rows over the model's length limit are
+    dropped and counted before the first forward pass, and the rest run in length-sorted batches.
+    """
+    hf_token = secrets.hf_token_value()
+    hub_token = secrets.hub_credential()
+    hp = spec.hyperparams
+    gpu = GpuSampler()
+    phase = phase_sink(writer, hf_token, gpu=gpu)
+    pushing = bool(hf_token and spec.output_repo_id)
+
+    if pushing:
+        async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
+            await _check_output_repo(spec, hf_token)
+            await _require_fresh_output(spec, cast("str", hf_token))
+    async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
+        rows = await asyncio.to_thread(_load_rows, spec, hub_token)
+    if not rows:
+        msg = "the run produced no rows: the dataset split was empty"
+        raise RunError(msg)
+    inputs = build_inputs(spec, rows)
+    emit(writer, ProgressEvent(kind="start", stage="run", total_steps=len(rows)))
+
+    async with ticking_phase(phase, "Downloading the model", stage="load_model"):
+        snapshot = await _fetch_model(spec, hub_token)
+    model_commit = spec.model_revision or snapshot_commit(snapshot)
+    async with ticking_phase(phase, "Loading the classifier", stage="load_model"):
+        classifier = await asyncio.to_thread(
+            load_classifier,
+            snapshot,
+            label_alias=hp.label_alias,
+            max_length=hp.max_model_len,
+            dtype=hp.dtype,
+        )
+    async with ticking_phase(phase, "Measuring rows", stage="run"):
+        lengths = await asyncio.to_thread(classifier.lengths, inputs.texts, inputs.pairs)
+    batches, overflow = plan_batches(
+        lengths, max_length=classifier.max_length, batch_size=hp.scoring_batch_size
+    )
+
+    logits: dict[int, list[float]] = {}
+    started = time.monotonic()
+    async with ticking_phase(phase, "Scoring rows", stage="run"):
+        for batch in batches:
+            values = await asyncio.to_thread(
+                classifier.logits,
+                [inputs.texts[i] for i in batch],
+                [inputs.pairs[i] for i in batch],
+            )
+            logits.update(zip(batch, values, strict=True))
+            elapsed = time.monotonic() - started
+            emit(
+                writer,
+                ProgressEvent(
+                    kind="step",
+                    stage="run",
+                    step=len(logits) + len(overflow),
+                    total_steps=len(rows),
+                    metrics={
+                        "succeeded": float(len(logits)),
+                        "failed": 0.0,
+                        "overflow": float(len(overflow)),
+                        **({"rows_per_s": len(logits) / elapsed} if elapsed > 0 else {}),
+                        **gpu.sample(),
+                    },
+                ),
+            )
+
+    out = result_rows(lengths, logits, classifier.labels, inputs)
+    async with ticking_phase(phase, "Writing results", stage="push"):
+        results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
+        await asyncio.to_thread(
+            write_manifest,
+            build_manifest(spec, classifier, out, model_commit),
+            Path(results_path).parent,
+        )
+    if pushing:
+        try:
+            async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
+                await _require_fresh_output(spec, cast("str", hf_token))
+                destination = await _push_results(spec, results_path, cast("str", hf_token))
+        except Exception as exc:
+            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
+            raise RunError(msg) from exc
+    else:
+        destination = str(results_path)
+
+    counts = tally(out)
+    emit(
+        writer,
+        ProgressEvent(
+            kind="end",
+            stage="push",
+            step=len(out),
+            total_steps=len(out),
+            metrics={
+                "succeeded": float(counts["scored"]),
+                "failed": 0.0,
+                "overflow": float(counts["overflow"]),
+            },
+            message=destination,
+        ),
+    )
+    if not counts["scored"]:
+        msg = (
+            f"all {len(out)} rows exceed the model's limit of {classifier.max_length} tokens, so "
+            "none was scored (nothing is truncated)"
+        )
+        raise RunError(msg)
     return destination
 
 
