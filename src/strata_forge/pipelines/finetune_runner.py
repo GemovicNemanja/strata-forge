@@ -564,6 +564,7 @@ def _receipt_event(name: str, receipt: Mapping[str, Any]) -> ProgressEvent:
     """A passed check as a ``phase`` event: a sentence for the monitor, numbers in ``metrics``."""
     metrics: dict[str, float] = {}
     if name == "overflow":
+        distribution: dict[str, Any] = dict(receipt.get("length_distribution") or {})
         message = (
             f"Length check passed: {receipt['rows']} rows, the longest {receipt['longest']} of "
             f"{receipt['max_length']} tokens"
@@ -573,6 +574,8 @@ def _receipt_event(name: str, receipt: Mapping[str, Any]) -> ProgressEvent:
             "check_longest_tokens": float(receipt["longest"]),
             "check_max_length": float(receipt["max_length"]),
             "check_template_token_overhead": float(receipt["template_token_overhead"]),
+            "check_rows_over_max_length": float(receipt["rows_over_max_length"]),
+            **{f"check_length_{k}": float(v) for k, v in distribution.items()},
         }
     elif name == "load":
         message = "Load check passed: only the declared head keys were missing"
@@ -586,6 +589,7 @@ def _receipt_event(name: str, receipt: Mapping[str, Any]) -> ProgressEvent:
             "step0_max_abs_logit_diff": float(receipt["max_abs_logit_diff"]),
             "step0_tolerance": float(receipt["tolerance"]),
             "step0_rows": float(receipt["rows"]),
+            "step0_argmax_agree": float(receipt["argmax_agree"]),
         }
     else:
         peak = receipt.get("peak_bytes")
@@ -601,6 +605,10 @@ def _receipt_event(name: str, receipt: Mapping[str, Any]) -> ProgressEvent:
             message = f"Memory check ran without a GPU to measure (activation checkpointing {flag})"
         metrics["preflight_gradient_checkpointing"] = 1.0 if flag == "on" else 0.0
         metrics["preflight_batch_max_length"] = float(receipt["batch_max_length"])
+        eval_peak = receipt.get("eval_peak_bytes")
+        if isinstance(eval_peak, int):
+            metrics["preflight_eval_peak_bytes"] = float(eval_peak)
+            message += f"; the in-run eval peaks at {eval_peak / 2**30:.1f} GiB"
     return ProgressEvent(kind="phase", stage="load_model", message=message, metrics=metrics)
 
 

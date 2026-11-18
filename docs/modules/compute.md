@@ -455,8 +455,10 @@ prefix), never as a Python list; and runs the classifier's checks before step 0
 ``phase`` event at stage ``load_model`` whose ``message`` is a sentence and
 whose ``metrics`` carry the numbers (``check_rows``,
 ``check_longest_tokens``, ``check_template_token_overhead``,
-``step0_max_abs_logit_diff``, ``step0_tolerance``,
-``preflight_peak_bytes``, ``preflight_total_bytes``,
+``check_rows_over_max_length``, ``check_length_min`` / ``_p50`` / ``_p95`` /
+``_max``, ``step0_max_abs_logit_diff``, ``step0_tolerance``,
+``step0_argmax_agree``, ``preflight_peak_bytes``,
+``preflight_eval_peak_bytes``, ``preflight_total_bytes``,
 ``preflight_gradient_checkpointing``, ...). A refused check fails the run
 with its measurement in the message (the memory refusal also names the
 flag and the base commit) and leaves a ``manifest.json`` with ``outcome``

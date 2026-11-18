@@ -161,6 +161,16 @@ class TestAcceptanceSmoke:
         ]
         step0 = next(e for e in events if e["message"].startswith("Step-0 check passed"))
         assert step0["metrics"]["step0_max_abs_logit_diff"] < 1e-5
+        assert step0["metrics"]["step0_argmax_agree"] == step0["metrics"]["step0_rows"]
+        length = next(e for e in events if e["message"].startswith("Length check passed"))
+        assert length["metrics"]["check_rows_over_max_length"] == 0.0
+        assert (
+            length["metrics"]["check_length_min"]
+            <= length["metrics"]["check_length_p50"]
+            <= length["metrics"]["check_length_p95"]
+            <= length["metrics"]["check_length_max"]
+            == length["metrics"]["check_longest_tokens"]
+        )
         assert events[-1]["kind"] == "end"
         assert events[-1]["metrics"]["gpu_seconds"] == 0.0
         assert events[-1]["metrics"]["gpu_count"] == 0.0
