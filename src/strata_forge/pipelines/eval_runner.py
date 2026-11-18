@@ -52,6 +52,7 @@ import sys
 import unicodedata
 from collections import Counter
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -82,6 +83,8 @@ from strata_forge.pipelines._common import (
     SAFE_NAME_RE,
     RunError,
     RunSecrets,
+    build_receipt,
+    commit_oid,
     emit,
     ensure_private_output,
     load_config,
@@ -92,13 +95,13 @@ from strata_forge.pipelines._common import (
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
 __all__ = [
     "ITEMS_FILENAME",
@@ -1652,8 +1655,9 @@ def _report(
     }
 
 
-async def _push(spec: EvalSpec, files: dict[str, Path], hf_token: str) -> str:
-    """Push the report files in ONE commit, so a half-landed report can never exist."""
+async def _push(spec: EvalSpec, files: dict[str, Path], hf_token: str) -> tuple[str, str | None]:
+    """Push the report files in ONE commit, so a half-landed report can never exist. Returns the
+    repo and the commit the push made."""
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push results"
         raise RunError(msg)
@@ -1666,9 +1670,7 @@ async def _push(spec: EvalSpec, files: dict[str, Path], hf_token: str) -> str:
         repo_type="dataset",
         commit_message="evaluation report",
     )
-    # ``repo@commit``, so the report is read back at the commit this run made, never at a head
-    # another run may have moved since.
-    return f"{out_repo}@{commit}" if COMMIT_SHA_RE.fullmatch(commit) else out_repo
+    return out_repo, commit_oid(commit)
 
 
 # ------------------------------------------------------------------ run
@@ -1748,15 +1750,25 @@ async def _execute(spec: EvalSpec, secrets: RunSecrets, writer: JsonlProgressWri
     async with ticking_phase(phase, "Writing the report", stage="push"):
         outdir = results_dir(spec.run_id, name=_RESULTS_DIR_NAME)
         files = await asyncio.to_thread(_write_outputs, spec, gold, systems, report, outdir)
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if pushing and hf_token:
         try:
             async with ticking_phase(phase, "Uploading the report to the Hub", stage="push"):
-                destination = await _push(spec, files, hf_token)
+                pushed = await _push(spec, files, hf_token)
+            # ``repo@commit``, so the report is read back at the commit this run made, never at a
+            # head another run may have moved since.
+            destination = f"{pushed[0]}@{pushed[1]}" if pushed[1] else pushed[0]
         except Exception as exc:
-            msg = f"the report is on the VM at {outdir}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(outdir)
     else:
         destination = str(outdir)
+    receipt = await asyncio.to_thread(build_receipt, "eval", files[MANIFEST_FILENAME], pushed)
+    await asyncio.to_thread(write_receipt, receipt, Path.cwd())
+    if push_error is not None:
+        msg = f"the report is on the VM at {outdir}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
 
     emit(
         writer,

@@ -96,6 +96,39 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `timed_verifier_request` on the scoring engine.
 - The clean-install matrix gains the benchmark machine's extras, `serving,storage,hf,scoring`,
   and the smoke script a `check_benchmark` on the tiny classifier.
+- The batch-inference runner names rows by a declared column: `RunSpec.id_column` makes each
+  results row's `custom_id` that column's value (present, at most 512 characters and unique, else
+  the run is refused naming the row position, never the value); unset, rows keep their position
+  `row-<i>`. `RunSpec.row_ids` (1-100,000 distinct ids) runs only those rows, selected from the
+  whole split whatever `row_limit` says, and refuses a run whose ids are not all found. Both are
+  chat-only. The manifest records `id_column` and `row_ids` as `{count, sha256}`.
+- Results rows gain `latency_ms` (the client's per-request measure, `None` without a response) and
+  `error_kind` (`timeout`, `rate_limited`, `model_error`, `invalid_output` or `other`, from the
+  exception's type; `None` on success).
+- A chat run writes `receipt.json` (`strata.run.receipt/v1`) into its working directory, where the
+  orchestrator reads it before the workdir is removed: the manifest's SHA-256, the model and
+  dataset pins requested and served, the template digest, the engine version, `id_column`,
+  `row_ids`, row counts and the output repo with the commit the push made. `_push_results` returns
+  that commit id beside the repo (`commit_oid`).
+- A chat run records its failed rows in `failed_rows.json` beside its receipt (`failed_rows_record`:
+  the distinct failed ids when rows are named by `id_column`, bounded by count and size, with
+  `complete`), the commit it read its split at (`dataset.commit`, resolved before the load when the
+  run is unpinned), and checks one id rule shared with the control plane (`valid_row_id`: 1-512
+  printable characters, not blank). `row_ids` are selected from the rows the run reads, so
+  `row_limit` bounds a retry's window, and its id uniqueness check, as it bounded its source run.
+- A pushing chat, scoring or fine-tuning run ends with `repo@commit` (`_common.pushed_at`), as an
+  evaluation run already did, so the orchestrator records the commit the output landed in
+  (`output_commit_sha`) rather than a repo whose head can move; a push the Hub named no commit for
+  ends with the repo alone.
+- The chat receipt names a prompt-build run's builds: `prompt` and `system_prompt`, each
+  `{build_id, build_hash}` from the manifest's prompt blocks (null for a template run).
+- Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):
+  scoring (`hf_classify`, `hf_label_logits`, verifier artifacts), fine-tuning (incl. `seq_cls`) and
+  evaluation runs write `_common.build_receipt`'s shape (manifest digest, the model, dataset and
+  engine their manifest records, row counts where they have rows, and `output` `{repo_id,
+  commit_sha}` of the commit the push made). The commit is what links one run's output to the run
+  that reads it next. `finetune_runner._push_artifact` and `eval_runner._push` return
+  `(repo_id, commit_sha)`; a push failure still leaves the receipt before the run fails.
 
 ### Changed
 

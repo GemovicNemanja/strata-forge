@@ -324,10 +324,34 @@ set; ``max_model_len`` bounds the context the KV cache must hold. The ``[serving
 ``vllm>=0.24,<1`` range serves gpt-oss's MXFP4 checkpoints with the harmony parser on every
 release in it.
 
-Each results row is ``{custom_id, output, reasoning, error, finish_reason,
-input_tokens, output_tokens}``; ``reasoning`` is ``None`` when the server
-returned none, and a failed row carries ``None`` in it and in the last
-three. ``finish_reason`` is the client's normalized value (``stop``,
+Each results row is ``{custom_id, output, reasoning, error, error_kind,
+finish_reason, input_tokens, output_tokens, latency_ms}``; ``reasoning`` is
+``None`` when the server returned none, and a failed row carries ``None`` in
+it, ``finish_reason``, the token counts and ``latency_ms``. ``latency_ms`` is
+the client's own measure of the row's request, in whole milliseconds (a
+guided-JSON retry counts both attempts). ``error_kind`` is ``None`` on a
+row that succeeded and, on a failed one, a stable class read off the
+exception's type, never its text: ``timeout``, ``rate_limited``,
+``model_error`` (any other provider error), ``invalid_output`` (a
+structured-output or validation error) or ``other``; a fallback chain is
+classed by its last attempt.
+
+A row is named by ``custom_id``: the value of the spec's ``id_column`` when
+one is declared (it must be a column of the split, and its values present,
+1 to 512 printable characters, not blank (``valid_row_id``, the rule the
+control plane applies to a retry's ids) and unique across the rows the run
+reads, else the run is refused naming the row position, never the value),
+else its position
+``row-<i>``. A position names a different row as soon as anything before it
+changes, so a declared id is what lets a later run name the same rows.
+``row_ids`` (1-100,000 distinct ids, as ``custom_id`` names them) runs only
+those rows, selected in split order from the rows the run reads (the first
+``row_limit`` rows, or the whole split without one): a retry that carries
+its source run's ``row_limit`` reads the same rows and checks their ids for
+uniqueness over the same window. A run whose requested ids are not all
+among those rows is refused with the count it could not find. Both are
+chat-only: a scoring engine's rows carry their own declared ``item_id``,
+and a spec setting either with another engine is refused. ``finish_reason`` is the client's normalized value (``stop``,
 ``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
 client does not recognise is reported as ``stop``; ``length`` (the output
 hit ``max_tokens``) is always preserved. Beside ``results.parquet`` the runner writes ``manifest.json``
@@ -352,10 +376,59 @@ the machine. It records:
   gpt-oss system message stated;
 - a SHA-256 of the template (never its text), the column mapping and the
   hyperparameters;
+- the ``id_column`` the rows were named by (``None`` for positions) and,
+  for a run given ``row_ids``, their ``count`` and a ``sha256`` of the ids
+  sorted and joined by newlines (never the ids themselves), else ``None``;
 - row, success and failure counts, a ``finish_reason`` histogram and token
   totals.
 
 It holds no row content and no credential.
+
+The runner also writes ``receipt.json`` (``RECEIPT_FILENAME``, schema
+``strata.run.receipt/v1``) into its **working directory**, the job
+workdir an orchestrator reads before it removes it; the manifest sits
+beside the results, outside that directory. Written once the results and
+manifest are written, whether the push succeeded or failed, it carries the
+SHA-256 of the ``manifest.json`` bytes as written and the facts an
+orchestrator compares with what it admitted: ``model`` (``id``,
+``requested_revision``, ``commit``), ``dataset`` (``id``, ``config``,
+``split``, ``requested_revision`` and the ``commit`` the split was read at:
+an unpinned run resolves the head to a commit before the load and loads at
+it, so this names the rows read), ``template_sha256`` (null on a run that
+rendered a pinned prompt build), ``prompt`` and ``system_prompt`` (each
+``{build_id, build_hash}`` from the manifest's prompt blocks, or ``None``),
+``engine_version``, ``id_column``, ``row_ids`` (``{count, sha256}`` or
+``None``), ``rows`` (``total``, ``succeeded``, ``failed``) and ``output``
+(``repo_id`` and the ``commit_sha`` of the Hub commit the push made, or
+``None`` when nothing was pushed). No row text, no prompt text and no
+credential. Its ``kind`` is ``chat``.
+
+Beside it the chat runner writes ``failed_rows.json``
+(``FAILED_ROWS_FILENAME``, schema ``strata.run.failed_rows/v1``): the
+``id_column``, the ``count`` of distinct failed rows and, when rows are
+named by ``id_column``, their ``row_ids`` in split order, bounded by
+``MAX_FAILED_ROW_IDS`` (10,000) and ``MAX_FAILED_ROW_ID_BYTES`` (64 KiB),
+with ``complete`` saying whether every failed row is listed. Positional
+names are counted and never listed. It is what a retry of the failed rows
+may name; the ids are the user's data and appear nowhere else.
+
+A run that pushed ends with ``repo@commit`` as its end event's message
+(``_common.pushed_at``; the repo alone when the Hub named no commit), so an
+orchestrator records the commit the output landed in. Chat, scoring,
+fine-tuning and evaluation runs all end this way.
+
+Every other pushing runner writes one too, through
+``_common.build_receipt(kind, manifest_path, output, rows=...)``: a scoring
+run (``kind`` ``scoring``: ``hf_classify``, ``hf_label_logits``, verifier
+artifacts), a fine-tuning run including ``seq_cls`` (``training``) and an
+evaluation run (``eval``). It carries the manifest digest, the ``model``,
+``dataset`` and ``engine_version`` the manifest records (null where that
+manifest has none), ``rows`` where the run has rows, and ``output`` with the
+commit the push made. That commit is what an orchestrator links runs by: a
+scoring run that reads a trained model at that commit, and an evaluation
+that reads a scoring run's predictions at theirs, link exactly, where a
+repo's head could have moved. A model registry pinning a training output
+reads the same commit.
 
 A pushed run goes only to a **private** output dataset repo: the runner
 creates it private when it is missing and refuses a public one, first

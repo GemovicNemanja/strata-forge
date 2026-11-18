@@ -46,8 +46,10 @@ credentials + the network):
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, reasoning, error, finish_reason, input_tokens,
-    output_tokens}`` (model text and its accounting only; a guided-JSON run adds its validity
+    repo id; result rows are ``{custom_id, output, reasoning, error, error_kind, finish_reason,
+    input_tokens, output_tokens, latency_ms}`` (model text and its accounting only; ``custom_id``
+    is the declared ``id_column``'s value, else the row's position ``row-<i>``; a guided-JSON run
+    adds its validity
     columns, see :mod:`strata_forge.pipelines._guided`), and the ``manifest.json`` beside them
     records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
@@ -98,12 +100,20 @@ from pydantic import (
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.core.errors import (
+    FallbackExhaustedError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
+from strata_forge.core.errors import ValidationError as ForgeValidationError
 from strata_forge.llm import AssistantMessage, LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
 )
+from strata_forge.llm.schemas import StructuredOutputError
 from strata_forge.pipelines._chat_template import (
     kwargs_digest,
     kwargs_placeholders,
@@ -115,14 +125,18 @@ from strata_forge.pipelines._chat_template import (
 from strata_forge.pipelines._common import (
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA,
+    RECEIPT_SCHEMA,
     RunError,
     RunSecrets,
+    build_receipt,
+    commit_oid,
     emit,
     ensure_private_output,
     load_config,
     manifest_engine,
     model_server_environ,
     phase_sink,
+    pushed_at,
     require_commit_sha,
     results_dir,
     run_redactor,
@@ -131,6 +145,7 @@ from strata_forge.pipelines._common import (
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
 from strata_forge.pipelines._guided import (
     OutputValidator,
@@ -159,7 +174,7 @@ from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
     from strata_forge.core.redact import Redactor
     from strata_forge.llm import LLMResponse
@@ -168,13 +183,20 @@ if TYPE_CHECKING:
     from strata_forge.pipelines._scoring import ScoringInputs
 
 __all__ = [
+    "FAILED_ROWS_FILENAME",
+    "FAILED_ROWS_SCHEMA",
+    "MAX_FAILED_ROW_IDS",
+    "MAX_FAILED_ROW_ID_BYTES",
     "SNAPSHOT_IGNORED",
     "SNAPSHOT_PATTERNS",
     "LabelToken",
     "RunSpec",
+    "failed_rows_record",
     "main",
     "render_template",
     "template_placeholders",
+    "valid_row_id",
+    "write_failed_rows",
 ]
 
 # vLLM serves on loopback only — the runner talks to it via localhost, and a multi-tenant
@@ -533,6 +555,30 @@ def _owners(fields: list[str]) -> str:
     )
 
 
+#: The most rows one run may name in ``row_ids``, and the longest id and column name it takes.
+MAX_ROW_IDS = 100_000
+_MAX_ROW_ID_CHARS = 512
+_MAX_ID_COLUMN_CHARS = 255
+
+#: The failed rows a chat run records in its working directory, beside its receipt, and the most
+#: ids (and bytes of ids) that record holds: what a retry of the failed rows may name.
+FAILED_ROWS_FILENAME = "failed_rows.json"
+FAILED_ROWS_SCHEMA = "strata.run.failed_rows/v1"
+MAX_FAILED_ROW_IDS = 10_000
+MAX_FAILED_ROW_ID_BYTES = 64 * 1024
+
+
+def valid_row_id(text: str) -> bool:
+    """A row id the platform can name: 1 to 512 characters, printable (no newline, tab or other
+    control character) and not blank. The control plane applies the same rule to a retry's ids."""
+    return 0 < len(text) <= _MAX_ROW_ID_CHARS and text.isprintable() and bool(text.strip())
+
+
+#: The stable class of a failed row's error (``error_kind``): read off the exception's type, never
+#: its text, so a consumer can count and filter failures without parsing prose.
+type RowErrorKind = Literal["timeout", "rate_limited", "model_error", "invalid_output", "other"]
+
+
 class RunSpec(BaseModel):
     """The inert run spec the server delivers in ``STRATA_RUN_CONFIG`` (no secrets)."""
 
@@ -560,6 +606,38 @@ class RunSpec(BaseModel):
     progress_path: str | None = None
     # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
     run_id: str | None = None
+    # A column of the split whose value names each row in the results (``custom_id``). Its values
+    # must be present and unique, so a row keeps its id however the split is read or re-read.
+    # Unset, a row is named by its position (``row-<i>``), which names a different row as soon
+    # as anything before it changes.
+    id_column: str | None = Field(default=None, min_length=1, max_length=_MAX_ID_COLUMN_CHARS)
+    # Run only the rows with these ids (as ``custom_id`` names them), selected from the rows the
+    # run reads (the first ``row_limit`` rows, or the whole split): the same rows, and the same
+    # id uniqueness check, as the run whose failed rows a retry names, when the retry carries its
+    # ``row_limit``. Every id must be found: a retry that silently ran fewer rows would hide the rest.
+    row_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_ROW_IDS)
+
+    @field_validator("row_ids")
+    @classmethod
+    def _distinct_row_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not all(valid_row_id(item) for item in value):
+            msg = f"each row id is 1 to {_MAX_ROW_ID_CHARS} printable characters, not blank"
+            raise ValueError(msg)
+        if len(set(value)) != len(value):
+            msg = "row_ids names a row more than once"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _ids_are_chat_only(self) -> RunSpec:
+        if self.hyperparams.engine != "vllm_chat" and (
+            self.id_column is not None or self.row_ids is not None
+        ):
+            msg = "id_column and row_ids apply only to engine 'vllm_chat'"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _artifact_templates_name_the_roles(self) -> RunSpec:
@@ -645,7 +723,8 @@ def render_template(template: str, row: dict[str, Any], column_mapping: dict[str
     return rendered[:_MAX_RENDERED_CHARS]
 
 
-def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any]]:
+def _open_split(spec: RunSpec, token: str | Literal[False]) -> Any:
+    """The split as ``datasets`` loads it, its mapped columns checked to exist."""
     try:
         # Lazy optional-extra import (forge convention: `Any` so pyright skips the unresolved
         # module); the [hf] extra ships `datasets`.
@@ -666,6 +745,14 @@ def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
+    if spec.id_column is not None and spec.id_column not in columns:
+        msg = f"id_column {spec.id_column!r} is not a column of the split"
+        raise RunError(msg)
+    return dataset
+
+
+def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any]]:
+    dataset = _open_split(spec, token)
     # Slice DURING iteration (not after): dataset size/content is attacker-controlled, so
     # row_limit must bound materialization — a huge split mustn't OOM the VM before the cap.
     limit = spec.hyperparams.row_limit
@@ -673,16 +760,111 @@ def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any
     return [dict(r) for r in source]
 
 
+def _row_id(id_column: str | None, row: dict[str, Any], position: int) -> str:
+    """A row's ``custom_id``: its ``id_column`` value, else its position. Never echoes a value
+    in an error: an id is the user's data."""
+    if id_column is None:
+        return f"row-{position}"
+    value = row.get(id_column)
+    text = "" if value is None else str(value)
+    if not text.strip():
+        msg = f"id_column {id_column!r} is empty in row {position}; every row needs an id"
+        raise RunError(msg)
+    if len(text) > _MAX_ROW_ID_CHARS:
+        msg = f"id_column {id_column!r} holds an id over {_MAX_ROW_ID_CHARS} characters in row {position}"
+        raise RunError(msg)
+    if not valid_row_id(text):
+        msg = (
+            f"id_column {id_column!r} holds an id with a control character in row {position}; "
+            "an id must be printable"
+        )
+        raise RunError(msg)
+    return text
+
+
+def select_rows(spec: RunSpec, source: Iterable[Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """The rows a chat run sends, and the ``custom_id`` of each, in split order.
+
+    It reads up to ``row_limit`` rows (sliced during iteration, so a huge split is never
+    materialised whole), or the whole split without one. With ``row_ids`` it keeps only the named
+    rows among those, and every named id must be found. An ``id_column`` value must be unique
+    across every row read: the same window, and so the same check, for a run and a retry of its
+    failed rows that carries its ``row_limit``.
+    """
+    wanted = set(spec.row_ids) if spec.row_ids is not None else None
+    limit = spec.hyperparams.row_limit
+    rows: list[dict[str, Any]] = []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for position, raw in enumerate(
+        itertools.islice(source, limit) if limit is not None else source
+    ):
+        row = dict(raw)
+        row_id = _row_id(spec.id_column, row, position)
+        if spec.id_column is not None:
+            if row_id in seen:
+                msg = (
+                    f"id_column {spec.id_column!r} repeats an id (row {position}); ids must be "
+                    "unique"
+                )
+                raise RunError(msg)
+            seen.add(row_id)
+        if wanted is not None and row_id not in wanted:
+            continue
+        rows.append(row)
+        ids.append(row_id)
+    if wanted is not None and len(ids) != len(wanted):
+        msg = (
+            f"{len(wanted) - len(ids)} of the {len(wanted)} requested row ids are not in the rows "
+            "this run reads"
+        )
+        raise RunError(msg)
+    return rows, ids
+
+
+def _load_chat_rows(
+    spec: RunSpec, token: str | Literal[False]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The chat run's rows and their ``custom_id``s (:func:`select_rows` over the split)."""
+    return select_rows(spec, _open_split(spec, token))
+
+
 def _build_requests(
-    spec: RunSpec, rows: list[dict[str, Any]]
+    spec: RunSpec, rows: list[dict[str, Any]], ids: Sequence[str] | None = None
 ) -> tuple[list[list[UserMessage]], list[str]]:
+    """One one-message conversation per row, and each row's ``custom_id`` (``ids`` as
+    :func:`select_rows` named them, else the rows' positions)."""
     prompts: list[list[UserMessage]] = []
-    custom_ids: list[str] = []
-    for i, row in enumerate(rows):
+    for row in rows:
         rendered = render_template(spec.template, row, spec.column_mapping)
         prompts.append([UserMessage(content=rendered)])  # one-message conversation
-        custom_ids.append(f"row-{i}")  # positional reconciliation key
+    custom_ids = list(ids) if ids is not None else [f"row-{i}" for i in range(len(rows))]
     return prompts, custom_ids
+
+
+def row_ids_digest(row_ids: Sequence[str] | None) -> dict[str, Any] | None:
+    """``{count, sha256}`` of a run's ``row_ids``, order-free: the SHA-256 of the ids sorted and
+    joined by newlines (an id holds no newline it could be confused by: one cannot be empty, and a
+    newline in one would still sort and hash deterministically). None when none were given."""
+    if row_ids is None:
+        return None
+    joined = "\n".join(sorted(row_ids))
+    return {"count": len(row_ids), "sha256": hashlib.sha256(joined.encode()).hexdigest()}
+
+
+def row_error_kind(error: BaseException | None) -> RowErrorKind:
+    """The stable class of a failed row's error, from its type (the last attempt of a fallback)."""
+    if isinstance(error, FallbackExhaustedError) and error.causes:
+        error = error.causes[-1][2]
+    if isinstance(error, ProviderTimeoutError | TimeoutError):
+        return "timeout"
+    if isinstance(error, ProviderRateLimitError):
+        return "rate_limited"
+    if isinstance(error, StructuredOutputError | ForgeValidationError):
+        return "invalid_output"
+    if isinstance(error, ProviderError):
+        return "model_error"
+    return "other"
 
 
 async def _run_batches(
@@ -779,9 +961,13 @@ async def _run_batches(
                             "output": response.text,
                             "reasoning": response.reasoning,
                             "error": None,
+                            "error_kind": None,
                             "finish_reason": response.finish_reason,
                             "input_tokens": response.usage.input_tokens,
                             "output_tokens": response.usage.output_tokens,
+                            # The client's own per-request measure (a guided retry's is both
+                            # attempts), rounded to whole milliseconds.
+                            "latency_ms": round(response.latency_ms),
                             **columns,
                         }
                     )
@@ -800,9 +986,12 @@ async def _run_batches(
                             "output": None,
                             "reasoning": None,
                             "error": error,
+                            "error_kind": row_error_kind(result.error),
                             "finish_reason": None,
                             "input_tokens": None,
                             "output_tokens": None,
+                            # No response, so nothing measured how long it took.
+                            "latency_ms": None,
                             **columns,
                         }
                     )
@@ -1310,6 +1499,7 @@ def _build_manifest(
     serving: dict[str, Any] | None = None,
     *,
     chat_template_sha256: str | None = None,
+    dataset_commit: str | None = None,
 ) -> dict[str, Any]:
     """What a run needs to be reproduced and audited, with no row content and no secret.
 
@@ -1351,6 +1541,9 @@ def _build_manifest(
             "config": spec.dataset_config,
             "split": spec.split,
             "requested_revision": spec.dataset_commit_sha,
+            # The commit the split was actually read at: the pin, or the head resolved before
+            # the load and then loaded at, so it names the rows read even without a pin.
+            "commit": dataset_commit,
         },
         # What the model server actually ran with, next to what was asked for in `hyperparams`.
         "serving": serving
@@ -1377,6 +1570,10 @@ def _build_manifest(
         ),
         "guided": guided,
         "column_mapping": spec.column_mapping,
+        # How each results row is named, and the rows a subset run was asked for (as a count and
+        # a digest, never the ids themselves: an id is the user's data).
+        "id_column": spec.id_column,
+        "row_ids": row_ids_digest(spec.row_ids),
         "hyperparams": spec.hyperparams.model_dump(),
         "counts": {
             "rows": len(rows),
@@ -1403,7 +1600,7 @@ async def _check_output_repo(spec: RunSpec, hf_token: str | None) -> None:
     await ensure_private_output(HFHubClient(token=hf_token), out_repo)
 
 
-async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
+async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> tuple[str, str | None]:
     """Push the results and the manifest beside them in ONE Hub commit.
 
     One commit, because two can half-land: a results file next to an earlier run's manifest is a
@@ -1416,7 +1613,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     # Re-checked at push time: visibility can change during a long run.
     await ensure_private_output(hub, out_repo)
-    await hub.upload_files(
+    commit = await hub.upload_files(
         {
             _RESULTS_FILENAME: results_path,
             MANIFEST_FILENAME: results_path.parent / MANIFEST_FILENAME,
@@ -1425,7 +1622,58 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
         repo_type="dataset",
         commit_message="batch inference results",
     )
-    return out_repo
+    # The repo and the commit the results landed in: the commit, not the repo's head, is what a
+    # receipt can point at, since a later run may push to the same repo.
+    return out_repo, commit_oid(commit)
+
+
+def _prompt_ref(block: Any) -> dict[str, Any] | None:
+    """A manifest's prompt block as a receipt names it: the build's id and hash, nothing else."""
+    if not isinstance(block, dict):
+        return None
+    data = cast("dict[str, Any]", block)
+    return {"build_id": data.get("build_id"), "build_hash": data.get("build_hash")}
+
+
+def _build_receipt(
+    manifest: dict[str, Any],
+    manifest_bytes: bytes,
+    rows: list[dict[str, Any]],
+    output: tuple[str, str | None] | None,
+) -> dict[str, Any]:
+    """The execution receipt of a chat run, from the manifest it wrote (and that manifest's
+    digest), its row counts and where the results were pushed (None when they were not)."""
+    model: dict[str, Any] = manifest.get("model") or {}
+    dataset: dict[str, Any] = manifest.get("dataset") or {}
+    engine: dict[str, Any] = manifest.get("engine") or {}
+    ok = sum(1 for r in rows if r["error"] is None)
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "kind": "chat",
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "model": {
+            "id": model.get("id"),
+            "requested_revision": model.get("requested_revision"),
+            "commit": model.get("commit"),
+        },
+        "dataset": {
+            "id": dataset.get("id"),
+            "config": dataset.get("config"),
+            "split": dataset.get("split"),
+            "requested_revision": dataset.get("requested_revision"),
+            "commit": dataset.get("commit"),
+        },
+        # A prompt-build run has no template digest: it rendered a pinned build, named here by its
+        # id and hash (the system prompt's too), as its manifest records them.
+        "template_sha256": manifest.get("template_sha256"),
+        "prompt": _prompt_ref(manifest.get("prompt")),
+        "system_prompt": _prompt_ref(manifest.get("system_prompt")),
+        "engine_version": engine.get("version"),
+        "id_column": manifest.get("id_column"),
+        "row_ids": manifest.get("row_ids"),
+        "rows": {"total": len(rows), "succeeded": ok, "failed": len(rows) - ok},
+        "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},
+    }
 
 
 async def _execute(
@@ -1463,8 +1711,20 @@ async def _execute(
     config, config_commit = await _read_model_config(spec, hub_token)
     hp = _effective_hyperparams(spec.hyperparams, config)
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
-        rows = await asyncio.to_thread(_load_rows, spec, hub_token) if given is None else given
-    prompts, custom_ids = _build_requests(spec, rows)
+        if given is None:
+            # Resolved to a commit first and loaded at it, so the receipt names the rows read.
+            dataset_commit: str | None = await _dataset_commit(spec, hub_token)
+            rows, row_ids = await asyncio.to_thread(
+                _load_chat_rows,
+                spec.model_copy(update={"dataset_commit_sha": dataset_commit}),
+                hub_token,
+            )
+        else:
+            # Prepared rows (the grader's cases) read no split: they are named as select_rows
+            # names a split's rows, and only a pin the spec carries is recorded.
+            dataset_commit = spec.dataset_commit_sha
+            rows, row_ids = select_rows(spec, given)
+    prompts, custom_ids = _build_requests(spec, rows, row_ids)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
     emit(
@@ -1590,28 +1850,44 @@ async def _execute(
     #
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
+    manifest = _build_manifest(
+        spec,
+        out,
+        model_commit,
+        serving_facts,
+        chat_template_sha256=chat_template_sha256,
+        dataset_commit=dataset_commit,
+    )
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         # Beside the results, so the push and the on-VM copy carry it alike.
-        await asyncio.to_thread(
-            write_manifest,
-            _build_manifest(
-                spec, out, model_commit, serving_facts, chat_template_sha256=chat_template_sha256
-            ),
-            Path(results_path).parent,
-        )
+        manifest_path = await asyncio.to_thread(write_manifest, manifest, Path(results_path).parent)
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if hf_token and spec.output_repo_id:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
-                destination = await _push_results(spec, results_path, hf_token)
+                pushed = await _push_results(spec, results_path, hf_token)
+            destination = pushed_at(pushed)
         except Exception as exc:
-            # Name WHERE the results are. The run still fails — the user asked for them on the Hub
-            # and they are not there — but a failure at the last step of a long run is the moment
-            # it matters most that the output was not lost with it.
-            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(results_path)
     else:
         destination = str(results_path)
+    # In the working directory, which the orchestrator reads before it removes it: the manifest
+    # sits beside the results, outside it. Written whatever the push did, so a failed push still
+    # leaves the evidence of what ran.
+    manifest_bytes = await asyncio.to_thread(Path(manifest_path).read_bytes)
+    await asyncio.to_thread(
+        write_receipt, _build_receipt(manifest, manifest_bytes, out, pushed), Path.cwd()
+    )
+    await asyncio.to_thread(write_failed_rows, spec.id_column, out, Path.cwd())
+    if push_error is not None:
+        # Name WHERE the results are. The run still fails — the user asked for them on the Hub
+        # and they are not there — but a failure at the last step of a long run is the moment it
+        # matters most that the output was not lost with it.
+        msg = f"results are on the VM at {results_path}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
 
     ok = sum(1 for r in out if r["error"] is None)
     guided_metrics = (
@@ -1640,8 +1916,46 @@ async def _execute(
     return destination
 
 
+def failed_rows_record(id_column: str | None, rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Which rows of a chat run failed, by ``custom_id``: what a retry of its failed rows may name.
+
+    The ids are listed only when rows are named by ``id_column`` (a position names a different
+    row once anything before it changes), in split order, distinct (a row sampled ``n`` times
+    fails once), up to ``MAX_FAILED_ROW_IDS`` ids and ``MAX_FAILED_ROW_ID_BYTES`` of them;
+    ``complete`` says whether every failed row is listed.
+    """
+    failed: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.get("error") is not None and row["custom_id"] not in seen:
+            seen.add(row["custom_id"])
+            failed.append(row["custom_id"])
+    listed: list[str] | None = None
+    if id_column is not None:
+        listed, size = [], 2
+        for row_id in failed:
+            size += len(json.dumps(row_id)) + 2
+            if len(listed) >= MAX_FAILED_ROW_IDS or size > MAX_FAILED_ROW_ID_BYTES:
+                break
+            listed.append(row_id)
+    return {
+        "schema": FAILED_ROWS_SCHEMA,
+        "id_column": id_column,
+        "count": len(failed),
+        "row_ids": listed,
+        "complete": listed is not None and len(listed) == len(failed),
+    }
+
+
+def write_failed_rows(id_column: str | None, rows: Sequence[dict[str, Any]], workdir: Path) -> Path:
+    """Write :func:`failed_rows_record` as ``failed_rows.json`` in ``workdir``."""
+    path = workdir / FAILED_ROWS_FILENAME
+    path.write_text(json.dumps(failed_rows_record(id_column, rows), sort_keys=True) + "\n")
+    return path
+
+
 async def _dataset_commit(spec: RunSpec, token: str | Literal[False]) -> str:
-    """The dataset commit a scoring run reads: its pin, or the default branch's head resolved now.
+    """The dataset commit a chat or scoring run reads: its pin, or the default branch's head resolved now.
 
     Resolved once, before the load, and then loaded at that commit, so the manifest names the
     exact rows scored even when the spec carried no pin.
@@ -1757,7 +2071,7 @@ async def _execute_scoring(
     out = scorer.result_rows(lengths, logits, inputs)
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
-        await asyncio.to_thread(
+        manifest_path = await asyncio.to_thread(
             write_manifest,
             scorer.manifest(
                 requested,
@@ -1768,18 +2082,33 @@ async def _execute_scoring(
             ),
             Path(results_path).parent,
         )
+    counts = tally(out)
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if pushing:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
                 await _require_fresh_output(spec, cast("str", hf_token))
-                destination = await _push_results(spec, results_path, cast("str", hf_token))
+                pushed = await _push_results(spec, results_path, cast("str", hf_token))
+            destination = pushed_at(pushed)
         except Exception as exc:
-            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(results_path)
     else:
         destination = str(results_path)
+    # Whatever the push did, the receipt says what ran and where (if anywhere) it landed.
+    receipt = await asyncio.to_thread(
+        build_receipt,
+        "scoring",
+        Path(manifest_path),
+        pushed,
+        rows={"total": len(out), "succeeded": counts["scored"], "failed": counts["overflow"]},
+    )
+    await asyncio.to_thread(write_receipt, receipt, Path.cwd())
+    if push_error is not None:
+        msg = f"results are on the VM at {results_path}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
 
-    counts = tally(out)
     emit(
         writer,
         ProgressEvent(
