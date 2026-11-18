@@ -279,6 +279,14 @@ class TestTerminalErrorsCarryGpuTime:
         assert set(metrics) >= {"gpu_seconds", "gpu_count"}
 
 
+class TestPinnedChecks:
+    @pytest.mark.parametrize("key", ["step0_rows", "step0_tolerance"])
+    def test_a_spec_cannot_widen_the_logit_checks(self, key: str) -> None:
+        spec = _spec(hyperparams={**_spec().hyperparams, key: 1})
+        with pytest.raises(RunError, match=f"{key} cannot be set"):
+            fr.check_spec(spec)
+
+
 class TestCalibrationSpec:
     def test_calibration_split_is_for_the_classifier_only(self) -> None:
         sft = fr.FinetuneSpec.model_validate(

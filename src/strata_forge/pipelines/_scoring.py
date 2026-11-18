@@ -1015,6 +1015,7 @@ class VerifierScorer(Classifier):
         self.calibration = calibration
         self.apply_calibration = apply_calibration
         self.heads = [h for h in ("flag", "support") if getattr(aux, h, None) is not None]
+        self._pad_id: Any = getattr(self._tokenizer, "pad_token_id", None)
 
     @property
     def temperature(self) -> float | None:
@@ -1037,6 +1038,7 @@ class VerifierScorer(Classifier):
     def measure(self, rows: Sequence[RenderedRow]) -> list[int | None]:
         """Each rendered row's token count with special tokens; ``None`` past the character cap."""
         out: list[int | None] = []
+        ends_on_pad: list[int] = []
         for offset in range(0, len(rows), _MEASURE_CHUNK):
             chunk = list(rows[offset : offset + _MEASURE_CHUNK])
             measurable = [
@@ -1048,8 +1050,20 @@ class VerifierScorer(Classifier):
             if measurable:
                 encoded: Any = encode_rows(self._tokenizer, [chunk[i] for i in measurable])
                 for i, ids in zip(measurable, encoded["input_ids"], strict=True):
-                    lengths[i] = len(cast("list[int]", ids))
+                    tokens = cast("list[int]", ids)
+                    if self.rendering.decoder and tokens and tokens[-1] == self._pad_id:
+                        ends_on_pad.append(offset + i)
+                    lengths[i] = len(tokens)
             out.extend(lengths)
+        if ends_on_pad:
+            # The stock decoder head reads the rightmost token that is not the pad id, the
+            # auxiliary heads the last one the attention mask keeps; on such a row they would read
+            # two positions, so it is refused, as training refused it.
+            msg = (
+                f"{len(ends_on_pad)} row(s) end on the padding token (first rows "
+                f"{ends_on_pad[:5]}), so the answer position cannot be found"
+            )
+            raise RunError(msg)
         return out
 
     def score(self, rows: Sequence[RenderedRow]) -> list[VerifierScores]:
@@ -1170,6 +1184,12 @@ def load_verifier(
         raise RunError(msg)
     if not rendering.decoder and getattr(config, "classifier_pooling", "cls") != "cls":
         msg = "an encoder verifier must pool at its first token (classifier_pooling 'cls')"
+        raise RunError(msg)
+    if max_length is not None and max_length > rendering.max_length:
+        msg = (
+            f"max_model_len {max_length} exceeds the {rendering.max_length} tokens the verifier was "
+            "trained on; a verifier is scored only on rows it could have been trained on"
+        )
         raise RunError(msg)
     limit, source = length_limit(config, tokenizer, max_length or rendering.max_length)
     if max_length is None:

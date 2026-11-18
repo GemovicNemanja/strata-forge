@@ -15,7 +15,7 @@ What the runner checks before it spends a step, in order, each a named refusal:
 2. **The load guard.** Only the declared head keys may be missing (see ``head_init``).
 3. **The step-0 check** (``decoder_lm_head``): on the first training rows, the classifier's logits
    must equal the base model's own LM-head logits for the verbalizer tokens, within
-   ``step0_tolerance``. The receipt records the largest difference.
+   ``CHECK_TOLERANCE``. The receipt records the largest difference.
 4. **The memory preflight.** One full optimizer step at the split's longest real batch (the
    ``per_device_batch_size`` longest rows), measured, then undone exactly; a peak above
    ``memory_fraction`` of the device, or an out-of-memory error, refuses the run with the measured
@@ -90,6 +90,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CALIBRATION_FILENAME",
+    "CHECK_ROWS",
+    "CHECK_TOLERANCE",
     "MAX_SEQ_CLS_ROWS",
     "VERIFIER_CONFIG_FILENAME",
     "ArtifactCheckError",
@@ -116,6 +118,13 @@ _ROLES_PRIMARY = ("premises", "hypothesis", "label")
 _TWO_WAY = "2way_entail_vs_not"
 _FULL = "3way"
 _MAX_REPORTED_ROWS = 5
+
+
+#: The rows every logit check compares (step 0, reload parity, scoring parity) and their bound.
+#: Constants, not configuration: a spec cannot change what passes the checks.
+CHECK_ROWS = 8
+CHECK_TOLERANCE = 1e-4
+_PINNED_CHECK_KEYS = ("step0_rows", "step0_tolerance")
 
 
 class PreflightError(RuntimeError):
@@ -172,8 +181,10 @@ class SeqClsConfig(BaseModel):
         gradient_checkpointing: Activation checkpointing (non-reentrant, RNG state preserved).
         brier_weight / flag_loss_weight / support_loss_weight: The objective's coefficients.
         memory_fraction: The share of device memory the preflight peak may reach.
-        step0_rows / step0_tolerance: The decoder step-0 check's sample and its absolute bound on
-            any label logit's difference.
+
+    The logit checks' sample and bound are fixed (:data:`CHECK_ROWS` rows, :data:`CHECK_TOLERANCE`),
+    not configuration: a spec that could widen them could switch the checks off, so
+    ``step0_rows`` and ``step0_tolerance`` are refused by name.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -212,12 +223,17 @@ class SeqClsConfig(BaseModel):
     save_total_limit: int = Field(default=2, ge=1, le=100)
     seed: int = 42
     memory_fraction: float = Field(default=0.92, gt=0.0, le=1.0)
-    step0_rows: int = Field(default=8, ge=1, le=64)
-    step0_tolerance: float = Field(default=1e-4, gt=0.0, le=1.0)
 
     @model_validator(mode="before")
     @classmethod
     def _refuse_accumulation(cls, data: Any) -> Any:
+        pinned = sorted(set(_PINNED_CHECK_KEYS) & set(data)) if isinstance(data, Mapping) else []  # pyright: ignore[reportUnknownArgumentType] - raw input
+        if pinned:
+            msg = (
+                f"{', '.join(pinned)} cannot be set for seq_cls: the step-0, reload and scoring "
+                f"checks always compare {CHECK_ROWS} rows within {CHECK_TOLERANCE:g}"
+            )
+            raise ValueError(msg)
         if isinstance(data, Mapping) and "gradient_accumulation_steps" in data:
             msg = (
                 "gradient_accumulation_steps is refused for seq_cls: the objective's means are "
@@ -1038,7 +1054,7 @@ class SeqClsRunner:
         logit_diff = 0.0
         prob_diff = 0.0
         argmax_agree = 0
-        sample = min(cfg.step0_rows, len(rows))
+        sample = min(CHECK_ROWS, len(rows))
         # Both sides in float32 with TF32 off, so the comparison is not of two rounding modes.
         with _exact_fp32(torch), torch.no_grad():
             for i in range(sample):
@@ -1060,16 +1076,16 @@ class SeqClsRunner:
             "rows": sample,
             "max_abs_logit_diff": logit_diff,
             "max_abs_prob_diff": prob_diff,
-            "tolerance": cfg.step0_tolerance,
+            "tolerance": CHECK_TOLERANCE,
             "argmax_agree": argmax_agree,
             "precision": "float32, tf32 off",
-            "passed": logit_diff <= cfg.step0_tolerance and argmax_agree == sample,
+            "passed": logit_diff <= CHECK_TOLERANCE and argmax_agree == sample,
             "verbalizer_token_ids": dict(receipt.verbalizer_token_ids),
         }
         if not result["passed"]:
             msg = (
                 f"step-0 check failed: the classifier's label logits differ from the base model's "
-                f"zero-shot logits by {logit_diff:.3g} (tolerance {cfg.step0_tolerance:g}), and "
+                f"zero-shot logits by {logit_diff:.3g} (tolerance {CHECK_TOLERANCE:g}), and "
                 f"the predicted label agrees on {argmax_agree} of {sample} rows"
             )
             raise Step0Error(msg, result)
@@ -1301,15 +1317,14 @@ class SeqClsRunner:
         The reload is stock ``AutoModelForSequenceClassification`` from the artifact's own
         safetensors, no remote code, float32 with TF32 off, under the same complete-load check a
         scorer applies (:func:`~strata_forge.training.loading.check_loading_info`). Its logits on
-        a fixed set of rows (the first ``step0_rows`` of the eval split, else of the training
+        a fixed set of rows (the first ``CHECK_ROWS`` of the eval split, else of the training
         split) must equal the trained classifier's in-memory float32 logits within
-        ``step0_tolerance`` with the same predicted label on every row, and every parameter held
+        ``CHECK_TOLERANCE`` with the same predicted label on every row, and every parameter held
         at zero must still be exactly zero. With a calibration split, a temperature is then fitted
         on the reloaded model's logits over its three-way rows and written to
         :data:`CALIBRATION_FILENAME`, before anything else reads the artifact.
         """
         torch, transformers = _modules()
-        cfg = self._config
         module: Any = prepared.module
         device: Any = next(module.parameters()).device
         model: Any
@@ -1351,16 +1366,16 @@ class SeqClsRunner:
             "rows": len(rows),
             "rows_from": prepared.parity_from,
             "max_abs_logit_diff": logit_diff,
-            "tolerance": cfg.step0_tolerance,
+            "tolerance": CHECK_TOLERANCE,
             "argmax_agree": agree,
             "precision": "float32, tf32 off",
             "zero_parameters": zeros,
-            "passed": logit_diff <= cfg.step0_tolerance and agree == len(rows),
+            "passed": logit_diff <= CHECK_TOLERANCE and agree == len(rows),
         }
         if not parity["passed"]:
             msg = (
                 f"the saved classifier's logits differ from the trained one's by {logit_diff:.3g} "
-                f"(tolerance {cfg.step0_tolerance:g}), and the predicted label agrees on {agree} of "
+                f"(tolerance {CHECK_TOLERANCE:g}), and the predicted label agrees on {agree} of "
                 f"{len(rows)} rows"
             )
             raise ArtifactCheckError(msg, parity)
@@ -1384,11 +1399,10 @@ class SeqClsRunner:
         The scorer (``hf_classify`` with ``artifact: strata_verifier``) loads the saved artifact
         and renders the RAW rows from its ``strata_verifier.json``; the trainer's in-memory
         classifier reads the same rows as it encoded them. Both in float32 with TF32 off: the
-        logits must agree within ``step0_tolerance`` with the same predicted label on every row,
+        logits must agree within ``CHECK_TOLERANCE`` with the same predicted label on every row,
         or the artifact is refused before it is pushed.
         """
         torch, _ = _modules()
-        cfg = self._config
         # Imported here: the scoring pipeline imports this package's heads and rendering.
         scoring: Any = importlib.import_module("strata_forge.pipelines._scoring")
         raw = prepared.scoring_rows
@@ -1433,16 +1447,16 @@ class SeqClsRunner:
             "rows_from": "train",
             "path": "hf_classify artifact strata_verifier",
             "max_abs_logit_diff": diff,
-            "tolerance": cfg.step0_tolerance,
+            "tolerance": CHECK_TOLERANCE,
             "argmax_agree": agree,
             "precision": "float32, tf32 off",
-            "passed": diff <= cfg.step0_tolerance and agree == len(raw),
+            "passed": diff <= CHECK_TOLERANCE and agree == len(raw),
         }
         del scorer
         if not receipt["passed"]:
             msg = (
                 f"scored as a verifier, the saved classifier's logits differ from the trained "
-                f"one's by {diff:.3g} (tolerance {cfg.step0_tolerance:g}), and the predicted label "
+                f"one's by {diff:.3g} (tolerance {CHECK_TOLERANCE:g}), and the predicted label "
                 f"agrees on {agree} of {len(raw)} rows"
             )
             raise ArtifactCheckError(msg, receipt)
@@ -1618,7 +1632,7 @@ class SeqClsRunner:
             train_rows=len(train),
             eval_rows=len(evaluation) if evaluation is not None else 0,
             on_gpu=bool(visible),
-            parity_rows=[parity_source[i] for i in range(min(cfg.step0_rows, len(parity_source)))],
+            parity_rows=[parity_source[i] for i in range(min(CHECK_ROWS, len(parity_source)))],
             parity_from="eval" if evaluation is not None else "train",
             calibration=calibration,
             scoring_rows=[
@@ -1626,9 +1640,9 @@ class SeqClsRunner:
                     "premises": train_dataset[i]["premises"],
                     "hypothesis": train_dataset[i]["hypothesis"],
                 }
-                for i in range(min(cfg.step0_rows, len(train_dataset)))
+                for i in range(min(CHECK_ROWS, len(train_dataset)))
             ],
-            scoring_encoded=[train[i] for i in range(min(cfg.step0_rows, len(train)))],
+            scoring_encoded=[train[i] for i in range(min(CHECK_ROWS, len(train)))],
         )
 
     def finish(

@@ -360,8 +360,11 @@ def aux_outputs(
 ) -> dict[str, Any]:
     """The auxiliary heads' logits from the base model's last hidden state.
 
-    Every head reads one pooled vector: the final non-padding token for a decoder (right padding),
-    the first token for an encoder. The support head also reads each premise marker's token. The
+    Every head reads one pooled vector: the final non-padding token for a decoder (right padding,
+    by the attention mask), the first token for an encoder. The stock decoder head reads the
+    rightmost token whose id is not the pad id; the two are one position on every row whose last
+    real token is not the pad id, and the trainer and the scorer both refuse a row that ends on
+    it, so the primary and auxiliary heads always read the same token. The support head also reads each premise marker's token. The
     trainer and the scorer both call this, so a verifier is scored as it was trained.
     """
     result: dict[str, Any] = {}

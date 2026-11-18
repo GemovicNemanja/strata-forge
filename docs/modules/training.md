@@ -322,7 +322,9 @@ the support head is `h^T W m_pid + b` over each premise's marker token. They sta
 ### Checks before step 0
 
 `SeqClsRunner.prepare` runs these in order, calling `on_receipt(name, receipt)` as each passes;
-a failure raises `PreflightError` (or `Step0Error`) carrying its receipt. The two checks that
+The logit checks' sample and bound are constants (`CHECK_ROWS` = 8 rows, `CHECK_TOLERANCE` =
+1e-4), never configuration: `step0_rows` and `step0_tolerance` are refused by name, so no spec can
+widen a check until it passes. A failure raises `PreflightError` (or `Step0Error`) carrying its receipt. The two checks that
 compare logits (step 0, and reload parity below) run both sides in float32 with TF32 matmul and
 cuDNN switched off for the comparison, and require the same predicted label on every compared row
 besides the tolerance.
@@ -335,9 +337,9 @@ besides the tolerance.
    literals), and the per-row token-length distribution (`min`, `p50`, `p95`, `max`, nearest
    rank, overhead included).
 2. **`load`**: the load guard above.
-3. **`step0`** (`decoder_lm_head`): on the first `step0_rows` training rows, the classifier's label
+3. **`step0`** (`decoder_lm_head`): on the first `CHECK_ROWS` (8) training rows, the classifier's label
    logits must equal the base model's own causal-LM logits for the verbalizer tokens within
-   `step0_tolerance` (absolute, float32, TF32 off) with the same predicted label on every row. The
+   `CHECK_TOLERANCE` (1e-4, absolute, float32, TF32 off) with the same predicted label on every row. The
    receipt records the largest logit and probability differences, the agreeing rows and the
    resolved verbalizer token ids; every verbalizer must be one token.
 4. **`memory`**: one full optimizer step at the split's longest real batch (the
@@ -375,13 +377,13 @@ config's `classifier_bias`), refuses the run at load when one of them is not exa
 keeps them frozen. A reload failure is reported by its exception type only, never the library's
 text, which names paths on the machine. The artifact is reloaded the way a scorer
 loads it: stock `AutoModelForSequenceClassification` from its own safetensors, no remote code,
-float32, under `check_loading_info`. Its logits on a fixed set of rows (the first `step0_rows` of
+float32, under `check_loading_info`. Its logits on a fixed set of rows (the first `CHECK_ROWS` of
 the eval split, else of the training split) must equal the trained classifier's in-memory float32
-logits within `step0_tolerance`, with the same predicted label on every row (`reload_parity`
-receipt). The first `step0_rows` TRAINING rows are then scored through the scoring path itself
+logits within `CHECK_TOLERANCE`, with the same predicted label on every row (`reload_parity`
+receipt). The first `CHECK_ROWS` TRAINING rows are then scored through the scoring path itself
 (`hf_classify` with `artifact: strata_verifier`, loading the saved artifact and rendering the raw
 rows from its `strata_verifier.json`), and those logits must also equal the trainer's in-memory
-float32 logits within `step0_tolerance` with the same argmax on every row (`scoring_parity`
+float32 logits within `CHECK_TOLERANCE` with the same argmax on every row (`scoring_parity`
 receipt). A failure of either raises `ArtifactCheckError`; the run is refused and nothing is
 pushed. Rendering is one module, `verifier_render.py` (`render_row`, `encode_rows`,
 `marker_tokens`), which the trainer and the scorer both import. When a

@@ -24,6 +24,7 @@ Pure Python over a tokenizer object; no torch.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -78,6 +79,21 @@ class Rendering:
         if (encoding == "template") != isinstance(template, str):
             msg = "strata_verifier.json: a decoder template exactly when the encoding is template"
             raise ValueError(msg)
+        if isinstance(template, str):
+            # Read back under the trainer's own rules, and against the digest it recorded.
+            found = sorted(_PLACEHOLDER_RE.findall(template))
+            if found != ["hypothesis", "premises"]:
+                msg = (
+                    "strata_verifier.json: the decoder template must hold {premises} and "
+                    "{hypothesis} exactly once each, and no other placeholder"
+                )
+                raise ValueError(msg)
+            recorded: Any = spec.get("decoder_template_sha256")
+            if recorded != hashlib.sha256(template.encode()).hexdigest():
+                msg = (
+                    "strata_verifier.json: the decoder template does not match its recorded digest"
+                )
+                raise ValueError(msg)
         if spec.get("premise_separator", PREMISE_SEPARATOR) != PREMISE_SEPARATOR:
             msg = "strata_verifier.json names a premise separator this engine does not render"
             raise ValueError(msg)

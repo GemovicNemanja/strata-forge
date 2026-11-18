@@ -259,3 +259,79 @@ def test_apply_calibration_is_for_artifact_scoring_only() -> None:
         )
     with pytest.raises(ValueError, match="apply only to engine"):
         Hyperparams.model_validate({"artifact": "strata_verifier"})
+
+
+def test_a_verifier_record_whose_template_was_altered_is_refused(
+    decoder_artifact: tuple[Any, Path], tmp_path: Path
+) -> None:
+    import shutil
+
+    _, trained = decoder_artifact
+    artifact = tmp_path / "altered"
+    shutil.copytree(trained, artifact)
+    path = artifact / "strata_verifier.json"
+    record = json.loads(path.read_text())
+    record["input"]["decoder_template"] = "{hypothesis}\n{premises}"
+    path.write_text(json.dumps(record))
+    with pytest.raises(RunError, match="recorded digest"):
+        load_verifier(
+            artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+        )
+    record["input"]["decoder_template"] = "{premises} {premises}\n{hypothesis}"
+    path.write_text(json.dumps(record))
+    with pytest.raises(RunError, match="exactly once each"):
+        load_verifier(
+            artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+        )
+
+
+def test_a_length_cap_above_the_trained_one_is_refused(encoder_artifact: tuple[Any, Path]) -> None:
+    _, artifact = encoder_artifact
+    with pytest.raises(RunError, match="exceeds the 64 tokens the verifier was trained on"):
+        load_verifier(
+            artifact, label_alias=None, max_length=65, dtype="float32", apply_calibration=False
+        )
+    scorer = load_verifier(
+        artifact, label_alias=None, max_length=32, dtype="float32", apply_calibration=False
+    )
+    assert scorer.max_length == 32
+
+
+def test_a_decoder_whose_pad_is_its_eos_is_refused_not_misread(
+    decoder_artifact: tuple[Any, Path], tmp_path: Path
+) -> None:
+    import shutil
+
+    _, trained = decoder_artifact
+    artifact = tmp_path / "pad-is-eos"
+    shutil.copytree(trained, artifact)
+    config_path = artifact / "tokenizer_config.json"
+    config = json.loads(config_path.read_text())
+    config["pad_token"] = "[SEP]"
+    config_path.write_text(json.dumps(config))
+    scorer = load_verifier(
+        artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+    )
+    assert scorer._tokenizer.pad_token_id == scorer._tokenizer.sep_token_id  # pyright: ignore[reportPrivateUsage]
+    rows = tiny.rows(3, seed=6)
+    rendered = scorer.render([r["premises"] for r in rows], [r["hypothesis"] for r in rows])
+    with pytest.raises(RunError, match="end on the padding token"):
+        scorer.measure(rendered)
+
+
+@pytest.mark.parametrize("which", ["encoder_artifact", "decoder_artifact"])
+def test_every_head_reads_the_same_token_alone_or_padded(
+    which: str, request: pytest.FixtureRequest
+) -> None:
+    _, artifact = request.getfixturevalue(which)
+    scorer = load_verifier(
+        artifact, label_alias=None, max_length=None, dtype="float32", apply_calibration=False
+    )
+    rows = tiny.rows(6, seed=7)
+    rendered = scorer.render([r["premises"] for r in rows], [r["hypothesis"] for r in rows])
+    together = scorer.score(rendered)
+    for row, joint in zip(rendered, together, strict=True):
+        (alone,) = scorer.score([row])
+        assert max(abs(a - b) for a, b in zip(alone.logits, joint.logits, strict=True)) < 1e-5
+        if alone.flag is not None and joint.flag is not None:
+            assert abs(alone.flag - joint.flag) < 1e-5

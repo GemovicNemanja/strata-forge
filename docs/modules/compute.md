@@ -532,8 +532,15 @@ a list of ``{pid, text}`` with pids ``p1..pN``, as in training, and a malformed
 cell refuses the run naming its row. ``label_alias`` is optional (each label
 as itself), ``list_separator`` is refused, and ``dtype`` stays required. The
 length limit is the artifact's training ``max_length`` unless
-``max_model_len`` asks for another (``max_length_source`` ``artifact``);
-overflow is dropped and counted as in pair mode.
+``max_model_len`` asks for a smaller one (a larger one is refused: a verifier
+is scored only on rows it could have been trained on; ``max_length_source``
+``artifact``); overflow is dropped and counted as in pair mode. The record is
+read back under the trainer's rules: a decoder template must hold
+``{premises}`` and ``{hypothesis}`` once each and match its recorded
+``decoder_template_sha256``. A decoder row whose last token is the pad id is
+refused, as training refuses it: the stock head reads the rightmost non-pad
+token and the auxiliary heads the last one the attention mask keeps, and only
+on such a row would they differ.
 
 Results rows add, when the artifact has those heads, ``logit_inconsistent``
 and ``p_inconsistent`` (its sigmoid) and ``support_scores``: a list of
