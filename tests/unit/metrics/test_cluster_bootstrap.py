@@ -345,3 +345,22 @@ def test_mean_bootstrap_refusals() -> None:
         cluster_mean_bootstrap([float("nan")], clusters=["a"], seed=1)
     with pytest.raises(ValidationError, match="cluster_bootstrap_empty"):
         cluster_mean_bootstrap([], clusters=[], seed=1)
+
+
+def test_the_paired_mean_bootstrap_reports_the_sd_of_differences() -> None:
+    import statistics
+
+    from strata_forge.metrics.cluster_bootstrap import paired_cluster_mean_bootstrap
+
+    rng = random.Random(2)  # noqa: S311 — synthetic fixture.
+    base = [rng.uniform(0, 2) for _ in range(80)]
+    cand = [b - rng.uniform(0, 0.3) for b in base]
+    keys = [f"c{i // 2}" for i in range(80)]
+    paired = paired_cluster_mean_bootstrap(base, cand, clusters=keys, seed=SEED, resamples=500)
+    diffs = [c - b for b, c in zip(base, cand, strict=True)]
+    assert paired.delta_sd.point == pytest.approx(statistics.stdev(diffs))
+    low, high = _bounds(paired.delta_sd)
+    assert 0 <= low <= statistics.stdev(diffs) * 1.5
+    assert high >= low
+    with pytest.raises(ValidationError, match="cluster_bootstrap_too_few_rows"):
+        paired_cluster_mean_bootstrap([1.0], [0.5], clusters=["a"], seed=1)

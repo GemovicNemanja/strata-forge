@@ -23,7 +23,9 @@ This is a pure deterministic numerical leaf. Read
   and reported when the optimum lies outside), `cross_fit_temperature` (`cluster-cross-fit-v1`:
   sorted cluster keys permuted by `Generator(PCG64(seed))`, dealt into contiguous folds, each
   fold scored with the temperature fitted on the others) and `expected_calibration_error`
-  (`top-label-ece-v1`, 15 bins, equal-mass by stable confidence sort or equal-width). A fitted
+  (`top-label-ece-v1`, 15 bins, equal-mass by stable confidence sort with ties by item id and
+  `array_split` sizes, or equal-width). Two folds put the first ceil(C/2) permuted clusters in
+  fold 0. A fitted
   temperature is never used to select a model, threshold or reference. Do not introduce
   thresholds, other interval definitions, or pooling implicitly.
 - `comparison.py` owns Wilson binomial intervals, exact conditional McNemar, and explicit

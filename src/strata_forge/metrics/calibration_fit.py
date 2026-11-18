@@ -242,12 +242,14 @@ def expected_calibration_error(
     labels: Sequence[str],
     bins: int = ECE_BINS,
     scheme: Literal["equal_mass", "equal_width"] = "equal_mass",
+    item_ids: Sequence[str] | None = None,
 ) -> CalibrationError:
     """Top-label ECE over rows with a probability vector in ``labels`` order.
 
     Confidence is the largest probability and the prediction its first argmax. ``equal_mass``
-    sorts rows by confidence (stable, so ties keep input order) and splits them into ``bins``
-    contiguous groups whose sizes differ by at most one; ``equal_width`` uses [k/bins, (k+1)/bins)
+    sorts rows by confidence, ties broken by ``item_ids`` (else by input order; the sort is
+    stable either way), and splits them into ``bins`` contiguous groups with ``array_split``
+    semantics (the first ``n mod bins`` groups hold one row more); ``equal_width`` uses [k/bins, (k+1)/bins)
     with 1.0 in the last bin. Empty bins contribute nothing.
     """
     import numpy as np
@@ -263,8 +265,16 @@ def expected_calibration_error(
         raise ValidationError("calibration_probabilities_invalid")
     confidence = p.max(axis=1)
     correct = (p.argmax(axis=1) == target).astype(np.float64)
+    if item_ids is not None and len(item_ids) != len(target):
+        raise ValidationError("calibration_population_mismatch")
     if scheme == "equal_mass":
-        groups = np.array_split(np.argsort(confidence, kind="stable"), bins)
+        if item_ids is None:
+            order = np.argsort(confidence, kind="stable")
+        else:
+            rank = {item: i for i, item in enumerate(sorted(item_ids))}
+            ids = np.asarray([rank[item] for item in item_ids], dtype=np.int64)
+            order = np.lexsort((ids, confidence))
+        groups = np.array_split(order, bins)
     elif scheme == "equal_width":
         index = np.minimum((confidence * bins).astype(np.int64), bins - 1)
         groups = [np.flatnonzero(index == b) for b in range(bins)]

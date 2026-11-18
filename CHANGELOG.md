@@ -32,6 +32,18 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   recorded and must not mix, a declared premise count must match the platform's, and rows keyed
   on the premise-hash fallback are counted per slice.
 - The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
+- `strata_forge.metrics.calibration_fit`: `fit_temperature` (NLL bisection on 1/T within
+  [0.05, 20], the bound reported when taken), `cross_fit_temperature` (the seeded permutation of
+  sorted cluster keys dealt into folds, the first ceil(C/2) in fold 0 for two, each fold scored
+  with the temperature fitted on the others) and `expected_calibration_error` (top-label, 15
+  equal-mass bins with ties by item id, or equal-width).
+- `cluster_mean_bootstrap` / `paired_cluster_mean_bootstrap` bound the mean of a per-row score
+  (a Brier term) under the cluster bootstrap contract; the paired form adds the SD of the per-row
+  differences with its interval.
+- The evaluation runner's optional `calibration` settings report three probability reads apart
+  (raw, a temperature cross-fitted by cluster over the split or a named slice of it, and the
+  system's own pinned `calibration.json` temperature) with sum-form Brier and its interval, NLL and
+  ECE, plus a paired Brier delta and the SD of the per-item Brier differences per baseline.
 
 ### Changed
 

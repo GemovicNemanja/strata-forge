@@ -137,14 +137,16 @@ Direct-import only; NumPy from `[scoring]`.
   they mislead). It records `n`, `nll_before` (T = 1) and `nll_after`. Every row needs finite
   logits in label order and a declared gold label; a constant added to a row changes nothing.
 - **`cross_fit_temperature`** (`cluster-cross-fit-v1`) sorts the cluster keys, permutes them with
-  `Generator(PCG64(seed))` and deals them into `folds` (default 2) contiguous groups by position,
-  so a cluster's rows are never on both sides of a fit. Fold k's rows get `softmax(z / T_k)`
+  `Generator(PCG64(seed))` and deals them into `folds` (default 2) contiguous groups by position
+  (the cluster at permuted position `j` goes to fold `j * folds // C`, so with two folds the
+  first `ceil(C/2)` are fold 0), so a cluster's rows are never on both sides of a fit. Fold k's rows get `softmax(z / T_k)`
   where `T_k` was fitted on every OTHER fold. The result holds the per-fold fits, the fold row
   counts and every row's held-out probabilities in input order. Fewer clusters than folds
   refuses (`calibration_too_few_clusters`).
 - **`expected_calibration_error`** (`top-label-ece-v1`): confidence is the largest probability and
-  the prediction its first argmax. `equal_mass` (default) sorts by confidence with a stable sort
-  and splits into `bins` (default 15) contiguous groups whose sizes differ by at most one;
+  the prediction its first argmax. `equal_mass` (default) sorts by confidence, ties broken by the
+  optional `item_ids` (else by input order; stable either way), and splits into `bins` (default
+  15) contiguous groups with `array_split` semantics (the first `n mod bins` hold one row more);
   `equal_width` uses `[k/bins, (k+1)/bins)` with 1.0 in the last bin. ECE is the
   bin-count-weighted mean of `|accuracy - mean confidence|`; empty bins contribute nothing.
   Rows must sum to one within 1e-6.
@@ -328,7 +330,9 @@ It needs NumPy from `[scoring]`, imported only when a function runs.
 `cluster_mean_bootstrap(values, clusters=..., seed=...)` and `paired_cluster_mean_bootstrap`
 apply the same contract to the mean of a finite per-row score (for example each row's Brier
 term): each resample's mean is its cluster sums over its cluster sizes, so 0/1 correctness gives
-exactly the accuracy interval above. One call covers
+exactly the accuracy interval above. The paired form also reports `delta_sd`, the sample SD
+(n - 1) of the per-row differences with its interval over the same resamples (from weighted sums
+of x and x squared); it needs at least two rows (`cluster_bootstrap_too_few_rows`). One call covers
 one slice: a slice's interval resamples whole clusters within that slice. Both are direct-import
 only. 10,000 paired resamples over 12,000 clusters take a few seconds.
 

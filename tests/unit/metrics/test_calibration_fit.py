@@ -138,3 +138,32 @@ def test_ece_refusals() -> None:
         expected_calibration_error(["yes"], [[0.5, 0.6]], labels=LABELS)
     with pytest.raises(ValidationError, match="calibration_bins_invalid"):
         expected_calibration_error(["yes"], [[0.5, 0.5]], labels=LABELS, bins=0)
+
+
+def test_fold_zero_holds_the_first_ceil_half_of_the_permuted_sorted_clusters() -> None:
+    import numpy as np
+
+    logits, gold, keys = _population()
+    seed = 20261104
+    result = cross_fit_temperature(logits, gold, labels=LABELS, clusters=keys, seed=seed)
+    order = sorted(set(keys))
+    permuted = np.random.Generator(np.random.PCG64(seed)).permutation(len(order)).tolist()
+    fold0 = {order[c] for c in permuted[: math.ceil(len(order) / 2)]}
+    assert result.fold_rows[0] == sum(1 for key in keys if key in fold0)
+
+
+def test_ece_ties_break_by_item_id() -> None:
+    # Three rows tie at 0.6 (right, wrong, right) beside one right at 0.9; with 3 bins the
+    # array_split sizes are 2, 1, 1, so which tied row comes first decides the bins.
+    gold = ["yes", "no", "yes", "yes"]
+    probs = [[0.4, 0.6], [0.4, 0.6], [0.4, 0.6], [0.1, 0.9]]
+    wrong_first = expected_calibration_error(
+        gold, probs, labels=LABELS, bins=3, item_ids=["b", "a", "c", "d"]
+    )
+    # {wrong, right} -> |0.5 - 0.6|, {right} -> 0.4, {right @ 0.9} -> 0.1
+    assert wrong_first.value == pytest.approx((2 * 0.1 + 0.4 + 0.1) / 4)
+    wrong_last = expected_calibration_error(
+        gold, probs, labels=LABELS, bins=3, item_ids=["a", "c", "b", "d"]
+    )
+    # {right, right} -> 0.4 each, {wrong} -> 0.6, {right @ 0.9} -> 0.1
+    assert wrong_last.value == pytest.approx((2 * 0.4 + 0.6 + 0.1) / 4)

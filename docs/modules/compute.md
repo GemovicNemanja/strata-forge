@@ -718,6 +718,55 @@ repo, refused when public, or kept on the machine under
 overall figures and bounds and each baseline's accuracy and macro-F1 deltas.
 The machine needs ``strata-forge[scoring,storage,hf]``.
 
+``EvalSettings.calibration`` (``CalibrationSettings``) adds probability reads on the
+shared rows. Every file must carry ``<logit_prefix><label>`` (default ``logit_``)
+for each declared label; an overflowed, refused or non-finite row has none. Three
+reads are reported apart, per system and slice, each with ``n``, ``coverage``,
+sum-form Brier (Σ_k (p_k − y_k)² on [0, 2]) with a cluster interval, NLL and
+top-label ECE (``ece_bins``, default 15, equal mass, ties by item id):
+
+- ``raw``: the logits' softmax.
+- ``cross_fit``: ``cross_fit_temperature`` over the fit population (the scored
+  rows of this split, or of its named slice ``fit_column`` = ``fit_value``), with
+  ``folds`` (default 2) folds by cluster: the seeded permutation of the sorted
+  cluster keys, the first ``ceil(C/2)`` in fold 0. Null outside the fit population.
+- ``applied``: the system's own temperature, from the ``calibration.json`` its
+  ``PredictionSource.calibration_ref`` pins (a model or dataset repo, a commit and
+  a path), when ``apply_calibration`` is ``auto``. A ``calibration_ref`` without
+  ``calibration`` settings refuses. Its SHA-256 and where its labels came from
+  (``labels_from``) are recorded.
+
+**The calibration file contract** (one schema, shared by the seq-cls trainer that
+writes it and the evaluation runner that reads it):
+
+- ``calibration.json`` is a JSON object (at most 64 KiB) with
+  ``"schema": "strata.calibration/v1"`` and ``fit``, the trainer's
+  ``TemperatureFit``: ``fit.temperature`` (positive, finite) is the temperature
+  applied, with ``nll_before`` / ``nll_after`` / ``at_bound`` beside it. The
+  trainer also records ``split``, ``rows``, ``excluded_rows`` and ``rows_sha256``
+  (the ID-dev rows fitted on).
+- Labels: the file's ``labels`` (the class order of the logits the temperature
+  scales) when present, else the ``labels`` of ``strata_verifier.json``
+  (``strata.verifier/v1``) in the same directory of the same repo at the same
+  commit. Either way they must equal the evaluation's declared ``labels`` in
+  order, or the run refuses.
+
+Each probability block reports ``n`` (rows with probabilities),
+``n_population`` and ``coverage`` (their ratio), and is computed on those rows
+only, with no "no mass" term for the rest. Each comparison gains ``brier_delta``:
+the paired candidate-minus-baseline raw Brier on the rows BOTH systems have
+probabilities for, with that ``n`` and ``coverage`` and ``sd``, the SD of the
+per-item Brier differences and its interval; with calibration the comparison's
+``discordance`` (p_d) is read on those same rows, with its ``n`` and
+``coverage``. **Gate rule:** a probability read with ``coverage`` < 1 is
+unresolved (``gate: "unresolved"`` on a block or p_d, ``excludes_zero:
+"unresolved"`` on the Brier delta), and unresolved counts as NOT met. The
+``end`` event carries ``brier_coverage`` and leaves the Brier bounds out below
+full coverage. The report's ``calibration`` block records the fit
+population, the fold rule, each system's per-fold temperatures and its own
+temperature. No temperature selects a system, a reference or a threshold. The
+``end`` event adds the candidate's raw ``brier`` and its bounds.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a

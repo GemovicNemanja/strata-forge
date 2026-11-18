@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from fractions import Fraction
 from typing import TYPE_CHECKING, Literal
 
@@ -490,6 +491,8 @@ class PairedClusterMeanBootstrap(_Frozen):
     baseline: MetricInterval
     candidate: MetricInterval
     delta: MetricInterval
+    # The sample SD (n - 1) of the per-row differences, with its interval over the same resamples.
+    delta_sd: MetricInterval
 
 
 def _row_values(values: Iterable[object], what: str) -> list[float]:
@@ -573,14 +576,50 @@ def paired_cluster_mean_bootstrap(
     resamples: int = CLUSTER_BOOTSTRAP_RESAMPLES,
 ) -> PairedClusterMeanBootstrap:
     """Two systems' per-row scores on the same rows, differenced per resample (candidate minus
-    baseline) before the quantiles."""
+    baseline) before the quantiles, and the SD of the per-row differences. Needs two rows."""
+    baseline_rows, candidate_rows, cluster_rows = list(baseline), list(candidate), list(clusters)
+    if len(baseline_rows) < 2:
+        raise ValidationError("cluster_bootstrap_too_few_rows")
     settings, points, resampled = _mean_run(
-        [baseline, candidate], clusters, seed=seed, resamples=resamples
+        [baseline_rows, candidate_rows], cluster_rows, seed=seed, resamples=resamples
     )
     delta = [c - b for b, c in zip(resampled[0], resampled[1], strict=True)]
+    diffs = [
+        c - b
+        for b, c in zip(
+            _row_values(baseline_rows, "value"), _row_values(candidate_rows, "value"), strict=True
+        )
+    ]
     return PairedClusterMeanBootstrap(
         settings=settings,
         baseline=_interval(points[0], resampled[0]),
         candidate=_interval(points[1], resampled[1]),
         delta=_interval(points[1] - points[0], delta),
+        delta_sd=_interval(
+            statistics.stdev(diffs),
+            _resampled_sd(diffs, cluster_rows, seed=settings.seed, resamples=settings.resamples),
+        ),
     )
+
+
+def _resampled_sd(
+    values: list[float], clusters: list[object], *, seed: int, resamples: int
+) -> list[float]:
+    """The sample SD of ``values`` in every resample, from weighted sums of x and x squared."""
+    import numpy as np
+
+    codes, count = _cluster_codes(clusters, len(values))
+    index = np.asarray(codes, dtype=np.int64)
+    x = np.asarray(values, dtype=np.float64)
+    sizes = np.bincount(index, minlength=count).astype(np.float64)
+    first = np.bincount(index, weights=x, minlength=count)
+    second = np.bincount(index, weights=x * x, minlength=count)
+    out: list[float] = []
+    for weights in _weights(count, seed=seed, resamples=resamples):
+        n = weights @ sizes
+        s1 = weights @ first
+        s2 = weights @ second
+        with np.errstate(invalid="ignore", divide="ignore"):
+            var = np.where(n > 1, (s2 - s1 * s1 / n) / (n - 1), np.nan)
+        out.extend(float(v) for v in np.sqrt(np.maximum(var, 0.0)).tolist())
+    return out
