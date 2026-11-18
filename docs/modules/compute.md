@@ -503,7 +503,9 @@ depth, which is also the order they are rendered in, so a stored and
 re-read spec renders the same prompt), ``assistant_prefill_sha256`` and
 ``assistant_prefill_token_ids``, the output layer's ``vocab_size``, the
 length limit and its source, the overflow policy, the padding side, dtype,
-the TF32 switches, the batch plan, device and the ignored checkpoint keys.
+the TF32 switches, the batch plan, device and the ignored checkpoint keys. Like the pair
+template, the prefill and the kwargs are left out of the manifest's
+``hyperparams`` dump: only their digests are pushed.
 
 ### The runner contract
 

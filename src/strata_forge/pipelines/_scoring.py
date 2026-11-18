@@ -648,6 +648,10 @@ def batch_plan_record(batches: Sequence[Sequence[int]], batch_size: int) -> dict
     }
 
 
+#: Hyperparameters that hold prompt text, recorded in a manifest as digests only.
+_PROMPT_TEXT_KNOBS = frozenset({"pair_template", "assistant_prefill", "chat_template_kwargs"})
+
+
 def manifest_frame(
     spec: RunSpec,
     rows: Sequence[Mapping[str, Any]],
@@ -659,9 +663,11 @@ def manifest_frame(
     """A scoring run's manifest (``kind`` ``scoring``) around one engine's ``scoring`` block.
 
     Pins (the commits actually read beside the ones requested), template digests, the mapping,
-    the knobs and the counts, with no row text: templates are recorded as digests (the pair
-    template is left out of the hyperparameters for the same reason), since the control plane
-    stores their text with the spec and a pushed manifest should not republish it.
+    the knobs and the counts, with no row text: templates are recorded as digests, and the knobs
+    that hold prompt text (the pair template, an assistant prefill, chat-template kwargs) are left
+    out of the hyperparameters for the same reason, since the control plane stores their text
+    with the spec and a pushed manifest should not republish it. The engine's ``scoring`` block
+    carries their digests.
     """
     hp = spec.hyperparams
     return {
@@ -684,7 +690,7 @@ def manifest_frame(
         "template_sha256": _digest(spec.template),
         "pair_template_sha256": _digest(hp.pair_template or ""),
         "column_mapping": spec.column_mapping,
-        "hyperparams": hp.model_dump(exclude={"pair_template"}),
+        "hyperparams": hp.model_dump(exclude=set(_PROMPT_TEXT_KNOBS)),
         "counts": tally(rows),
     }
 

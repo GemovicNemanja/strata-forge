@@ -497,6 +497,10 @@ async def test_a_label_logits_run_drops_overflow_and_pushes_one_commit(
     assert manifest["kind"] == "scoring"
     assert manifest["counts"] == {"rows": 2, "scored": 1, "overflow": 1}
     assert manifest["dataset"]["commit"] == _SHA
+    # Prompt text stays out of the pushed record; the engine's block carries the digests.
+    assert "assistant_prefill" not in manifest["hyperparams"]
+    assert "chat_template_kwargs" not in manifest["hyperparams"]
+    assert manifest["hyperparams"]["label_tokens"][0]["label"] == "true"
     assert _FakeReader.loaded["pins"]["batches"] == [[0]]
     assert [c for c in _Hub.calls if c[0] == "upload_files"] == [
         ("upload_files", (["manifest.json", "results.parquet"], "org/scores"))
