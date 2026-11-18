@@ -284,3 +284,14 @@ def test_a_failing_plugin_reports_its_exit_scrubbed(
     with pytest.raises(RunError, match="exited with code 1"):
         asyncio.run(plugin_runner._execute(spec, RunSecrets(hf_token=SecretStr(TOKEN)), None))  # pyright: ignore[reportPrivateUsage]
     assert _FakeHub.pushed == []
+
+
+def test_a_linked_output_is_never_pushed(tmp_path: Path, pin: PluginPin) -> None:
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    secret = tmp_path / "id_rsa"
+    secret.write_text("key")
+    (outdir / "out.txt").write_text("x")
+    (outdir / "leak").symlink_to(secret)
+    with pytest.raises(RunError, match="link or special file"):
+        plugin_runner._check_output(_spec(pin, entry="job"), outdir, {})  # pyright: ignore[reportPrivateUsage]

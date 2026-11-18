@@ -285,6 +285,13 @@ async def _stop(proc: asyncio.subprocess.Process) -> None:
 
 
 def _check_output(spec: PluginRunSpec, outdir: Path, rows: dict[str, int]) -> dict[str, Any]:
+    # Only regular files the plugin wrote are pushed. A symbolic link (to a key, a cached login,
+    # anything readable on the machine) would be uploaded as its target's content, so the whole
+    # output is refused rather than pushing a file the plugin did not produce.
+    for path in outdir.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            msg = f"the plugin output holds a link or special file ({path.name}); nothing is pushed"
+            raise RunError(msg)
     if spec.entry.type == "step_scorer":
         scores = outdir / SCORES_FILENAME
         if not scores.is_file():
