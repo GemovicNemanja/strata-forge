@@ -115,6 +115,52 @@ def test_the_time_limit_stops_the_whole_group(tmp_path: Path) -> None:
         os.kill(int(pidfile.read_text()), 0)
 
 
+def test_a_process_that_writes_nothing_for_the_idle_limit_is_stalled(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+        "print('working', flush=True)\n"
+        "time.sleep(300)\n"
+    )
+    marker = str(tmp_path / "job-marker.json")
+    result = asyncio.run(
+        run_plugin_process(
+            [sys.executable, "-c", code, marker],
+            sandbox=NONE,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            cwd=tmp_path,
+            marker=marker,
+            timeout_s=60.0,
+            sink=lambda _event: None,
+            idle_timeout_s=1.5,
+        )
+    )
+    assert result.stalled
+    assert not result.timed_out
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+
+
+def test_output_keeps_a_process_under_its_idle_limit(tmp_path: Path) -> None:
+    code = "import sys, time\nfor _ in range(6):\n    print('x', file=sys.stderr, flush=True)\n    time.sleep(0.4)\n"
+    marker = str(tmp_path / "job-marker.json")
+    result = asyncio.run(
+        run_plugin_process(
+            [sys.executable, "-c", code, marker],
+            sandbox=NONE,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            cwd=tmp_path,
+            marker=marker,
+            timeout_s=60.0,
+            sink=lambda _event: None,
+            idle_timeout_s=1.5,
+        )
+    )
+    assert (result.code, result.stalled) == (0, False)
+
+
 def test_a_process_ignoring_sigterm_is_killed(tmp_path: Path) -> None:
     code = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(300)\n"
     _, rc, _, timed_out = _run(tmp_path, code, timeout_s=1.0)

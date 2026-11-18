@@ -9,7 +9,10 @@ source (its build backend). The strongest sandbox the machine offers is used, in
 - ``uid``: bubblewrap started through passwordless ``sudo``, the plugin dropped to the
   unprivileged ``nobody`` uid inside it (``setpriv``, no new privileges, no supplementary
   groups). Another uid cannot read the runner's files or ptrace it, and the sandbox adds the
-  namespaces below.
+  namespaces below. Bubblewrap's parent is then ``sudo``, which outlives a killed runner, so the
+  sandbox's first process is :mod:`strata_forge.plugins.supervisor` (root, before the drop): it
+  watches a pipe only the runner holds, and when the runner dies it ends, and the kernel ends
+  everything else in the sandbox with it.
 - ``bwrap``: the same bubblewrap sandbox as the runner's own uid. New PID, network, IPC, UTS and
   cgroup namespaces: the runner's processes are not visible (no ``/proc`` entry to read, nothing
   to ptrace), there is no network at all, and the filesystem is only what is bound in: the system
@@ -244,10 +247,17 @@ def sandbox_command(
     if sandbox.isolation == "uid":
         setpriv = shutil.which("setpriv") or "setpriv"
         sudo = shutil.which("sudo") or "sudo"
+        # Still root inside the sandbox, the supervisor ties the sandbox's life to the runner's
+        # (bubblewrap's parent is ``sudo``, which outlives a killed runner), then drops to nobody.
         args = [
             sudo,
             "-n",
             *args,
+            sys.executable,
+            "-I",
+            "-m",
+            "strata_forge.plugins.supervisor",
+            "--",
             setpriv,
             f"--reuid={NOBODY_UID}",
             f"--regid={NOBODY_UID}",

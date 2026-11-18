@@ -12,6 +12,12 @@ session of its own and:
 - enforces the operator's wall-clock limit, and ends the run early when any process of the
   plugin's stays stopped (a ptrace stop, or ``SIGSTOP``) for :data:`STOPPED_LIMIT_SECONDS`: a
   stopped sandbox init never reaps its children, and the run would otherwise hang to its limit;
+- when the caller sets an idle limit (a git source's build does), ends the process early once it
+  has written nothing to either pipe for that long: a stalled build stops there rather than at
+  its wall-clock limit;
+- in a ``uid`` sandbox, hands the process a pipe whose write end only this process holds, as its
+  standard input: :mod:`strata_forge.plugins.supervisor` ends the sandbox when it closes, so the
+  plugin dies with the runner rather than with ``sudo``;
 - after the process exits, whether it finished, failed, ran out of time or was cancelled, signals
   its whole process group, waits for it, and confirms that no process of the run is left (by its
   process group, and by the job file's path on any process's command line). Only then does the
@@ -78,6 +84,8 @@ class ChildResult:
     timed_out: bool
     #: Ended because a process of the plugin's stayed stopped (traced or suspended).
     stopped: bool = False
+    #: Ended because it wrote nothing for the caller's idle limit.
+    stalled: bool = False
 
 
 def _process_table(proc: Path) -> dict[int, tuple[int, str]]:
@@ -142,12 +150,15 @@ def relayable(line: bytes) -> ProgressEvent | None:
     return None
 
 
-async def _relay(stream: asyncio.StreamReader, sink: Callable[[ProgressEvent], None]) -> None:
+async def _relay(
+    stream: asyncio.StreamReader, sink: Callable[[ProgressEvent], None], seen: list[float]
+) -> None:
     pending = b""
     dropping = False
     last_step = 0.0
     held: ProgressEvent | None = None
     while chunk := await stream.read(_READ_CHUNK):
+        seen[0] = time.monotonic()
         pending += chunk
         *lines, pending = pending.split(b"\n")
         for line in lines:
@@ -170,8 +181,9 @@ async def _relay(stream: asyncio.StreamReader, sink: Callable[[ProgressEvent], N
         sink(held)
 
 
-async def _tail(stream: asyncio.StreamReader, keep: bytearray) -> None:
+async def _tail(stream: asyncio.StreamReader, keep: bytearray, seen: list[float]) -> None:
     while chunk := await stream.read(_READ_CHUNK):
+        seen[0] = time.monotonic()
         keep.extend(chunk)
         if len(keep) > STDERR_TAIL_BYTES:
             del keep[: len(keep) - STDERR_TAIL_BYTES]
@@ -259,27 +271,55 @@ async def run_plugin_process(
     marker: str,
     timeout_s: float,
     sink: Callable[[ProgressEvent], None],
+    idle_timeout_s: float | None = None,
 ) -> ChildResult:
     """Run the plugin's process to its end and make sure nothing of it is left."""
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(cwd),
-        env=dict(env),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
+    # The lifeline: only this process holds the write end (``os.pipe`` descriptors are not
+    # inherited), so the kernel closes it when this process dies, however it dies.
+    lifeline = os.pipe() if sandbox.isolation == "uid" else None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(cwd),
+            env=dict(env),
+            stdin=lifeline[0] if lifeline is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except BaseException:
+        if lifeline is not None:
+            os.close(lifeline[1])
+        raise
+    finally:
+        if lifeline is not None:
+            os.close(lifeline[0])
+    try:
+        return await _supervise(proc, sandbox, marker, timeout_s, sink, idle_timeout_s)
+    finally:
+        if lifeline is not None:
+            os.close(lifeline[1])
+
+
+async def _supervise(
+    proc: asyncio.subprocess.Process,
+    sandbox: Sandbox,
+    marker: str,
+    timeout_s: float,
+    sink: Callable[[ProgressEvent], None],
+    idle_timeout_s: float | None,
+) -> ChildResult:
     pgid = proc.pid
     stderr = bytearray()
     if proc.stdout is None or proc.stderr is None:  # PIPE above; a typed guard
         msg = "the plugin process has no pipes"
         raise RuntimeError(msg)
+    seen = [time.monotonic()]
     readers = [
-        asyncio.create_task(_relay(proc.stdout, sink)),
-        asyncio.create_task(_tail(proc.stderr, stderr)),
+        asyncio.create_task(_relay(proc.stdout, sink, seen)),
+        asyncio.create_task(_tail(proc.stderr, stderr, seen)),
     ]
-    timed_out = stopped = False
+    timed_out = stopped = stalled = False
     try:
         try:
             async with asyncio.timeout(timeout_s):
@@ -290,6 +330,9 @@ async def run_plugin_process(
                 while proc.returncode is None:
                     await asyncio.sleep(0.2)
                     now = time.monotonic()
+                    if idle_timeout_s is not None and now - seen[0] >= idle_timeout_s:
+                        stalled = True
+                        break
                     if now < next_check:
                         continue
                     next_check = now + _STOPPED_CHECK_SECONDS
@@ -320,4 +363,5 @@ async def run_plugin_process(
         stderr_tail=bytes(stderr).decode("utf-8", "replace"),
         timed_out=timed_out,
         stopped=stopped,
+        stalled=stalled,
     )

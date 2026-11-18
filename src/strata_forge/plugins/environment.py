@@ -32,7 +32,10 @@ rewrite the engine it imports. So:
 Every build is checked before it is used, and again on every reuse: the pinned distribution and
 version are there, every file matches its RECORD hash, and the files' digest is the pin's
 ``files_sha256`` (:func:`~strata_forge.plugins.pins.record_mismatch`); every distribution the
-plugin requires is present (the plugin directory or the engine's environment). The directory is
+plugin requires is present (the plugin directory or the engine's environment). On reuse, the
+whole directory must also hash to the digest recorded when it was built (:func:`tree_digest`):
+the plugin's RECORD covers only its own files, and this covers the dependencies, their data
+files and anything added beside them. The directory is
 keyed by everything it holds (:func:`environment_key`), so a changed pin, engine or interpreter
 gets a new one. The resolved set of installed distributions is recorded in the run's manifest.
 """
@@ -72,6 +75,7 @@ __all__ = [
     "environment_key",
     "install_environ",
     "pth_problems",
+    "tree_digest",
     "verify_wheel",
 ]
 
@@ -366,9 +370,49 @@ def _verify(pin: PluginPin, site: Path) -> str | None:
     return None
 
 
-def _recorded(marker: Path, key: str) -> tuple[str, ...] | None:
-    """The requirements a finished environment was built from, or ``None`` when the marker is
-    missing, unreadable or names another key (an unfinished or foreign directory)."""
+def tree_digest(site: Path) -> str:
+    """The SHA-256 over EVERY entry of the plugin directory: each directory, and each file's
+    path, executable bit and content hash, sorted. The plugin's own RECORD covers only its own
+    files; this covers its dependencies, their data files, bytecode and anything added beside
+    them, so a reused directory must be byte for byte the one this runner built. A link or a
+    special file anywhere refuses the directory (``pip --target`` writes neither).
+
+    Each entry is its fields as the file system's own bytes (``os.fsencode``), each ended by a NUL,
+    which no path component can hold: a name with a newline cannot pose as two entries, and a name
+    that is not valid text is hashed as it is rather than refused."""
+    digest = hashlib.sha256()
+    entries = sorted((os.fsencode(p.relative_to(site)), p) for p in site.rglob("*"))
+    for rel, path in entries:
+        if path.is_symlink():
+            msg = f"the plugin environment holds a link ({rel!a}); it is not reused"
+            raise PluginManifestError(msg)
+        if path.is_dir():
+            digest.update(b"d\0" + rel + b"\0")
+            continue
+        if not path.is_file():
+            msg = f"the plugin environment holds a special file ({rel!a}); it is not reused"
+            raise PluginManifestError(msg)
+        content = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                content.update(chunk)
+        mode = b"x" if path.stat().st_mode & 0o111 else b"-"
+        digest.update(b"f\0" + rel + b"\0" + mode + b"\0" + content.hexdigest().encode() + b"\0")
+    return digest.hexdigest()
+
+
+def _tree_matches(site: Path, recorded: str) -> bool:
+    """Whether the directory still hashes to ``recorded``; any failure to hash it means no."""
+    try:
+        return tree_digest(site) == recorded
+    except OSError, ValueError, PluginManifestError:
+        return False
+
+
+def _recorded(marker: Path, key: str) -> tuple[tuple[str, ...], str] | None:
+    """The requirements a finished environment was built from and the digest of its whole
+    directory, or ``None`` when the marker is missing, unreadable, names another key, or predates
+    the directory digest (an unfinished, foreign or older directory, rebuilt)."""
     try:
         data: object = json.loads(marker.read_text(encoding="utf-8"))
     except OSError, ValueError:
@@ -380,9 +424,10 @@ def _recorded(marker: Path, key: str) -> tuple[str, ...] | None:
     if record.get("key") != key or not isinstance(requirements, list):
         return None
     items = cast("list[object]", requirements)
-    if not all(isinstance(i, str) for i in items):
+    tree = record.get("tree_sha256")
+    if not all(isinstance(i, str) for i in items) or not isinstance(tree, str) or not tree:
         return None
-    return tuple(cast("list[str]", items))
+    return tuple(cast("list[str]", items)), tree
 
 
 # ── building one ────────────────────────────────────────────────────────────────────────────────
@@ -412,7 +457,10 @@ async def _tools(base: Path, run: CommandRunner, env: Mapping[str, str]) -> Path
         if not done.exists():
             shutil.rmtree(tools, ignore_errors=True)
             await _checked(
-                run, [sys.executable, "-m", "venv", str(tools)], env, "creating pip's environment"
+                run,
+                [sys.executable, "-I", "-m", "venv", str(tools)],
+                env,
+                "creating pip's environment",
             )
             await _checked(run, [str(python), "-I", "-m", "pip", "--version"], env, "checking pip")
             done.write_text("ok\n", encoding="utf-8")
@@ -525,6 +573,9 @@ async def _built_wheel(
                 "-m",
                 "pip",
                 "wheel",
+                # Verbose, so the backend's own output streams: a build that writes nothing for
+                # the runner's idle limit is treated as stalled and stopped.
+                "-v",
                 "--no-deps",
                 "--no-build-isolation",
                 "--no-index",
@@ -598,13 +649,19 @@ async def ensure_environment(
     fd = await asyncio.to_thread(_lock, base / f"{key}.lock")
     try:
         recorded = _recorded(marker, key)
-        if recorded is not None and _verify(pin, site) is None:
+        # Reused only when every file in it is the one this runner built (the whole-directory
+        # digest: dependencies and data files included), and the pinned build still verifies.
+        if (
+            recorded is not None
+            and await asyncio.to_thread(_tree_matches, site, recorded[1])
+            and _verify(pin, site) is None
+        ):
             return PluginEnvironment(
                 key=key,
                 root=target,
                 site=site,
                 packages=_packages(site),
-                requirements=recorded,
+                requirements=recorded[0],
                 reused=True,
             )
         shutil.rmtree(target, ignore_errors=True)
@@ -660,8 +717,10 @@ async def ensure_environment(
             _plugin_requirement(pin),
             *(d.requirement_line() for d in pin.dependencies),
         )
+        tree = await asyncio.to_thread(tree_digest, site)
         marker.write_text(
-            json.dumps({"key": key, "requirements": list(requirements)}), encoding="utf-8"
+            json.dumps({"key": key, "requirements": list(requirements), "tree_sha256": tree}),
+            encoding="utf-8",
         )
         return PluginEnvironment(
             key=key,
