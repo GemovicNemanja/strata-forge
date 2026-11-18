@@ -3,8 +3,8 @@
 This pure leaf is shared by training and evaluation. It performs no I/O, reads no datasets,
 calls no models, and imports neither consumer. Functions are synchronous under
 [ADR 0020](../architecture/adr/0020-pure-metric-functions.md). Execution workers own scheduling
-and persistence. NumPy is required only by nonempty temperature application and the agreement
-bootstrap, through `[scoring]`.
+and persistence. NumPy is required only by nonempty temperature application and the agreement and
+cluster bootstraps, through `[scoring]`.
 
 ## Public surface
 
@@ -218,14 +218,65 @@ at large near-central counts and exhaustive small paired tables.
 
 ### Resampling boundary
 
-The only bootstrap is the approved agreement interval described under
-[Item-level agreement bootstrap](#item-level-agreement-bootstrap). Any other resampling contract
+Two bootstrap contracts exist: the agreement interval described under
+[Item-level agreement bootstrap](#item-level-agreement-bootstrap), and the classification
+interval described under [Cluster percentile bootstrap](#cluster-percentile-bootstrap). Any other
+resampling contract
 must specify its eligible unit IDs, exact paired population, declared cluster/base-problem
 mapping, preserved config/slice context, and behavior for absent classes or undefined metrics.
 Reproducibility additionally requires an explicit RNG algorithm and seed, canonical unit/cluster
 ordering, replicate count, quantile/interpolation definition, and failure/coverage policy. Those
 choices are not silently made by these three helpers. They supply neither bootstrap intervals
-nor research thresholds, calibration fits, or an evaluation runner.
+nor research thresholds or calibration fits.
+
+### Cluster percentile bootstrap
+
+```python
+from strata_forge.metrics.cluster_bootstrap import cluster_bootstrap, paired_cluster_bootstrap
+
+single = cluster_bootstrap(gold, predictions, labels=labels, clusters=base_ids, seed=20261104)
+paired = paired_cluster_bootstrap(
+    gold, baseline, candidate, labels=labels, clusters=base_ids, seed=20261104
+)
+assert paired.delta.macro_f1.point == (
+    paired.candidate.macro_f1.point - paired.baseline.macro_f1.point
+)
+```
+
+A nonparametric percentile bootstrap over caller-declared **clusters**
+(`bootstrap_version="cluster-percentile-bootstrap-v1"`) for accuracy, macro-F1 and invalid rate.
+It needs NumPy from `[scoring]`, imported only when a function runs.
+
+- **Population.** `gold`, every system's predictions and `clusters` are aligned row lists of one
+  length. A cluster key is a nonempty string per row (for example a base problem id); a row-level
+  bootstrap is a cluster per row. Invalid and missing predictions follow `classification_report`:
+  wrong, and in the gold class's support. An empty population refuses with
+  `cluster_bootstrap_empty`, a length mismatch with `cluster_bootstrap_population_mismatch`.
+- **Order.** Clusters are ordered by their sorted string keys, so neither row order nor the
+  order in which clusters first appear changes a result.
+- **Draws.** The stream is that of one C-order draw
+  `numpy.random.Generator(PCG64(seed)).integers(0, C, size=(resamples, C), dtype=int64)` over the
+  `C` canonical clusters, drawn in consecutive row blocks of about 2**20 indices from the same
+  generator. Each drawn cluster contributes all its rows. `seed` is an integer in `[0, 2**53-1]`
+  (bool refused); `resamples` is at least one and at most 1,000,000, default 10,000.
+- **Arithmetic.** Each cluster's confusion cells are counted once; a block of resamples multiplies
+  its cluster multiplicities by that table in float64, exact for integer counts below 2**53 in any
+  summation order. Each resample's metrics use `classification_report`'s definitions (absent
+  classes contribute F1 zero) in float64, equal to the point arithmetic within `1e-12`. Every
+  resample has at least one row, so no resample is undefined.
+- **Pairing.** `paired_cluster_bootstrap` scores both systems on every resample and differences
+  them per resample (candidate minus baseline) before taking quantiles, so the delta interval
+  reflects the pairing. Its per-system intervals equal `cluster_bootstrap`'s for the same seed.
+- **Quantile rule.** Hyndman-Fan type 7 at exact rational positions `p = 1/40` and `p = 39/40`,
+  as for the agreement bootstrap; the confidence level is fixed at 0.95.
+- **Golden values.** A unit test pins exact bounds for a fixed seed and input.
+
+`ClusterBootstrap` holds a `settings` block (the contract fields, `seed`, `resamples`, `n`,
+`clusters`, `numpy_version`) and `intervals` (`accuracy`, `macro_f1`, `invalid_rate`, each a
+`MetricInterval` of `point`, `lower`, `upper`; `point` is the full-sample value).
+`PairedClusterBootstrap` holds `settings`, `baseline`, `candidate` and `delta`. One call covers
+one slice: a slice's interval resamples whole clusters within that slice. Both are direct-import
+only. 10,000 paired resamples over 12,000 clusters take a few seconds.
 
 Module rules: [`src/strata_forge/metrics/CLAUDE.md`](../../src/strata_forge/metrics/CLAUDE.md).
 
