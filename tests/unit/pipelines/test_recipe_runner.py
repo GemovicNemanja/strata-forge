@@ -310,6 +310,49 @@ async def test_a_preview_writes_nothing_and_returns_a_capped_sample(
     assert not (run["tmp"] / "receipt.json").exists()
 
 
+class _ReadOnlyHub:
+    """A Hub client on which a preview may only download the generator's snapshot: every other
+    attribute (a push, a repo creation, a visibility check, any upload) fails the test."""
+
+    calls: ClassVar[list[str]] = []
+
+    def __init__(self, *, token: Any) -> None:
+        del token
+
+    async def download_snapshot(self, repo_id: str, **kw: Any) -> Path:
+        _ReadOnlyHub.calls.append("download_snapshot")
+        snapshot = _Hub.root / "snapshots" / kw["revision"]
+        snapshot.mkdir(parents=True, exist_ok=True)
+        return snapshot
+
+    def __getattr__(self, name: str) -> Any:
+        msg = f"a preview reached the Hub client's {name}"
+        raise AssertionError(msg)
+
+
+async def test_a_preview_reaches_no_hub_write_api_even_with_a_token(
+    monkeypatch: pytest.MonkeyPatch, run: dict[str, Any]
+) -> None:
+    # The token is present (a private source may need it to be READ), yet nothing writes.
+    _ReadOnlyHub.calls = []
+    monkeypatch.setattr(rr, "HFHubClient", _ReadOnlyHub)
+    ensured: list[str] = []
+
+    async def _ensure(_hub: Any, repo: str) -> None:
+        ensured.append(repo)
+
+    monkeypatch.setattr(rr, "ensure_private_output", _ensure)
+    spec = _spec(_recipe(synth=True), mode="preview", preview_rows=3)
+    spec.pop("output_repo_id")
+    _launch(monkeypatch, run, spec)
+    assert await rr.main() == 0
+    assert _ReadOnlyHub.calls == ["download_snapshot"]
+    assert ensured == []
+    assert run["read"][0][2] == _TOKEN  # the source was read with the token
+    assert not (run["tmp"] / "receipt.json").exists()
+    assert not [e for e in _events(run) if e["kind"] == "error"]
+
+
 async def test_a_preview_sample_is_bounded_per_value_and_in_total() -> None:
     from strata_forge.datasets.recipe import RecipeOutput, Row, Table
 
