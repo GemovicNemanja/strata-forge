@@ -25,6 +25,9 @@ It constructs, offline, everything a run constructs before it loads weights:
 - an evaluation run over an ``hf_classify`` scoring run's own output: the scorer runs on a tiny
   classifier, writes its results parquet as a pushed run does, and the evaluation reads that file
   as its predictions with no reshaping (its id, prediction, overflow and logit columns as written);
+- an evaluation over a ``seq_cls`` verifier's own files: a tiny verifier trained on CPU with a
+  calibration split, scored with ``artifact: strata_verifier``, then evaluated with that results
+  parquet as its predictions and the trainer's ``calibration.json`` as its ``calibration_ref``;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -1158,6 +1161,226 @@ def check_eval_consumes_scoring_output() -> None:
         raise SmokeError(msg)
 
 
+#: The commits the verifier check pins its synthetic model, gold split and scores to.
+_VERIFIER_SHA = "a" * 40
+_VERIFIER_SCORES_SHA = "c" * 40
+
+
+@contextlib.contextmanager
+def _repo_tests() -> Any:
+    """Make this checkout's ``tests`` package importable, for its synthetic checkpoint builders.
+
+    Only the repository root is added, which holds no ``strata_forge`` (the package is under
+    ``src/``), so the installed distribution is still the one under test.
+    """
+    root = str(Path(__file__).resolve().parents[1])
+    sys.path.insert(0, root)
+    try:
+        yield
+    finally:
+        sys.path.remove(root)
+
+
+class _MemoryProbe:
+    """A device-memory probe for a CPU run: fixed numbers, so the memory check reports and passes."""
+
+    def reset(self) -> None:
+        return None
+
+    def peak_bytes(self) -> int | None:
+        return 10
+
+    def total_bytes(self) -> int | None:
+        return 1000
+
+
+def _train_tiny_verifier(root: Path, tiny: Any) -> Path:
+    """Train a tiny ``seq_cls`` encoder verifier with a calibration split; return its artifact."""
+    import datasets
+
+    from strata_forge.training.seq_cls import SeqClsConfig, SeqClsRunner
+
+    config = SeqClsConfig.model_validate(
+        {
+            "model_id": "synthetic/tiny",
+            "output_dir": str(root / "checkpoints"),
+            "labels": tiny.LABELS,
+            **tiny.TWO_WAY,
+            "max_length": 64,
+            "per_device_batch_size": 8,
+            "max_steps": 2,
+        }
+    )
+    artifact = root / "artifact"
+    SeqClsRunner(config, memory_probe=_MemoryProbe()).run(
+        checkpoint=tiny.encoder(root / "base"),
+        artifact_dir=artifact,
+        train_dataset=datasets.Dataset.from_list(tiny.rows(16)),
+        calibration_dataset=datasets.Dataset.from_list(tiny.rows(8, seed=2)),
+    )
+    return artifact
+
+
+def _score_with_verifier(tmp: Path, artifact: Path, rows: list[dict[str, Any]]) -> Path:
+    """Score ``rows`` with ``artifact: strata_verifier`` through the runner; return its parquet."""
+    from strata_forge.pipelines import inference_runner
+    from strata_forge.pipelines._common import RunSecrets
+
+    spec = inference_runner.RunSpec.model_validate(
+        {
+            "model_id": "synthetic/verifier",
+            "model_revision": _VERIFIER_SHA,
+            "dataset_id": "synthetic/gold",
+            "dataset_commit_sha": _GOLD_SHA,
+            "split": "test",
+            "template": "{premises}",
+            "column_mapping": {"premises": "premises", "hypothesis": "hypothesis"},
+            "hyperparams": {
+                "engine": "hf_classify",
+                "artifact": "strata_verifier",
+                "pair_template": "{hypothesis}",
+                "dtype": "float32",
+                "id_column": "uid",
+            },
+            "run_id": "verifier-scores",
+        }
+    )
+
+    async def commit(_spec: Any, _token: Any) -> str:
+        return _GOLD_SHA
+
+    async def fetch(_spec: Any, _token: Any) -> Path:
+        return artifact
+
+    def load_rows(_spec: Any, _token: Any) -> list[dict[str, Any]]:
+        return rows
+
+    with (
+        _home(tmp),
+        _patched(
+            inference_runner, _dataset_commit=commit, _load_rows=load_rows, _fetch_model=fetch
+        ),
+    ):
+        asyncio.run(inference_runner._execute_scoring(spec, RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
+    return tmp / "strata-inference-results" / "verifier-scores" / "results.parquet"
+
+
+def _evaluate_verifier(
+    tmp: Path, results: Path, calibration: Path, artifact: Path, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Evaluate the verifier's results parquet with its calibration file; return metrics.json."""
+    from strata_forge.pipelines import eval_runner
+    from strata_forge.pipelines._common import RunSecrets
+
+    labels = ["entailment", "contradiction", "neutral"]
+    _LocalHub.files = {
+        ("synthetic/scores", _VERIFIER_SCORES_SHA, "results.parquet"): results,
+        ("synthetic/verifier", _VERIFIER_SHA, "calibration.json"): calibration,
+        ("synthetic/verifier", _VERIFIER_SHA, "strata_verifier.json"): artifact
+        / "strata_verifier.json",
+    }
+    gold = {key: [row[key] for row in rows] for key in ("uid", "label", "base", "premises")}
+
+    def load_gold(_spec: Any, _token: Any) -> dict[str, list[Any]]:
+        return gold
+
+    spec = eval_runner.EvalSpec.model_validate(
+        {
+            "model_id": "synthetic/verifier",
+            "dataset_id": "synthetic/gold",
+            "dataset_commit_sha": _GOLD_SHA,
+            "split": "test",
+            "run_id": "verifier-eval",
+            "evaluation": {
+                "labels": labels,
+                "predictions": {
+                    "name": "verifier",
+                    "repo_id": "synthetic/scores",
+                    "commit_sha": _VERIFIER_SCORES_SHA,
+                    "id_column": "item_id",
+                    "prediction_column": "pred",
+                    "overflow_column": "overflow",
+                    # The trainer's file as written; without its own labels the evaluation
+                    # takes them from the strata_verifier.json beside it at the same commit.
+                    "calibration_ref": {
+                        "repo_id": "synthetic/verifier",
+                        "commit_sha": _VERIFIER_SHA,
+                        "path": "calibration.json",
+                    },
+                },
+                "id_column": "uid",
+                "gold_column": "label",
+                "cluster_column": "base",
+                "premises_column": "premises",
+                "seed": 20261104,
+                "resamples": 200,
+                "min_slice_rows": 1,
+                "calibration": {"apply_calibration": "auto"},
+            },
+        }
+    )
+    with _home(tmp), _patched(eval_runner, HFHubClient=_LocalHub, _load_gold=load_gold):
+        asyncio.run(eval_runner._execute(spec, RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
+    return json.loads((tmp / "strata-eval-results" / "verifier-eval" / "metrics.json").read_text())
+
+
+def check_eval_consumes_verifier() -> None:
+    """An evaluation reads a trained verifier's scores and calibration file exactly as written.
+
+    The trainer writes ``calibration.json`` (``strata.calibration/v1``) with its labels; the
+    check also evaluates a copy without them, which takes them from ``strata_verifier.json``.
+    Either way the applied read must be the trainer's temperature on the scorer's raw logits.
+    """
+    import pyarrow.parquet as pq
+
+    from strata_forge.metrics.calibration import temperature_scale
+    from strata_forge.metrics.classification import brier
+
+    with _repo_tests():
+        from tests.unit.training import tiny_classifier as tiny
+    labels = list(tiny.LABELS)
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        artifact = _train_tiny_verifier(root / "train", tiny)
+        trained = json.loads((artifact / "calibration.json").read_text())
+        if trained.get("schema") != "strata.calibration/v1" or trained.get("labels") != labels:
+            msg = f"the trainer wrote a calibration file the evaluation does not read: {trained}"
+            raise SmokeError(msg)
+        temperature = trained["fit"]["temperature"]
+        # The evaluation's label space is the three-way one; two-way rows are left out.
+        three_way = [row for row in tiny.rows(24, seed=7) if row["label_space"] == "3way"]
+        rows = [{**row, "uid": f"u{i}", "base": f"b{i // 2}"} for i, row in enumerate(three_way)]
+        results = _score_with_verifier(root / "score", artifact, rows)
+        written = {row["item_id"]: row for row in pq.read_table(str(results)).to_pylist()}
+        logits = [[written[row["uid"]][f"logit_{label}"] for label in labels] for row in rows]
+        expected = brier(
+            [row["label"] for row in rows],
+            temperature_scale(logits, temperature=temperature),
+            labels=labels,
+            probability_kind="class_probabilities",
+        ).value
+        unlabelled = root / "calibration-without-labels.json"
+        unlabelled.write_text(json.dumps({k: v for k, v in trained.items() if k != "labels"}))
+        for calibration, labels_from in (
+            (artifact / "calibration.json", "calibration.json"),
+            (unlabelled, "strata_verifier.json"),
+        ):
+            where = root / f"eval-{labels_from}"
+            report = _evaluate_verifier(where, results, calibration, artifact, rows)
+            counts = report["systems"][0]["counts"]
+            if (counts["scored"], counts["missing"]) != (len(rows), 0):
+                msg = f"the evaluation joined the verifier's scores as {counts}"
+                raise SmokeError(msg)
+            own = report["calibration"]["systems"]["verifier"]["own"]
+            if (own["temperature"], own["labels_from"]) != (temperature, labels_from):
+                msg = f"the calibration file was not read as written: {own}"
+                raise SmokeError(msg)
+            applied = report["slices"][0]["systems"]["verifier"]["applied"]
+            if applied["n"] != len(rows) or abs(applied["brier"]["point"] - expected) > 1e-12:
+                msg = f"the applied read is not the trainer's temperature on raw logits: {applied}"
+                raise SmokeError(msg)
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -1328,6 +1551,13 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
             (
                 "evaluation reads an hf_classify scoring output as written",
                 check_eval_consumes_scoring_output,
+            )
+        )
+    if {"finetuning", "serving", "scoring", "storage", "hf"} <= extras:
+        checks.append(
+            (
+                "evaluation reads a trained verifier's scores and calibration",
+                check_eval_consumes_verifier,
             )
         )
     if {"serving", "hf"} <= extras:
