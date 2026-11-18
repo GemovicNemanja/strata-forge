@@ -971,6 +971,113 @@ never uploads ``checkpoint-*``: a ``seq_cls`` run writes its intermediate
 checkpoints beside the artifact, and the causal-LM methods' are excluded from
 the upload by name.
 
+### Latency benchmark (`benchmark_runner`)
+
+``python -m strata_forge.pipelines.benchmark_runner`` measures one pinned
+model on one pinned workload split. It is a bounded measurement job, not a
+serving deployment: nothing it reports is an online-serving latency or a
+production target. The spec (``BenchmarkSpec``) has the batch spec's shape
+with both pins required (``model_revision`` and ``dataset_commit_sha``, full
+40-character commits) and ``hyperparams`` a ``BenchmarkHyperparams``:
+
+| Field | Meaning |
+|---|---|
+| ``engine_settings`` | Required. A batch run's own ``Hyperparams``, whose ``engine`` picks the engine: ``hf_classify`` or ``vllm_chat`` (``max_tokens`` required: a generation's length decides its latency). ``hf_classify`` with ``artifact: strata_verifier`` times a verifier trained by ``seq_cls`` through its own rendering and heads (the **headline path**, its templates fixed to ``{premises}`` / ``{hypothesis}``; ``apply_calibration`` applies); without ``artifact`` it is the plain AutoModel path, recorded as a **third-party reference model**. An allow-list per engine: a knob the benchmark does not apply (``row_limit``, ``scoring_batch_size``, ``slice_column``, ``n``, ...) is refused. |
+| ``boundaries`` | ``end_to_end`` (required: ``total_ms``, the headline) and optionally ``model_only`` (``forward_ms``, a diagnostic). ``vllm_chat`` measures ``end_to_end`` only. |
+| ``batch_sizes`` / ``concurrency`` | The grid; their product is the configurations, at most 32. ``hf_classify`` runs one request stream (``concurrency`` ``[1]``); ``vllm_chat`` sends one request per iteration (``batch_sizes`` ``[1]``). |
+| ``warmup`` | Requests (full batches above batch size one) run untimed before EVERY timed pass, on the same workload, with no restart and no cache clear, drawn with ``random.Random(warmup_seed + pass_index)``. Default 50. |
+| ``passes`` | Timed passes per configuration, each over the whole sample in the order ``random.Random(order_seed + pass_index)`` shuffles it, never length-sorted. Default 5. |
+| ``item_cap`` | Every row of the pinned split is read; a split with more rows than this is refused (read up to one past it), never truncated. Default 100,000. |
+| ``sample_size`` / ``sample_seed`` | Optional ``random.Random(sample_seed).sample`` of the eligible rows, in row order; unset, every eligible row. |
+| ``order_seed`` / ``warmup_seed`` | Defaults 1000 and 2000; at least ``passes`` apart, so a warmup never replays another pass's order. All three seeds are in the manifest. |
+| ``wall_clock_cap_s`` | A hard stop on measuring, checked before each iteration starts. Reaching it marks the results incomplete and every unstarted configuration ``not_measured``. Default 1800, at most 6 hours. |
+| ``max_input_tokens`` / ``item_count_column`` / ``max_items`` | Exclusions (the protocol's are 8,192 tokens and 20 premises), counted by reason (``unmeasurable``, ``over_model_limit``, ``over_max_input_tokens``, ``over_max_items``) and never timed. Lengths are measured at run time with this model's own tokenizer and template: the verifier's own rendering, the pair with special tokens for the reference path, the prompt after the chat template for ``vllm_chat``. |
+| ``length_buckets`` / ``item_buckets`` | Inclusive ascending upper edges (``[512, 2048, 4096, 8192]`` gives ``0-512``, ``513-2048``, ...). At a batch size of one each bucket (L by tokens, P by items) gets its own percentiles. |
+| ``bootstrap_resamples`` / ``bootstrap_seed`` | Optional, off by default, diagnostic only: percentile-bootstrap intervals for the pooled percentiles (``metrics.latency_bootstrap``). Never the headline and never a pass/fail input. |
+| ``prefix_caching`` | ``vllm_chat`` only, default ``false``: the model server is launched with ``--no-enable-prefix-caching``, since every pass replays the same prompts and a cached prefill would understate the time. Recorded in the engine facts. |
+| ``require_gpu`` | Optional. Refuse to measure unless every visible GPU's reported name contains it (``H100``). |
+
+**Timing boundaries.** ``total_ms`` (the headline) is read from
+``time.perf_counter_ns``. On the verifier path it runs from the raw
+``(premises, hypothesis)`` cells in memory through the verifier's own
+rendering, tokenization, the host-to-device copy, the forward pass and the
+auxiliary heads, the copies back to the host, the 3-way softmax, the flag
+head's sigmoid (``p_inconsistent``) and the support head's per-premise
+sigmoids (``support_scores``), and stops after ONE
+``torch.cuda.synchronize()``. On the reference path it runs from the text
+pair through tokenization, the forward pass and a softmax to the
+probabilities on the host, and stops after the same single synchronization.
+``forward_ms`` (diagnostic) is two CUDA events recorded around the forward
+pass in the same request and read after that synchronization; no
+synchronization is added to take it (on a CPU, ``perf_counter_ns`` around
+the forward pass). The dtype (bf16 accepted) and the attention
+implementation are recorded. A batch above one is consecutive rows of the
+order, padded to its longest pair; the rows that do not fill a last batch are
+counted, not timed. With ``vllm_chat`` the model is served on loopback, and
+end to end is one chat request: the HTTP request, templating, tokenization,
+queueing, prefill and decode, and the response; the client has no cache and
+makes one attempt. An iteration that raises stops its configuration, with its
+exception text redacted.
+
+**The GPU.** Before anything is loaded, ``nvidia-smi`` is asked for compute
+processes on the GPUs ``CUDA_VISIBLE_DEVICES`` exposes, other than this
+runner and its model server: one refuses the run. The same check runs before
+every pass's warmup; a process found then stops the run as incomplete,
+``gpu_busy``. Clocks are never locked: the SM and memory clocks, power limit
+and draw, temperature and persistence mode are recorded at the start and end
+of every pass (``gpu_telemetry``). The probes run between passes, never
+while an iteration is timed. Without ``nvidia-smi`` the check is
+``unavailable`` and the headline is not readable.
+
+**Statistics.** Only completed passes are summarized: a pass cut short (a
+failure, the cap, a busy GPU) stays in ``timings.parquet`` with
+``pass_completed`` false and never enters a percentile, the across-pass
+median, the throughput or a bucket. Per configuration and boundary: per-pass
+p50/p95/p99 (Hyndman-Fan type 7, equal to ``numpy.percentile``), their median
+across passes with min and max, and the pooled percentiles; throughput is
+items (and tokens) per second over the union of the measured intervals.
+Latency is per request at a batch size of one and per batch above it. The
+**headline** of each configuration is the median of the per-pass end-to-end
+p95 with their minimum and maximum (``headline``). ``headline_readable`` is
+true only for a complete run whose GPU was checked idle throughout: an
+incomplete run has no T13 read, and ``headline_unreadable_reason`` says why.
+Every summary number is finite: NaN and infinity are refused.
+
+**Outputs.** ``timings.parquet`` (one row per measured iteration: the
+configuration, pass and ``pass_completed``, the iteration, the row indices,
+token and item counts, buckets, ``total_ms``, ``forward_ms`` and output
+tokens; never row text), ``summary.json`` (``BenchmarkSummary``, ``format``
+``strata.benchmark.summary/v1``: completeness, its reason and
+``incomplete_codes`` (``gpu_busy``, ``wall_clock_cap``,
+``stopped_on_failure``, ``server_died``, ``not_measured``), the headline
+readability, the model path, the GPU idle check and telemetry, the sample and
+exclusion counts, the cold start, a short GPU receipt and every
+configuration's result) and ``manifest.json`` (``kind`` ``benchmark``: both
+pins and commits, the protocol in words with its seeds, the engine facts, the
+full environment receipt, the counts and ``compute``). They are written
+outside the workdir under ``~/strata-benchmark-results/<run_id>`` and pushed
+in ONE commit to a private output repo that holds nothing else; with no write
+token they stay on the machine. A copy of the summary is left in the workdir
+as ``benchmark-summary.json`` for the orchestrator to read. If the model
+server dies mid-run, the measured configurations are still written and pushed
+(the rest ``not_measured``) and the run then fails as incomplete.
+
+**The environment receipt** is what the machine reports, never what the run
+asked for: per visible GPU from ``nvidia-smi`` (index, name, total memory,
+driver, persistence mode, current and maximum SM clock, power limit, PCI bus
+id) and how many compute processes held one before the model loaded; from
+torch, its version, CUDA runtime, cuDNN, and the device; the installed
+versions of torch, transformers, tokenizers, safetensors, vLLM, NumPy,
+datasets and huggingface-hub; and ``CUDA_VISIBLE_DEVICES``. A field the
+machine could not report is ``null``. The cold start is recorded separately
+from every percentile.
+
+The ``end`` event's metrics are ``iterations_measured``,
+``configurations_measured``, ``configurations``, ``complete`` and
+``headline_readable`` (1 or 0), ``gpu_count`` and ``gpu_seconds`` (this
+process's wall time times the visible GPUs). A run that measured no
+iteration at all fails after writing its files.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a

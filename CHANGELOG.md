@@ -68,11 +68,40 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (raw, a temperature cross-fitted by cluster over the split or a named slice of it, and the
   system's own pinned `calibration.json` temperature) with sum-form Brier and its interval, NLL and
   ECE, plus a paired Brier delta and the SD of the per-item Brier differences per baseline.
+- A latency benchmark runner, `strata_forge.pipelines.benchmark_runner`, measuring one pinned
+  model (`model_revision` required) on every row of one pinned workload split
+  (`dataset_commit_sha` required; a split past `item_cap` is refused) over a grid of batch sizes
+  and concurrent request streams. The headline path is `hf_classify` with
+  `artifact: strata_verifier`: `total_ms` runs from the raw cells through the verifier's own
+  rendering, the forward pass and heads, the 3-way softmax, `p_inconsistent` and
+  `support_scores` to ONE `torch.cuda.synchronize()`; `forward_ms` is CUDA events around the
+  forward pass in the same request, a diagnostic. The plain AutoModel path is recorded as a
+  third-party reference model. `vllm_chat` times each chat request end to end, with no client
+  cache, one attempt and the server's prefix cache off unless declared. Three recorded seeds
+  (`sample_seed`, `order_seed + pass`, `warmup_seed + pass`); warmup before every pass; lengths
+  and L/P buckets measured with each model's own tokenizer and template; exclusions counted by
+  reason. A GPU another process holds refuses the run at the start and stops it as incomplete
+  (`gpu_busy`) before a pass; clocks, power and temperature are recorded around every pass. Only
+  completed passes are summarized, and the headline is the median of the per-pass p95 with min
+  and max, readable only for a complete run on a GPU checked idle. `timings.parquet`,
+  `summary.json` (`BenchmarkSummary`, finite numbers only) and `manifest.json` (`kind`
+  `benchmark`) are pushed in one commit to a private output repo of the run's own, also when the
+  model server dies mid-run (the run then fails as incomplete). The `end` event carries
+  `gpu_count` and `gpu_seconds` over the GPUs `CUDA_VISIBLE_DEVICES` exposes.
+- `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
+  NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
+  and the pooled percentiles) and the opt-in, diagnostic-only `latency_bootstrap` interval.
+- `Classifier.timed_forward`, `Classifier.forward_timer` (`ForwardTimer`: CUDA events, no added
+  synchronization), `Classifier.synchronize`, `Classifier.attention` and
+  `timed_verifier_request` on the scoring engine.
+- The clean-install matrix gains the benchmark machine's extras, `serving,storage,hf,scoring`,
+  and the smoke script a `check_benchmark` on the tiny classifier.
 
 ### Changed
 
 - `pipelines._common.ensure_private_output` is the one private-output-repo check, shared by the
   inference and evaluation runners.
+
 ### Fixed
 
 - `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a

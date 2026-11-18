@@ -62,7 +62,7 @@ from strata_forge.training.verifier_render import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from pydantic import JsonValue
@@ -78,6 +78,7 @@ __all__ = [
     "VERIFIER_ARTIFACT",
     "Classifier",
     "ClassifierScorer",
+    "ForwardTimer",
     "ScoringInputs",
     "VerifierRunScorer",
     "VerifierScorer",
@@ -99,6 +100,7 @@ __all__ = [
     "softmax",
     "tally",
     "tf32_state",
+    "timed_verifier_request",
     "verifier_result_rows",
 ]
 
@@ -562,6 +564,97 @@ class Classifier:
             msg = "the model returned a non-finite logit"
             raise RunError(msg)
         return [[float(value) for value in row] for row in values]
+
+    @property
+    def attention(self) -> str | None:
+        """The attention implementation the loaded model runs (``sdpa``, ``eager``, ...)."""
+        value: object = getattr(self._model.config, "_attn_implementation", None)
+        return value if isinstance(value, str) else None
+
+    def synchronize(self) -> None:
+        """Wait for the device's queued work, so a clock read after it has seen that work end."""
+        if self.device == "cuda":
+            self._torch.cuda.synchronize()
+
+    def forward_timer(self) -> ForwardTimer:
+        """A timer for one forward pass that adds no synchronization of its own (see the class)."""
+        return ForwardTimer(self._torch, cuda=self.device == "cuda")
+
+    def timed_forward(
+        self,
+        texts: Sequence[str],
+        pairs: Sequence[str],
+        *,
+        clock: Callable[[], int],
+    ) -> tuple[int, int, float]:
+        """One reference-model request: ``(start, end)`` on ``clock`` and the forward pass in ms.
+
+        End to end runs from the text pairs in memory, through tokenization, the host-to-device
+        copy, the forward pass and a softmax over every class, to the probabilities copied back
+        to the host, and stops after the ONE ``torch.cuda.synchronize()``. The forward pass is
+        timed with CUDA events in the same request (on a CPU, with ``clock``), read after that
+        synchronization: no synchronization is added to measure it.
+        """
+        torch = self._torch
+        start = clock()
+        features: Any = self._tokenizer(
+            list(texts), list(pairs), padding=True, truncation=False, return_tensors="pt"
+        )
+        if int(features["input_ids"].shape[1]) > self.max_length:
+            msg = "a batch exceeded the model's length limit after planning; nothing was timed"
+            raise RunError(msg)
+        moved = {key: value.to(self.device) for key, value in features.items()}
+        timer = self.forward_timer()
+        with torch.inference_mode():
+            timer.begin(clock)
+            output: Any = self._model(**moved)
+            timer.end(clock)
+            probabilities: Any = torch.softmax(output.logits.float(), dim=-1).cpu()
+        self.synchronize()
+        end = clock()
+        del probabilities
+        return start, end, timer.elapsed_ms()
+
+
+class ForwardTimer:
+    """Times one forward pass inside a request without adding a synchronization.
+
+    On a GPU two CUDA events are recorded on the current stream around the forward pass and read
+    only after the request's own final synchronization, so the request's end-to-end time is
+    exactly what it would be untimed. On a CPU the work is synchronous and ``clock`` is read.
+    """
+
+    def __init__(self, torch: Any, *, cuda: bool) -> None:
+        self._cuda = cuda
+        self._events: tuple[Any, Any] | None = (
+            (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+            if cuda
+            else None
+        )
+        self._start = 0
+        self._end = 0
+
+    @property
+    def method(self) -> str:
+        return "cuda_event" if self._cuda else "perf_counter_ns_cpu"
+
+    def begin(self, clock: Callable[[], int]) -> None:
+        if self._events is not None:
+            self._events[0].record()
+        else:
+            self._start = clock()
+
+    def end(self, clock: Callable[[], int]) -> None:
+        if self._events is not None:
+            self._events[1].record()
+        else:
+            self._end = clock()
+
+    def elapsed_ms(self) -> float:
+        """The forward pass in milliseconds; on a GPU, call only after the request synchronized."""
+        if self._events is not None:
+            return float(self._events[0].elapsed_time(self._events[1]))
+        return (self._end - self._start) / 1_000_000
 
 
 def load_classifier(
@@ -1066,8 +1159,18 @@ class VerifierScorer(Classifier):
             raise RunError(msg)
         return out
 
-    def score(self, rows: Sequence[RenderedRow]) -> list[VerifierScores]:
-        """One batch: raw logits for every class and the auxiliary heads, right-padded."""
+    def score(
+        self,
+        rows: Sequence[RenderedRow],
+        *,
+        timer: ForwardTimer | None = None,
+        clock: Callable[[], int] | None = None,
+    ) -> list[VerifierScores]:
+        """One batch: raw logits for every class and the auxiliary heads, right-padded.
+
+        ``timer`` (with ``clock``) brackets the forward pass and the auxiliary heads, for the
+        latency benchmark; it adds no synchronization.
+        """
         torch = self._torch
         features: Any = encode_rows(
             self._tokenizer,
@@ -1098,6 +1201,8 @@ class VerifierScorer(Classifier):
                 )
         self._hidden.clear()
         with torch.inference_mode():
+            if timer is not None and clock is not None:
+                timer.begin(clock)
             output: Any = self._model(input_ids=ids, attention_mask=mask)
             aux: dict[str, Any] = (
                 aux_outputs(
@@ -1111,6 +1216,8 @@ class VerifierScorer(Classifier):
                 if self.heads
                 else {}
             )
+            if timer is not None and clock is not None:
+                timer.end(clock)
         logits = cast("list[list[float]]", output.logits.float().cpu().tolist())
         flags: Any = aux.get("flag_logits")
         flag_values = (
@@ -1140,6 +1247,35 @@ class VerifierScorer(Classifier):
                 raise RunError(msg)
             out.append(scores)
         return out
+
+
+def timed_verifier_request(
+    scorer: VerifierScorer, cells: Sequence[tuple[Any, Any]], *, clock: Callable[[], int]
+) -> tuple[int, int, float]:
+    """One trained-verifier request timed as it would ship: ``(start, end)`` and the forward ms.
+
+    Inside the boundary, from the raw ``(premises, hypothesis)`` cells: the artifact's own
+    rendering, tokenization, the host-to-device copy, the forward pass and the auxiliary heads,
+    the copies back to the host, the softmax over the classes (at the applied temperature), the
+    flag head's sigmoid (``p_inconsistent``) and the support head's per-premise sigmoids
+    (``support_scores``), and the ONE final ``torch.cuda.synchronize()``. The forward pass is
+    timed with CUDA events read after that synchronization.
+    """
+    start = clock()
+    rows = scorer.render([c[0] for c in cells], [c[1] for c in cells])
+    timer = scorer.forward_timer()
+    values = scorer.score(rows, timer=timer, clock=clock)
+    temperature = scorer.temperature or 1.0
+    included = [i for i, label in enumerate(scorer.outputs) if label is not None]
+    for value in values:
+        softmax([value.logits[i] / temperature for i in included])
+        if value.flag is not None:
+            _sigmoid(value.flag)
+        for _, logit in value.support or []:
+            _sigmoid(logit)
+    scorer.synchronize()
+    end = clock()
+    return start, end, timer.elapsed_ms()
 
 
 def load_verifier(

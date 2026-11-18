@@ -28,6 +28,8 @@ It constructs, offline, everything a run constructs before it loads weights:
 - an evaluation over a ``seq_cls`` verifier's own files: a tiny verifier trained on CPU with a
   calibration split, scored with ``artifact: strata_verifier``, then evaluated with that results
   parquet as its predictions and the trainer's ``calibration.json`` as its ``calibration_ref``;
+- the benchmark's timed forward pass and measurement loop on that classifier, its summary and its
+  timings parquet;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -1381,6 +1383,110 @@ def check_eval_consumes_verifier() -> None:
                 raise SmokeError(msg)
 
 
+def check_benchmark() -> None:
+    """The benchmark's ``hf_classify`` timing on a tiny CPU classifier, through its real loop.
+
+    Covers what the fakes cannot: the timed request runs on the installed torch and
+    transformers with ONE synchronization, its forward_ms sits inside its total_ms, warmups are
+    excluded, the summary validates from its JSON text, and the timings parquet is written.
+    """
+    import asyncio
+    import time
+
+    from strata_forge.pipelines import _benchmark as bench
+    from strata_forge.pipelines import _scoring, benchmark_runner
+
+    identity = {name: name for name in ("entailment", "neutral", "contradiction")}
+    texts = ["all cats are animals", "some dogs bark", "cats are animals", "dogs bark"]
+    pairs = ["cats are animals", "all dogs bark", "all cats", "some dogs"]
+    with tempfile.TemporaryDirectory() as tmp:
+        _tiny_classifier(Path(tmp), with_head=True)
+        classifier = _scoring.load_classifier(
+            Path(tmp), label_alias=identity, max_length=None, dtype="float32"
+        )
+        syncs = 0
+        real_sync = classifier.synchronize
+
+        def _counted() -> None:
+            nonlocal syncs
+            syncs += 1
+            real_sync()
+
+        classifier.synchronize = _counted  # type: ignore[method-assign]
+        start, end, forward = classifier.timed_forward(
+            texts[:2], pairs[:2], clock=time.perf_counter_ns
+        )
+        if not 0 < forward * 1_000_000 <= end - start:
+            msg = f"forward_ms is not inside the request: {forward} ms of {end - start} ns"
+            raise SmokeError(msg)
+        if syncs != 1:
+            msg = f"a timed request synchronized {syncs} times; the protocol allows one"
+            raise SmokeError(msg)
+        step = benchmark_runner._reference_step(  # pyright: ignore[reportPrivateUsage]
+            classifier, texts, pairs
+        )
+        outcome = asyncio.run(
+            bench.measure_configuration(
+                bench.Configuration(index=0, batch_size=2, concurrency=1),
+                sample=[0, 1, 2, 3],
+                passes=2,
+                warmup=1,
+                order_seed=7,
+                warmup_seed=1007,
+                step=step,
+                clock_ns=time.perf_counter_ns,
+                deadline_ns=time.perf_counter_ns() + 60 * 10**9,
+            )
+        )
+        if outcome.status != "measured" or len(outcome.iterations) != 4:
+            msg = (
+                f"the loop did not measure 2 passes of 2 batches: {outcome.status}, {outcome.error}"
+            )
+            raise SmokeError(msg)
+        lengths = classifier.lengths(texts, pairs)
+        tokens = [length or 0 for length in lengths]
+        result = bench.summarize(
+            outcome,
+            boundaries=["model_only", "end_to_end"],
+            tokens=tokens,
+            length_of=lambda _row: None,
+            items_of=lambda _row: None,
+            bootstrap=(7, 20) if importlib.util.find_spec("numpy") else None,
+        )
+        summary = bench.BenchmarkSummary(
+            engine="hf_classify",
+            boundaries=("model_only", "end_to_end"),
+            complete=True,
+            headline_readable=False,
+            model_path="reference_automodel",
+            headline_unreadable_reason="a CPU smoke check is not a T13 read",
+            gpu_idle_check="unavailable",
+            sample={"rows": 4, "eligible": 4, "sampled": 4},
+            excluded={},
+            cold_start={"load_seconds": None, "first_iteration_ms": outcome.first_iteration_ms},
+            gpu={"name": None},
+            configurations=(result,),
+        )
+        parsed = bench.BenchmarkSummary.model_validate_json(summary.model_dump_json())
+        model_p50 = parsed.configurations[0].boundaries[0].latency.pooled["p50"]
+        e2e_p50 = parsed.configurations[0].boundaries[1].latency.pooled["p50"]
+        if model_p50 is None or e2e_p50 is None or model_p50 > e2e_p50:
+            msg = f"model-only p50 {model_p50} is not within end-to-end p50 {e2e_p50}"
+            raise SmokeError(msg)
+        rows = bench.iteration_rows(
+            [outcome],
+            boundaries=["model_only", "end_to_end"],
+            tokens=tokens,
+            items=None,
+            length_of=lambda _row: None,
+            items_of=lambda _row: None,
+        )
+        path = benchmark_runner._write_timings(rows, Path(tmp) / "out")  # pyright: ignore[reportPrivateUsage]
+        if not path.is_file() or path.stat().st_size == 0:
+            msg = f"no timings parquet at {path}"
+            raise SmokeError(msg)
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -1564,6 +1670,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
         checks.append(("inference spec, requests and results", check_inference_spec))
         checks.append(("hf_classify scores a saved classifier exactly", check_hf_classify))
         checks.append(("hf_label_logits reads a saved causal LM exactly", check_hf_label_logits))
+        checks.append(("benchmark times a saved classifier on its real loop", check_benchmark))
     if "serving" in extras:
         checks.append(("vllm accepts the serving command line", check_vllm_command_line))
     return checks

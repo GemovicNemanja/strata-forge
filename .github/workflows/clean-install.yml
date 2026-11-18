@@ -105,11 +105,12 @@ jobs:
       fail-fast: false
       matrix:
         # The extras strings strata-server installs on a run's machine, verbatim
-        # (`_INFERENCE_EXTRAS` / `_FINETUNE_EXTRAS` / `_EVAL_EXTRAS` in its run_tasks.py), plus
-        # `all`. This list IS what a VM installs: when the server's strings change, this matrix
-        # changes with them.
+        # (`_INFERENCE_EXTRAS` / `_BENCHMARK_EXTRAS` / `_FINETUNE_EXTRAS` / `_EVAL_EXTRAS` in its
+        # run_tasks.py), plus `all`. This list IS what a VM installs: when the server's strings
+        # change, this matrix changes with them.
         extras:
           - "serving,storage,hf"  # batch-inference machine
+          - "serving,storage,hf,scoring"  # benchmark machine
           - "finetuning,storage"  # fine-tuning machine
           - "scoring,storage,hf"  # evaluation machine
           - "serving,scoring,storage,hf"  # graded-evaluation machine (LLM grader)
