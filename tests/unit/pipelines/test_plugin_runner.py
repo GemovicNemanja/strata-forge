@@ -1,44 +1,60 @@
 """The plugin runner: every check before plugin code runs, the credential kept from the plugin,
-and the output checked before it is pushed privately."""
+the plugin gone before its output is copied, checked and pushed privately."""
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
-from typing import TYPE_CHECKING, Any, ClassVar
+import subprocess
+import sys
+import sysconfig
+from pathlib import Path
+from typing import Any, ClassVar
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from pydantic import SecretStr
 
 from strata_forge.pipelines import plugin_runner
-from strata_forge.pipelines._common import RunError, RunSecrets
+from strata_forge.pipelines._common import LEGACY_TOKEN_ENV, RunError, RunSecrets
+from strata_forge.plugins.environment import PluginEnvironment
 from strata_forge.plugins.host import SCORES_FILENAME, HostJob, run
-from strata_forge.plugins.manifest import PluginManifestError
-from strata_forge.plugins.pins import ALLOWED_PLUGINS_ENV, PluginPin
-from tests.unit.plugins.conftest import MANIFEST, SHA
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
-def _arrow() -> tuple[Any, Any]:
-    """pyarrow ships with the [hf] extra; the tests that write parquet skip without it."""
-    return pytest.importorskip("pyarrow"), pytest.importorskip("pyarrow.parquet")
-
+from strata_forge.plugins.manifest import EntryPointDecl, PluginManifestError
+from strata_forge.plugins.pins import ALLOWED_PLUGINS_ENV, AllowedPlugin, PluginPin, RunnerAllowance
+from strata_forge.plugins.sandbox import Sandbox
+from tests.unit.plugins.conftest import MANIFEST, SHA, build_toy
 
 TOKEN = "hf_" + "Z" * 34
 
 
+def _decl(name: str, base: str = "prm", **changes: Any) -> dict[str, Any]:
+    decl = copy.deepcopy(next(e for e in MANIFEST["entry_points"] if e["name"] == base))
+    decl["name"] = name
+    decl.update(changes)
+    return decl
+
+
+#: The entry points the orchestrator hands the runner: the manifest's, plus toy ones the tests use.
+ENTRIES = [
+    *MANIFEST["entry_points"],
+    _decl("bad"),
+    _decl("escape"),
+    _decl("probe", base="job"),
+]
+
+
 def _spec(pin: PluginPin, entry: str = "prm", **changes: Any) -> plugin_runner.PluginRunSpec:
-    decl = next(e for e in MANIFEST["entry_points"] if e["name"] == entry)
+    scorer = entry in {"prm", "bad", "escape"}
     data: dict[str, Any] = {
         "run_id": "run1",
         "plugin": pin.model_dump(),
-        "entry": decl,
-        "config": {"mode": "fast"} if entry == "prm" else {"label": "L"},
+        "entry_point": entry,
+        "config": {"mode": "fast"} if scorer else {"label": "L"},
         "inputs": [
             {"role": "steps", "repo_id": "acme/steps", "revision": SHA, "split": "train"}
-            if entry == "prm"
+            if scorer
             else {"role": "items", "repo_id": "acme/items", "revision": SHA, "split": "train"}
         ],
         "output_repo_id": "acme/out",
@@ -47,34 +63,38 @@ def _spec(pin: PluginPin, entry: str = "prm", **changes: Any) -> plugin_runner.P
     return plugin_runner.PluginRunSpec.model_validate(data)
 
 
-def _allow(monkeypatch: pytest.MonkeyPatch, *pins: PluginPin) -> None:
-    monkeypatch.setenv(ALLOWED_PLUGINS_ENV, json.dumps([p.model_dump() for p in pins]))
-
-
-def _steps_parquet(path: Path, n: int = 5) -> None:
-    pa, pq = _arrow()
-    pq.write_table(
-        pa.table(
-            {
-                "item_id": [f"s{i // 2}" for i in range(n)],
-                "step_index": [i % 2 for i in range(n)],
-                "context": ["premises"] * n,
-                "step": ["x" * (i + 1) for i in range(n)],
-            }
+def _allow(
+    monkeypatch: pytest.MonkeyPatch, pin: PluginPin, *, entry_points: tuple[str, ...] | None = None
+) -> None:
+    allowance = RunnerAllowance(
+        plugin=AllowedPlugin(
+            id="toy", label="Toy", pin=pin, entry_points=entry_points, allow_unisolated=True
         ),
-        str(path),
+        entry_points=tuple(EntryPointDecl.model_validate(e) for e in ENTRIES),
     )
+    monkeypatch.setenv(ALLOWED_PLUGINS_ENV, json.dumps([allowance.model_dump(mode="json")]))
 
 
-@pytest.mark.usefixtures("toy_site")
+def _steps_parquet(path: Path, n: int = 5, *, step_type: bool = False) -> None:
+    columns: dict[str, Any] = {
+        "item_id": [f"s{i // 2}" for i in range(n)],
+        "step_index": [i % 2 for i in range(n)],
+        "context": ["premises"] * n,
+        "step": ["x" * (i + 1) for i in range(n)],
+    }
+    if step_type:
+        columns["step_type"] = ["claim" if i != 1 else "skip" for i in range(n)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table(columns), str(path))
+
+
 def test_admission_refuses_before_any_plugin_code_runs(
     monkeypatch: pytest.MonkeyPatch, pin: PluginPin
 ) -> None:
     monkeypatch.delenv(ALLOWED_PLUGINS_ENV, raising=False)
     with pytest.raises(RunError, match="not set"):
         plugin_runner.admit(_spec(pin))
-    other = pin.model_copy(update={"version": "9.9.9"})
-    _allow(monkeypatch, other)
+    _allow(monkeypatch, pin.model_copy(update={"version": "9.9.9"}))
     with pytest.raises(RunError, match="not an allowed plugin"):
         plugin_runner.admit(_spec(pin))
     _allow(monkeypatch, pin)
@@ -84,99 +104,191 @@ def test_admission_refuses_before_any_plugin_code_runs(
         plugin_runner.admit(_spec(pin, inputs=[]))
     with pytest.raises(RunError, match="invalid output repo"):
         plugin_runner.admit(_spec(pin, output_repo_id="../x"))
-    assert plugin_runner.admit(_spec(pin)) == {"mode": "fast", "scale": 1.0}
+    with pytest.raises(RunError, match="does not allow the entry point 'nope'"):
+        plugin_runner.admit(_spec(pin, entry="nope"))
+    admitted = plugin_runner.admit(_spec(pin))
+    assert admitted.config == {"mode": "fast", "scale": 1.0}
+    assert admitted.entry.score_kind == "probability"
 
 
-def test_an_uninstalled_build_is_refused(monkeypatch: pytest.MonkeyPatch, pin: PluginPin) -> None:
-    _allow(monkeypatch, pin)
-    with pytest.raises(RunError, match="is not installed"):
+def test_the_operator_s_entry_point_limit_is_enforced_on_the_target(
+    monkeypatch: pytest.MonkeyPatch, pin: PluginPin
+) -> None:
+    _allow(monkeypatch, pin, entry_points=("job",))
+    with pytest.raises(RunError, match="does not allow the entry point 'prm'"):
         plugin_runner.admit(_spec(pin))
+    assert plugin_runner.admit(_spec(pin, entry="job")).entry.type == "runner"
+
+
+def test_the_spec_cannot_carry_an_interface_of_its_own(pin: PluginPin) -> None:
+    data = {**_spec(pin).model_dump(mode="json"), "entry": MANIFEST["entry_points"][0]}
+    with pytest.raises(ValueError, match="Extra inputs"):
+        plugin_runner.PluginRunSpec.model_validate(data)
+
+
+def test_diagnostic_aggregations_are_opt_in_and_scorer_only(
+    monkeypatch: pytest.MonkeyPatch, pin: PluginPin
+) -> None:
+    assert _spec(pin).diagnostic_aggregations == ()
+    with pytest.raises(ValueError, match="repeats"):
+        _spec(pin, diagnostic_aggregations=["min", "min"])
+    with pytest.raises(ValueError, match="validation error"):
+        _spec(pin, diagnostic_aggregations=["median"])
+    _allow(monkeypatch, pin)
+    with pytest.raises(RunError, match="step_scorer only"):
+        plugin_runner.admit(_spec(pin, entry="job", diagnostic_aggregations=["min"]))
 
 
 def test_the_plugin_environment_holds_no_credential(tmp_path: Path) -> None:
     env = plugin_runner.plugin_environ(
         gpu=False,
-        hf_home=tmp_path,
+        home=tmp_path / "home",
+        hf_home=tmp_path / "hf",
         environ={
             "PATH": "/bin",
             "HOME": "/home/u",
             "HF_TOKEN": "hf_x",
             "STRATA_RUN_CONFIG": "{}",
-            "STRATA_SECRETS_FILE": "/run/s",
+            "FORGE_SECRETS_FILE": "/run/s",
             "PYTHONPATH": "/evil",
             "CUDA_VISIBLE_DEVICES": "0",
             "AWS_SECRET_ACCESS_KEY": "x",
         },
     )
     assert env["PATH"] == "/bin"
+    assert env["HOME"] == str(tmp_path / "home")  # never the runner's
     assert env["HF_HUB_OFFLINE"] == "1"
-    assert env["HF_HOME"] == str(tmp_path)
     for name in (
         "HF_TOKEN",
         "STRATA_RUN_CONFIG",
-        "STRATA_SECRETS_FILE",
+        "FORGE_SECRETS_FILE",
         "PYTHONPATH",
         "CUDA_VISIBLE_DEVICES",
         "AWS_SECRET_ACCESS_KEY",
     ):
         assert name not in env
-    gpu = plugin_runner.plugin_environ(
-        gpu=True, hf_home=tmp_path, environ={"CUDA_VISIBLE_DEVICES": "0", "CUDA_TOKEN": "x"}
-    )
-    assert gpu["CUDA_VISIBLE_DEVICES"] == "0"
-    assert "CUDA_TOKEN" not in gpu
 
 
-@pytest.mark.usefixtures("toy_site")
-def test_the_host_scores_every_step(tmp_path: Path, pin: PluginPin) -> None:
-    steps = tmp_path / "steps.parquet"
-    _steps_parquet(steps)
-    out = tmp_path / "out"
-    run(
-        HostJob(
-            pin=pin,
-            entry_point="prm",
-            type="step_scorer",
-            config={"scale": 2.0},
-            datasets={"steps": steps},
-            models={},
-            output_dir=out,
-            batch_size=2,
-        )
-    )
-    _, pq = _arrow()
-    table = pq.read_table(str(out / SCORES_FILENAME)).to_pydict()
-    assert table["item_id"] == ["s0", "s0", "s1", "s1", "s2"]
-    assert table["step_index"] == [0, 1, 0, 1, 0]
-    assert table["score"] == [0.2, 0.4, 0.6, 0.8, 1.0]
-
-
-@pytest.mark.usefixtures("toy_site")
-def test_a_scorer_returning_the_wrong_count_fails(tmp_path: Path, pin: PluginPin) -> None:
-    steps = tmp_path / "steps.parquet"
-    _steps_parquet(steps)
-    job = HostJob(
+def _host_job(pin: PluginPin, entry: str, steps: Path, out: Path, **changes: Any) -> HostJob:
+    decl = _decl(entry)
+    decl.update(changes.pop("decl", {}))
+    return HostJob(
         pin=pin,
-        entry_point="bad",
-        type="step_scorer",
-        config={},
+        entry=EntryPointDecl.model_validate(decl),
+        config=changes.pop("config", {}),
         datasets={"steps": steps},
         models={},
-        output_dir=tmp_path / "out",
+        output_dir=out,
+        **changes,
     )
-    with pytest.raises(PluginManifestError, match="1 scores for 5 steps"):
-        run(job)
 
 
-def _admit_with(config: dict[str, Any]) -> Any:
-    def admit(spec: plugin_runner.PluginRunSpec) -> dict[str, Any]:
-        return config
+@pytest.mark.usefixtures("toy_site")
+def test_the_host_scores_every_step_and_carries_the_input_columns(
+    tmp_path: Path, pin: PluginPin
+) -> None:
+    steps = tmp_path / "steps.parquet"
+    _steps_parquet(steps, step_type=True)
+    out = tmp_path / "out"
+    run(_host_job(pin, "prm", steps, out, config={"scale": 2.0}, batch_size=2))
+    table = pq.read_table(str(out / SCORES_FILENAME)).to_pydict()
+    assert list(table) == ["item_id", "step_index", "step_type", "score", "reason"]
+    assert table["step_type"] == ["claim", "skip", "claim", "claim", "claim"]
+    assert table["score"] == [0.2, None, 0.6, 0.8, 1.0]
+    assert table["reason"] == [None, "not_scored_type", None, None, None]
 
-    return admit
+
+@pytest.mark.usefixtures("toy_site")
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        ("bad", "1 results for 5 steps"),
+        ("over", "probability"),
+        ("nan", "non-finite"),
+        ("reason", "undeclared reason"),
+        ("escape", "not one of toy-prm's files"),
+    ],
+)
+def test_a_scorer_outside_the_contract_fails(
+    tmp_path: Path, pin: PluginPin, entry: str, match: str
+) -> None:
+    steps = tmp_path / "steps.parquet"
+    _steps_parquet(steps)
+    with pytest.raises(PluginManifestError, match=match):
+        run(_host_job(pin, entry, steps, tmp_path / "out"))
+    assert not (tmp_path / "out" / SCORES_FILENAME).exists()
+
+
+def test_the_host_refuses_a_build_that_changed_after_install(
+    toy_site: Path, tmp_path: Path, pin: PluginPin
+) -> None:
+    steps = tmp_path / "steps.parquet"
+    _steps_parquet(steps)
+    (toy_site / "toy_prm" / "__init__.py").write_text("raise SystemExit('planted')\n")
+    with pytest.raises(PluginManifestError, match="RECORD hash"):
+        run(_host_job(pin, "prm", steps, tmp_path / "out"))
+
+
+@pytest.mark.usefixtures("toy_site")
+def test_a_structured_context_and_declared_columns_pass_through_unchanged(
+    tmp_path: Path, pin: PluginPin
+) -> None:
+    steps = tmp_path / "steps.parquet"
+    context = [
+        [{"pid": "p1", "text": "a"}, {"pid": "p2", "text": "b"}],
+        [{"pid": "p1", "text": "c"}],
+    ]
+    pq.write_table(
+        pa.table(
+            {
+                "item_id": ["i", "i"],
+                "step_index": pa.array([0, 1], type=pa.int32()),
+                "context": context,
+                "step": ["s", "t"],
+                "source": pa.array([7, 8], type=pa.int16()),
+            }
+        ),
+        str(steps),
+    )
+    columns = ["item_id", "step_index", "context", "step", "source"]
+    decl = {
+        "inputs": [{"role": "steps", "required_columns": columns}],
+        "passthrough_columns": ["source"],
+        "score_kind": "unconstrained",
+    }
+    out = tmp_path / "out"
+    run(_host_job(pin, "contexts", steps, out, decl=decl))
+    table = pq.read_table(str(out / SCORES_FILENAME))
+    assert table.column_names == ["item_id", "step_index", "source", "score", "reason"]
+    assert table.column("score").to_pylist() == [2.0, 1.0]  # the segments, never joined
+    assert table.schema.field("source").type == pa.int16()
+
+
+# ------------------------------------------------------------------- the whole run, end to end
+
+
+@pytest.fixture(scope="session")
+def plugin_env(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A real plugin environment: its own venv holding the toy build, run with ``-I``; the
+    engine and its dependencies reach it through a site directory, as an install would put them."""
+    root = tmp_path_factory.mktemp("plugin-env") / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root)], check=True)  # noqa: S603
+    python = root / "bin" / "python"
+    site = subprocess.run(  # noqa: S603 -- the test's own interpreter
+        [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    engine_site = sysconfig.get_path("purelib")
+    Path(site, "_engine.pth").write_text(f"import site; site.addsitedir({engine_site!r})\n")
+    build_toy(Path(site))
+    return root
 
 
 class _FakeHub:
-    pushed: ClassVar[list[tuple[str, str]]] = []
+    pushed: ClassVar[list[tuple[str, str, list[str]]]] = []
+    last: ClassVar[dict[str, bytes]] = {}
     private: ClassVar[bool] = True
 
     def __init__(self, *, token: Any) -> None:
@@ -188,110 +300,139 @@ class _FakeHub:
     async def is_private(self, repo_id: str, **_: Any) -> bool:
         return self.private
 
-    async def upload_folder(self, folder: Any, repo_id: str, *, repo_type: str, **_: Any) -> str:
-        _FakeHub.pushed.append((repo_id, repo_type))
+    async def upload_folder(self, folder: Path, repo_id: str, *, repo_type: str, **_: Any) -> str:
+        files = sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())  # noqa: ASYNC240
+        _FakeHub.pushed.append((repo_id, repo_type, files))
+        _FakeHub.last = {p: (folder / p).read_bytes() for p in files}
         return "ok"
 
 
-def _wire(monkeypatch: pytest.MonkeyPatch, toy_site: Path, tmp_path: Path) -> None:
-    async def fake_inputs(spec: Any, secrets: Any, workdir: Path) -> Any:
+def _wire(monkeypatch: pytest.MonkeyPatch, plugin_env: Path) -> None:
+    site = next((plugin_env / "lib").glob("python*/site-packages"))
+
+    async def environment(*_: Any) -> PluginEnvironment:
+        return PluginEnvironment(
+            key="k",
+            root=plugin_env,
+            python=plugin_env / "bin" / "python",
+            site_paths=(str(site),),
+            packages=({"name": "toy-prm", "version": "0.1.0"},),
+            requirements=("strata-forge[hf]==0.6.0", "toy-prm @ git+x"),
+            reused=False,
+        )
+
+    async def inputs(spec: Any, entry: Any, secrets: Any, folder: Path) -> Any:
         role = spec.inputs[0].role
-        dest = workdir / "inputs" / f"{role}.parquet"
-        dest.parent.mkdir(parents=True)
+        dest = folder / "datasets" / f"{role}.parquet"
         if role == "steps":
-            _steps_parquet(dest)
+            _steps_parquet(dest, step_type=True)
         else:
-            pa, pq = _arrow()
+            dest.parent.mkdir(parents=True)
             pq.write_table(pa.table({"text": ["a", "b"]}), str(dest))
         return {role: dest}, {}, {role: 5 if role == "steps" else 2}
 
-    real_environ = plugin_runner.plugin_environ
+    async def unisolated(**_: Any) -> Sandbox:
+        return Sandbox("none", None)
 
-    def environ_with_toy(*, gpu: bool, hf_home: Path, environ: Any = None) -> dict[str, str]:
-        env = real_environ(gpu=gpu, hf_home=hf_home, environ=environ)
-        # The test's toy distribution lives on a temporary path the real allow-list strips.
-        env["PYTHONPATH"] = str(toy_site)
-        return env
-
-    monkeypatch.setattr(plugin_runner, "_download_inputs", fake_inputs)
-    monkeypatch.setattr(plugin_runner, "plugin_environ", environ_with_toy)
+    monkeypatch.setattr(plugin_runner, "_prepare_environment", environment)
+    monkeypatch.setattr(plugin_runner, "_download_inputs", inputs)
+    monkeypatch.setattr(plugin_runner, "choose_sandbox", unisolated)
     monkeypatch.setattr(plugin_runner, "HFHubClient", _FakeHub)
-
-    def results(run_id: str | None, *, name: str) -> Path:
-        return tmp_path / "results"
-
-    monkeypatch.setattr(plugin_runner, "results_dir", results)
-    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    monkeypatch.delenv(LEGACY_TOKEN_ENV, raising=False)
     _FakeHub.pushed = []
+    _FakeHub.last = {}
     _FakeHub.private = True
 
 
+def _execute(spec: plugin_runner.PluginRunSpec, *, from_environment: bool = False) -> str:
+    secrets = RunSecrets(hf_token=SecretStr(TOKEN), from_environment=from_environment)
+    return asyncio.run(plugin_runner._execute(spec, secrets, None))  # pyright: ignore[reportPrivateUsage]
+
+
 def test_a_step_scoring_run_end_to_end(
-    monkeypatch: pytest.MonkeyPatch, toy_site: Path, tmp_path: Path, pin: PluginPin
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
 ) -> None:
     _allow(monkeypatch, pin)
-    _wire(monkeypatch, toy_site, tmp_path)
-    secrets = RunSecrets(hf_token=SecretStr(TOKEN))
-    out = asyncio.run(plugin_runner._execute(_spec(pin), secrets, None))  # pyright: ignore[reportPrivateUsage]
-    assert out == "acme/out"
-    assert _FakeHub.pushed == [("acme/out", "dataset")]
-    manifest = json.loads((tmp_path / "results" / "manifest.json").read_text())
+    _wire(monkeypatch, plugin_env)
+    assert _execute(_spec(pin)) == "acme/out"
+    ((repo, kind, files),) = _FakeHub.pushed
+    assert (repo, kind) == ("acme/out", "dataset")
+    assert files == ["manifest.json", SCORES_FILENAME]
+    manifest = json.loads(_FakeHub.last["manifest.json"])
     assert manifest["kind"] == "plugin"
-    assert manifest["plugin"]["source"]["commit"] == SHA
-    assert manifest["output"] == {"path": SCORES_FILENAME, "rows": 5}
+    assert manifest["plugin"]["repo"] == "acme/toy-prm"
+    assert manifest["plugin"]["commit"] == SHA
+    assert manifest["plugin"]["score_kind"] == "probability"
+    assert manifest["inputs"][0]["commit"] == SHA
+    assert manifest["environment"]["packages"] == [{"name": "toy-prm", "version": "0.1.0"}]
+    assert manifest["sandbox"]["isolation"] == "none"
+    assert manifest["output"]["scoring"] == {
+        "score_kind": "probability",
+        "rows": 5,
+        "scored": 4,
+        "unscored": {"unparseable": 0, "not_scored_type": 1},
+    }
+    assert set(manifest["output"]["files"]) == {SCORES_FILENAME}
+    assert "diagnostics" not in manifest
 
 
-def test_the_plugin_process_never_sees_the_credential(
-    monkeypatch: pytest.MonkeyPatch, toy_site: Path, tmp_path: Path, pin: PluginPin
+def test_opt_in_aggregations_go_to_a_separate_diagnostic_file(
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
 ) -> None:
     _allow(monkeypatch, pin)
-    _wire(monkeypatch, toy_site, tmp_path)
+    _wire(monkeypatch, plugin_env)
+    _execute(_spec(pin, diagnostic_aggregations=["min", "last"]))
+    ((_, _, files),) = _FakeHub.pushed
+    assert plugin_runner.DIAGNOSTICS_FILENAME in files
+    table = pq.read_table(pa.BufferReader(_FakeHub.last[plugin_runner.DIAGNOSTICS_FILENAME]))
+    assert table.schema.metadata == {b"strata.diagnostic": b"true"}
+    assert len(table) == 6
+    scores = pq.read_table(pa.BufferReader(_FakeHub.last[SCORES_FILENAME]))
+    assert "aggregation" not in scores.column_names
+    manifest = json.loads(_FakeHub.last["manifest.json"])
+    assert manifest["diagnostics"]["diagnostic"] is True
+
+
+def test_the_plugin_process_never_sees_a_credential(
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
+) -> None:
+    _allow(monkeypatch, pin)
+    _wire(monkeypatch, plugin_env)
     monkeypatch.setenv("STRATA_RUN_CONFIG", "{}")
-    probe = dict(next(e for e in MANIFEST["entry_points"] if e["name"] == "job"), name="probe")
-    spec = _spec(pin, entry="job").model_copy(
-        update={"entry": plugin_runner.EntryPointDecl.model_validate(probe)}
-    )
-    # The probe is not in the toy manifest's allowed set of names; admission is exercised above.
-    monkeypatch.setattr(plugin_runner, "admit", _admit_with({"label": "L"}))
-    asyncio.run(plugin_runner._execute(spec, RunSecrets(hf_token=SecretStr(TOKEN)), None))  # pyright: ignore[reportPrivateUsage]
-    assert (tmp_path / "results" / "env.txt").read_text() == ""
+    _execute(_spec(pin, entry="probe"))
+    assert _FakeHub.last["env.txt"] == b""
+
+
+def test_a_token_delivered_in_the_environment_is_refused(
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
+) -> None:
+    _allow(monkeypatch, pin)
+    _wire(monkeypatch, plugin_env)
+    with pytest.raises(RunError, match="only from the secrets file"):
+        _execute(_spec(pin), from_environment=True)
+    monkeypatch.setattr(plugin_runner._StartingEnvironment, "token_present", True)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(RunError, match="only from the secrets file"):
+        _execute(_spec(pin))
+    assert _FakeHub.pushed == []
 
 
 def test_a_public_output_repository_is_never_written(
-    monkeypatch: pytest.MonkeyPatch, toy_site: Path, tmp_path: Path, pin: PluginPin
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
 ) -> None:
     _allow(monkeypatch, pin)
-    _wire(monkeypatch, toy_site, tmp_path)
+    _wire(monkeypatch, plugin_env)
     _FakeHub.private = False
     with pytest.raises(RunError, match="public"):
-        asyncio.run(plugin_runner._execute(_spec(pin), RunSecrets(hf_token=SecretStr(TOKEN)), None))  # pyright: ignore[reportPrivateUsage]
+        _execute(_spec(pin))
     assert _FakeHub.pushed == []
 
 
-def test_a_failing_plugin_reports_its_exit_scrubbed(
-    monkeypatch: pytest.MonkeyPatch, toy_site: Path, tmp_path: Path, pin: PluginPin
+@pytest.mark.parametrize("entry", ["bad", "escape"])
+def test_a_failing_plugin_pushes_nothing(
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin, entry: str
 ) -> None:
     _allow(monkeypatch, pin)
-    _wire(monkeypatch, toy_site, tmp_path)
-    spec = _spec(pin, entry="prm").model_copy(
-        update={
-            "entry": plugin_runner.EntryPointDecl.model_validate(
-                dict(next(e for e in MANIFEST["entry_points"] if e["name"] == "prm"), name="bad")
-            )
-        }
-    )
-    monkeypatch.setattr(plugin_runner, "admit", _admit_with({}))
+    _wire(monkeypatch, plugin_env)
     with pytest.raises(RunError, match="exited with code 1"):
-        asyncio.run(plugin_runner._execute(spec, RunSecrets(hf_token=SecretStr(TOKEN)), None))  # pyright: ignore[reportPrivateUsage]
+        _execute(_spec(pin, entry=entry))
     assert _FakeHub.pushed == []
-
-
-def test_a_linked_output_is_never_pushed(tmp_path: Path, pin: PluginPin) -> None:
-    outdir = tmp_path / "out"
-    outdir.mkdir()
-    secret = tmp_path / "id_rsa"
-    secret.write_text("key")
-    (outdir / "out.txt").write_text("x")
-    (outdir / "leak").symlink_to(secret)
-    with pytest.raises(RunError, match="link or special file"):
-        plugin_runner._check_output(_spec(pin, entry="job"), outdir, {})  # pyright: ignore[reportPrivateUsage]

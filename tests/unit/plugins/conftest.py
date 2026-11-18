@@ -7,25 +7,32 @@ finds it once the directory is on ``sys.path``, which is all the plugin machiner
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib
 import json
 import sys
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from strata_forge.plugins.manifest import PluginManifest, parse_manifest
-from strata_forge.plugins.pins import AllowedPlugin, PluginPin, PluginSource
+from strata_forge.plugins.pins import AllowedPlugin, PluginPin, PluginSource, files_digest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
 
 TOY_MODULE = """
 from pathlib import Path
+
+from strata_forge.plugins.step_scoring import Unscored
+
+SEEN = []
 
 
 class _Scorer:
@@ -34,18 +41,35 @@ class _Scorer:
         self.models = setup.models
 
     def score(self, steps):
-        return [min(1.0, len(s.step) / 10.0 * self.scale) for s in steps]
+        out = []
+        for s in steps:
+            if s.step_type == "skip":
+                out.append(Unscored("not_scored_type"))
+            elif not s.step:
+                out.append(Unscored("unparseable"))
+            else:
+                out.append(min(1.0, len(s.step) / 10.0 * self.scale))
+        return out
 
 
 def create(setup):
     return _Scorer(setup)
 
 
-def bad_count(setup):
-    class _Bad:
-        def score(self, steps):
-            return [0.5]
-    return _Bad()
+def _fixed(value):
+    def factory(setup):
+        class _Fixed:
+            def score(self, steps):
+                return value(steps)
+        return _Fixed()
+    return factory
+
+
+bad_count = _fixed(lambda steps: [0.5])
+over_one = _fixed(lambda steps: [1.5 for _ in steps])
+not_finite = _fixed(lambda steps: [float("nan") for _ in steps])
+bad_reason = _fixed(lambda steps: [Unscored("tired") for _ in steps])
+contexts = _fixed(lambda steps: [0.0 if isinstance(s.context, str) else float(len(s.context)) for s in steps])
 
 
 def job(ctx):
@@ -80,6 +104,8 @@ MANIFEST: dict[str, Any] = {
                 {"name": "scale", "type": "number", "minimum": 0, "maximum": 10, "default": 1.0},
                 {"name": "mode", "type": "string", "enum": ["fast", "slow"]},
             ],
+            "score_kind": "probability",
+            "unscored_reasons": ["unparseable", "not_scored_type"],
         },
         {
             "name": "job",
@@ -92,6 +118,24 @@ MANIFEST: dict[str, Any] = {
 }
 
 
+TOY_ENTRY_POINTS = (
+    "[strata_forge.plugins]\nprm = toy_prm:create\njob = toy_prm:job\n"
+    "bad = toy_prm:bad_count\nprobe = toy_prm:secrets_probe\n"
+    "over = toy_prm:over_one\nnan = toy_prm:not_finite\n"
+    "reason = toy_prm:bad_reason\ncontexts = toy_prm:contexts\n"
+    "escape = os:getcwd\n"
+)
+TOY_DIRECT_URL: dict[str, Any] = {
+    "url": "https://github.com/acme/toy-prm.git",
+    "vcs_info": {"vcs": "git", "commit_id": SHA},
+}
+
+
+def _record_hash(path: Path) -> str:
+    digest = hashlib.sha256(path.read_bytes()).digest()
+    return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
 def write_dist(
     site: Path,
     *,
@@ -99,46 +143,76 @@ def write_dist(
     version: str = "0.1.0",
     direct_url: dict[str, Any] | None,
     entry_points: str,
+    files: tuple[str, ...] = (),
 ) -> None:
+    """A dist-info as pip writes it: METADATA, entry points, the PEP 610 record and a RECORD
+    hashing every file (``files`` are further site-relative paths the distribution owns)."""
     info = site / f"{name}-{version}.dist-info"
     info.mkdir(parents=True)
     (info / "METADATA").write_text(
         f"Metadata-Version: 2.1\nName: {name.replace('_', '-')}\nVersion: {version}\n"
     )
     (info / "entry_points.txt").write_text(entry_points)
+    (info / "INSTALLER").write_text("pip\n")
     if direct_url is not None:
         (info / "direct_url.json").write_text(json.dumps(direct_url))
+    rows = [*files, *(f"{info.name}/{p.name}" for p in sorted(info.iterdir()))]
+    lines = [f"{row},{_record_hash(site / row)},{(site / row).stat().st_size}" for row in rows]
+    lines.append(f"{info.name}/RECORD,,")
+    (info / "RECORD").write_text("\n".join(lines) + "\n")
+
+
+def build_toy(site: Path) -> None:
+    (site / "toy_prm").mkdir(parents=True)
+    (site / "toy_prm" / "__init__.py").write_text(TOY_MODULE)
+    write_dist(
+        site,
+        direct_url=TOY_DIRECT_URL,
+        entry_points=TOY_ENTRY_POINTS,
+        files=("toy_prm/__init__.py",),
+    )
+
+
+def _toy_digest() -> str:
+    from importlib import metadata
+
+    with tempfile.TemporaryDirectory() as tmp:
+        build_toy(Path(tmp))
+        (dist,) = metadata.distributions(path=[tmp])
+        digest = files_digest(dist)
+    if digest is None:  # pragma: no cover -- build_toy always writes a RECORD
+        raise RuntimeError
+    return digest
+
+
+#: The files digest of the toy build, what an operator pins as ``files_sha256``.
+TOY_DIGEST = _toy_digest()
 
 
 @pytest.fixture
 def toy_site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     site = tmp_path / "site"
-    (site / "toy_prm").mkdir(parents=True)
-    (site / "toy_prm" / "__init__.py").write_text(TOY_MODULE)
-    write_dist(
-        site,
-        direct_url={
-            "url": "https://github.com/acme/toy-prm.git",
-            "vcs_info": {"vcs": "git", "commit_id": SHA},
-        },
-        entry_points=(
-            "[strata_forge.plugins]\nprm = toy_prm:create\njob = toy_prm:job\n"
-            "bad = toy_prm:bad_count\nprobe = toy_prm:secrets_probe\n"
-        ),
-    )
+    build_toy(site)
     monkeypatch.syspath_prepend(str(site))
     importlib.invalidate_caches()
     yield site
     sys.modules.pop("toy_prm", None)
 
 
-@pytest.fixture
-def pin() -> PluginPin:
+def toy_pin(**source: Any) -> PluginPin:
     return PluginPin(
         distribution="toy-prm",
         version="0.1.0",
-        source=PluginSource(kind="git", repo="acme/toy-prm", commit=SHA),
+        source=PluginSource.model_validate(
+            {"kind": "git", "repo": "acme/toy-prm", "commit": SHA, "files_sha256": TOY_DIGEST}
+            | source
+        ),
     )
+
+
+@pytest.fixture
+def pin() -> PluginPin:
+    return toy_pin()
 
 
 @pytest.fixture

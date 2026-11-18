@@ -11,9 +11,11 @@ writes, and the closed configuration each accepts. Three rules make running it s
 - **Checked without being run** (:mod:`~strata_forge.plugins.preflight`). A control plane reads
   the manifest at the pinned commit as data and checks a request against it; nothing from the
   repository executes there.
-- **Run apart from the credentials** (:mod:`~strata_forge.plugins.host`). On the target, the
-  runner verifies the installed build, downloads the declared inputs itself, and runs the plugin
-  in a child process that never receives the run's Hub credential.
+- **Installed from the pin, without credentials** (:mod:`~strata_forge.plugins.environment`). On
+  the target, the runner builds the pinned build its own environment and verifies it.
+- **Run apart from the credentials** (:mod:`~strata_forge.plugins.host`). The runner downloads
+  the declared inputs itself and runs the plugin in a child process that never receives the
+  run's Hub credential.
 
 A ``step_scorer`` entry point is a process reward model with a forge-owned contract
 (:mod:`~strata_forge.plugins.step_scoring`).
@@ -29,6 +31,7 @@ from strata_forge.plugins.manifest import (
     OutputDecl,
     PluginManifest,
     PluginManifestError,
+    ScoreKind,
     parse_manifest,
 )
 from strata_forge.plugins.pins import (
@@ -46,6 +49,7 @@ from strata_forge.plugins.preflight import (
     PreflightReport,
     preflight,
 )
+from strata_forge.plugins.step_scoring import ContextSegment, Step, StepScorerSetup, Unscored
 
 __all__ = [
     "ALLOWED_PLUGINS_ENV",
@@ -54,6 +58,7 @@ __all__ = [
     "PLUGIN_MANIFEST_FILENAME",
     "AllowedPlugin",
     "ConfigParam",
+    "ContextSegment",
     "EntryPointDecl",
     "InputBinding",
     "InputDecl",
@@ -65,6 +70,10 @@ __all__ = [
     "PluginSource",
     "PreflightCheck",
     "PreflightReport",
+    "ScoreKind",
+    "Step",
+    "StepScorerSetup",
+    "Unscored",
     "installed_mismatch",
     "parse_allow_list",
     "parse_manifest",

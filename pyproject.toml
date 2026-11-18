@@ -210,6 +210,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "PT004", "S105", "S106", "S107"]
+# The sandbox tests assert the paths bubblewrap binds, which are the sandbox's own /tmp.
+"tests/unit/plugins/test_sandbox.py" = ["S101", "S108"]
 "examples/**/*.py" = ["S101", "T201"]
 "scripts/**/*.py" = ["S101", "T201"]
 # marimo notebooks: a cell's trailing bare expression is its rendered output.

@@ -82,6 +82,44 @@ def test_a_step_scorer_must_read_steps_and_write_scores() -> None:
         parse_manifest(json.dumps(_entry(0, outputs=[{"role": "out", "kind": "dataset"}])))
 
 
+def test_a_step_scorer_declares_its_score_kind() -> None:
+    with pytest.raises(PluginManifestError, match="score_kind"):
+        parse_manifest(json.dumps(_entry(0, score_kind=None)))
+    with pytest.raises(PluginManifestError):
+        parse_manifest(json.dumps(_entry(0, score_kind="percent")))
+    for kind in ("probability", "logit", "unconstrained"):
+        assert (
+            parse_manifest(json.dumps(_entry(0, score_kind=kind))).entry_points[0].score_kind
+            == kind
+        )
+
+
+def test_scoring_fields_belong_to_a_step_scorer() -> None:
+    for field, value in (
+        ("score_kind", "logit"),
+        ("unscored_reasons", ["unparseable"]),
+        ("passthrough_columns", ["text"]),
+    ):
+        with pytest.raises(PluginManifestError, match="belong to a step_scorer"):
+            parse_manifest(json.dumps(_entry(1, **{field: value})))
+
+
+def test_pass_through_columns_are_required_and_never_forge_s_own() -> None:
+    steps = {
+        "role": "steps",
+        "required_columns": ["item_id", "step_index", "context", "step", "source"],
+    }
+    ok = _entry(0, inputs=[steps], passthrough_columns=["source"])
+    assert parse_manifest(json.dumps(ok)).entry_points[0].passthrough_columns == ("source",)
+    with pytest.raises(PluginManifestError, match="must be required columns"):
+        parse_manifest(json.dumps(_entry(0, inputs=[steps], passthrough_columns=["other"])))
+    for reserved in ("score", "reason", "step_type", "item_id"):
+        with pytest.raises(PluginManifestError, match="written by forge"):
+            parse_manifest(json.dumps(_entry(0, inputs=[steps], passthrough_columns=[reserved])))
+    with pytest.raises(PluginManifestError, match="duplicate"):
+        parse_manifest(json.dumps(_entry(0, unscored_reasons=["a", "a"])))
+
+
 def test_a_model_input_has_no_columns() -> None:
     bad = _entry(1, inputs=[{"role": "m", "kind": "model", "required_columns": ["x"]}])
     with pytest.raises(PluginManifestError, match="no columns"):

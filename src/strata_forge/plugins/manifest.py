@@ -35,6 +35,8 @@ __all__ = [
     "STEP_INPUT_COLUMNS",
     "STEP_INPUT_ROLE",
     "STEP_OUTPUT_ROLE",
+    "STEP_RESERVED_COLUMNS",
+    "STEP_TYPE_COLUMN",
     "ConfigParam",
     "EntryPointDecl",
     "EntryType",
@@ -43,6 +45,7 @@ __all__ = [
     "PluginManifest",
     "PluginManifestError",
     "ScalarValue",
+    "ScoreKind",
     "check_scalar",
     "normalize_distribution",
     "parse_manifest",
@@ -61,8 +64,13 @@ MAX_MANIFEST_BYTES = 64 * 1024
 #: :mod:`strata_forge.plugins.step_scoring`).
 STEP_INPUT_ROLE = "steps"
 STEP_INPUT_COLUMNS: tuple[str, ...] = ("item_id", "step_index", "context", "step")
-#: The one output a ``step_scorer`` produces: one score per input step, written by forge.
+#: An optional column of the ``steps`` input: the step's type, as segmented upstream. Handed to
+#: the scorer and carried unchanged into the scores when the input has it.
+STEP_TYPE_COLUMN = "step_type"
+#: The one output a ``step_scorer`` produces: one row per input step, written by forge.
 STEP_OUTPUT_ROLE = "scores"
+#: Names a declared pass-through column cannot take: forge writes these itself.
+STEP_RESERVED_COLUMNS = frozenset({*STEP_INPUT_COLUMNS, STEP_TYPE_COLUMN, "score", "reason"})
 
 # A role or parameter name: a lowercase identifier, so it is safe as a key, a column suffix and
 # a path segment alike.
@@ -89,6 +97,11 @@ type ScalarValue = str | int | float | bool
 #: reads its declared inputs and writes into the output directory forge hands it. ``step_scorer``
 #: is a process reward model: forge feeds it steps and writes the scores (see ``step_scoring``).
 type EntryType = Literal["runner", "step_scorer"]
+
+#: What a step scorer's number is. ``probability`` is held to [0, 1] (both ends allowed) and a
+#: value outside it fails the run; it is never clipped. ``logit`` and ``unconstrained`` must be
+#: finite and are recorded exactly as returned.
+type ScoreKind = Literal["probability", "logit", "unconstrained"]
 
 
 class PluginManifestError(ValidationError):
@@ -188,12 +201,36 @@ class EntryPointDecl(BaseModel):
     #: Whether the entry point needs a GPU. Informational for a target check; forge does not
     #: allocate devices.
     gpu: bool = False
+    #: A step scorer's score kind (required on a ``step_scorer``, refused on a ``runner``).
+    score_kind: ScoreKind | None = None
+    #: The reasons a step scorer may give for leaving a step unscored (``unparseable``,
+    #: ``over_token_cap``, ``not_scored_type``, ...). Any other reason fails the run.
+    unscored_reasons: tuple[Ident, ...] = Field(default=(), max_length=16)
+    #: Further ``steps`` columns forge copies unchanged into the scores, beside ``item_id``,
+    #: ``step_index`` and ``step_type``. Each must be one of the input's required columns.
+    passthrough_columns: tuple[Column, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
     def _consistent(self) -> EntryPointDecl:
         _unique((i.role for i in self.inputs), f"entry point {self.name!r}: input role")
         _unique((p.name for p in self.config), f"entry point {self.name!r}: parameter")
+        _unique(self.unscored_reasons, f"entry point {self.name!r}: unscored reason")
+        _unique(self.passthrough_columns, f"entry point {self.name!r}: pass-through column")
+        if self.type == "runner" and (
+            self.score_kind is not None or self.unscored_reasons or self.passthrough_columns
+        ):
+            msg = (
+                f"entry point {self.name!r}: score_kind, unscored_reasons and "
+                "passthrough_columns belong to a step_scorer"
+            )
+            raise ValueError(msg)
         if self.type == "step_scorer":
+            if self.score_kind is None:
+                msg = (
+                    f"entry point {self.name!r}: a step_scorer declares its score_kind "
+                    "(probability, logit or unconstrained)"
+                )
+                raise ValueError(msg)
             datasets = [i for i in self.inputs if i.kind == "dataset"]
             if [i.role for i in datasets] != [STEP_INPUT_ROLE] or not datasets[0].required:
                 msg = (
@@ -206,6 +243,22 @@ class EntryPointDecl(BaseModel):
                 msg = (
                     f"entry point {self.name!r}: a step_scorer's {STEP_INPUT_ROLE!r} input must "
                     f"require the columns {list(STEP_INPUT_COLUMNS)}"
+                )
+                raise ValueError(msg)
+            reserved = sorted(STEP_RESERVED_COLUMNS.intersection(self.passthrough_columns))
+            if reserved:
+                msg = (
+                    f"entry point {self.name!r}: {reserved} are written by forge and cannot be "
+                    "pass-through columns"
+                )
+                raise ValueError(msg)
+            undeclared = [
+                c for c in self.passthrough_columns if c not in datasets[0].required_columns
+            ]
+            if undeclared:
+                msg = (
+                    f"entry point {self.name!r}: the pass-through columns {undeclared} must be "
+                    f"required columns of {STEP_INPUT_ROLE!r}"
                 )
                 raise ValueError(msg)
             output = self.outputs[0]

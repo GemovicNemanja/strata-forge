@@ -26,23 +26,54 @@ configuration of typed scalars.
 - **Checked as data.** The orchestrator reads the manifest at the pinned commit and checks a
   request against it (`preflight`) without building, importing or executing anything from the
   repository.
-- **Exact installed build.** The plugin is installed on the target by its owner, with an exact
-  requirement. The runner accepts it only when the installed version is the pinned one and PEP
-  610's `direct_url.json` records the pinned source at the pinned commit; an index install or an
-  editable checkout never matches. The entry point is looked up by name inside that
+- **Exact artifact, installed by the runner.** The runner installs the pinned build into a
+  dedicated per-build environment beside (never inside) the engine's venv, cached by the pin and
+  the engine build, with no credential in the install's environment. A git source installs
+  anonymously at its commit and is pinned also by the digest of the files its build installs (a
+  commit pins source, not what a build produces); a Hugging Face wheel is pinned by its SHA-256,
+  checked before anything installs it. The runner accepts the environment only when the
+  installed version is the pinned one, PEP 610's `direct_url.json` records the pinned commit or
+  wheel hash (an index install or an editable checkout never matches), every file matches its
+  RECORD hash, the files digest matches the pin, and the engine there is its own.
+  The resolved package set is recorded. The entry point is looked up by name inside that
   distribution's own metadata only.
-- **Credential separation.** The runner downloads the declared inputs at their commits and pushes
-  the output to a private repository itself. The plugin runs in a child process with an
-  allow-listed environment that holds no credential and an offline, empty Hub cache. Model
-  weights in pickle formats are not downloaded.
-- **Step scoring is a forge contract.** A `step_scorer` reads one `steps` input with the columns
-  `item_id`, `step_index`, `context` and `step`; forge calls it in batches and writes exactly one
-  finite score per step.
+- **Credential separation, enforced by a sandbox.** The runner reads the token from the secrets
+  file into memory, unlinks the file, and refuses a token delivered in an environment variable
+  (a process's starting environment stays readable in `/proc`). It downloads the declared inputs
+  at their commits and pushes the output to a private repository itself. The plugin runs from its
+  own environment's interpreter with `-I`, in the strongest sandbox the machine has: bubblewrap
+  as another uid (passwordless sudo), else bubblewrap as the runner's uid (new PID and network
+  namespaces, only the environment, inputs and one output directory bound, no home directory),
+  else, only when the operator allowed it for that plugin and the kernel restricts ptrace, a
+  plain child process. The isolation used is recorded. Its environment holds no credential and
+  an offline, empty Hub cache, its time and resources are limited, and its progress reaches the
+  runner only through a pipe the runner validates. Model files in formats that run code when
+  loaded are not downloaded.
+- **Nothing the plugin left is trusted.** However the plugin ends, its whole process group is
+  killed and confirmed gone before its output is touched. The output is copied without following
+  links, refusing links, hard links and special files, into a directory the runner owns; only
+  the copy is checked and pushed. A step scorer's scores are re-checked by the runner from that
+  copy. The build is checked again inside the plugin's process before any of its modules is
+  imported, and each module on the entry point's path must be one of the pinned distribution's
+  files.
+- **Step scoring is a forge contract; the platform scores and records.** A `step_scorer` reads
+  one `steps` input with the columns `item_id`, `step_index`, `context` and `step` (and
+  `step_type` when present), segmented upstream and never re-split; a structured context reaches
+  it as `{pid, text}` segments, never joined. Its manifest declares a `score_kind`: a
+  `probability` outside [0, 1] fails the run and is never clipped, a `logit` or `unconstrained`
+  score passes through; NaN and infinity always fail. A step it does not score carries a
+  declared reason. Forge writes exactly one row per input step, re-checks it against the input
+  before the push (a missing row is an infrastructure fault), and records the counts by reason.
+  Forge picks no aggregation: reductions are opt-in, diagnostic, and written to a separate file.
 
 ## Consequences
 
-Running a plugin needs three parties to agree: the operator allow-lists the build, the owner
-installs it on their own machine, and the request names it. The control plane never runs plugin
-code, and a plugin never sees the run's credential. Plugin code is still the owner's chosen code
-on the owner's machine: this is credential separation, not isolation from a hostile plugin.
-Installing the build is outside forge (no deploy key reaches the machine).
+Running a plugin needs two parties to agree: the operator allow-lists the build, and the request
+names it; the runner installs exactly that build on the owner's machine. The control plane never
+runs plugin code, and a plugin never holds the run's credential, at install or at run time. The
+sandbox is what keeps a misbehaving plugin from the credential and the runner; without one
+(`none`, operator opt-in) the plugin can read whatever the runner's uid can and reach the
+network, and only the operator's review of the build vouches for it. The build backend runs
+unsandboxed at install time, as the runner's uid with no credential in its environment. No
+deploy key reaches the machine, so a git source must be publicly readable; a private build is
+published as an `hf` wheel, pinned by its hash.
