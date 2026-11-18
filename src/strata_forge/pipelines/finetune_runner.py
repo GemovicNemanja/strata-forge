@@ -49,6 +49,7 @@ one call :meth:`SFTRunner.train` offers.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import itertools
 import sys
 import time
@@ -165,6 +166,9 @@ class FinetuneSpec(BaseModel):
     # An optional held-out split. Its rows go through the same format projection, so an eval loss
     # appears in the same progress stream as the training loss.
     eval_split: str | None = None
+    # ``seq_cls`` only: the declared in-distribution dev split a temperature is fitted on after
+    # training, written to the artifact's calibration record before anything reads it.
+    calibration_split: str | None = None
     dataset_format: str
     column_mapping: dict[str, str] = Field(default_factory=dict)
     adapter: Literal["none", "lora", "qlora"] = "lora"
@@ -243,6 +247,15 @@ def check_spec(spec: FinetuneSpec) -> None:
         if spec.adapter != "none":
             msg = "seq_cls trains full weights; set adapter to 'none'"
             raise RunError(msg)
+        if (
+            spec.calibration_split is not None
+            and importlib.util.find_spec("strata_forge.metrics.calibration_fit") is None
+        ):
+            msg = "calibration_split needs an engine with the temperature fit; this one has none"
+            raise RunError(msg)
+    elif spec.calibration_split is not None:
+        msg = f"calibration_split applies to seq_cls only, not {method.name}"
+        raise RunError(msg)
     _trainer_config(spec, method, Path("/nonexistent/strata-check"))
 
 
@@ -591,6 +604,24 @@ def _receipt_event(name: str, receipt: Mapping[str, Any]) -> ProgressEvent:
     return ProgressEvent(kind="phase", stage="load_model", message=message, metrics=metrics)
 
 
+def _refused(spec: FinetuneSpec, exc: PreflightError, on_refusal: Any) -> RunError:
+    """A refused check as the run's error: recorded locally, measured on the terminal event."""
+    compute: dict[str, Any] = on_refusal(
+        {"refused": str(exc), "check": exc.check, "receipt": exc.receipt}
+    )
+    detail = f"{exc.check or 'a'} check refused the run: {exc}"
+    if exc.check == "memory":
+        detail += f"; base {spec.model_id}@{spec.model_revision}"
+    metrics = {
+        "gpu_seconds": float(compute["gpu_seconds"]),
+        "gpu_count": float(compute["gpu_count"]),
+    }
+    for key, value in exc.receipt.items():
+        if isinstance(value, int | float) and not isinstance(value, bool) and len(metrics) < 32:
+            metrics[f"refused_{key}"[:64]] = float(value)
+    return RunError(detail, metrics=metrics)
+
+
 def _gpu_facts() -> dict[str, Any]:
     """The GPUs this process can use, read once: count and device name, or none."""
     try:
@@ -635,6 +666,7 @@ def _build_manifest(
             "config": spec.dataset_config,
             "split": spec.split,
             "eval_split": spec.eval_split,
+            "calibration_split": spec.calibration_split,
             "requested_revision": spec.dataset_commit_sha,
             "format": spec.dataset_format,
             "column_mapping": spec.column_mapping,
@@ -765,6 +797,11 @@ async def _train_seq_cls(
             if spec.eval_split
             else None
         )
+        calibration = (
+            await asyncio.to_thread(_load_role_split, spec, spec.calibration_split, hub_token)
+            if spec.calibration_split
+            else None
+        )
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         checkpoint = await _fetch_checkpoint(spec, hub_token)
 
@@ -784,18 +821,28 @@ async def _train_seq_cls(
                 checkpoint=checkpoint,
                 train_dataset=train,
                 eval_dataset=evaluation,
+                calibration_dataset=calibration,
                 on_receipt=on_receipt,
             )
     except PreflightError as exc:
-        on_refusal({"refused": str(exc), "receipt": exc.receipt})
-        detail = str(exc)
-        if "memory" in detail:
-            detail += f"; base {spec.model_id}@{spec.model_revision}"
-        raise RunError(detail) from exc
+        raise _refused(spec, exc, on_refusal) from exc
     # No caption over the loop: the trainer narrates its own steps (see `_train_causal_lm`).
-    result = await asyncio.to_thread(
-        runner.finish, prepared, artifact_dir=artifact_dir, public_model_id=spec.model_id
-    )
+    try:
+        result = await asyncio.to_thread(
+            runner.finish,
+            prepared,
+            artifact_dir=artifact_dir,
+            public_model_id=spec.model_id,
+            calibration_source={
+                "dataset_id": spec.dataset_id,
+                "config": spec.dataset_config,
+                "split": spec.calibration_split,
+                "commit": spec.dataset_commit_sha,
+            },
+        )
+    except PreflightError as exc:
+        # A saved artifact that does not reload as trained is refused before it is pushed.
+        raise _refused(spec, exc, on_refusal) from exc
     counts = {"train_rows": prepared.train_rows, "eval_rows": prepared.eval_rows}
     return {"steps": result.steps, "metrics": result.metrics}, counts, result.receipts
 
@@ -836,7 +883,10 @@ async def _execute(
     checks: dict[str, Any] | None = None
     if seq_cls:
 
-        def on_refusal(refusal: dict[str, Any]) -> None:
+        def on_refusal(refusal: dict[str, Any]) -> dict[str, Any]:
+            compute = _compute_block(
+                started, {**gpu_facts, "gpu_count": min(1, gpu_facts["gpu_count"])}, {}
+            )
             write_manifest(
                 _build_manifest(
                     spec,
@@ -846,13 +896,12 @@ async def _execute(
                     model_commit=spec.model_revision,
                     counts={},
                     result={},
-                    compute=_compute_block(
-                        started, {**gpu_facts, "gpu_count": min(1, gpu_facts["gpu_count"])}, {}
-                    ),
+                    compute=compute,
                     checks=refusal,
                 ),
                 run_dir,
             )
+            return compute
 
         result, counts, checks = await _train_seq_cls(
             spec, config, phase, writer, run_dir, artifact_dir, hub_token, on_refusal
@@ -912,6 +961,7 @@ async def _execute(
             metrics={
                 **cast("dict[str, float]", result.get("metrics") or {}),
                 "gpu_seconds": float(compute["gpu_seconds"]),
+                "gpu_count": float(compute["gpu_count"]),
             },
             message=destination,  # WHERE it landed: a repo id (pushed) or a VM path (local)
         ),

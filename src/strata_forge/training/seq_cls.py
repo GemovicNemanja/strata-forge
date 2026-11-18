@@ -36,12 +36,14 @@ Heavy imports (``torch``, ``transformers``, ``datasets``) happen inside the runn
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import importlib
 import json
 import math
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
@@ -59,9 +61,14 @@ from strata_forge.training.classifier_heads import (
     load_aux_heads,
     save_aux_heads,
 )
-from strata_forge.training.classifier_loss import LossWeights, classifier_loss
+from strata_forge.training.classifier_loss import LOSS_FORM, LossWeights, classifier_loss
 from strata_forge.training.dataset_format import DatasetFormatError
-from strata_forge.training.loading import model_load_kwargs, tokenizer_load_kwargs
+from strata_forge.training.loading import (
+    LoadRefusedError,
+    check_loading_info,
+    model_load_kwargs,
+    tokenizer_load_kwargs,
+)
 from strata_forge.training.progress import attach as _attach_progress
 from strata_forge.training.progress import coerce_int, numeric_metrics
 
@@ -71,9 +78,10 @@ if TYPE_CHECKING:
     from strata_forge.training.peft import LoRAConfig, QLoRAConfig
 
 __all__ = [
+    "CALIBRATION_FILENAME",
     "MAX_SEQ_CLS_ROWS",
-    "NOT_ENTAILED",
     "VERIFIER_CONFIG_FILENAME",
+    "ArtifactCheckError",
     "CudaMemoryProbe",
     "MemoryProbe",
     "PreflightError",
@@ -90,9 +98,6 @@ VERIFIER_CONFIG_FILENAME = "strata_verifier.json"
 #: The largest split a run trains on. The split is memory-mapped Arrow, never a Python list, so
 #: the bound is the supported population rather than a memory guard.
 MAX_SEQ_CLS_ROWS = 600_000
-#: The canonical label a two-way row's negative may be spelled as (directly or through an alias),
-#: besides any non-positive label.
-NOT_ENTAILED = "not_entailed"
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]+)\}")
@@ -106,13 +111,29 @@ _MAX_REPORTED_ROWS = 5
 class PreflightError(RuntimeError):
     """A run refused before training. ``receipt`` holds the measured facts for the manifest."""
 
-    def __init__(self, message: str, receipt: Mapping[str, Any]) -> None:
+    def __init__(self, message: str, receipt: Mapping[str, Any], *, check: str = "") -> None:
         super().__init__(message)
         self.receipt = dict(receipt)
+        #: Which check refused: ``overflow``, ``load``, ``step0``, ``memory`` or ``artifact``.
+        self.check = check
 
 
 class Step0Error(PreflightError):
     """The decoder head does not reproduce the base model's zero-shot label logits at step 0."""
+
+
+class ArtifactCheckError(PreflightError):
+    """The saved artifact does not reload to the classifier that was trained."""
+
+
+#: The temperature fit and its record, beside the weights.
+CALIBRATION_FILENAME = "calibration.json"
+_HEAD_PREFIXES = ("classifier.", "score.", "head.")
+_CLASSIFIER_BIAS_REASON = (
+    "the stock decoder classifier has no bias, and the head starts from the LM head's output "
+    "projection, whose bias is nonzero; classifier_bias=true carries it, and gives head.dense a "
+    "bias that is held at exactly zero"
+)
 
 
 class SeqClsConfig(BaseModel):
@@ -121,10 +142,14 @@ class SeqClsConfig(BaseModel):
 
     Attributes:
         labels: The label order: logit ``k`` is ``labels[k]``.
-        label_aliases: Dataset spelling -> label (or :data:`NOT_ENTAILED` on two-way rows).
+        label_aliases: Dataset spelling -> label, for three-way rows.
         label_index_map: Integer label -> label. Required for integer labels, because index orders
             differ between datasets.
-        two_way_positive_label: The label a two-way row's positive means (default ``labels[0]``).
+        two_way_positive_label: The label whose probability a two-way row's positive is; the
+            negative is the sum over every other label. No default: a split with two-way rows
+            needs it declared, with ``two_way_labels``.
+        two_way_labels: How a two-way row spells its positive and its negative, e.g.
+            ``("entailed", "not_entailed")``. A two-way row's label must be one of the two.
         head_init: ``new`` (encoder, fresh classifier), ``decoder_lm_head`` (decoder, classifier
             from its own LM head) or ``existing`` (a checkpoint that already has this classifier).
         verbalizers: Label -> its single-token verbalizer, for ``decoder_lm_head``.
@@ -150,6 +175,7 @@ class SeqClsConfig(BaseModel):
     label_aliases: dict[str, str] = Field(default_factory=dict[str, str])
     label_index_map: dict[str, str] | None = None
     two_way_positive_label: str | None = None
+    two_way_labels: tuple[str, str] | None = None
     head_init: Literal["new", "decoder_lm_head", "existing"] = "new"
     verbalizers: dict[str, str] | None = None
     premise_format: Literal["ids", "plain"] = "ids"
@@ -200,9 +226,9 @@ class SeqClsConfig(BaseModel):
         if len(set(value)) != len(value):
             msg = "labels must be unique"
             raise ValueError(msg)
-        bad = [label for label in value if not _LABEL_RE.fullmatch(label) or label == NOT_ENTAILED]
+        bad = [label for label in value if not _LABEL_RE.fullmatch(label)]
         if bad:
-            msg = f"labels must match [A-Za-z0-9_.-]{{1,64}} and not be {NOT_ENTAILED!r}: {bad}"
+            msg = f"labels must match [A-Za-z0-9_.-]{{1,64}}: {bad}"
             raise ValueError(msg)
         return value
 
@@ -212,9 +238,7 @@ class SeqClsConfig(BaseModel):
         if len(self.label_aliases) > 256:
             msg = "label_aliases has more than 256 entries"
             raise ValueError(msg)
-        stray = sorted(
-            {v for v in self.label_aliases.values() if v not in labels and v != NOT_ENTAILED}
-        )
+        stray = sorted({v for v in self.label_aliases.values() if v not in labels})
         if stray:
             msg = f"label_aliases map to labels that are not declared: {stray}"
             raise ValueError(msg)
@@ -226,9 +250,17 @@ class SeqClsConfig(BaseModel):
             if unknown:
                 msg = f"label_index_map maps to labels that are not declared: {unknown}"
                 raise ValueError(msg)
+        if (self.two_way_positive_label is None) != (self.two_way_labels is None):
+            msg = "two_way_positive_label and two_way_labels are declared together, or not at all"
+            raise ValueError(msg)
         if self.two_way_positive_label is not None and self.two_way_positive_label not in labels:
             msg = "two_way_positive_label must be one of labels"
             raise ValueError(msg)
+        if self.two_way_labels is not None:
+            spelled = self.two_way_labels
+            if spelled[0] == spelled[1] or not all(_LABEL_RE.fullmatch(x) for x in spelled):
+                msg = "two_way_labels are two distinct [A-Za-z0-9_.-]{1,64} spellings"
+                raise ValueError(msg)
         if self.head_init == "decoder_lm_head":
             if self.verbalizers is None or set(self.verbalizers) != labels:
                 msg = "decoder_lm_head needs a verbalizer for every label, and only for labels"
@@ -243,8 +275,11 @@ class SeqClsConfig(BaseModel):
         return self
 
     @property
-    def positive_label(self) -> str:
-        return self.two_way_positive_label or self.labels[0]
+    def positive_index(self) -> int:
+        """The logit a two-way row's positive reads; unused (0) when no two-way row is declared."""
+        if self.two_way_positive_label is None:
+            return 0
+        return self.labels.index(self.two_way_positive_label)
 
     @property
     def loss_weights(self) -> LossWeights:
@@ -311,33 +346,29 @@ class CudaMemoryProbe:
 def render_premises(value: Any, premise_format: str) -> tuple[str, list[tuple[str, int]]]:
     """Render a ``premises`` cell and return ``(text, [(pid, first_char_offset), ...])``.
 
-    A cell is a string (rendered as given, with no premise ids), a list of strings (ids ``"1"``,
-    ``"2"``, ... in order) or a list of ``{pid, text}`` objects. Under ``ids`` each premise is the
-    line ``"{pid}: {text}"`` and its marker is the pid's first character; under ``plain`` the line
-    is the text and there are no markers.
+    A cell is a non-empty list of ``{pid, text}`` objects whose pids are ``p1``, ``p2``, ... in
+    order; a bare string or a list of strings is refused, because a premise without its declared
+    id cannot be supervised or audited. Under ``ids`` each premise is the line
+    ``"{pid}: {text}"`` and its marker is the pid's first character; under ``plain`` the line is
+    the text and there are no markers.
     """
-    if isinstance(value, str):
-        return value, []
-    if not isinstance(value, Sequence) or isinstance(value, bytes):
-        msg = f"premises must be a string or a list, not {type(value).__name__}"
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence) or not value:
+        msg = "premises must be a non-empty list of {pid, text} objects"
         raise DatasetFormatError(msg)
     entries: list[tuple[str, str]] = []
     for i, item in enumerate(value):  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType] - a dataset cell
-        if isinstance(item, str):
-            entries.append((str(i + 1), item))
-        elif isinstance(item, Mapping) and "pid" in item and "text" in item:
-            pid: Any = item["pid"]  # pyright: ignore[reportUnknownVariableType] - a dataset cell
-            text: Any = item["text"]  # pyright: ignore[reportUnknownVariableType] - a dataset cell
-            if not isinstance(text, str) or not str(pid):  # pyright: ignore[reportUnknownArgumentType]
-                msg = "each premise object needs a non-empty pid and a string text"
-                raise DatasetFormatError(msg)
-            entries.append((str(pid), text))  # pyright: ignore[reportUnknownArgumentType]
-        else:
-            msg = "each premise must be a string or an object with pid and text"
+        if not (isinstance(item, Mapping) and "pid" in item and "text" in item):
+            msg = "each premise must be an object with pid and text"
             raise DatasetFormatError(msg)
-    if len({pid for pid, _ in entries}) != len(entries):
-        msg = "premise ids must be unique within a row"
-        raise DatasetFormatError(msg)
+        pid: Any = item["pid"]  # pyright: ignore[reportUnknownVariableType] - a dataset cell
+        text: Any = item["text"]  # pyright: ignore[reportUnknownVariableType] - a dataset cell
+        if not isinstance(text, str):
+            msg = "each premise's text must be a string"
+            raise DatasetFormatError(msg)
+        if pid != f"p{i + 1}":
+            msg = f"premise ids must be p1..pN in order; premise {i + 1} is not p{i + 1}"
+            raise DatasetFormatError(msg)
+        entries.append((str(pid), text))  # pyright: ignore[reportUnknownArgumentType] - checked equal to a str
     lines: list[str] = []
     markers: list[tuple[str, int]] = []
     offset = 0
@@ -395,16 +426,30 @@ class _Encoder:
         if not isinstance(raw, str):
             msg = f"row {row}: label must be a string or an integer"
             raise DatasetFormatError(msg)
-        if raw in self.config.labels or raw == NOT_ENTAILED:
+        if raw in self.config.labels:
             return raw
         if raw in self.config.label_aliases:
             return self.config.label_aliases[raw]
         msg = f"row {row}: label is neither a declared label nor an alias"
         raise DatasetFormatError(msg)
 
+    def _two_way(self, raw: Any, row: int) -> float:
+        spelled = self.config.two_way_labels
+        if spelled is None:
+            msg = (
+                f"row {row}: a two-way row needs two_way_positive_label and two_way_labels "
+                "declared; there is no default"
+            )
+            raise DatasetFormatError(msg)
+        if raw == spelled[0]:
+            return 1.0
+        if raw == spelled[1]:
+            return 0.0
+        msg = f"row {row}: a two-way label must be one of the declared two_way_labels"
+        raise DatasetFormatError(msg)
+
     def _targets(self, batch: Mapping[str, list[Any]], i: int, row: int) -> dict[str, Any]:
         labels = self.config.labels
-        canonical = self._label(batch["label"][i], row)
         space: Any = batch["label_space"][i] if "label_space" in self.roles else _FULL
         if space not in (_FULL, _TWO_WAY):
             msg = f"row {row}: label_space must be {_FULL!r} or {_TWO_WAY!r}"
@@ -414,11 +459,9 @@ class _Encoder:
             return {
                 "target": target,
                 "two_way": 1,
-                "two_way_target": 1.0 if canonical == self.config.positive_label else 0.0,
+                "two_way_target": self._two_way(batch["label"][i], row),
             }
-        if canonical == NOT_ENTAILED:
-            msg = f"row {row}: {NOT_ENTAILED!r} is a two-way label, but the row is three-way"
-            raise DatasetFormatError(msg)
+        canonical = self._label(batch["label"][i], row)
         dist: Any = batch["label_dist"][i] if "label_dist" in self.roles else None
         if dist is None:
             target[labels.index(canonical)] = 1.0
@@ -707,6 +750,10 @@ def _classes(torch: Any, transformers: Any) -> tuple[Any, Any]:
                 return terms.total, {"logits": out["logits"]}
             return terms.total
 
+        def reset_loss_parts(self) -> None:
+            """Forget loss parts accumulated outside training (the memory preflight's step)."""
+            self._parts, self._parts_count = {}, 0
+
         def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
             if "loss" in logs and self._parts_count:
                 count = self._parts_count
@@ -881,6 +928,13 @@ class SeqClsRunner:
             "max_length": self._config.max_length,
             "longest": max(lengths),
             "rows_over_max_length": len(over),
+            # Per-row token counts, special tokens and template literals included.
+            "length_distribution": {
+                "min": min(lengths),
+                "p50": _nearest_rank(lengths, 0.50),
+                "p95": _nearest_rank(lengths, 0.95),
+                "max": max(lengths),
+            },
             "template_token_overhead": self._overhead(tokenizer),
         }
         if over:
@@ -939,6 +993,12 @@ class SeqClsRunner:
         except HeadLoadError as exc:
             raise PreflightError(str(exc), {}) from exc
         model.config.pad_token_id = tokenizer.pad_token_id
+        # Every head reads one pooled vector, the first token for an encoder; a config that mean
+        # pools would give the primary head a different vector from the auxiliary heads.
+        pooling: Any = getattr(model.config, "classifier_pooling", None)
+        if pooling is not None and pooling != "cls":
+            model.config.classifier_pooling = "cls"
+            receipt.pooling_changed_from = str(pooling)
         frozen = self._frozen_parameters(checkpoint, receipt)
         params = dict(model.named_parameters())
         unknown = [name for name in frozen if name not in params]
@@ -1014,8 +1074,10 @@ class SeqClsRunner:
         module.eval()
         logit_diff = 0.0
         prob_diff = 0.0
+        argmax_agree = 0
         sample = min(cfg.step0_rows, len(rows))
-        with torch.no_grad():
+        # Both sides in float32 with TF32 off, so the comparison is not of two rounding modes.
+        with _exact_fp32(torch), torch.no_grad():
             for i in range(sample):
                 input_ids: Any = torch.tensor([rows[i]["input_ids"]], device=device)
                 mask: Any = torch.ones_like(input_ids)
@@ -1026,6 +1088,7 @@ class SeqClsRunner:
                     prob_diff,
                     float((zero_shot.softmax(-1) - head.softmax(-1)).abs().max()),
                 )
+                argmax_agree += int(int(zero_shot.argmax()) == int(head.argmax()))
         del lm
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1035,19 +1098,29 @@ class SeqClsRunner:
             "max_abs_logit_diff": logit_diff,
             "max_abs_prob_diff": prob_diff,
             "tolerance": cfg.step0_tolerance,
-            "passed": logit_diff <= cfg.step0_tolerance,
+            "argmax_agree": argmax_agree,
+            "precision": "float32, tf32 off",
+            "passed": logit_diff <= cfg.step0_tolerance and argmax_agree == sample,
             "verbalizer_token_ids": dict(receipt.verbalizer_token_ids),
         }
         if not result["passed"]:
             msg = (
                 f"step-0 check failed: the classifier's label logits differ from the base model's "
-                f"zero-shot logits by {logit_diff:.3g} (tolerance {cfg.step0_tolerance:g})"
+                f"zero-shot logits by {logit_diff:.3g} (tolerance {cfg.step0_tolerance:g}), and "
+                f"the predicted label agrees on {argmax_agree} of {sample} rows"
             )
             raise Step0Error(msg, result)
         return result
 
-    def memory_preflight(self, trainer: Any, encoded: Any) -> dict[str, Any]:
-        """One optimizer step at the longest real batch, measured and then undone exactly."""
+    def memory_preflight(
+        self, trainer: Any, encoded: Any, evaluation: Any = None
+    ) -> dict[str, Any]:
+        """One optimizer step at the longest real batch, measured and then undone exactly.
+
+        With an eval split, the in-run evaluation is measured too: a forward pass at the eval
+        batch size over the eval split's longest rows, with the optimizer state still allocated,
+        as it is when the trainer evaluates mid-run. The budget applies to the larger peak.
+        """
         torch, _ = _modules()
         cfg = self._config
         probe = self._probe or CudaMemoryProbe(torch)
@@ -1080,6 +1153,30 @@ class SeqClsRunner:
             optimizer: Any = trainer.create_optimizer()
             optimizer.step()
             receipt["peak_bytes"] = probe.peak_bytes()
+            if evaluation is not None and len(evaluation) > 0:
+                eval_lengths: list[int] = list(evaluation["length"])
+                eval_rows = min(cfg.eval_batch_size or cfg.per_device_batch_size, len(eval_lengths))
+                eval_longest = sorted(
+                    range(len(eval_lengths)), key=lambda i: eval_lengths[i], reverse=True
+                )[:eval_rows]
+                eval_batch = {
+                    k: v.to(device)
+                    for k, v in trainer.data_collator([evaluation[i] for i in eval_longest]).items()
+                }
+                receipt["eval_batch_rows"] = eval_rows
+                receipt["eval_batch_max_length"] = max(eval_lengths[i] for i in eval_longest)
+                model.zero_grad(set_to_none=True)
+                model.eval()
+                probe.reset()
+                with (
+                    torch.no_grad(),
+                    torch.autocast(
+                        autocast_device, dtype=torch.bfloat16, enabled=cfg.precision == "bf16"
+                    ),
+                ):
+                    trainer.compute_loss(model, eval_batch)
+                receipt["eval_peak_bytes"] = probe.peak_bytes()
+                model.train()
         except (torch.OutOfMemoryError, RuntimeError) as exc:
             # cuBLAS / cuDNN allocation failures surface as a RuntimeError, not as the OOM type.
             if not isinstance(exc, torch.OutOfMemoryError) and not _is_allocation_failure(exc):
@@ -1090,6 +1187,7 @@ class SeqClsRunner:
             raise PreflightError(msg, receipt) from exc
         finally:
             trainer.optimizer = None
+            trainer.reset_loss_parts()
             model.zero_grad(set_to_none=True)
             with torch.no_grad():
                 for name, param in model.named_parameters():
@@ -1097,16 +1195,22 @@ class SeqClsRunner:
             del snapshot
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-        peak, total = receipt["peak_bytes"], receipt["total_bytes"]
+        measured = [
+            b for b in (receipt["peak_bytes"], receipt.get("eval_peak_bytes")) if b is not None
+        ]
+        peak = max(measured) if measured else None
+        total = receipt["total_bytes"]
+        receipt["measured_peak_bytes"] = peak
         receipt["budget_bytes"] = int(total * cfg.memory_fraction) if total else None
         if (
             peak is not None
             and receipt["budget_bytes"] is not None
             and peak > receipt["budget_bytes"]
         ):
+            which = "eval" if peak == receipt.get("eval_peak_bytes") else "training"
             msg = (
-                f"memory preflight peak {_gib(receipt)} exceeds {cfg.memory_fraction:.0%} of the "
-                "device"
+                f"memory preflight {which} peak {_gib({**receipt, 'peak_bytes': peak})} exceeds "
+                f"{cfg.memory_fraction:.0%} of the device"
             )
             raise PreflightError(msg, receipt)
         return receipt
@@ -1153,7 +1257,7 @@ class SeqClsRunner:
             eval_dataset=evaluation,
             data_collator=_collate(int(tokenizer.pad_token_id), torch),
             seq_cls=cfg,
-            positive_index=list(cfg.labels).index(cfg.positive_label),
+            positive_index=cfg.positive_index,
         )
         _attach_progress(trainer, cfg.progress_jsonl)
         return trainer
@@ -1172,6 +1276,7 @@ class SeqClsRunner:
         cfg = self._config
         artifact_dir.mkdir(parents=True, exist_ok=True)
         classifier: Any = module.classifier
+        _require_zero(classifier, _zero_parameters(receipt), when="at save")
         classifier.config._name_or_path = public_model_id
         classifier.save_pretrained(str(artifact_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(artifact_dir))
@@ -1186,10 +1291,12 @@ class SeqClsRunner:
             "labels": list(cfg.labels),
             "label_aliases": dict(cfg.label_aliases),
             "label_index_map": cfg.label_index_map,
-            "two_way_positive_label": cfg.positive_label,
+            "two_way_positive_label": cfg.two_way_positive_label,
+            "two_way_labels": list(cfg.two_way_labels) if cfg.two_way_labels else None,
             "head_init": cfg.head_init,
             "model_type": receipt.model_type,
             "pooling": "last_token" if self.decoder else "first_token",
+            "classifier_pooling": getattr(classifier.config, "classifier_pooling", None),
             "input": {
                 "encoding": "template" if self.decoder else "pair",
                 "premise_format": cfg.premise_format,
@@ -1212,15 +1319,165 @@ class SeqClsRunner:
         )
         return verifier
 
+    def artifact_checks(
+        self,
+        prepared: PreparedRun,
+        artifact_dir: Path,
+        calibration_source: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reload the saved artifact the way a scorer does, check it, and calibrate it.
+
+        The reload is stock ``AutoModelForSequenceClassification`` from the artifact's own
+        safetensors, no remote code, float32 with TF32 off, under the same complete-load check a
+        scorer applies (:func:`~strata_forge.training.loading.check_loading_info`). Its logits on
+        a fixed set of rows (the first ``step0_rows`` of the eval split, else of the training
+        split) must equal the trained classifier's in-memory float32 logits within
+        ``step0_tolerance`` with the same predicted label on every row, and every parameter held
+        at zero must still be exactly zero. With a calibration split, a temperature is then fitted
+        on the reloaded model's logits over its three-way rows and written to
+        :data:`CALIBRATION_FILENAME`, before anything else reads the artifact.
+        """
+        torch, transformers = _modules()
+        cfg = self._config
+        module: Any = prepared.module
+        device: Any = next(module.parameters()).device
+        model: Any
+        try:
+            model, info = transformers.AutoModelForSequenceClassification.from_pretrained(
+                str(artifact_dir),
+                local_files_only=True,
+                output_loading_info=True,
+                dtype=torch.float32,
+                **model_load_kwargs(False),
+            )
+            check_loading_info(cast("Mapping[str, Any]", info), head_prefixes=_HEAD_PREFIXES)
+        except (LoadRefusedError, OSError, ValueError) as exc:
+            msg = f"the saved classifier does not reload cleanly: {exc}"
+            raise ArtifactCheckError(msg, {}) from exc
+        zeros = _zero_parameters(prepared.load_receipt)
+        _require_zero(model, zeros, when="after reload")
+        model.config.pad_token_id = prepared.tokenizer.pad_token_id
+        model.to(device)
+        model.eval()
+        module.eval()
+        rows = prepared.parity_rows
+        logit_diff = 0.0
+        agree = 0
+        with _exact_fp32(torch), torch.no_grad():
+            for row in rows:
+                ids: Any = torch.tensor([row["input_ids"]], device=device)
+                mask: Any = torch.ones_like(ids)
+                # The classifier itself, not the module the trainer wrapped: mixed-precision
+                # training wraps that module's forward in autocast, and this compare is fp32.
+                trained: Any = (
+                    module.classifier(input_ids=ids, attention_mask=mask).logits[0].float()
+                )
+                reloaded: Any = model(input_ids=ids, attention_mask=mask).logits[0].float()
+                logit_diff = max(logit_diff, float((trained - reloaded).abs().max()))
+                agree += int(int(trained.argmax()) == int(reloaded.argmax()))
+        parity: dict[str, Any] = {
+            "rows": len(rows),
+            "rows_from": prepared.parity_from,
+            "max_abs_logit_diff": logit_diff,
+            "tolerance": cfg.step0_tolerance,
+            "argmax_agree": agree,
+            "precision": "float32, tf32 off",
+            "zero_parameters": zeros,
+            "passed": logit_diff <= cfg.step0_tolerance and agree == len(rows),
+        }
+        if not parity["passed"]:
+            msg = (
+                f"the saved classifier's logits differ from the trained one's by {logit_diff:.3g} "
+                f"(tolerance {cfg.step0_tolerance:g}), and the predicted label agrees on {agree} of "
+                f"{len(rows)} rows"
+            )
+            raise ArtifactCheckError(msg, parity)
+        out: dict[str, Any] = {"reload_parity": parity, "calibration": None}
+        if prepared.calibration is not None:
+            out["calibration"] = self._calibrate(
+                model, prepared, artifact_dir, calibration_source or {}
+            )
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return out
+
+    def _calibrate(
+        self,
+        model: Any,
+        prepared: PreparedRun,
+        artifact_dir: Path,
+        source: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Fit one temperature on the calibration split's three-way rows; write the record."""
+        torch, _ = _modules()
+        cfg = self._config
+        try:
+            fitter: Any = importlib.import_module("strata_forge.metrics.calibration_fit")
+        except ImportError as exc:
+            msg = "this engine has no temperature fit (strata_forge.metrics.calibration_fit)"
+            raise ArtifactCheckError(msg, {}) from exc
+        encoded: Any = prepared.calibration
+        device: Any = next(model.parameters()).device
+        collate = prepared.trainer.data_collator
+        labels = list(cfg.labels)
+        picked = [
+            i
+            for i, (two_way, target) in enumerate(
+                zip(encoded["two_way"], encoded["target"], strict=True)
+            )
+            if not two_way and max(target) == 1.0
+        ]
+        if not picked:
+            msg = "the calibration split has no three-way row with a single label to fit on"
+            raise ArtifactCheckError(msg, {"rows": len(encoded)})
+        digest = hashlib.sha256()
+        logits: list[list[float]] = []
+        gold: list[str] = []
+        size = cfg.eval_batch_size or cfg.per_device_batch_size
+        with _exact_fp32(torch), torch.no_grad():
+            for start in range(0, len(picked), size):
+                features = [encoded[i] for i in picked[start : start + size]]
+                batch = collate(features)
+                out: Any = model(
+                    input_ids=batch["input_ids"].to(device),
+                    attention_mask=batch["attention_mask"].to(device),
+                ).logits.float()
+                logits.extend(cast("list[list[float]]", out.cpu().tolist()))
+                for feature in features:
+                    label = labels[list(feature["target"]).index(1.0)]
+                    gold.append(label)
+                    line = json.dumps([list(feature["input_ids"]), label], separators=(",", ":"))
+                    digest.update(line.encode() + b"\n")
+        fit: Any = fitter.fit_temperature(logits, gold, labels=labels)
+        record: dict[str, Any] = {
+            "schema": "strata.calibration/v1",
+            "fit": cast("dict[str, Any]", fit.model_dump(mode="json")),
+            "split": dict(source),
+            "rows": len(picked),
+            "excluded_rows": len(encoded) - len(picked),
+            # sha256 over one JSON line [input_ids, label] per fitted row, in split order.
+            "rows_sha256": digest.hexdigest(),
+            "logits_from": "the saved artifact, float32, tf32 off",
+        }
+        (artifact_dir / CALIBRATION_FILENAME).write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n"
+        )
+        return record
+
     def prepare(
         self,
         *,
         checkpoint: Path,
         train_dataset: Any,
         eval_dataset: Any = None,
+        calibration_dataset: Any = None,
         on_receipt: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> PreparedRun:
         """Every check before step 0, in order; returns the trainer ready to start.
+
+        ``calibration_dataset`` is the declared in-distribution dev split the temperature is
+        fitted on after training; it is encoded and length-checked here like the others.
 
         ``on_receipt(name, receipt)`` is called as each check passes (``overflow``, ``load``,
         ``step0``, ``memory``), so a caller can report it before the run moves on. Blocking.
@@ -1249,35 +1506,58 @@ class SeqClsRunner:
         transformers.set_seed(cfg.seed)
         tokenizer = self.load_tokenizer(checkpoint)
         roles = frozenset(train_dataset.column_names)
-        train, receipts["overflow"] = self.encode(train_dataset, tokenizer, split="train")
+        with _check_stage("overflow"):
+            train, receipts["overflow"] = self.encode(train_dataset, tokenizer, split="train")
         evaluation = None
         if eval_dataset is not None:
             if frozenset(eval_dataset.column_names) != roles:
                 msg = "the eval split must map the same roles as the training split"
                 raise PreflightError(msg, {})
-            evaluation, receipts["overflow_eval"] = self.encode(
-                eval_dataset, tokenizer, split="eval"
-            )
+            with _check_stage("overflow"):
+                evaluation, receipts["overflow_eval"] = self.encode(
+                    eval_dataset, tokenizer, split="eval"
+                )
+        calibration = None
+        if calibration_dataset is not None:
+            with _check_stage("overflow"):
+                calibration, receipts["overflow_calibration"] = self.encode(
+                    calibration_dataset, tokenizer, split="calibration"
+                )
         report("overflow", receipts["overflow"])
         _stamp("encode_s")
 
-        module, load_receipt, frozen = self.load_model(checkpoint, tokenizer, roles=roles)
+        with _check_stage("load"):
+            module, load_receipt, frozen = self.load_model(checkpoint, tokenizer, roles=roles)
         receipts["load"] = {**asdict(load_receipt), "frozen_parameters": frozen}
+        receipts["load"]["classifier_bias"] = (
+            {"value": True, "reason": _CLASSIFIER_BIAS_REASON}
+            if "classifier.bias" in load_receipt.added_parameters
+            else None
+        )
+        receipts["loss"] = {
+            "form": LOSS_FORM,
+            "brier_weight": cfg.brier_weight,
+            "flag_weight": cfg.flag_loss_weight,
+            "support_weight": cfg.support_loss_weight,
+        }
         report("load", receipts["load"])
         if visible:
             module.to("cuda")
         if cfg.from_lm_head:
-            receipts["step0"] = self.step0_check(module, checkpoint, train, load_receipt)
+            with _check_stage("step0"):
+                receipts["step0"] = self.step0_check(module, checkpoint, train, load_receipt)
             report("step0", receipts["step0"])
         _stamp("load_s")
 
         trainer = self.build_trainer(module, train, evaluation, tokenizer)
-        receipts["memory"] = self.memory_preflight(trainer, train)
+        with _check_stage("memory"):
+            receipts["memory"] = self.memory_preflight(trainer, train, evaluation)
         report("memory", receipts["memory"])
         # The preflight consumed random state; start the run from the declared seed regardless.
         transformers.set_seed(cfg.seed)
         _stamp("preflight_s")
         receipts["timing"] = timing
+        parity_source = evaluation if evaluation is not None else train
         return PreparedRun(
             trainer=trainer,
             module=module,
@@ -1288,12 +1568,24 @@ class SeqClsRunner:
             train_rows=len(train),
             eval_rows=len(evaluation) if evaluation is not None else 0,
             on_gpu=bool(visible),
+            parity_rows=[parity_source[i] for i in range(min(cfg.step0_rows, len(parity_source)))],
+            parity_from="eval" if evaluation is not None else "train",
+            calibration=calibration,
         )
 
     def finish(
-        self, prepared: PreparedRun, *, artifact_dir: Path, public_model_id: str | None = None
+        self,
+        prepared: PreparedRun,
+        *,
+        artifact_dir: Path,
+        public_model_id: str | None = None,
+        calibration_source: Mapping[str, Any] | None = None,
     ) -> SeqClsResult:
-        """Train a prepared run and write its artifact. Blocking."""
+        """Train a prepared run, write its artifact, then check and calibrate it. Blocking.
+
+        ``calibration_source`` names the calibration split (repo, config, split, commit) in the
+        calibration record.
+        """
         started = time.monotonic()
         output: Any = prepared.trainer.train()
         trained = time.monotonic()
@@ -1306,9 +1598,13 @@ class SeqClsRunner:
             receipt=prepared.load_receipt,
             frozen=prepared.frozen,
         )
+        saved = time.monotonic()
+        with _check_stage("artifact"):
+            receipts.update(self.artifact_checks(prepared, artifact_dir, calibration_source))
         timing = dict(receipts.get("timing") or {})
         timing["train_s"] = round(trained - started, 3)
-        timing["save_s"] = round(time.monotonic() - trained, 3)
+        timing["save_s"] = round(saved - trained, 3)
+        timing["artifact_checks_s"] = round(time.monotonic() - saved, 3)
         receipts["timing"] = timing
         return SeqClsResult(
             output_dir=str(artifact_dir),
@@ -1324,6 +1620,8 @@ class SeqClsRunner:
         artifact_dir: Path,
         train_dataset: Any,
         eval_dataset: Any = None,
+        calibration_dataset: Any = None,
+        calibration_source: Mapping[str, Any] | None = None,
         public_model_id: str | None = None,
         on_receipt: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> SeqClsResult:
@@ -1332,9 +1630,15 @@ class SeqClsRunner:
             checkpoint=checkpoint,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
+            calibration_dataset=calibration_dataset,
             on_receipt=on_receipt,
         )
-        return self.finish(prepared, artifact_dir=artifact_dir, public_model_id=public_model_id)
+        return self.finish(
+            prepared,
+            artifact_dir=artifact_dir,
+            public_model_id=public_model_id,
+            calibration_source=calibration_source,
+        )
 
 
 @dataclass
@@ -1350,6 +1654,48 @@ class PreparedRun:
     train_rows: int
     eval_rows: int
     on_gpu: bool
+    parity_rows: list[dict[str, Any]]
+    parity_from: str
+    calibration: Any = None
+
+
+@contextlib.contextmanager
+def _exact_fp32(torch: Any) -> Generator[None]:
+    """TF32 off for the block (matmul and cuDNN), restored after; a check compares exact fp32."""
+    backends: Any = getattr(torch, "backends", None)
+    switches = [
+        getattr(getattr(backends, "cuda", None), "matmul", None),
+        getattr(backends, "cudnn", None),
+    ]
+    saved = [getattr(x, "allow_tf32", None) for x in switches]
+    for switch in switches:
+        if switch is not None and hasattr(switch, "allow_tf32"):
+            switch.allow_tf32 = False
+    try:
+        yield
+    finally:
+        for switch, value in zip(switches, saved, strict=True):
+            if switch is not None and isinstance(value, bool):
+                switch.allow_tf32 = value
+
+
+def _zero_parameters(receipt: LoadReceipt) -> list[str]:
+    """The parameters this method added as exactly zero (and frozen there)."""
+    return [p.split(" ")[0] for p in receipt.added_parameters if "zero" in p]
+
+
+def _require_zero(model: Any, names: list[str], *, when: str) -> None:
+    params = dict(model.named_parameters())
+    for name in names:
+        param: Any = params.get(name)
+        if param is None or bool((param.detach() != 0).any()):
+            msg = f"{name} must be exactly zero {when}, and is not"
+            raise ArtifactCheckError(msg, {"parameter": name})
+
+
+def _nearest_rank(values: list[int], q: float) -> int:
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(q * len(ordered)) - 1)]
 
 
 def _is_allocation_failure(exc: BaseException) -> bool:
@@ -1364,6 +1710,17 @@ def _read_verifier(checkpoint: Path) -> dict[str, Any] | None:
     except OSError, ValueError:
         return None
     return cast("dict[str, Any]", saved) if isinstance(saved, dict) else None
+
+
+@contextlib.contextmanager
+def _check_stage(name: str) -> Generator[None]:
+    """Tag a refusal raised inside the block with the check it came from."""
+    try:
+        yield
+    except PreflightError as exc:
+        if not exc.check:
+            exc.check = name
+        raise
 
 
 def _ignore_receipt(_name: str, _receipt: dict[str, Any]) -> None:

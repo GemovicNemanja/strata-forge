@@ -40,7 +40,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["LossTerms", "LossWeights", "classifier_loss"]
+__all__ = ["LOSS_FORM", "LossTerms", "LossWeights", "classifier_loss"]
+
+#: The objective in words, recorded beside its weights in every classifier run's manifest.
+LOSS_FORM = (
+    "primary: soft cross-entropy over the labels; a two-way row is masked to positive vs the sum "
+    "of every other label, log(1-q) = LSE(z_neg) - LSE(z); plus brier_weight * Brier in the sum "
+    "form sum_k (p_k - y_k)^2 on [0, 2] (2 (q - t)^2 on a two-way row); mean over every row. "
+    "flag: BCE-with-logits, mean over rows whose flag is not null. support: BCE-with-logits per "
+    "premise, mean per row, then mean over rows whose support set is not null. "
+    "total = primary + flag_weight * flag + support_weight * support; no accumulation."
+)
 
 
 @dataclass(frozen=True)

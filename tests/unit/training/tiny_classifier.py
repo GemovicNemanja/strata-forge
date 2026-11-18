@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 WORDS = [f"w{i}" for i in range(40)]
 VERBALIZERS = {"entailment": " True", "contradiction": " False", "neutral": " Unknown"}
 LABELS = ("entailment", "contradiction", "neutral")
+#: How a two-way row spells its positive and negative, declared explicitly by every config.
+TWO_WAY = {"two_way_positive_label": "entailment", "two_way_labels": ("entailed", "not_entailed")}
 _SPECIAL = ["[PAD]", "[UNK]", "[CLS]", "[SEP]"]
 _EXTRA = ["True", "False", "Unknown", ":", "p1", "p2", "p3", "1", "2", "3"]
 
@@ -63,13 +65,16 @@ def _common(vocab_size: int) -> dict[str, Any]:
     }
 
 
-def encoder(directory: Path, *, seed: int = 0) -> Path:
-    """A ModernBERT masked-LM checkpoint: the shape of a classifier-less encoder base."""
+def encoder(directory: Path, *, seed: int = 0, pooling: str = "cls") -> Path:
+    """A ModernBERT masked-LM checkpoint: the shape of a classifier-less encoder base.
+
+    ``pooling="mean"`` writes the ``classifier_pooling`` the Ettin encoder configs carry.
+    """
     torch: Any = __import__("torch")
     transformers: Any = __import__("transformers")
     tok = tokenizer(directory)
     torch.manual_seed(seed)
-    config = transformers.ModernBertConfig(**_common(len(tok)))
+    config = transformers.ModernBertConfig(**_common(len(tok)), classifier_pooling=pooling)
     model = transformers.ModernBertForMaskedLM(config)
     model.save_pretrained(str(directory), safe_serialization=True)
     return directory
@@ -109,7 +114,7 @@ def rows(n: int, *, seed: int = 0, two_way_every: int = 4) -> list[dict[str, Any
             {
                 "premises": premises,
                 "hypothesis": hypothesis,
-                "label": ("not_entailment" if label != "entailment" else "entailment")
+                "label": ("entailed" if label == "entailment" else "not_entailed")
                 if two_way
                 else label,
                 "label_space": "2way_entail_vs_not" if two_way else "3way",

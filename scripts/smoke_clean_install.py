@@ -90,7 +90,8 @@ _FULL_WEIGHT_TASKS = frozenset({"SEQ_CLS"})
 _PIN = "0" * 40
 _SEQ_CLS_HYPERPARAMS = {
     "labels": ["entailment", "contradiction", "neutral"],
-    "label_aliases": {"not_entailment": "not_entailed"},
+    "two_way_positive_label": "entailment",
+    "two_way_labels": ["entailed", "not_entailed"],
     "max_length": 64,
     "per_device_batch_size": 2,
 }

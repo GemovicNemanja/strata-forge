@@ -618,7 +618,7 @@ class TestExecute:
         assert events[-1]["step"] == 12
         assert events[-1]["total_steps"] == 12
         # The run's measured GPU time rides the terminal event too (0 on a machine with no GPU).
-        assert events[-1]["metrics"] == {"train_loss": 0.5, "gpu_seconds": 0.0}
+        assert events[-1]["metrics"] == {"train_loss": 0.5, "gpu_seconds": 0.0, "gpu_count": 0.0}
 
     def test_the_manifest_lands_in_the_artifact_and_names_the_run(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

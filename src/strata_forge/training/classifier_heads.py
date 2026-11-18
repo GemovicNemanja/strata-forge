@@ -104,6 +104,8 @@ class LoadReceipt:
     initialised_from: dict[str, str] = field(default_factory=dict[str, str])
     verbalizer_token_ids: dict[str, int] = field(default_factory=dict[str, int])
     added_parameters: list[str] = field(default_factory=list[str])
+    #: The checkpoint config's ``classifier_pooling`` when the method replaced it with ``cls``.
+    pooling_changed_from: str | None = None
 
 
 def _torch() -> Any:
@@ -199,12 +201,12 @@ def _checkpoint_files(path: Path) -> dict[str, Path]:
     if index.is_file():
         weight_map: Any = json.loads(index.read_text()).get("weight_map") or {}
         if not isinstance(weight_map, dict):
-            msg = f"{index} has no weight_map"
+            msg = "the checkpoint's safetensors index has no weight_map"
             raise HeadLoadError(msg)
         return {str(k): path / str(v) for k, v in weight_map.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType] - parsed JSON
     single = path / "model.safetensors"
     if not single.is_file():
-        msg = f"{path} has no safetensors weights"
+        msg = "the checkpoint has no safetensors weights"
         raise HeadLoadError(msg)
     safetensors_mod: Any = __import__("safetensors")
     with safetensors_mod.safe_open(str(single), framework="pt") as handle:

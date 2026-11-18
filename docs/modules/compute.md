@@ -474,11 +474,14 @@ metrics; the engine and the installed versions of ``torch``,
 ``transformers``, ``trl``, ``peft``, ``accelerate``, ``datasets``,
 ``tokenizers`` and ``safetensors``; for ``seq_cls``, every check's receipt;
 and ``compute``: the device, the GPU count, ``wall_seconds``, per-phase
-``timing`` and ``gpu_seconds``. ``gpu_seconds`` is the runner's own measured
+``timing`` and ``gpu_seconds``. A ``seq_cls`` run's ``checks`` also hold the loss form and
+weights, the reload-parity receipt and, with ``calibration_split`` declared, the calibration
+record also written to ``calibration.json``. ``gpu_seconds`` is the runner's own measured
 wall-clock time, from the spec check to the manifest, times the GPUs it used
 (one for ``seq_cls``); provisioning and the engine install happen before the
 runner exists and are the control plane's to measure. The terminal ``end``
-event carries ``gpu_seconds`` in its metrics too. The manifest holds no row
+event carries ``gpu_seconds`` and ``gpu_count`` in its metrics too, so a control plane can book
+its own total GPU-held time against the same count. The manifest holds no row
 content and no credential.
 
 A pushed fine-tune goes only to a **private** model repo, checked before any

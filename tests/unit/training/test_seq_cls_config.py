@@ -13,7 +13,6 @@ from strata_forge.training.dataset_format import (
     validate_mapping,
 )
 from strata_forge.training.seq_cls import (
-    NOT_ENTAILED,
     SeqClsConfig,
     _decoder_text,  # pyright: ignore[reportPrivateUsage]
     render_premises,
@@ -34,7 +33,8 @@ class TestConfig:
         assert config.precision == "bf16"
         assert config.gradient_checkpointing is False
         assert config.brier_weight == 0.0
-        assert config.positive_label == "entailment"
+        assert config.two_way_positive_label is None
+        assert config.two_way_labels is None
 
     @pytest.mark.parametrize("steps", [1, 2, 8])
     def test_gradient_accumulation_is_refused_by_name(self, steps: int) -> None:
@@ -46,7 +46,6 @@ class TestConfig:
         [
             ("only",),
             ("a", "a"),
-            ("a", NOT_ENTAILED),
             ("a", "b c"),
             tuple(f"l{i}" for i in range(17)),
         ],
@@ -58,7 +57,21 @@ class TestConfig:
     def test_an_alias_must_name_a_declared_label(self) -> None:
         with pytest.raises(ValidationError, match="not declared"):
             _config(label_aliases={"yes": "entailed"})
-        assert _config(label_aliases={"not_entailment": NOT_ENTAILED}).label_aliases
+        assert _config(label_aliases={"yes": "entailment"}).label_aliases
+
+    def test_two_way_labels_are_declared_explicitly_and_together(self) -> None:
+        with pytest.raises(ValidationError, match="declared together"):
+            _config(two_way_positive_label="entailment")
+        with pytest.raises(ValidationError, match="declared together"):
+            _config(two_way_labels=("entailed", "not_entailed"))
+        with pytest.raises(ValidationError, match="one of labels"):
+            _config(two_way_positive_label="entailed", two_way_labels=("entailed", "not_entailed"))
+        with pytest.raises(ValidationError, match="two distinct"):
+            _config(two_way_positive_label="entailment", two_way_labels=("x", "x"))
+        config = _config(
+            two_way_positive_label="contradiction", two_way_labels=("entailed", "not_entailed")
+        )
+        assert config.positive_index == 1
 
     def test_an_index_map_is_integer_keyed_and_declared(self) -> None:
         with pytest.raises(ValidationError, match="integers"):
@@ -99,28 +112,26 @@ class TestRenderPremises:
         assert markers == [("p1", 0), ("p2", 10)]
         assert all(text[offset:].startswith(pid) for pid, offset in markers)
 
-    def test_a_list_of_strings_is_numbered(self) -> None:
-        text, markers = render_premises(["alpha", "beta"], "ids")
-        assert text == "1: alpha\n2: beta"
-        assert [pid for pid, _ in markers] == ["1", "2"]
-
     def test_plain_renders_text_without_markers(self) -> None:
-        assert render_premises(["alpha", "beta"], "plain") == ("alpha\nbeta", [])
-
-    def test_a_string_is_used_as_given(self) -> None:
-        assert render_premises("alpha. beta.", "ids") == ("alpha. beta.", [])
+        cell = [{"pid": "p1", "text": "alpha"}, {"pid": "p2", "text": "beta"}]
+        assert render_premises(cell, "plain") == ("alpha\nbeta", [])
 
     @pytest.mark.parametrize(
-        "bad",
+        ("bad", "match"),
         [
-            [{"pid": "p1", "text": "a"}, {"pid": "p1", "text": "b"}],
-            [{"pid": "p1"}],
-            [3],
-            42,
+            ("alpha. beta.", "list of"),
+            (["alpha", "beta"], "pid and text"),
+            ([], "non-empty"),
+            ([{"pid": "p2", "text": "a"}], "p1..pN"),
+            ([{"pid": "p1", "text": "a"}, {"pid": "p1", "text": "b"}], "p1..pN"),
+            ([{"pid": "1", "text": "a"}], "p1..pN"),
+            ([{"pid": "p1"}], "pid and text"),
+            ([{"pid": "p1", "text": 3}], "string"),
+            (42, "list of"),
         ],
     )
-    def test_malformed_premises_are_refused(self, bad: Any) -> None:
-        with pytest.raises(DatasetFormatError):
+    def test_premises_must_be_ordered_pid_objects(self, bad: Any, match: str) -> None:
+        with pytest.raises(DatasetFormatError, match=match):
             render_premises(bad, "ids")
 
     def test_the_decoder_template_reports_where_the_premises_start(self) -> None:

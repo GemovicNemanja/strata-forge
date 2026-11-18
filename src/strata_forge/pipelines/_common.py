@@ -228,7 +228,15 @@ _CREDENTIAL_NAME_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL", re.IGN
 
 
 class RunError(Exception):
-    """A runner failure whose message is safe to surface (already token-scrubbed)."""
+    """A runner failure whose message is safe to surface (already token-scrubbed).
+
+    ``metrics`` ride the terminal ``error`` event, so a control plane receives a refused run's
+    measurements (its GPU time, the check's numbers) as it does a finished run's.
+    """
+
+    def __init__(self, *args: object, metrics: Mapping[str, float] | None = None) -> None:
+        super().__init__(*args)
+        self.metrics: dict[str, float] = dict(metrics or {})
 
 
 class RunSecrets(BaseModel):
@@ -752,7 +760,8 @@ async def runner_main(
         return 1
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
         detail = redactor.redact(str(exc))
-        emit(writer, ProgressEvent(kind="error", message=detail))
+        metrics = exc.metrics if isinstance(exc, RunError) else {}
+        emit(writer, ProgressEvent(kind="error", message=detail, metrics=metrics))
         # Also to stderr, because that is where the control plane reads a failed run's reason
         # from. Catching the exception here means no traceback is printed, so without this the
         # run's own account of why it failed exists only in the progress file, and the record

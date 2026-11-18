@@ -12,6 +12,7 @@ The Hub is never contacted: the split and the checkpoint are generated and hande
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _SHA = "b" * 40
+_HAS_FIT = importlib.util.find_spec("strata_forge.metrics.calibration_fit") is not None
 _TOKEN = "hf_secretwritetoken1234567890"
 _MAPPING = {
     "premises": "ctx",
@@ -62,6 +64,9 @@ def _spec(**overrides: Any) -> fr.FinetuneSpec:
         "dataset_commit_sha": _SHA,
         "split": "train",
         "eval_split": "dev",
+        # The temperature fit ships in its own change; until it is in the engine the smoke
+        # declares no calibration split (an engine without the fit refuses one).
+        **({"calibration_split": "dev"} if _HAS_FIT else {}),
         "dataset_format": "nli_pair",
         "column_mapping": _MAPPING,
         "adapter": "none",
@@ -69,7 +74,8 @@ def _spec(**overrides: Any) -> fr.FinetuneSpec:
         "run_id": "smoke",
         "hyperparams": {
             "labels": list(tiny.LABELS),
-            "label_aliases": {"not_entailment": "not_entailed"},
+            "two_way_positive_label": "entailment",
+            "two_way_labels": ["entailed", "not_entailed"],
             "head_init": "decoder_lm_head",
             "verbalizers": dict(tiny.VERBALIZERS),
             "max_length": 64,
@@ -157,6 +163,7 @@ class TestAcceptanceSmoke:
         assert step0["metrics"]["step0_max_abs_logit_diff"] < 1e-5
         assert events[-1]["kind"] == "end"
         assert events[-1]["metrics"]["gpu_seconds"] == 0.0
+        assert events[-1]["metrics"]["gpu_count"] == 0.0
 
         # The artifact and its manifest went up together; the checkpoints did not.
         assert {"manifest.json", "model.safetensors", "strata_verifier.json"} <= set(
@@ -177,6 +184,27 @@ class TestAcceptanceSmoke:
         assert manifest["checks"]["step0"]["passed"] is True
         assert manifest["checks"]["memory"]["gradient_checkpointing"] is True
         assert manifest["checks"]["overflow"]["rows_over_max_length"] == 0
+        assert manifest["checks"]["overflow"]["length_distribution"]["max"] <= 64
+        assert manifest["checks"]["reload_parity"]["passed"] is True
+        assert manifest["checks"]["load"]["classifier_bias"]["value"] is True
+        assert set(manifest["checks"]["loss"]) == {
+            "form",
+            "brier_weight",
+            "flag_weight",
+            "support_weight",
+        }
+        if _HAS_FIT:
+            assert manifest["dataset"]["calibration_split"] == "dev"
+            calibration = manifest["checks"]["calibration"]
+            assert calibration["split"] == {
+                "dataset_id": "synthetic/rows",
+                "config": None,
+                "split": "dev",
+                "commit": _SHA,
+            }
+            assert "calibration.json" in pushed["files"]
+        else:
+            assert manifest["checks"]["calibration"] is None
         assert manifest["compute"]["gpu_seconds"] == 0.0
         assert set(manifest["compute"]["timing"]) >= {
             "encode_s",
@@ -192,12 +220,49 @@ class TestAcceptanceSmoke:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checkpoint: Path
     ) -> None:
         spec = _spec(hyperparams={"max_length": 8})
-        with pytest.raises(RunError, match="exceed max_length 8"):
+        with pytest.raises(RunError, match="overflow check refused the run") as exc:
             _drive(monkeypatch, tmp_path, checkpoint, spec)
+        assert "exceed max_length 8" in str(exc.value)
+        # Measured on the terminal error event, so the control plane books a refused run too.
+        assert exc.value.metrics["gpu_seconds"] == 0.0
+        assert exc.value.metrics["refused_rows_over_max_length"] > 0
         refused = json.loads((tmp_path / "strata-finetune-output" / "manifest.json").read_text())
         assert refused["outcome"] == "refused"
+        assert refused["checks"]["check"] == "overflow"
+        assert refused["compute"]["gpu_seconds"] == 0.0
         assert refused["checks"]["receipt"]["rows_over_max_length"] > 0
         assert refused["model"]["requested_revision"] == _SHA
+
+
+class TestCalibrationSpec:
+    def test_calibration_split_is_for_the_classifier_only(self) -> None:
+        sft = fr.FinetuneSpec.model_validate(
+            {
+                "method": "sft",
+                "model_id": "org/m",
+                "dataset_id": "org/d",
+                "split": "train",
+                "dataset_format": "text",
+                "column_mapping": {"text": "t"},
+                "calibration_split": "dev",
+            }
+        )
+        with pytest.raises(RunError, match="seq_cls only"):
+            fr.check_spec(sft)
+
+    def test_an_engine_without_the_fit_refuses_a_calibration_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib.util
+
+        real = importlib.util.find_spec
+
+        def _missing(name: str, *args: Any) -> Any:
+            return None if name.endswith("calibration_fit") else real(name, *args)
+
+        monkeypatch.setattr(importlib.util, "find_spec", _missing)
+        with pytest.raises(RunError, match="temperature fit"):
+            fr.check_spec(_spec(calibration_split="dev"))
 
 
 class TestRoleSplit:

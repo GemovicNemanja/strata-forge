@@ -247,7 +247,8 @@ config = SeqClsConfig(
     model_id="org/base",                     # recorded; the runner loads `checkpoint`
     output_dir="/data/run/checkpoints",      # intermediate checkpoints only
     labels=("entailment", "contradiction", "neutral"),
-    label_aliases={"not_entailment": "not_entailed"},
+    two_way_positive_label="entailment",
+    two_way_labels=("entailed", "not_entailed"),
     head_init="decoder_lm_head",
     verbalizers={"entailment": " True", "contradiction": " False", "neutral": " Unknown"},
     brier_weight=0.1,
@@ -262,9 +263,9 @@ result = SeqClsRunner(config).run(
 
 | Role | Cell | Null |
 |---|---|---|
-| `premises` | a string (rendered as given), a list of strings (ids `1`, `2`, ...) or a list of `{pid, text}` | refused |
+| `premises` | a non-empty list of `{pid, text}` whose pids are `p1`, `p2`, ... in order (a string or a list of strings is refused) | refused |
 | `hypothesis` | a string | refused |
-| `label` | a declared label, an alias, or an integer through `label_index_map` (integer labels need one, because index orders differ) | refused |
+| `label` | three-way: a declared label, an alias, or an integer through `label_index_map` (integer labels need one, because index orders differ); two-way: exactly one of the declared `two_way_labels` | refused |
 | `label_space` | `3way` or `2way_entail_vs_not` | refused (unmapped: every row is `3way`) |
 | `label_dist` | `len(labels)` non-negative numbers summing to 1 (three-way rows) | the one-hot label |
 | `inconsistent_premises` | a boolean | masked |
@@ -280,16 +281,20 @@ and its answer position is the final token. Rows are never truncated.
 
 `classifier_loss` (`classifier_loss.py`), vectorised over the batch. A three-way row contributes
 `CE + brier_weight * Brier` against its target distribution (Brier in the sum form). A two-way row
-asks only whether the positive label (`two_way_positive_label`, default `labels[0]`) holds: its
-negative is the aggregate of every other label, `log(1 - q) = LSE(z_neg) - LSE(z)`, so the negative
+asks only whether the positive label holds. Both halves are declared, with no default: which label
+the positive is (`two_way_positive_label`) and how a row spells its positive and negative
+(`two_way_labels`, e.g. `("entailed", "not_entailed")`); a split with a two-way row and neither
+declared refuses. The negative is the aggregate of every other label (with three labels,
+P(not_entailed) = P(C) + P(U)), `log(1 - q) = LSE(z_neg) - LSE(z)`, so the negative
 labels are never trained against each other, and its Brier is `2 (q - t)^2`. The primary term is
 the mean over every row. The flag head adds `flag_loss_weight` times the mean BCE over the rows
 whose flag is not null; the support head adds `support_loss_weight` times the mean, over eligible
 rows, of each row's mean BCE over its premises. A term with no eligible row is exactly zero.
 Every mean is over the declared batch, which is why `gradient_accumulation_steps` is refused by
 name: accumulating would change the denominators. There is no label smoothing and no class or
-sample weight. The research preset is `brier_weight=0.1`, `flag_loss_weight=1.0`,
-`support_loss_weight=1.0`.
+sample weight. There is no named preset: the weights are plain parameters (research runs use
+`brier_weight=0.1`, `flag_loss_weight=1.0`, `support_loss_weight=1.0`), and each run's manifest
+records the three weights beside `LOSS_FORM`, the objective in words.
 
 ### Heads and the load guard
 
@@ -317,25 +322,33 @@ the support head is `h^T W m_pid + b` over each premise's marker token. They sta
 ### Checks before step 0
 
 `SeqClsRunner.prepare` runs these in order, calling `on_receipt(name, receipt)` as each passes;
-a failure raises `PreflightError` (or `Step0Error`) carrying its receipt.
+a failure raises `PreflightError` (or `Step0Error`) carrying its receipt. The two checks that
+compare logits (step 0, and reload parity below) run both sides in float32 with TF32 matmul and
+cuDNN switched off for the comparison, and require the same predicted label on every compared row
+besides the tolerance.
 
 1. **`overflow`**: every row resolves its label (a soft `label_dist` must be finite, non-negative
    and sum to 1) and tokenises without truncation; a refusal names the row index and the role,
    never the cell; a row longer than
    `max_length` refuses the run with the count and the first row indices. The receipt records the
-   row count, the longest row and the template's token overhead (special tokens plus template
-   literals).
+   row count, the over-cap count, the template's token overhead (special tokens plus template
+   literals), and the per-row token-length distribution (`min`, `p50`, `p95`, `max`, nearest
+   rank, overhead included).
 2. **`load`**: the load guard above.
 3. **`step0`** (`decoder_lm_head`): on the first `step0_rows` training rows, the classifier's label
    logits must equal the base model's own causal-LM logits for the verbalizer tokens within
-   `step0_tolerance` (absolute, float32). The receipt records the largest logit and probability
-   differences and the resolved verbalizer token ids; every verbalizer must be one token.
+   `step0_tolerance` (absolute, float32, TF32 off) with the same predicted label on every row. The
+   receipt records the largest logit and probability differences, the agreeing rows and the
+   resolved verbalizer token ids; every verbalizer must be one token.
 4. **`memory`**: one full optimizer step at the split's longest real batch (the
    `per_device_batch_size` longest rows, padded together), under the run's precision and
    activation-checkpointing setting, measured by the CUDA allocator's peak and then undone exactly
-   (weights restored, gradients and optimizer state dropped). A peak above `memory_fraction` of
-   the device, or an out-of-memory error, refuses the run with the measured peak. Off a GPU the
-   step still runs and the peak is recorded as unmeasured.
+   (weights restored, gradients and optimizer state dropped). With an eval split, the in-run
+   evaluation is measured as well: a forward pass at the eval batch size over the eval split's
+   longest rows while the optimizer state is still allocated, as when the trainer evaluates
+   mid-run. The larger peak above `memory_fraction` of the device, or an out-of-memory error,
+   refuses the run with the measured peaks. Off a GPU the step still runs and the peaks are
+   recorded as unmeasured.
 
 The run also refuses a machine exposing more than one GPU, since the trainer would split the batch.
 
@@ -350,6 +363,27 @@ order), the tokenizer, `strata_aux_heads.safetensors`, and `strata_verifier.json
 aliases and index map, the pooling position, the premise and template rendering (and the
 template's SHA-256), `max_length`, the verbalizers and their token ids, the trained outputs and the
 frozen parameters, so an evaluator renders rows exactly as training did.
+
+### After training: reload parity and calibration
+
+`SeqClsRunner.finish` checks the saved artifact before anything else reads it
+(`artifact_checks`). Every parameter the method holds at zero (the decoder's `head.dense.bias`) is
+asserted exactly zero at save and again after reload. The artifact is reloaded the way a scorer
+loads it: stock `AutoModelForSequenceClassification` from its own safetensors, no remote code,
+float32, under `check_loading_info`. Its logits on a fixed set of rows (the first `step0_rows` of
+the eval split, else of the training split) must equal the trained classifier's in-memory float32
+logits within `step0_tolerance`, with the same predicted label on every row (`reload_parity`
+receipt). A failure raises `ArtifactCheckError`; the run is refused and nothing is pushed. When a
+decoder's classifier gained a bias, the load receipt records `classifier_bias: true` and why.
+
+With a declared calibration split (the run spec's `calibration_split`, an in-distribution dev
+split), one temperature is then fitted on the reloaded model's float32 logits over the split's
+single-label three-way rows (two-way and soft-label rows are excluded and counted) with
+`strata_forge.metrics.calibration_fit.fit_temperature`, the same fit the evaluation runner uses,
+and written to `calibration.json` in the artifact: the fit (temperature, NLL before and after, a
+boundary hit), the split and its dataset commit, the row counts, and `rows_sha256` (SHA-256 over
+one JSON line `[input_ids, label]` per fitted row, in split order). An engine without that fit
+refuses a spec that declares a calibration split.
 
 ## PEFT (LoRA / QLoRA)
 

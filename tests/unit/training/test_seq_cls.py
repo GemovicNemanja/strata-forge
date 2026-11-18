@@ -22,7 +22,9 @@ from strata_forge.training.classifier_heads import (
     head_plan,
 )
 from strata_forge.training.seq_cls import (
+    CALIBRATION_FILENAME,
     VERIFIER_CONFIG_FILENAME,
+    ArtifactCheckError,
     PreflightError,
     SeqClsConfig,
     SeqClsRunner,
@@ -38,8 +40,6 @@ from tests.unit.training import tiny_classifier as tiny  # noqa: E402 - after th
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-_ALIASES = {"not_entailment": "not_entailed"}
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +66,7 @@ def _config(tmp_path: Path, **overrides: Any) -> SeqClsConfig:
         "model_id": "synthetic/tiny",
         "output_dir": str(tmp_path / "checkpoints"),
         "labels": tiny.LABELS,
-        "label_aliases": _ALIASES,
+        **tiny.TWO_WAY,
         "max_length": 64,
         "per_device_batch_size": 4,
         "max_steps": 3,
@@ -85,16 +85,22 @@ def _decoder_config(tmp_path: Path, **overrides: Any) -> SeqClsConfig:
 
 
 class _Probe:
-    """A memory probe with a fixed reading, standing in for a GPU allocator."""
+    """A memory probe with fixed readings, standing in for a GPU allocator.
 
-    def __init__(self, peak: int, total: int) -> None:
-        self._peak, self._total = peak, total
+    Each reading after a reset is the next of ``peaks`` (the last repeats), so a test can give the
+    training step and the eval pass different peaks.
+    """
+
+    def __init__(self, peak: int | list[int], total: int) -> None:
+        self._peaks = peak if isinstance(peak, list) else [peak]
+        self._total = total
+        self._resets = 0
 
     def reset(self) -> None:
-        return None
+        self._resets += 1
 
     def peak_bytes(self) -> int | None:
-        return self._peak
+        return self._peaks[min(self._resets, len(self._peaks)) - 1]
 
     def total_bytes(self) -> int | None:
         return self._total
@@ -118,7 +124,7 @@ class TestEncode:
                 assert enc["target"][tiny.LABELS.index(row["label"])] == 1.0
             else:
                 assert enc["two_way"] == 1
-                assert enc["two_way_target"] == (1.0 if row["label"] == "entailment" else 0.0)
+                assert enc["two_way_target"] == (1.0 if row["label"] == "entailed" else 0.0)
             flag = row["inconsistent_premises"]
             assert enc["flag"] == (-1.0 if flag is None else float(flag))
             if row["support_set"] is None:
@@ -144,7 +150,7 @@ class TestEncode:
         assert "never truncated" in str(exc.value)
 
     def test_an_integer_label_needs_an_index_map(self, tmp_path: Path, encoder_dir: Path) -> None:
-        rows = [{"premises": "w1 w2", "hypothesis": "w3", "label": 2}]
+        rows = [{"premises": [{"pid": "p1", "text": "w1 w2"}], "hypothesis": "w3", "label": 2}]
         runner = SeqClsRunner(_config(tmp_path))
         tokenizer = runner.load_tokenizer(encoder_dir)
         with pytest.raises(PreflightError, match="explicit index map"):
@@ -156,7 +162,7 @@ class TestEncode:
         assert encoded[0]["target"] == [0.0, 0.0, 1.0]
 
     def test_an_unknown_label_is_named_by_row(self, tmp_path: Path, encoder_dir: Path) -> None:
-        rows = [{"premises": "w1", "hypothesis": "w3", "label": "maybe"}]
+        rows = [{"premises": [{"pid": "p1", "text": "w1"}], "hypothesis": "w3", "label": "maybe"}]
         runner = SeqClsRunner(_config(tmp_path))
         with pytest.raises(PreflightError, match="row 0: label is neither"):
             runner.encode(
@@ -166,7 +172,7 @@ class TestEncode:
     def test_a_soft_label_distribution(self, tmp_path: Path, encoder_dir: Path) -> None:
         rows = [
             {
-                "premises": "w1",
+                "premises": [{"pid": "p1", "text": "w1"}],
                 "hypothesis": "w2",
                 "label": "neutral",
                 "label_dist": [0.2, 0.3, 0.5],
@@ -186,7 +192,14 @@ class TestEncode:
     def test_a_malformed_label_distribution_refuses_without_echoing_it(
         self, tmp_path: Path, encoder_dir: Path, dist: Any
     ) -> None:
-        rows = [{"premises": "w1", "hypothesis": "w2", "label": "neutral", "label_dist": dist}]
+        rows = [
+            {
+                "premises": [{"pid": "p1", "text": "w1"}],
+                "hypothesis": "w2",
+                "label": "neutral",
+                "label_dist": dist,
+            }
+        ]
         runner = SeqClsRunner(_config(tmp_path))
         tokenizer = runner.load_tokenizer(encoder_dir)
         with pytest.raises(PreflightError) as exc:
@@ -198,13 +211,44 @@ class TestEncode:
     def test_an_integer_label_refusal_does_not_echo_the_value(
         self, tmp_path: Path, encoder_dir: Path
     ) -> None:
-        rows = [{"premises": "w1", "hypothesis": "w3", "label": 987654}]
+        rows = [{"premises": [{"pid": "p1", "text": "w1"}], "hypothesis": "w3", "label": 987654}]
         runner = SeqClsRunner(_config(tmp_path))
         with pytest.raises(PreflightError) as exc:
             runner.encode(
                 datasets.Dataset.from_list(rows), runner.load_tokenizer(encoder_dir), split="t"
             )
         assert "987654" not in str(exc.value)
+
+    def test_a_two_way_row_needs_declared_labels(self, tmp_path: Path, encoder_dir: Path) -> None:
+        rows = [{**tiny.rows(1)[0]}]  # row 0 is two-way
+        assert rows[0]["label_space"] == "2way_entail_vs_not"
+        bare = _config(tmp_path).model_copy(
+            update={"two_way_positive_label": None, "two_way_labels": None}
+        )
+        runner = SeqClsRunner(bare)
+        with pytest.raises(PreflightError, match="there is no default"):
+            runner.encode(
+                datasets.Dataset.from_list(rows), runner.load_tokenizer(encoder_dir), split="t"
+            )
+        declared = SeqClsRunner(_config(tmp_path))
+        odd = [{**rows[0], "label": "contradiction"}]
+        with pytest.raises(PreflightError, match="declared two_way_labels"):
+            declared.encode(
+                datasets.Dataset.from_list(odd), declared.load_tokenizer(encoder_dir), split="t"
+            )
+
+    def test_the_length_distribution_is_recorded(self, tmp_path: Path, encoder_dir: Path) -> None:
+        runner = SeqClsRunner(_config(tmp_path))
+        encoded, receipt = runner.encode(
+            _dataset(20), runner.load_tokenizer(encoder_dir), split="t"
+        )
+        lengths = sorted(encoded["length"])
+        dist = receipt["length_distribution"]
+        assert dist["min"] == lengths[0]
+        assert dist["max"] == lengths[-1]
+        assert dist["p50"] == lengths[9]  # nearest rank: ceil(0.5 * 20) = 10th
+        assert dist["p95"] == lengths[18]  # ceil(0.95 * 20) = 19th
+        assert receipt["rows_over_max_length"] == 0
 
     def test_a_support_set_naming_an_unknown_premise_refuses(
         self, tmp_path: Path, encoder_dir: Path
@@ -257,6 +301,21 @@ class TestLoadGuard:
         model, info = _load(encoder_dir)
         receipt = check_load(model, info, "new")
         assert receipt.missing == ["classifier.bias", "classifier.weight"]
+
+    def test_a_mean_pooling_encoder_config_is_read_at_its_first_token(self, tmp_path: Path) -> None:
+        checkpoint = tiny.encoder(tmp_path / "mean", pooling="mean")
+        assert json.loads((checkpoint / "config.json").read_text())["classifier_pooling"] == "mean"
+        runner = SeqClsRunner(_config(tmp_path))
+        tokenizer = runner.load_tokenizer(checkpoint)
+        module, receipt, _ = runner.load_model(checkpoint, tokenizer, roles=frozenset())
+        assert module.classifier.config.classifier_pooling == "cls"
+        assert receipt.pooling_changed_from == "mean"
+        result, _, artifact = _smoke(tmp_path / "run", checkpoint, _config(tmp_path / "run"))
+        assert result.receipts["load"]["pooling_changed_from"] == "mean"
+        verifier = json.loads((artifact / VERIFIER_CONFIG_FILENAME).read_text())
+        assert verifier["classifier_pooling"] == "cls"
+        assert verifier["pooling"] == "first_token"
+        assert json.loads((artifact / "config.json").read_text())["classifier_pooling"] == "cls"
 
     def test_the_decoder_may_miss_exactly_the_declared_head_keys(self, decoder_dir: Path) -> None:
         model, info = _load(decoder_dir)
@@ -331,6 +390,8 @@ class TestStep0:
         result = runner.step0_check(module, checkpoint, train, receipt)
         assert result["passed"]
         assert result["max_abs_logit_diff"] < 1e-5
+        assert result["argmax_agree"] == result["rows"] == 8
+        assert result["precision"] == "float32, tf32 off"
         assert result["verbalizer_token_ids"] == {
             label: tokenizer.convert_tokens_to_ids(v.strip())
             for label, v in tiny.VERBALIZERS.items()
@@ -397,6 +458,23 @@ class TestMemoryPreflight:
         assert receipt["budget_bytes"] == 920
         assert receipt["gradient_checkpointing"] is False
 
+    def test_the_in_run_eval_is_measured_and_its_peak_counts(
+        self, tmp_path: Path, encoder_dir: Path
+    ) -> None:
+        runner = SeqClsRunner(_config(tmp_path), memory_probe=_Probe([100, 950], 1000))
+        tokenizer = runner.load_tokenizer(encoder_dir)
+        train, _ = runner.encode(_dataset(12), tokenizer, split="t")
+        evaluation, _ = runner.encode(_dataset(6, seed=3), tokenizer, split="e")
+        module, _, _ = runner.load_model(encoder_dir, tokenizer, roles=frozenset(tiny.rows(1)[0]))
+        trainer = runner.build_trainer(module, train, evaluation, tokenizer)
+        with pytest.raises(PreflightError, match="eval peak") as exc:
+            runner.memory_preflight(trainer, train, evaluation)
+        receipt = exc.value.receipt
+        assert receipt["peak_bytes"] == 100
+        assert receipt["eval_peak_bytes"] == 950
+        assert receipt["measured_peak_bytes"] == 950
+        assert receipt["eval_batch_rows"] == 4
+
     def test_the_longest_batch_is_measured_and_the_step_is_undone(
         self, tmp_path: Path, encoder_dir: Path
     ) -> None:
@@ -448,6 +526,15 @@ class TestAcceptanceSmoke:
         result, seen, artifact = _smoke(tmp_path, decoder_dir, config)
         assert seen == ["overflow", "load", "step0", "memory"]
         assert result.receipts["step0"]["passed"]
+        parity = result.receipts["reload_parity"]
+        assert parity["passed"]
+        assert parity["rows_from"] == "eval"
+        assert parity["max_abs_logit_diff"] <= 1e-4
+        assert parity["zero_parameters"] == ["head.dense.bias"]
+        assert result.receipts["load"]["classifier_bias"]["value"] is True
+        assert "output projection" in result.receipts["load"]["classifier_bias"]["reason"]
+        assert result.receipts["loss"]["brier_weight"] == 0.1
+        assert "sum form" in result.receipts["loss"]["form"]
         assert result.receipts["memory"]["gradient_checkpointing"] is True
         verifier = self._check_artifact(artifact, tmp_path, outputs=["primary", "flag", "support"])
         assert verifier["pooling"] == "last_token"
@@ -469,6 +556,48 @@ class TestAcceptanceSmoke:
         assert seen == ["overflow", "load", "memory"]
         assert result.receipts["load"]["missing"] == []
         assert result.receipts["load"]["frozen_parameters"] == ["head.dense.bias"]
+
+    def test_smoke_calibration_is_fitted_on_the_saved_artifact(
+        self, tmp_path: Path, encoder_dir: Path
+    ) -> None:
+        pytest.importorskip("strata_forge.metrics.calibration_fit")
+        artifact = tmp_path / "artifact"
+        result = SeqClsRunner(_config(tmp_path), memory_probe=_Probe(10, 1000)).run(
+            checkpoint=encoder_dir,
+            artifact_dir=artifact,
+            train_dataset=_dataset(24),
+            calibration_dataset=_dataset(12, seed=2),
+            calibration_source={"dataset_id": "synthetic/rows", "split": "dev", "commit": "c" * 40},
+        )
+        record = json.loads((artifact / CALIBRATION_FILENAME).read_text())
+        assert record == result.receipts["calibration"]
+        assert record["split"]["commit"] == "c" * 40
+        assert record["fit"]["temperature"] > 0
+        assert record["fit"]["nll_after"] <= record["fit"]["nll_before"] + 1e-12
+        # Two-way rows have no three-way gold and are excluded, by count.
+        assert record["rows"] + record["excluded_rows"] == 12
+        assert record["excluded_rows"] == 3
+        assert len(record["rows_sha256"]) == 64
+        assert result.receipts["overflow_calibration"]["rows"] == 12
+
+    def test_a_saved_artifact_that_reloads_differently_refuses(
+        self, tmp_path: Path, decoder_dir: Path
+    ) -> None:
+        runner = SeqClsRunner(_decoder_config(tmp_path), memory_probe=_Probe(10, 1000))
+        prepared = runner.prepare(checkpoint=decoder_dir, train_dataset=_dataset(16))
+        artifact = tmp_path / "artifact"
+        runner.finish(prepared, artifact_dir=artifact)
+        path = artifact / "model.safetensors"
+        state = safetensors_torch.load_file(str(path))
+        state["classifier.weight"] = state["classifier.weight"] + 0.5
+        safetensors_torch.save_file(state, str(path), metadata={"format": "pt"})
+        with pytest.raises(ArtifactCheckError, match="differ from the trained") as exc:
+            runner.artifact_checks(prepared, artifact)
+        assert exc.value.receipt["passed"] is False
+        state["head.dense.bias"] = state["head.dense.bias"] + 1e-3
+        safetensors_torch.save_file(state, str(path), metadata={"format": "pt"})
+        with pytest.raises(ArtifactCheckError, match="exactly zero after reload"):
+            runner.artifact_checks(prepared, artifact)
 
     def test_existing_refuses_a_different_label_order(
         self, tmp_path: Path, encoder_dir: Path

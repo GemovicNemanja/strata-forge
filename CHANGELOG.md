@@ -65,7 +65,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   0 reproduces the base model's zero-shot label logits, and measures one optimizer step at the
   longest real batch against the device. `head_init="existing"` continues a classifier a previous
   run saved. Intermediate checkpoints never enter the artifact, which carries the stock
-  checkpoint, `strata_aux_heads.safetensors` and `strata_verifier.json`.
+  checkpoint, `strata_aux_heads.safetensors` and `strata_verifier.json`. Premises are lists of
+  `{pid, text}` with pids `p1..pN`; a two-way row's positive label and its two spellings are
+  declared, with no default. Logit comparisons run in float32 with TF32 off and require the same
+  predicted label on every row. The length receipt carries the per-row length distribution, and
+  the memory preflight also measures the in-run eval pass. After training the saved artifact is
+  reloaded as a scorer would and must match the trained logits (`ArtifactCheckError` otherwise),
+  with zero-held parameters asserted exactly zero at save and reload; a declared
+  `calibration_split` gets a temperature fitted on it and written to `calibration.json`.
 - `FinetuneSpec.model_revision`: a full commit id pins the base model for every load of a
   fine-tuning run; `seq_cls` requires it and `dataset_commit_sha`.
 - Every fine-tuning run writes a `strata.run.manifest/v1` manifest of kind `finetune`, with each
