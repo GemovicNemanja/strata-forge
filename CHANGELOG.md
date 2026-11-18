@@ -16,7 +16,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   argmax, uncalibrated) beside `eval_loss`, as `eval` events labelled
   `monitoring (ID dev, final checkpoint is the model)` and in the manifest. The final checkpoint is
   the model: best-model selection, early stopping and `eval_steps` are refused, and the eval split
-  must be another split of the training dataset.
+  must share no row with the training split (overlapping or undecidable split specs, such as
+  `train[:80%]` with `train[70%:]`, are refused).
 - `strata_forge.metrics.cluster_bootstrap` adds `cluster_bootstrap` and
   `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`): seeded percentile intervals
   for accuracy, macro-F1 and invalid rate that resample whole caller-declared clusters with

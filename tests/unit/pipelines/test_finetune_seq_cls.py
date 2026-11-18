@@ -283,9 +283,13 @@ class TestTerminalErrorsCarryGpuTime:
 
 
 class TestMonitoringSplit:
-    def test_the_eval_split_is_another_split_of_the_training_dataset(self) -> None:
-        with pytest.raises(RunError, match="a different split of the training dataset"):
-            fr.check_spec(_spec(eval_split="train"))
+    @pytest.mark.parametrize("eval_split", ["train", "train[:100%]", "train[90%:]", "train[5:]"])
+    def test_an_eval_split_sharing_rows_with_training_is_refused(self, eval_split: str) -> None:
+        with pytest.raises(RunError, match="sharing no row with the training split"):
+            fr.check_spec(_spec(eval_split=eval_split))
+
+    def test_a_disjoint_slice_of_the_same_split_passes(self) -> None:
+        fr.check_spec(_spec(split="train[:80%]", eval_split="train[80%:]"))
 
 
 class TestPinnedChecks:

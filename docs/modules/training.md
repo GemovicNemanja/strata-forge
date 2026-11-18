@@ -369,7 +369,10 @@ frozen parameters, so an evaluator renders rows exactly as training did.
 ### In-training monitoring
 
 The final checkpoint is the model. An eval split (another split of the training dataset, read at the
-same pinned commit; the training split itself is refused) is evaluated every
+same pinned commit; an eval split that shares a row with the training split, or whose overlap the
+two split specs cannot rule out, is refused: `train[:80%]` with `train[80%:]` passes, `train` with
+`train[:100%]` or `train[:80%]` with `train[70%:]` is refused, and so are rows against percent of
+one split, negative row indexes and two different roundings) is evaluated every
 `ceil(steps_per_epoch / 4)` optimizer steps (`seq_cls_monitor.monitor_eval_steps`) and once more on
 the final checkpoint, for **monitoring only**: `load_best_model_at_end`, `metric_for_best_model`,
 `greater_is_better`, `early_stopping_patience`, `early_stopping_threshold` and `eval_steps` are
