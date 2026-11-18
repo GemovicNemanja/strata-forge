@@ -39,11 +39,25 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 from strata_forge.pipelines._common import MANIFEST_SCHEMA, RunError, manifest_engine
+from strata_forge.training.classifier_heads import (
+    HeadLoadError,
+    aux_outputs,
+    build_aux_heads,
+    load_aux_heads,
+)
+from strata_forge.training.dataset_format import DatasetFormatError
 from strata_forge.training.loading import (
     LoadRefusedError,
     check_loading_info,
     model_load_kwargs,
     tokenizer_load_kwargs,
+)
+from strata_forge.training.verifier_render import (
+    RenderedRow,
+    Rendering,
+    encode_rows,
+    marker_tokens,
+    render_row,
 )
 
 if TYPE_CHECKING:
@@ -53,23 +67,41 @@ if TYPE_CHECKING:
     from strata_forge.pipelines.inference_runner import RunSpec
 
 __all__ = [
+    "ARTIFACT_PAIR_TEMPLATE",
+    "ARTIFACT_TEMPLATE",
     "BATCH_ORDER",
     "LABEL_RE",
     "SCORING_DTYPES",
+    "VERIFIER_ARTIFACT",
     "Classifier",
     "ScoringInputs",
+    "VerifierScorer",
+    "VerifierScores",
+    "artifact_template_error",
     "batch_plan_record",
     "build_inputs",
     "build_manifest",
     "load_classifier",
+    "load_verifier",
     "plan_batches",
+    "read_calibration",
+    "read_verifier",
     "render_scoring_text",
     "resolve_labels",
     "result_rows",
     "softmax",
     "tally",
+    "verifier_result_rows",
 ]
 
+#: ``hyperparams.artifact`` for a verifier trained by ``seq_cls``: score it as it was trained.
+VERIFIER_ARTIFACT = "strata_verifier"
+#: The fixed templates of artifact scoring: they only name the two roles.
+ARTIFACT_TEMPLATE = "{premises}"
+ARTIFACT_PAIR_TEMPLATE = "{hypothesis}"
+VERIFIER_FILENAME = "strata_verifier.json"
+VERIFIER_SCHEMA = "strata.verifier/v1"
+CALIBRATION_FILENAME = "calibration.json"
 #: What an output label may be: it becomes part of a column name (``logit_<label>``).
 LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 #: The dtypes a scoring run may declare. There is no default: the spec must name one.
@@ -213,14 +245,23 @@ def build_inputs(spec: RunSpec, rows: Sequence[Mapping[str, Any]]) -> ScoringInp
         if column is not None and rows and column not in columns:
             msg = f"{what} {column!r} is not a column of the split; columns: {sorted(columns)}"
             raise RunError(msg)
-    texts = [
-        render_scoring_text(spec.template, row, spec.column_mapping, separator=hp.list_separator)
-        for row in rows
-    ]
-    pairs = [
-        render_scoring_text(pair_template, row, spec.column_mapping, separator=hp.list_separator)
-        for row in rows
-    ]
+    if hp.artifact is not None:
+        # A trained verifier renders its own rows (`VerifierScorer.render`), from the raw cells.
+        texts: list[str] = []
+        pairs: list[str] = []
+    else:
+        texts = [
+            render_scoring_text(
+                spec.template, row, spec.column_mapping, separator=hp.list_separator
+            )
+            for row in rows
+        ]
+        pairs = [
+            render_scoring_text(
+                pair_template, row, spec.column_mapping, separator=hp.list_separator
+            )
+            for row in rows
+        ]
     item_ids = _item_ids(rows, hp.id_column) if hp.id_column is not None else None
     slices = _slices(rows, hp.slice_column) if hp.slice_column is not None else None
     return ScoringInputs(texts=texts, pairs=pairs, item_ids=item_ids, slices=slices)
@@ -324,8 +365,13 @@ def result_rows(
     logits: Mapping[int, Sequence[float]],
     outputs: Sequence[str | None],
     inputs: ScoringInputs,
+    *,
+    temperature: float | None = None,
 ) -> list[dict[str, Any]]:
     """One results row per input row, in input order; an unscored row carries no score.
+
+    ``temperature`` divides the logits before the softmax (``p_*`` only; the ``logit_*`` columns
+    stay raw). ``None`` is temperature 1, no calibration.
 
     ``outputs`` is each class's label by class id, ``None`` for an excluded class: its logit is
     dropped before the softmax and the argmax, so both run over the included classes only. Every
@@ -354,7 +400,9 @@ def result_rows(
             row.update(
                 {f"logit_{label}": value for label, value in zip(labels, values, strict=True)}
             )
-            probabilities = softmax(values)
+            probabilities = softmax(
+                values if temperature is None else [value / temperature for value in values]
+            )
             row.update(
                 {f"p_{label}": value for label, value in zip(labels, probabilities, strict=True)}
             )
@@ -485,6 +533,34 @@ def load_classifier(
     is involved and nothing else is fetched. In ``float32`` the TF32 matmul and cuDNN paths are
     switched off first, so a GPU does not silently compute at reduced precision.
     """
+    torch, transformers, tf32 = _scoring_modules(dtype)
+    tokenizer, model, unexpected = _load_model(transformers, torch, snapshot, dtype)
+    config: Any = model.config
+    names, outputs = resolve_labels(cast("Mapping[Any, Any]", config.id2label), label_alias)
+    # Before padding is aligned: the position offset is the CHECKPOINT's padding index.
+    limit, source = _length_limit(config, tokenizer, max_length)
+    pad_token = _align_padding(tokenizer, config)
+    device = "cuda" if bool(torch.cuda.is_available()) else "cpu"
+    model.to(device)
+    model.eval()
+    return Classifier(
+        model=model,
+        tokenizer=tokenizer,
+        torch=torch,
+        names=names,
+        outputs=outputs,
+        max_length=limit,
+        max_length_source=source,
+        dtype=str(model.dtype).removeprefix("torch."),
+        tf32=tf32,
+        device=device,
+        pad_token=pad_token,
+        unexpected_keys=unexpected,
+    )
+
+
+def _scoring_modules(dtype: str) -> tuple[Any, Any, dict[str, bool | None]]:
+    """torch and transformers, with TF32 switched off for a float32 run, and the TF32 state."""
     if dtype not in SCORING_DTYPES:
         msg = f"dtype must be one of {', '.join(SCORING_DTYPES)}"
         raise RunError(msg)
@@ -494,7 +570,13 @@ def load_classifier(
     except ImportError as exc:
         msg = "classifier scoring needs torch and transformers: pip install 'strata-forge[serving]'"
         raise RunError(msg) from exc
-    tf32 = _tf32_state(torch, disable=dtype == "float32")
+    return torch, transformers, _tf32_state(torch, disable=dtype == "float32")
+
+
+def _load_model(
+    transformers: Any, torch: Any, snapshot: Path, dtype: str
+) -> tuple[Any, Any, list[str]]:
+    """The snapshot's tokenizer and sequence classifier, local files only, refusing a partial load."""
     location = str(snapshot)
     try:
         tokenizer: Any = transformers.AutoTokenizer.from_pretrained(
@@ -520,28 +602,7 @@ def load_classifier(
         )
     except LoadRefusedError as exc:
         raise RunError(str(exc)) from exc
-    config: Any = model.config
-    names, outputs = resolve_labels(cast("Mapping[Any, Any]", config.id2label), label_alias)
-    # Before padding is aligned: the position offset is the CHECKPOINT's padding index.
-    limit, source = _length_limit(config, tokenizer, max_length)
-    pad_token = _align_padding(tokenizer, config)
-    device = "cuda" if bool(torch.cuda.is_available()) else "cpu"
-    model.to(device)
-    model.eval()
-    return Classifier(
-        model=model,
-        tokenizer=tokenizer,
-        torch=torch,
-        names=names,
-        outputs=outputs,
-        max_length=limit,
-        max_length_source=source,
-        dtype=str(model.dtype).removeprefix("torch."),
-        tf32=tf32,
-        device=device,
-        pad_token=pad_token,
-        unexpected_keys=unexpected,
-    )
+    return tokenizer, model, unexpected
 
 
 def _tf32_state(torch: Any, *, disable: bool) -> dict[str, bool | None]:
@@ -648,6 +709,39 @@ def build_manifest(
     should not republish it beside the scores.
     """
     hp = spec.hyperparams
+    verifier = classifier if isinstance(classifier, VerifierScorer) else None
+    outputs = ["logit", "p_softmax_t1_over_included", "pred_argmax_over_included"]
+    calibration: dict[str, Any] | None = None
+    artifact: dict[str, Any] | None = None
+    if verifier is not None:
+        if verifier.temperature is not None:
+            outputs[1] = "p_softmax_calibrated_over_included"
+        outputs += [f"aux_{head}" for head in verifier.heads]
+        record = verifier.calibration
+        calibration = {
+            "mode": hp.apply_calibration,
+            "applied": verifier.temperature is not None,
+            "temperature": verifier.temperature,
+            "artifact_record": (
+                None
+                if record is None
+                else {
+                    "sha256": record["sha256"],
+                    "fit": cast("dict[str, Any]", record["record"])["fit"],
+                }
+            ),
+            "raw_logits_kept": True,
+        }
+        artifact = {
+            "kind": hp.artifact,
+            "verifier_sha256": verifier.verifier_sha256,
+            "rendering": verifier.rendering.to_verifier(),
+            "pooling": verifier.verifier.get("pooling"),
+            "heads": verifier.heads,
+            "support_scores": "list of {pid, logit, p} per premise, in premise order"
+            if "support" in verifier.heads
+            else None,
+        }
     return {
         "schema": MANIFEST_SCHEMA,
         "kind": "scoring",
@@ -675,8 +769,10 @@ def build_manifest(
                 for name, label in zip(classifier.names, classifier.outputs, strict=True)
                 if label is None
             ],
-            "outputs": ["logit", "p_softmax_t1_over_included", "pred_argmax_over_included"],
-            "calibration": None,
+            "input": "strata_verifier" if verifier is not None else "pair",
+            "artifact": artifact,
+            "outputs": outputs,
+            "calibration": calibration,
             "max_length": classifier.max_length,
             "max_length_source": classifier.max_length_source,
             "overflow_policy": "drop_and_count",
@@ -702,3 +798,348 @@ def build_manifest(
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+# ----------------------------------------------------------------------- trained verifiers
+
+
+@dataclass(frozen=True, slots=True)
+class VerifierScores:
+    """One row's scores from a trained verifier: every class's raw logit, and the auxiliary
+    heads' raw logits when the artifact has them (``support`` as ``(pid, logit)`` per premise)."""
+
+    logits: list[float]
+    flag: float | None
+    support: list[tuple[str, float]] | None
+
+
+def artifact_template_error(template: str, hyperparams: Any) -> str | None:
+    """Why a spec's templates do not fit artifact scoring, or ``None`` when they do.
+
+    A trained verifier renders its own input from ``strata_verifier.json``; the run's templates
+    only NAME the two roles, so they are fixed: ``template`` is ``{premises}`` and
+    ``pair_template`` is ``{hypothesis}``, and ``column_mapping`` maps each to its column.
+    """
+    if getattr(hyperparams, "artifact", None) is None:
+        return None
+    if template != ARTIFACT_TEMPLATE or hyperparams.pair_template != ARTIFACT_PAIR_TEMPLATE:
+        return (
+            f"artifact scoring renders rows from the verifier's own strata_verifier.json, so the "
+            f"templates only name the roles: template {ARTIFACT_TEMPLATE!r} and pair_template "
+            f"{ARTIFACT_PAIR_TEMPLATE!r}, each mapped to its column"
+        )
+    return None
+
+
+def read_verifier(snapshot: Path) -> dict[str, Any]:
+    """The artifact's ``strata_verifier.json``, refusing a checkpoint that is not one."""
+    path = snapshot / VERIFIER_FILENAME
+    if not path.is_file():
+        msg = (
+            f"the model has no {VERIFIER_FILENAME}, so it is not a verifier trained by seq_cls; "
+            "score it in pair mode instead (no hyperparams.artifact)"
+        )
+        raise RunError(msg)
+    try:
+        raw: Any = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        msg = f"{VERIFIER_FILENAME} could not be read as JSON"
+        raise RunError(msg) from exc
+    record = cast("dict[str, Any]", raw) if isinstance(raw, dict) else {}
+    if record.get("schema") != VERIFIER_SCHEMA:
+        msg = f"{VERIFIER_FILENAME} is not a {VERIFIER_SCHEMA} record"
+        raise RunError(msg)
+    return record
+
+
+def read_calibration(snapshot: Path) -> dict[str, Any] | None:
+    """The artifact's ``calibration.json`` and its digest, or ``None`` when it has none."""
+    path = snapshot / CALIBRATION_FILENAME
+    if not path.is_file():
+        return None
+    text = path.read_text()
+    try:
+        record: Any = json.loads(text)
+        temperature = float(record["fit"]["temperature"])
+    except (ValueError, KeyError, TypeError) as exc:
+        msg = f"{CALIBRATION_FILENAME} holds no fitted temperature"
+        raise RunError(msg) from exc
+    if not (math.isfinite(temperature) and temperature > 0):
+        msg = f"{CALIBRATION_FILENAME} holds a temperature that is not a positive number"
+        raise RunError(msg)
+    return {"temperature": temperature, "record": record, "sha256": _digest(text)}
+
+
+class VerifierScorer(Classifier):
+    """A ``seq_cls`` artifact, scored with the rendering it was trained with.
+
+    The rendering, the label order, the pooling and the auxiliary heads all come from the
+    artifact (``strata_verifier.json``), through the same functions the trainer calls
+    (:mod:`strata_forge.training.verifier_render`,
+    :func:`~strata_forge.training.classifier_heads.aux_outputs`).
+    """
+
+    def __init__(
+        self,
+        *,
+        rendering: Rendering,
+        verifier: dict[str, Any],
+        verifier_sha256: str,
+        aux: Any,
+        hidden: list[Any],
+        calibration: dict[str, Any] | None,
+        apply_calibration: bool,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.rendering = rendering
+        self.verifier = verifier
+        self.verifier_sha256 = verifier_sha256
+        self._aux = aux
+        self._hidden = hidden
+        self.calibration = calibration
+        self.apply_calibration = apply_calibration
+        self.heads = [h for h in ("flag", "support") if getattr(aux, h, None) is not None]
+
+    @property
+    def temperature(self) -> float | None:
+        """The temperature applied to ``p_*``: only under ``apply_calibration: auto``."""
+        if not self.apply_calibration or self.calibration is None:
+            return None
+        return float(self.calibration["temperature"])
+
+    def render(self, premises: Sequence[Any], hypotheses: Sequence[Any]) -> list[RenderedRow]:
+        """Every row's text; a malformed cell refuses the run, naming the row and never the cell."""
+        out: list[RenderedRow] = []
+        for index, (cell, hypothesis) in enumerate(zip(premises, hypotheses, strict=True)):
+            try:
+                out.append(render_row(self.rendering, cell, hypothesis))
+            except DatasetFormatError as exc:
+                msg = f"row {index}: {exc}"
+                raise RunError(msg) from exc
+        return out
+
+    def measure(self, rows: Sequence[RenderedRow]) -> list[int | None]:
+        """Each rendered row's token count with special tokens; ``None`` past the character cap."""
+        out: list[int | None] = []
+        for offset in range(0, len(rows), _MEASURE_CHUNK):
+            chunk = list(rows[offset : offset + _MEASURE_CHUNK])
+            measurable = [
+                i
+                for i, row in enumerate(chunk)
+                if len(row.text) + len(row.pair or "") <= _MAX_RENDERED_CHARS
+            ]
+            lengths: list[int | None] = [None] * len(chunk)
+            if measurable:
+                encoded: Any = encode_rows(self._tokenizer, [chunk[i] for i in measurable])
+                for i, ids in zip(measurable, encoded["input_ids"], strict=True):
+                    lengths[i] = len(cast("list[int]", ids))
+            out.extend(lengths)
+        return out
+
+    def score(self, rows: Sequence[RenderedRow]) -> list[VerifierScores]:
+        """One batch: raw logits for every class and the auxiliary heads, right-padded."""
+        torch = self._torch
+        features: Any = encode_rows(
+            self._tokenizer,
+            rows,
+            padding=True,
+            return_tensors="pt",
+            return_offsets_mapping=self._aux.support is not None,
+        )
+        if int(features["input_ids"].shape[1]) > self.max_length:
+            msg = "a batch exceeded the model's length limit after planning; nothing was scored"
+            raise RunError(msg)
+        ids: Any = features["input_ids"].to(self.device)
+        mask: Any = features["attention_mask"].to(self.device)
+        support_markers: list[list[int]] = []
+        positions: Any = None
+        if self._aux.support is not None:
+            offsets: Any = features["offset_mapping"].tolist()
+            for i, row in enumerate(rows):
+                found = marker_tokens(row.markers, offsets[i], features.sequence_ids(i))
+                if found is None:
+                    msg = "a premise id's first character is covered by no token"
+                    raise RunError(msg)
+                support_markers.append(found)
+            width = max((len(m) for m in support_markers), default=0)
+            if width:
+                positions = torch.tensor(
+                    [m + [0] * (width - len(m)) for m in support_markers], device=self.device
+                )
+        self._hidden.clear()
+        with torch.inference_mode():
+            output: Any = self._model(input_ids=ids, attention_mask=mask)
+            aux: dict[str, Any] = (
+                aux_outputs(
+                    torch,
+                    self._aux,
+                    self._hidden[-1] if self._hidden else None,
+                    mask,
+                    last_token=self.rendering.decoder,
+                    support_positions=positions,
+                )
+                if self.heads
+                else {}
+            )
+        logits = cast("list[list[float]]", output.logits.float().cpu().tolist())
+        flags: Any = aux.get("flag_logits")
+        flag_values = (
+            cast("list[float]", flags.float().cpu().tolist()) if flags is not None else None
+        )
+        support: Any = aux.get("support_logits")
+        support_values = (
+            cast("list[list[float]]", support.float().cpu().tolist())
+            if support is not None
+            else None
+        )
+        out: list[VerifierScores] = []
+        for i, row in enumerate(rows):
+            per_premise: list[tuple[str, float]] | None = None
+            if self._aux.support is not None:
+                values = support_values[i] if support_values is not None else []
+                per_premise = [(pid, float(values[k])) for k, (pid, _) in enumerate(row.markers)]
+            scores = VerifierScores(
+                logits=[float(v) for v in logits[i]],
+                flag=float(flag_values[i]) if flag_values is not None else None,
+                support=per_premise,
+            )
+            numbers = [*scores.logits, *([scores.flag] if scores.flag is not None else [])]
+            numbers += [v for _, v in scores.support or []]
+            if len(scores.logits) != len(self.names) or not all(math.isfinite(v) for v in numbers):
+                msg = "the verifier returned a non-finite or mis-shaped score"
+                raise RunError(msg)
+            out.append(scores)
+        return out
+
+
+def load_verifier(
+    snapshot: Path,
+    *,
+    label_alias: Mapping[str, str | None] | None,
+    max_length: int | None,
+    dtype: str,
+    apply_calibration: bool,
+) -> VerifierScorer:
+    """Load a ``seq_cls`` artifact for scoring: its rendering, labels, heads and calibration.
+
+    The label order is the artifact's: its ``id2label`` must name the verifier's labels in order,
+    and ``label_alias`` (optional here) defaults to each label as itself. The length limit is the
+    artifact's training ``max_length`` unless ``max_model_len`` asks for another. The
+    calibration record is read whenever present (and recorded); it changes ``p_*`` only under
+    ``apply_calibration``, and the raw logits are always kept.
+    """
+    verifier = read_verifier(snapshot)
+    try:
+        rendering = Rendering.from_verifier(verifier)
+    except ValueError as exc:
+        raise RunError(str(exc)) from exc
+    raw_labels: Any = verifier.get("labels")
+    if not isinstance(raw_labels, list):
+        msg = f"{VERIFIER_FILENAME} has no label list"
+        raise RunError(msg)
+    labels = [str(x) for x in cast("list[object]", raw_labels)]
+    pooling = "last_token" if rendering.decoder else "first_token"
+    if verifier.get("pooling") != pooling:
+        msg = f"{VERIFIER_FILENAME} pools at {verifier.get('pooling')!r}; its rendering reads {pooling}"
+        raise RunError(msg)
+    torch, transformers, tf32 = _scoring_modules(dtype)
+    tokenizer, model, unexpected = _load_model(transformers, torch, snapshot, dtype)
+    config: Any = model.config
+    alias: Mapping[str, str | None] = (
+        label_alias if label_alias is not None else {name: name for name in labels}
+    )
+    names, outputs = resolve_labels(cast("Mapping[Any, Any]", config.id2label), alias)
+    if names != labels:
+        msg = f"the model's id2label {names} is not the verifier's label order {labels}"
+        raise RunError(msg)
+    if not rendering.decoder and getattr(config, "classifier_pooling", "cls") != "cls":
+        msg = "an encoder verifier must pool at its first token (classifier_pooling 'cls')"
+        raise RunError(msg)
+    limit, source = _length_limit(config, tokenizer, max_length or rendering.max_length)
+    if max_length is None:
+        source = "artifact"
+    pad_token = _align_padding(tokenizer, config)
+    heads: Any = verifier.get("outputs") or []
+    aux = build_aux_heads(
+        int(config.hidden_size), flag="flag" in heads, support="support" in heads, std=0.0
+    )
+    try:
+        load_aux_heads(aux, snapshot)
+    except HeadLoadError as exc:
+        raise RunError(str(exc)) from exc
+    hidden: list[Any] = []
+    if "flag" in heads or "support" in heads:
+
+        def _capture(_module: Any, _args: Any, output: Any) -> None:
+            hidden.append(output[0])
+
+        model.base_model.register_forward_hook(_capture)
+    device = "cuda" if bool(torch.cuda.is_available()) else "cpu"
+    model.to(device)
+    aux.to(device=device, dtype=model.dtype)
+    model.eval()
+    aux.eval()
+    return VerifierScorer(
+        rendering=rendering,
+        verifier=verifier,
+        verifier_sha256=_digest((snapshot / VERIFIER_FILENAME).read_text()),
+        aux=aux,
+        hidden=hidden,
+        calibration=read_calibration(snapshot),
+        apply_calibration=apply_calibration,
+        model=model,
+        tokenizer=tokenizer,
+        torch=torch,
+        names=names,
+        outputs=outputs,
+        max_length=limit,
+        max_length_source=source,
+        dtype=str(model.dtype).removeprefix("torch."),
+        tf32=tf32,
+        device=device,
+        pad_token=pad_token,
+        unexpected_keys=unexpected,
+    )
+
+
+def verifier_result_rows(
+    lengths: Sequence[int | None],
+    scores: Mapping[int, VerifierScores],
+    scorer: VerifierScorer,
+    inputs: ScoringInputs,
+) -> list[dict[str, Any]]:
+    """:func:`result_rows` for a verifier, plus its auxiliary heads' columns.
+
+    ``p_*`` is the softmax at the applied temperature (1 unless calibration is applied); the
+    ``logit_*`` columns are always the raw logits. With a flag head: ``logit_inconsistent`` and
+    ``p_inconsistent`` (its sigmoid). With a support head: ``support_scores``, a list of
+    ``{pid, logit, p}`` per premise in premise order. An unscored row carries ``None`` in each.
+    """
+    rows = result_rows(
+        lengths,
+        {i: s.logits for i, s in scores.items()},
+        scorer.outputs,
+        inputs,
+        temperature=scorer.temperature,
+    )
+    for index, row in enumerate(rows):
+        entry = scores.get(index)
+        if "flag" in scorer.heads:
+            flag = entry.flag if entry is not None else None
+            row["logit_inconsistent"] = flag
+            row["p_inconsistent"] = None if flag is None else _sigmoid(flag)
+        if "support" in scorer.heads:
+            row["support_scores"] = (
+                None
+                if entry is None or entry.support is None
+                else [{"pid": pid, "logit": v, "p": _sigmoid(v)} for pid, v in entry.support]
+            )
+    return rows
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp = math.exp(value)
+    return exp / (1.0 + exp)

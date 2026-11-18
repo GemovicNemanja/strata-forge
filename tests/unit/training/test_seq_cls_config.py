@@ -14,9 +14,9 @@ from strata_forge.training.dataset_format import (
 )
 from strata_forge.training.seq_cls import (
     SeqClsConfig,
-    _decoder_text,  # pyright: ignore[reportPrivateUsage]
-    render_premises,
 )
+from strata_forge.training.verifier_render import fill_template as _decoder_text
+from strata_forge.training.verifier_render import render_premises
 
 _LABELS = ("entailment", "contradiction", "neutral")
 

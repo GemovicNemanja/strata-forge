@@ -196,6 +196,8 @@ class TestAcceptanceSmoke:
         assert manifest["checks"]["overflow"]["rows_over_max_length"] == 0
         assert manifest["checks"]["overflow"]["length_distribution"]["max"] <= 64
         assert manifest["checks"]["reload_parity"]["passed"] is True
+        assert manifest["checks"]["scoring_parity"]["passed"] is True
+        assert manifest["checks"]["scoring_parity"]["argmax_agree"] == 8
         assert manifest["checks"]["load"]["classifier_bias"]["value"] is True
         assert set(manifest["checks"]["loss"]) == {
             "form",

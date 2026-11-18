@@ -118,14 +118,20 @@ from strata_forge.pipelines._common import (
     write_manifest,
 )
 from strata_forge.pipelines._scoring import (
+    ARTIFACT_PAIR_TEMPLATE,
     LABEL_RE,
     SCORING_DTYPES,
+    VERIFIER_ARTIFACT,
+    VerifierScores,
+    artifact_template_error,
     build_inputs,
     build_manifest,
     load_classifier,
+    load_verifier,
     plan_batches,
     result_rows,
     tally,
+    verifier_result_rows,
 )
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
@@ -231,6 +237,8 @@ _SCORING_FIELDS = frozenset(
         "slice_column",
         "list_separator",
         "scoring_batch_size",
+        "artifact",
+        "apply_calibration",
     }
 )
 _SHARED_FIELDS = frozenset({"row_limit", "max_model_len", "dtype"})
@@ -285,6 +293,12 @@ class Hyperparams(BaseModel):
     slice_column: str | None = Field(default=None, min_length=1, max_length=255)
     list_separator: str = Field(default="\n", max_length=16)
     scoring_batch_size: int = Field(default=16, ge=1, le=1024)
+    # A verifier trained by `seq_cls`: score it with the rendering, labels, pooling and auxiliary
+    # heads its `strata_verifier.json` records, never with run parameters. Unset is pair mode.
+    artifact: Literal["strata_verifier"] | None = None
+    # Artifact scoring only: `auto` applies the artifact's `calibration.json` temperature to the
+    # `p_*` columns (the `logit_*` columns stay raw); `off` (the default) applies none.
+    apply_calibration: Literal["off", "auto"] = "off"
 
     @model_validator(mode="after")
     def _fields_match_the_engine(self) -> Hyperparams:
@@ -306,6 +320,22 @@ class Hyperparams(BaseModel):
         if self.dtype not in SCORING_DTYPES:
             msg = f"engine 'hf_classify' needs dtype, one of {', '.join(SCORING_DTYPES)}"
             raise ValueError(msg)
+        if self.artifact is None and "apply_calibration" in given:
+            msg = "apply_calibration applies to artifact scoring only (artifact: strata_verifier)"
+            raise ValueError(msg)
+        if self.artifact == VERIFIER_ARTIFACT:
+            if "list_separator" in given:
+                msg = "artifact scoring renders premises as the verifier was trained; no list_separator"
+                raise ValueError(msg)
+            if self.pair_template != ARTIFACT_PAIR_TEMPLATE:
+                msg = (
+                    f"artifact scoring takes pair_template {ARTIFACT_PAIR_TEMPLATE!r}: the "
+                    "verifier renders its own input, so the templates only name the roles"
+                )
+                raise ValueError(msg)
+            if self.label_alias is None:
+                # The artifact's own label order; an alias may still rename or exclude a class.
+                return self
         if self.label_alias is None:
             msg = (
                 "engine 'hf_classify' needs label_alias: every model class mapped to an output "
@@ -386,6 +416,13 @@ class RunSpec(BaseModel):
     progress_path: str | None = None
     # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
     run_id: str | None = None
+
+    @model_validator(mode="after")
+    def _artifact_templates_name_the_roles(self) -> RunSpec:
+        error = artifact_template_error(self.template, self.hyperparams)
+        if error:
+            raise ValueError(error)
+        return self
 
 
 def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
@@ -1269,6 +1306,20 @@ async def _execute_scoring(
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
     model_commit = spec.model_revision or snapshot_commit(snapshot)
+    if hp.artifact is not None:
+        return await _execute_verifier_scoring(
+            spec,
+            requested,
+            rows,
+            inputs,
+            snapshot,
+            model_commit=model_commit,
+            dataset_commit=dataset_commit,
+            phase=phase,
+            writer=writer,
+            gpu=gpu,
+            hf_token=hf_token if pushing else None,
+        )
     async with ticking_phase(phase, "Loading the classifier", stage="load_model"):
         classifier = await asyncio.to_thread(
             load_classifier,
@@ -1311,7 +1362,35 @@ async def _execute_scoring(
                 ),
             )
 
-    out = result_rows(lengths, logits, classifier.labels, inputs)
+    out = result_rows(lengths, logits, classifier.outputs, inputs)
+    return await _finish_scoring(
+        spec,
+        requested,
+        classifier,
+        out,
+        batches,
+        model_commit=model_commit,
+        dataset_commit=dataset_commit,
+        phase=phase,
+        writer=writer,
+        hf_token=cast("str", hf_token) if pushing else None,
+    )
+
+
+async def _finish_scoring(
+    spec: RunSpec,
+    requested: RunSpec,
+    classifier: Any,
+    out: list[dict[str, Any]],
+    batches: list[list[int]],
+    *,
+    model_commit: str | None,
+    dataset_commit: str | None,
+    phase: Any,
+    writer: JsonlProgressWriter | None,
+    hf_token: str | None,
+) -> str:
+    """Write the results and manifest, push them when the run has a write token, and end."""
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         await asyncio.to_thread(
@@ -1326,11 +1405,11 @@ async def _execute_scoring(
             ),
             Path(results_path).parent,
         )
-    if pushing:
+    if hf_token is not None:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
-                await _require_fresh_output(spec, cast("str", hf_token))
-                destination = await _push_results(spec, results_path, cast("str", hf_token))
+                await _require_fresh_output(spec, hf_token)
+                destination = await _push_results(spec, results_path, hf_token)
         except Exception as exc:
             msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
             raise RunError(msg) from exc
@@ -1360,6 +1439,90 @@ async def _execute_scoring(
         )
         raise RunError(msg)
     return destination
+
+
+async def _execute_verifier_scoring(
+    spec: RunSpec,
+    requested: RunSpec,
+    rows: list[dict[str, Any]],
+    inputs: Any,
+    snapshot: Path,
+    *,
+    model_commit: str | None,
+    dataset_commit: str | None,
+    phase: Any,
+    writer: JsonlProgressWriter | None,
+    gpu: GpuSampler,
+    hf_token: str | None,
+) -> str:
+    """The middle of a scoring run for a verifier trained by ``seq_cls`` (``artifact``).
+
+    The rows are rendered by the artifact's own rendering from the raw ``premises`` and
+    ``hypothesis`` cells (the columns the two fixed templates name); everything else is the pair
+    mode's frame: overflow dropped and counted, length-sorted batches, one pushed commit.
+    """
+    hp = spec.hyperparams
+    async with ticking_phase(phase, "Loading the verifier", stage="load_model"):
+        scorer = await asyncio.to_thread(
+            load_verifier,
+            snapshot,
+            label_alias=hp.label_alias,
+            max_length=hp.max_model_len,
+            dtype=cast("str", hp.dtype),
+            apply_calibration=hp.apply_calibration == "auto",
+        )
+    premises_column = spec.column_mapping["premises"]
+    hypothesis_column = spec.column_mapping["hypothesis"]
+    for column in (premises_column, hypothesis_column):
+        if column not in rows[0]:
+            msg = f"column {column!r} is not in the split; columns: {sorted(rows[0])}"
+            raise RunError(msg)
+    async with ticking_phase(phase, "Measuring rows", stage="run"):
+        rendered = await asyncio.to_thread(
+            scorer.render,
+            [row.get(premises_column) for row in rows],
+            [row.get(hypothesis_column) for row in rows],
+        )
+        lengths = await asyncio.to_thread(scorer.measure, rendered)
+    batches, overflow = plan_batches(
+        lengths, max_length=scorer.max_length, batch_size=hp.scoring_batch_size
+    )
+    scores: dict[int, VerifierScores] = {}
+    started = time.monotonic()
+    async with ticking_phase(phase, "Scoring rows", stage="run"):
+        for batch in batches:
+            values = await asyncio.to_thread(scorer.score, [rendered[i] for i in batch])
+            scores.update(zip(batch, values, strict=True))
+            elapsed = time.monotonic() - started
+            emit(
+                writer,
+                ProgressEvent(
+                    kind="step",
+                    stage="run",
+                    step=len(scores) + len(overflow),
+                    total_steps=len(rows),
+                    metrics={
+                        "succeeded": float(len(scores)),
+                        "failed": 0.0,
+                        "overflow": float(len(overflow)),
+                        **({"rows_per_s": len(scores) / elapsed} if elapsed > 0 else {}),
+                        **gpu.sample(),
+                    },
+                ),
+            )
+    out = verifier_result_rows(lengths, scores, scorer, inputs)
+    return await _finish_scoring(
+        spec,
+        requested,
+        scorer,
+        out,
+        batches,
+        model_commit=model_commit,
+        dataset_commit=dataset_commit,
+        phase=phase,
+        writer=writer,
+        hf_token=hf_token,
+    )
 
 
 async def main() -> int:
