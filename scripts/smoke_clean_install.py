@@ -13,6 +13,8 @@ It constructs, offline, everything a run constructs before it loads weights:
   the peft config and the bitsandbytes config, and the projected training rows as a ``Dataset``;
 - the batch-inference spec, its requests, its results parquet, the client it talks through, and
   the vLLM command line, parsed by the installed vLLM's own entrypoint;
+- the ``hf_classify`` scoring engine on a tiny classifier built from a config and saved to disk,
+  against a direct forward pass, and its refusal of a checkpoint saved without its head;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -490,6 +492,121 @@ def check_inference_spec() -> None:
             raise SmokeError(msg)
 
 
+def _tiny_classifier(directory: Path, *, with_head: bool) -> Any:
+    """Save a tiny BERT pair classifier and its tokenizer to ``directory``; return the model.
+
+    Built from a config with a fixed seed, so nothing is downloaded. ``with_head=False`` saves
+    the bare encoder, which a classification load must refuse: its head would be random.
+    """
+    import torch
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+    from transformers import (
+        BertConfig,
+        BertForSequenceClassification,
+        BertModel,
+        PreTrainedTokenizerFast,
+    )
+
+    words = ["all", "cats", "are", "animals", "some", "dogs", "bark", "so"]
+    specials = {"[PAD]": 0, "[UNK]": 1, "[CLS]": 2, "[SEP]": 3}
+    vocab = specials | {word: index + len(specials) for index, word in enumerate(words)}
+    # Tokenizer markers, not credentials: passed by name so no keyword reads as a hardcoded secret.
+    markers = {
+        "pad_token": "[PAD]",
+        "unk_token": "[UNK]",
+        "cls_token": "[CLS]",
+        "sep_token": "[SEP]",
+    }
+    backend = Tokenizer(models.WordLevel(vocab, unk_token=markers["unk_token"]))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    backend.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[CLS]", 2), ("[SEP]", 3)],
+    )
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, model_max_length=12, **markers)
+    labels = {0: "entailment", 1: "neutral", 2: "contradiction"}
+    config = BertConfig(
+        vocab_size=len(vocab),
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        max_position_embeddings=32,
+        num_labels=3,
+        id2label=labels,
+        label2id={name: index for index, name in labels.items()},
+    )
+    torch.manual_seed(0)
+    model: Any = (BertForSequenceClassification if with_head else BertModel)(config).eval()
+    model.save_pretrained(str(directory))
+    tokenizer.save_pretrained(str(directory))
+    return model
+
+
+def check_hf_classify() -> None:
+    """The ``hf_classify`` engine on the installed transformers, against a direct forward pass.
+
+    Covers what a fake cannot: the loading report's shape, the pair tokenization's special tokens
+    and right padding, and that a checkpoint without its head is refused rather than scored.
+    """
+    import torch
+
+    from strata_forge.pipelines import _scoring
+    from strata_forge.pipelines._common import RunError
+
+    identity = {name: name for name in ("entailment", "neutral", "contradiction")}
+    texts = ["all cats are animals", "some dogs bark", "so so so so so so so so so"]
+    pairs = ["cats are animals", "all dogs bark", "dogs bark"]
+    with tempfile.TemporaryDirectory() as tmp:
+        reference = _tiny_classifier(Path(tmp), with_head=True)
+        classifier = _scoring.load_classifier(
+            Path(tmp), label_alias=identity, max_length=None, dtype="float32"
+        )
+        if classifier.labels != ["entailment", "neutral", "contradiction"]:
+            msg = f"labels were not read by class id: {classifier.labels}"
+            raise SmokeError(msg)
+        if classifier.tf32 != {"matmul": False, "cudnn": False}:
+            msg = f"float32 scoring left TF32 on: {classifier.tf32}"
+            raise SmokeError(msg)
+        if (classifier.max_length, classifier.max_length_source) != (12, "model"):
+            msg = f"the length limit is not the tokenizer's 12: {classifier.max_length}"
+            raise SmokeError(msg)
+        lengths = classifier.lengths(texts, pairs)
+        # [CLS] a [SEP] b [SEP]: three special tokens per pair, nothing truncated.
+        if lengths != [4 + 3 + 3, 3 + 3 + 3, 9 + 2 + 3]:
+            msg = f"pair lengths are not the untruncated token counts: {lengths}"
+            raise SmokeError(msg)
+        batches, overflow = _scoring.plan_batches(
+            lengths, max_length=classifier.max_length, batch_size=8
+        )
+        if overflow != [2] or batches != [[0, 1]]:
+            msg = f"the over-long pair was not dropped: {batches}, {overflow}"
+            raise SmokeError(msg)
+        got = classifier.logits(texts[:2], pairs[:2])
+        tokenizer: Any = classifier._tokenizer  # pyright: ignore[reportPrivateUsage]
+        for index in (0, 1):
+            features = tokenizer(texts[index], pairs[index], return_tensors="pt")
+            with torch.inference_mode():
+                expected = reference(**features).logits[0].tolist()
+            if any(abs(a - b) > 1e-5 for a, b in zip(got[index], expected, strict=True)):
+                msg = f"batched logits differ from one forward pass: {got[index]} vs {expected}"
+                raise SmokeError(msg)
+    with tempfile.TemporaryDirectory() as tmp:
+        _tiny_classifier(Path(tmp), with_head=False)
+        try:
+            _scoring.load_classifier(
+                Path(tmp), label_alias=identity, max_length=None, dtype="bfloat16"
+            )
+        except RunError as exc:
+            if "classifier.weight" not in str(exc):
+                msg = f"a headless checkpoint was refused for the wrong reason: {exc}"
+                raise SmokeError(msg) from exc
+        else:
+            msg = "a checkpoint saved without its classification head was scored"
+            raise SmokeError(msg)
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -654,6 +771,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
             checks.append((f"finetune {method} / {fmt} / {adapter}", case))
     if {"serving", "hf"} <= extras:
         checks.append(("inference spec, requests and results", check_inference_spec))
+        checks.append(("hf_classify scores a saved classifier exactly", check_hf_classify))
     if "serving" in extras:
         checks.append(("vllm accepts the serving command line", check_vllm_command_line))
     return checks

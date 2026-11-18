@@ -33,11 +33,31 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `LLMResponse.reasoning` carries the plain-text reasoning a chat-completions server returned
   (`reasoning` / `reasoning_content`, also read from LiteLLM's `provider_specific_fields`),
   separate from `text`.
+- The inference runner takes `Hyperparams.engine`: `vllm_chat` (the default, unchanged) or
+  `hf_classify`, exact sequence-classification scoring with no model server. Each row renders
+  into a pair (`template` = the premises, a list column joined by `list_separator`;
+  `pair_template` = the hypothesis); labels come from `config.id2label` by class id through a
+  REQUIRED `label_alias` naming every class exactly (`null` excludes a class; many-to-one is
+  refused), and `dtype` is REQUIRED (`float32`, with TF32 switched off, or `bfloat16`). Pairs over
+  the model's token
+  limit are dropped before the forward pass, never truncated, counted, and written with
+  `overflow` true and no score. Results carry raw `logit_<label>` columns beside an uncalibrated
+  softmax and the argmax `pred`, a stable `item_id` from `id_column`, and a `slice` from
+  `slice_column`. The `scoring` manifest (`kind` `scoring`) records the model's `id2label` and the
+  alias used, the length limit (less the padding offset on RoBERTa-style models), dtype and TF32
+  state, the batch plan, the overflow policy, counts per slice, and the dataset commit actually
+  read (an unpinned dataset is resolved once and loaded at that commit). A scoring run pushes only
+  to an output repo of its own.
+- `strata_forge.training.loading.check_loading_info` refuses a model load that left weights
+  uninitialised, mismatched a shape, reported an error or ignored a head tensor, and returns the
+  other ignored checkpoint keys for the record.
 
 ### Changed
 
 - A model whose response LiteLLM already split into `<think>` reasoning and content (Qwen3 with
   no parser) now has that reasoning in the `reasoning` column instead of losing it.
+- The `[serving]` extra declares `torch` and `transformers` directly (the same ranges as
+  `[finetuning]`), since the scoring engine imports them itself.
 
 ## [0.5.0] - 2026-11-18
 

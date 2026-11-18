@@ -365,6 +365,72 @@ never holds one run's results beside another run's manifest. The check
 creates a missing repo private, so a run that fails afterwards can leave an
 empty private repo behind.
 
+### Classifier scoring (`hf_classify`)
+
+``Hyperparams.engine`` chooses what an inference run does with each row:
+``vllm_chat`` (the default) generates a reply through the model server;
+``hf_classify`` reads a sequence-classification head's logits and starts
+no model server. The scoring knobs live in ``Hyperparams``, so a control
+plane that validates hyperparameters with this model accepts them with no
+schema of its own:
+
+| Field | Meaning |
+|---|---|
+| ``pair_template`` | Required. The second text of each pair (the hypothesis); ``template`` renders the first (the premises). Its placeholders need ``column_mapping`` entries like the template's. |
+| ``list_separator`` | Joins a list-valued column (a row's premises) when it fills a placeholder. Default ``"\n"``. |
+| ``label_alias`` | Required. Names every ``id2label`` class exactly, no missing and no extra key: each maps to its output label, or to ``null`` to EXCLUDE it (no columns; the softmax and argmax run over the included classes). Two classes mapping to one label are refused (no combine rule exists); at least two classes stay included. |
+| ``id_column`` | Optional. A column whose value becomes each row's ``item_id``: a string or an integer, unique, at most 256 characters. |
+| ``slice_column`` | Optional. A column (at most 256 distinct values) the counts are kept per value of, for per-tier receipts. A missing value counts under ``(null)``; a value spelled ``(null)``, one over 64 characters, or one spelling held by two types (``1`` and ``"1"``) is refused rather than merged. |
+| ``scoring_batch_size`` | Rows per forward pass, 1-1024. Default 16. |
+| ``max_model_len`` | Optional token limit. Unset, the model's own: the smaller of the position table (less ``pad_token_id + 1`` slots on padding-offset architectures such as RoBERTa, whose position ids start after the padding index, so 514 slots fit 512 tokens) and the tokenizer's ``model_max_length``. A larger one is refused. |
+| ``dtype`` | Required, no default: ``float32`` or ``bfloat16``. In ``float32`` the TF32 matmul and cuDNN paths are switched off (``torch.backends.cuda.matmul.allow_tf32`` / ``cudnn.allow_tf32``) before the model loads. In ``bfloat16`` a row's logits can depend on which rows share its batch; in ``float32`` the difference is at rounding level. |
+| ``row_limit`` | As for chat. |
+
+Every other knob generates text, so it is refused with this engine, and the
+scoring knobs are refused with ``vllm_chat``.
+
+The model comes from the same filtered snapshot as a chat run (safetensors
+only, no repo code) and loads with ``AutoModelForSequenceClassification``,
+``trust_remote_code=False``, from the local snapshot alone. A load that
+left any weight uninitialised, reported a shape mismatch or an error, or
+ignored a checkpoint tensor under ``classifier.`` / ``score.`` / ``head.``
+is refused (``training.loading.check_loading_info``); other ignored
+checkpoint keys (a pooler, a ``position_ids`` buffer) are recorded.
+Labels are read from ``config.id2label`` in class-id order, never in
+dictionary order.
+
+**Nothing is truncated.** Each pair is measured with its special tokens; a
+pair over the limit is dropped before any forward pass, counted, and still
+written as a row with ``overflow`` true and no score. The rest run in
+length-sorted batches, longest first, right-padded. A run where every row
+overflowed fails after writing its results.
+
+Each results row is ``{custom_id, item_id?, slice?, input_tokens, overflow,
+pred, logit_<label>..., p_<label>...}``: the raw head logits, their plain
+softmax over the included classes (temperature 1; no calibration is applied)
+and the argmax label over them (the lowest class id on a tie). The ``end`` event's metrics are ``succeeded``
+(scored rows), ``failed`` (0) and ``overflow``.
+
+The manifest beside the results has ``kind`` ``scoring``. It records the
+model's requested revision and loaded commit, and the dataset's requested
+revision and the commit actually read: an unpinned dataset is resolved to
+its default branch's head once, before the load, and loaded at that commit.
+Beside the engine versions (``transformers``, ``torch``, ``tokenizers``,
+``safetensors``, ``datasets``, ``huggingface-hub``), the template and pair
+template digests (the hyperparameters are recorded without the pair
+template's text), and the column mapping, its ``scoring`` block records the
+model's ``id2label``, the ``label_alias`` used, the included labels and the
+excluded classes, the length limit and where it came from, the overflow
+policy (``drop_and_count``), ``calibration: null``, the padding side and pad
+token, the loaded dtype, the TF32 switches as they stood, the device, the
+batch plan (``order`` ``token_length_desc_then_row_index``, ``batch_size``,
+the number of batches and a SHA-256 of the plan), and the ignored checkpoint
+keys; ``counts`` holds rows, scored and overflow, overall and ``by_slice``.
+
+A scoring run pushes only to an output repo of its own: one holding any
+file but ``.gitattributes`` is refused before the dataset loads and again at
+push time, so a repo never mixes two runs' rows.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a
