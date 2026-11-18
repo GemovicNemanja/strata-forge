@@ -59,6 +59,7 @@ its entire timeout, invisibly.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import itertools
 import json
@@ -71,7 +72,15 @@ from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceRunner
@@ -187,6 +196,11 @@ _SERVE_LOAD_FORMAT = ("--load-format", "safetensors")
 #: splits it out.
 _HARMONY_MODEL_TYPE = "gpt_oss"
 _HARMONY_REASONING_PARSER = "openai_gptoss"
+# The harmony system message states a "Current date", which the model server takes from this
+# variable and otherwise from its own clock, per request. Unpinned, the same prompts differ across
+# days, and a long run can cross midnight.
+_HARMONY_DATE_ENV = "VLLM_SYSTEM_START_DATE"
+_ISO_DATE_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 
 
 class Hyperparams(BaseModel):
@@ -222,7 +236,25 @@ class Hyperparams(BaseModel):
     reasoning_parser: Literal["openai_gptoss", "qwen3"] | None = None
     # gpt-oss's harmony reasoning effort, sent with every request.
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # The date the harmony system message states, ``YYYY-MM-DD``. Unset, a gpt-oss run pins the
+    # serving machine's date at start-up. Either way the manifest records the date used.
+    harmony_date: str | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
+
+    @field_validator("harmony_date")
+    @classmethod
+    def _harmony_date_is_a_calendar_date(cls, value: str | None) -> str | None:
+        # The pattern first: `date.fromisoformat` also takes `20261118` and week dates, and the
+        # value is recorded as given, so only the one spelling is accepted.
+        if value is not None:
+            try:
+                if not _ISO_DATE_RE.fullmatch(value):
+                    raise ValueError
+                datetime.date.fromisoformat(value)
+            except ValueError:
+                msg = "harmony_date must be a calendar date written YYYY-MM-DD"
+                raise ValueError(msg) from None
+        return value
 
     @model_validator(mode="after")
     def _effort_needs_the_harmony_parser(self) -> Hyperparams:
@@ -232,6 +264,12 @@ class Hyperparams(BaseModel):
         if self.reasoning_effort is not None and self.reasoning_parser != _HARMONY_REASONING_PARSER:
             msg = (
                 "reasoning_effort applies only to gpt-oss models, served with "
+                f"reasoning_parser={_HARMONY_REASONING_PARSER!r}"
+            )
+            raise ValueError(msg)
+        if self.harmony_date is not None and self.reasoning_parser != _HARMONY_REASONING_PARSER:
+            msg = (
+                "harmony_date applies only to gpt-oss models, served with "
                 f"reasoning_parser={_HARMONY_REASONING_PARSER!r}"
             )
             raise ValueError(msg)
@@ -520,6 +558,22 @@ def _serve_args(hp: Hyperparams) -> tuple[str, ...]:
     return tuple(args)
 
 
+def _today() -> str:
+    """This machine's local date, the clock the model server would read."""
+    return datetime.datetime.now().astimezone().date().isoformat()
+
+
+def _harmony_date(hp: Hyperparams) -> str | None:
+    """The date a gpt-oss run's system message states: the requested one, else today's.
+
+    Today's on this machine's clock, which is the one the model server would read, but taken once
+    so that every row of the run states the same date. ``None`` for a model without harmony.
+    """
+    if hp.reasoning_parser != _HARMONY_REASONING_PARSER:
+        return None
+    return hp.harmony_date or _today()
+
+
 def _serve_flags(run: str) -> list[str]:
     """The flags of the model server's command line, from ``--host`` on.
 
@@ -748,7 +802,8 @@ def _build_manifest(
             "requested_revision": spec.dataset_commit_sha,
         },
         # What the model server actually ran with, next to what was asked for in `hyperparams`.
-        "serving": serving or {"max_model_len": None, "dtype": None, "flags": None},
+        "serving": serving
+        or {"max_model_len": None, "dtype": None, "flags": None, "harmony_date": None},
         "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
         "column_mapping": spec.column_mapping,
         "hyperparams": spec.hyperparams.model_dump(),
@@ -850,6 +905,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
 
     hp = spec.hyperparams
     await asyncio.to_thread(_check_reasoning_parser, snapshot, hp)
+    harmony_date = _harmony_date(hp)
     task = build_vllm_task(
         str(snapshot),
         served_model_name=spec.model_id,  # the client below keeps addressing it by its Hub id
@@ -891,6 +947,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
                 # The weights are already local. Offline, the server cannot fetch a file the
                 # download above refused, and has no reason to look for a credential.
                 "HF_HUB_OFFLINE": "1",
+                **({_HARMONY_DATE_ENV: harmony_date} if harmony_date else {}),
             }
         }
     )
@@ -916,6 +973,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
                 "served": await asyncio.to_thread(_served_dtype, Path.cwd()),
             },
             "flags": _serve_flags(task.run),
+            "harmony_date": harmony_date,
         }
         # The endpoint this runner just launched is on loopback and takes no credential, and
         # saying so EXPLICITLY is what keeps it deterministic: left unset, the client falls back

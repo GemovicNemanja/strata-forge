@@ -21,6 +21,10 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `Hyperparams.gpu_memory_utilization` and `Hyperparams.max_num_batched_tokens` set vLLM's
   `--gpu-memory-utilization` and `--max-num-batched-tokens`, the two knobs vLLM's gpt-oss recipe
   uses to fit gpt-oss-120b on one 80 GB GPU.
+- `Hyperparams.harmony_date` (`YYYY-MM-DD`, a real calendar date, only with `openai_gptoss`) pins
+  the "Current date" of gpt-oss's harmony system message through vLLM's `VLLM_SYSTEM_START_DATE`.
+  Unset, a gpt-oss run pins the serving machine's local date once at start-up, so every row states
+  the same date. The manifest records the date used as `serving.harmony_date`.
 - The inference manifest records the model server's command-line flags as `serving.flags`.
 - `LLMResponse.reasoning` carries the plain-text reasoning a chat-completions server returned
   (`reasoning` / `reasoning_content`), separate from `text`.

@@ -1522,8 +1522,9 @@ async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
     manifest = json.loads(raw)
     assert manifest["schema"] == "strata.run.manifest/v1"
     assert manifest["kind"] == "inference"
-    assert set(manifest["serving"]) == {"max_model_len", "dtype", "flags"}
+    assert set(manifest["serving"]) == {"max_model_len", "dtype", "flags", "harmony_date"}
     assert "--load-format" in manifest["serving"]["flags"]
+    assert manifest["serving"]["harmony_date"] is None  # not a harmony model
     assert manifest["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
     assert manifest["dataset"]["requested_revision"] == "8978b4c1c8a030706e837a239dd870a8fe8de8a4"
     assert manifest["engine"]["version"] == SPEC_VERSION
@@ -1741,6 +1742,12 @@ def _gpt_oss_snapshot(tmp_path: Path) -> None:
         {"gpu_memory_utilization": 1.5},
         {"max_num_batched_tokens": 0},
         {"max_num_batched_tokens": True},
+        {"harmony_date": "2026-11-18"},  # no harmony parser
+        {"harmony_date": "2026-11-18", "reasoning_parser": "qwen3"},
+        *(
+            {"harmony_date": bad, "reasoning_parser": "openai_gptoss"}
+            for bad in ("2026-02-30", "2026-1-05", "20261118", "2026-11-18T00:00", "2026-W47-3", "")
+        ),
     ],
 )
 def test_reasoning_and_memory_knobs_are_validated(bad: dict[str, Any]) -> None:
@@ -1858,6 +1865,7 @@ async def test_a_gpt_oss_run_serves_with_the_harmony_parser_and_records_its_flag
                 "reasoning_effort": "high",
                 "gpu_memory_utilization": 0.95,
                 "max_num_batched_tokens": 1024,
+                "harmony_date": "2026-11-18",
             },
         ),
     )
@@ -1884,6 +1892,9 @@ async def test_a_gpt_oss_run_serves_with_the_harmony_parser_and_records_its_flag
     assert flags[flags.index("--reasoning-parser") + 1] == "openai_gptoss"
     assert str(tmp_path / "hub-snapshot") not in flags  # a machine path, not a run fact
     assert manifest["hyperparams"]["reasoning_effort"] == "high"
+    # The requested date pins the system message, and the manifest says which date that was.
+    assert record["task"].env["VLLM_SYSTEM_START_DATE"] == "2026-11-18"
+    assert manifest["serving"]["harmony_date"] == "2026-11-18"
     assert manifest["model"]["commit"] == _SHA
     # Row text stays out of the manifest, the reasoning included.
     assert "ANALYSIS" not in json.dumps(manifest)
@@ -1918,3 +1929,39 @@ async def test_the_harmony_parser_on_another_model_is_refused_before_serving(
     assert await ir.main() == 1
     assert "task" not in record
     assert "model_type='qwen3'" in capsys.readouterr().err
+
+
+async def test_an_undated_gpt_oss_run_pins_and_records_the_machines_date(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Left to the model server, the date is read per request: a run crossing midnight would state
+    # two dates. The runner takes it once, pins it, and records it.
+    monkeypatch.chdir(tmp_path)
+    _gpt_oss_snapshot(tmp_path)
+
+    monkeypatch.setattr(ir, "_today", lambda: "2026-11-19")
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(
+            model_id="openai/gpt-oss-20b", hyperparams={"reasoning_parser": "openai_gptoss"}
+        ),
+    )
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert record["task"].env["VLLM_SYSTEM_START_DATE"] == "2026-11-19"
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["serving"]["harmony_date"] == "2026-11-19"
+
+
+async def test_a_model_without_harmony_gets_no_date_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert "VLLM_SYSTEM_START_DATE" not in record["task"].env
