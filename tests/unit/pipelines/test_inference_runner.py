@@ -16,6 +16,7 @@ import types
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from strata_forge.compute.batch import BatchInferenceResult
 from strata_forge.compute.batch import BatchInferenceRunner as _RealBatchRunner
@@ -30,7 +31,7 @@ from strata_forge.pipelines._common import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
     from pathlib import Path
 
     from strata_forge.llm import LLMClient, LLMResponse
@@ -264,6 +265,17 @@ class _NeverEndingDataset:
             i += 1
 
 
+def _chat_rows(
+    load: Callable[[Any, Any], list[dict[str, Any]]],
+) -> Callable[[Any, Any], tuple[list[dict[str, Any]], None]]:
+    """A chat run's row loader from a plain one: its rows, named by position."""
+
+    def _loaded(spec: Any, token: Any) -> tuple[list[dict[str, Any]], None]:
+        return load(spec, token), None
+
+    return _loaded
+
+
 def test_load_rows_caps_materialization(monkeypatch: pytest.MonkeyPatch) -> None:
 
     counter = {"consumed": 0}
@@ -344,18 +356,22 @@ async def test_run_batches_reconciles_and_emits(
             "output": "OUT0",
             "reasoning": None,
             "error": None,
+            "error_kind": None,
             "finish_reason": "stop",
             "input_tokens": 5,
             "output_tokens": 10,
+            "latency_ms": 100,
         },
         {
             "custom_id": "row-1",
             "output": None,
             "reasoning": None,
             "error": "RuntimeError('boom')",
+            "error_kind": "other",
             "finish_reason": None,
             "input_tokens": None,
             "output_tokens": None,
+            "latency_ms": None,
         },
     ]
     events = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
@@ -411,7 +427,7 @@ async def test_main_happy_path_pushes_and_never_leaks_token(
         return cast("str", spec.output_repo_id)
 
     _FakeRunner.scripted = [_ok("A"), _ok("B")]
-    monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_rows))
     monkeypatch.setattr(ir, "serving_endpoint", _fake_serving)
     monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
     monkeypatch.setattr(ir, "_write_results", _write)
@@ -492,7 +508,7 @@ def _mock_main_deps(
     _FakeRunner.scripted = [_ok("A")] if scripted is None else scripted
     # The real probe would reach for a model server on loopback; nothing listens there in a test.
     monkeypatch.setattr(ir, "_served_max_model_len", _no_served_len)
-    monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_rows))
     monkeypatch.setattr(ir, "serving_endpoint", serving)
     monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
     monkeypatch.setattr(ir, "_write_results", _write)
@@ -877,7 +893,7 @@ async def test_main_error_path_scrubs_token(
         msg = f"dataset load failed with creds {_TOKEN}"
         raise ir.RunError(msg)
 
-    monkeypatch.setattr(ir, "_load_rows", _boom)
+    monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_boom))
 
     code = await ir.main()
     assert code == 1
@@ -918,7 +934,7 @@ async def test_main_no_token_keeps_results_on_vm_and_skips_push(
         return "unreachable"
 
     _FakeRunner.scripted = [_ok("A")]
-    monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_rows))
     monkeypatch.setattr(ir, "serving_endpoint", _fake_serving)
     monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
     monkeypatch.setattr(ir, "_write_results", _write)
@@ -1052,9 +1068,11 @@ async def test_a_failed_run_still_writes_its_results(
             "output": None,
             "reasoning": None,
             "error": "RuntimeError('kaboom')",
+            "error_kind": "other",
             "finish_reason": None,
             "input_tokens": None,
             "output_tokens": None,
+            "latency_ms": None,
         }
     ]
 
@@ -1641,7 +1659,7 @@ async def test_a_public_output_repo_is_refused_before_any_gpu_time(
         return [{"question": "a"}]
 
     _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
-    monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_rows))
 
     assert await ir.main() == 1
     assert not loaded  # refused before the dataset download, the model download or the server
@@ -2172,3 +2190,155 @@ async def test_the_wire_carries_the_effort_and_the_reply_splits_end_to_end(
     assert "extra_body" not in received[0]
     assert out[0]["output"] == "42"
     assert out[0]["reasoning"] == "Six times seven."
+
+
+# ------------------------------ stable row ids ------------------------------
+
+_SPLIT = [
+    {"question": "a", "ticket": "t-1"},
+    {"question": "b", "ticket": "t-2"},
+    {"question": "c", "ticket": "t-3"},
+]
+
+
+def _chat_spec(**overrides: Any) -> ir.RunSpec:
+    return ir.RunSpec.model_validate_json(_spec_json(**overrides))
+
+
+def test_rows_are_named_by_position_or_by_the_declared_column() -> None:
+    rows, ids = ir.select_rows(_chat_spec(hyperparams={"row_limit": 2}), iter(_SPLIT))
+    assert ids == ["row-0", "row-1"]
+    assert [r["question"] for r in rows] == ["a", "b"]
+    rows, ids = ir.select_rows(_chat_spec(id_column="ticket"), iter(_SPLIT))
+    assert ids == ["t-1", "t-2", "t-3"]
+    # An integer id is named by its text.
+    _, ids = ir.select_rows(_chat_spec(id_column="n"), iter([{"n": 7}, {"n": 8}]))
+    assert ids == ["7", "8"]
+
+
+@pytest.mark.parametrize(
+    ("split", "message"),
+    [
+        ([{"ticket": "SECRET-ID"}, {"ticket": "SECRET-ID"}], r"repeats an id \(row 1\)"),
+        ([{"ticket": "t-1"}, {"ticket": "  "}], "is empty in row 1"),
+        ([{"ticket": None}], "is empty in row 0"),
+        ([{"ticket": "x" * 513}], "over 512 characters"),
+    ],
+)
+def test_a_declared_id_column_must_hold_unique_present_ids(
+    split: list[dict[str, Any]], message: str
+) -> None:
+    with pytest.raises(ir.RunError, match=message) as caught:
+        ir.select_rows(_chat_spec(id_column="ticket"), iter(split))
+    # The id itself is the user's data and never rides out in the error.
+    assert "SECRET-ID" not in str(caught.value)
+
+
+def test_row_ids_select_from_the_whole_split() -> None:
+    # row_limit does not cut a selection: the named rows are found wherever they are.
+    spec = _chat_spec(row_ids=["row-2", "row-0"], hyperparams={"row_limit": 1})
+    rows, ids = ir.select_rows(spec, iter(_SPLIT))
+    assert ids == ["row-0", "row-2"]  # in split order
+    assert [r["question"] for r in rows] == ["a", "c"]
+    _, ids = ir.select_rows(_chat_spec(id_column="ticket", row_ids=["t-3"]), iter(_SPLIT))
+    assert ids == ["t-3"]
+    with pytest.raises(ir.RunError, match="2 of the 3 requested row ids are not in the split"):
+        ir.select_rows(_chat_spec(id_column="ticket", row_ids=["t-1", "t-9", "t-8"]), iter(_SPLIT))
+
+
+def test_row_ids_are_validated_in_the_spec() -> None:
+    for bad in ([], ["a", "a"], [""], ["x" * 513]):
+        with pytest.raises(PydanticValidationError):
+            _chat_spec(row_ids=bad)
+    with pytest.raises(PydanticValidationError):
+        _chat_spec(id_column="")
+
+
+@pytest.mark.parametrize("field", [{"id_column": "uid"}, {"row_ids": ["row-0"]}])
+def test_ids_are_refused_outside_chat_runs(field: dict[str, Any]) -> None:
+    # Scoring rows carry their own declared id (`item_id`), so neither field means anything there.
+    scoring = {
+        "engine": "hf_classify",
+        "pair_template": "{h}",
+        "dtype": "float32",
+        "label_alias": {"ENTAILMENT": "entailed", "NOT_ENTAILMENT": "not_entailed"},
+    }
+    spec = json.loads(_spec_json(column_mapping={"h": "hypothesis"}, template="{h}", **field))
+    spec["hyperparams"] = scoring
+    with pytest.raises(PydanticValidationError, match="apply only to engine 'vllm_chat'"):
+        ir.RunSpec.model_validate(spec)
+
+
+def test_an_id_column_missing_from_the_split_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Split(list[dict[str, Any]]):
+        column_names: ClassVar[list[str]] = ["question"]
+
+    def _load_dataset(*_a: Any, **_k: Any) -> _Split:
+        return _Split([{"question": "a"}])
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
+    with pytest.raises(ir.RunError, match="id_column 'ticket' is not a column of the split"):
+        ir._load_chat_rows(_chat_spec(id_column="ticket"), False)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_failed_row_is_classed_by_its_error_type() -> None:
+    from strata_forge.core.errors import (
+        FallbackExhaustedError,
+        ProviderBadRequestError,
+        ProviderRateLimitError,
+        ProviderTimeoutError,
+    )
+    from strata_forge.llm.schemas import StructuredOutputError
+
+    assert ir.row_error_kind(ProviderTimeoutError("t")) == "timeout"
+    assert ir.row_error_kind(TimeoutError()) == "timeout"
+    assert ir.row_error_kind(ProviderRateLimitError("r")) == "rate_limited"
+    assert ir.row_error_kind(ProviderBadRequestError("b")) == "model_error"
+    assert ir.row_error_kind(StructuredOutputError("s", attempts=1)) == "invalid_output"
+    assert ir.row_error_kind(RuntimeError("timeout in the text")) == "other"
+    exhausted = FallbackExhaustedError(
+        "all",
+        causes=[("m", None, ProviderBadRequestError("b")), ("m", None, ProviderTimeoutError("t"))],
+    )
+    assert ir.row_error_kind(exhausted) == "timeout"  # the last attempt's class
+
+
+def test_the_row_ids_digest_ignores_order() -> None:
+    first = ir.row_ids_digest(["b", "a"])
+    assert first == ir.row_ids_digest(["a", "b"])
+    assert first is not None
+    assert first["count"] == 2
+    assert ir.row_ids_digest(None) is None
+
+
+async def test_a_run_names_its_rows_by_the_declared_column(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(id_column="ticket", row_ids=["t-1", "t-3"]))
+    _deliver_token(monkeypatch, tmp_path)
+    written: list[list[dict[str, Any]]] = []
+    _mock_main_deps(
+        monkeypatch,
+        tmp_path,
+        _fake_serving,
+        rows=_SPLIT,
+        scripted=[_ok("A", latency_ms=812.4), _fail(TimeoutError())],
+        written=written,
+    )
+
+    def _select(spec: Any, token: Any) -> tuple[list[dict[str, Any]], list[str]]:
+        del token
+        return ir.select_rows(spec, iter(_SPLIT))
+
+    monkeypatch.setattr(ir, "_load_chat_rows", _select)
+
+    assert await ir.main() == 0
+    rows = written[0]
+    assert [(r["custom_id"], r["latency_ms"], r["error_kind"]) for r in rows] == [
+        ("t-1", 812, None),
+        ("t-3", None, "timeout"),
+    ]
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["id_column"] == "ticket"
+    assert manifest["row_ids"] == ir.row_ids_digest(["t-1", "t-3"])

@@ -96,6 +96,15 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   `timed_verifier_request` on the scoring engine.
 - The clean-install matrix gains the benchmark machine's extras, `serving,storage,hf,scoring`,
   and the smoke script a `check_benchmark` on the tiny classifier.
+- The batch-inference runner names rows by a declared column: `RunSpec.id_column` makes each
+  results row's `custom_id` that column's value (present, at most 512 characters and unique, else
+  the run is refused naming the row position, never the value); unset, rows keep their position
+  `row-<i>`. `RunSpec.row_ids` (1-100,000 distinct ids) runs only those rows, selected from the
+  whole split whatever `row_limit` says, and refuses a run whose ids are not all found. Both are
+  chat-only. The manifest records `id_column` and `row_ids` as `{count, sha256}`.
+- Results rows gain `latency_ms` (the client's per-request measure, `None` without a response) and
+  `error_kind` (`timeout`, `rate_limited`, `model_error`, `invalid_output` or `other`, from the
+  exception's type; `None` on success).
 
 ### Changed
 

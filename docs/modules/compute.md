@@ -324,10 +324,30 @@ set; ``max_model_len`` bounds the context the KV cache must hold. The ``[serving
 ``vllm>=0.24,<1`` range serves gpt-oss's MXFP4 checkpoints with the harmony parser on every
 release in it.
 
-Each results row is ``{custom_id, output, reasoning, error, finish_reason,
-input_tokens, output_tokens}``; ``reasoning`` is ``None`` when the server
-returned none, and a failed row carries ``None`` in it and in the last
-three. ``finish_reason`` is the client's normalized value (``stop``,
+Each results row is ``{custom_id, output, reasoning, error, error_kind,
+finish_reason, input_tokens, output_tokens, latency_ms}``; ``reasoning`` is
+``None`` when the server returned none, and a failed row carries ``None`` in
+it, ``finish_reason``, the token counts and ``latency_ms``. ``latency_ms`` is
+the client's own measure of the row's request, in whole milliseconds (a
+guided-JSON retry counts both attempts). ``error_kind`` is ``None`` on a
+row that succeeded and, on a failed one, a stable class read off the
+exception's type, never its text: ``timeout``, ``rate_limited``,
+``model_error`` (any other provider error), ``invalid_output`` (a
+structured-output or validation error) or ``other``; a fallback chain is
+classed by its last attempt.
+
+A row is named by ``custom_id``: the value of the spec's ``id_column`` when
+one is declared (it must be a column of the split, and its values present,
+at most 512 characters and unique across the rows read, else the run is
+refused naming the row position, never the value), else its position
+``row-<i>``. A position names a different row as soon as anything before it
+changes, so a declared id is what lets a later run name the same rows.
+``row_ids`` (1-100,000 distinct ids, as ``custom_id`` names them) runs only
+those rows: they are selected from the whole split, so ``row_limit`` does
+not cut the selection, in split order, and a run whose requested ids are
+not all in the split is refused with the count it could not find. Both are
+chat-only: a scoring engine's rows carry their own declared ``item_id``,
+and a spec setting either with another engine is refused. ``finish_reason`` is the client's normalized value (``stop``,
 ``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
 client does not recognise is reported as ``stop``; ``length`` (the output
 hit ``max_tokens``) is always preserved. Beside ``results.parquet`` the runner writes ``manifest.json``
@@ -352,6 +372,9 @@ the machine. It records:
   gpt-oss system message stated;
 - a SHA-256 of the template (never its text), the column mapping and the
   hyperparameters;
+- the ``id_column`` the rows were named by (``None`` for positions) and,
+  for a run given ``row_ids``, their ``count`` and a ``sha256`` of the ids
+  sorted and joined by newlines (never the ids themselves), else ``None``;
 - row, success and failure counts, a ``finish_reason`` histogram and token
   totals.
 

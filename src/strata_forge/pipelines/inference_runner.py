@@ -46,8 +46,10 @@ credentials + the network):
     (:func:`~strata_forge.pipelines._common.model_server_environ`), not the runner's: it is
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
-    repo id; result rows are ``{custom_id, output, reasoning, error, finish_reason, input_tokens,
-    output_tokens}`` (model text and its accounting only; a guided-JSON run adds its validity
+    repo id; result rows are ``{custom_id, output, reasoning, error, error_kind, finish_reason,
+    input_tokens, output_tokens, latency_ms}`` (model text and its accounting only; ``custom_id``
+    is the declared ``id_column``'s value, else the row's position ``row-<i>``; a guided-JSON run
+    adds its validity
     columns, see :mod:`strata_forge.pipelines._guided`), and the ``manifest.json`` beside them
     records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
@@ -98,12 +100,20 @@ from pydantic import (
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
+from strata_forge.core.errors import (
+    FallbackExhaustedError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
+from strata_forge.core.errors import ValidationError as ForgeValidationError
 from strata_forge.llm import AssistantMessage, LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
 )
+from strata_forge.llm.schemas import StructuredOutputError
 from strata_forge.pipelines._chat_template import (
     kwargs_digest,
     kwargs_placeholders,
@@ -159,7 +169,7 @@ from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
     from strata_forge.core.redact import Redactor
     from strata_forge.llm import LLMResponse
@@ -533,6 +543,16 @@ def _owners(fields: list[str]) -> str:
     )
 
 
+#: The most rows one run may name in ``row_ids``, and the longest id and column name it takes.
+MAX_ROW_IDS = 100_000
+_MAX_ROW_ID_CHARS = 512
+_MAX_ID_COLUMN_CHARS = 255
+
+#: The stable class of a failed row's error (``error_kind``): read off the exception's type, never
+#: its text, so a consumer can count and filter failures without parsing prose.
+type RowErrorKind = Literal["timeout", "rate_limited", "model_error", "invalid_output", "other"]
+
+
 class RunSpec(BaseModel):
     """The inert run spec the server delivers in ``STRATA_RUN_CONFIG`` (no secrets)."""
 
@@ -560,6 +580,37 @@ class RunSpec(BaseModel):
     progress_path: str | None = None
     # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
     run_id: str | None = None
+    # A column of the split whose value names each row in the results (``custom_id``). Its values
+    # must be present and unique, so a row keeps its id however the split is read or re-read.
+    # Unset, a row is named by its position (``row-<i>``), which names a different row as soon
+    # as anything before it changes.
+    id_column: str | None = Field(default=None, min_length=1, max_length=_MAX_ID_COLUMN_CHARS)
+    # Run only the rows with these ids (as ``custom_id`` names them). Read from the whole split,
+    # so ``row_limit`` does not cut the selection, and every id must be found: a retry of the
+    # failed rows of a run that silently ran fewer rows than asked would hide the rest.
+    row_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_ROW_IDS)
+
+    @field_validator("row_ids")
+    @classmethod
+    def _distinct_row_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if any(not item or len(item) > _MAX_ROW_ID_CHARS for item in value):
+            msg = f"each row id is 1 to {_MAX_ROW_ID_CHARS} characters"
+            raise ValueError(msg)
+        if len(set(value)) != len(value):
+            msg = "row_ids names a row more than once"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _ids_are_chat_only(self) -> RunSpec:
+        if self.hyperparams.engine != "vllm_chat" and (
+            self.id_column is not None or self.row_ids is not None
+        ):
+            msg = "id_column and row_ids apply only to engine 'vllm_chat'"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _artifact_templates_name_the_roles(self) -> RunSpec:
@@ -645,7 +696,8 @@ def render_template(template: str, row: dict[str, Any], column_mapping: dict[str
     return rendered[:_MAX_RENDERED_CHARS]
 
 
-def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any]]:
+def _open_split(spec: RunSpec, token: str | Literal[False]) -> Any:
+    """The split as ``datasets`` loads it, its mapped columns checked to exist."""
     try:
         # Lazy optional-extra import (forge convention: `Any` so pyright skips the unresolved
         # module); the [hf] extra ships `datasets`.
@@ -666,6 +718,14 @@ def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
+    if spec.id_column is not None and spec.id_column not in columns:
+        msg = f"id_column {spec.id_column!r} is not a column of the split"
+        raise RunError(msg)
+    return dataset
+
+
+def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any]]:
+    dataset = _open_split(spec, token)
     # Slice DURING iteration (not after): dataset size/content is attacker-controlled, so
     # row_limit must bound materialization — a huge split mustn't OOM the VM before the cap.
     limit = spec.hyperparams.row_limit
@@ -673,16 +733,103 @@ def _load_rows(spec: RunSpec, token: str | Literal[False]) -> list[dict[str, Any
     return [dict(r) for r in source]
 
 
+def _row_id(id_column: str | None, row: dict[str, Any], position: int) -> str:
+    """A row's ``custom_id``: its ``id_column`` value, else its position. Never echoes a value
+    in an error: an id is the user's data."""
+    if id_column is None:
+        return f"row-{position}"
+    value = row.get(id_column)
+    text = "" if value is None else str(value)
+    if not text.strip():
+        msg = f"id_column {id_column!r} is empty in row {position}; every row needs an id"
+        raise RunError(msg)
+    if len(text) > _MAX_ROW_ID_CHARS:
+        msg = f"id_column {id_column!r} holds an id over {_MAX_ROW_ID_CHARS} characters in row {position}"
+        raise RunError(msg)
+    return text
+
+
+def select_rows(spec: RunSpec, source: Iterable[Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """The rows a chat run sends, and the ``custom_id`` of each, in split order.
+
+    Without ``row_ids`` this reads up to ``row_limit`` rows. With them it reads the whole split
+    (sliced during iteration otherwise, so a huge split is still never materialised whole) and
+    keeps only the named rows, and every named id must be found. An ``id_column`` value must be
+    unique across every row read.
+    """
+    wanted = set(spec.row_ids) if spec.row_ids is not None else None
+    limit = None if wanted is not None else spec.hyperparams.row_limit
+    rows: list[dict[str, Any]] = []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for position, raw in enumerate(
+        itertools.islice(source, limit) if limit is not None else source
+    ):
+        row = dict(raw)
+        row_id = _row_id(spec.id_column, row, position)
+        if spec.id_column is not None:
+            if row_id in seen:
+                msg = (
+                    f"id_column {spec.id_column!r} repeats an id (row {position}); ids must be "
+                    "unique"
+                )
+                raise RunError(msg)
+            seen.add(row_id)
+        if wanted is not None and row_id not in wanted:
+            continue
+        rows.append(row)
+        ids.append(row_id)
+    if wanted is not None and len(ids) != len(wanted):
+        msg = (
+            f"{len(wanted) - len(ids)} of the {len(wanted)} requested row ids are not in the split"
+        )
+        raise RunError(msg)
+    return rows, ids
+
+
+def _load_chat_rows(
+    spec: RunSpec, token: str | Literal[False]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The chat run's rows and their ``custom_id``s (:func:`select_rows` over the split)."""
+    return select_rows(spec, _open_split(spec, token))
+
+
 def _build_requests(
-    spec: RunSpec, rows: list[dict[str, Any]]
+    spec: RunSpec, rows: list[dict[str, Any]], ids: Sequence[str] | None = None
 ) -> tuple[list[list[UserMessage]], list[str]]:
+    """One one-message conversation per row, and each row's ``custom_id`` (``ids`` as
+    :func:`select_rows` named them, else the rows' positions)."""
     prompts: list[list[UserMessage]] = []
-    custom_ids: list[str] = []
-    for i, row in enumerate(rows):
+    for row in rows:
         rendered = render_template(spec.template, row, spec.column_mapping)
         prompts.append([UserMessage(content=rendered)])  # one-message conversation
-        custom_ids.append(f"row-{i}")  # positional reconciliation key
+    custom_ids = list(ids) if ids is not None else [f"row-{i}" for i in range(len(rows))]
     return prompts, custom_ids
+
+
+def row_ids_digest(row_ids: Sequence[str] | None) -> dict[str, Any] | None:
+    """``{count, sha256}`` of a run's ``row_ids``, order-free: the SHA-256 of the ids sorted and
+    joined by newlines (an id holds no newline it could be confused by: one cannot be empty, and a
+    newline in one would still sort and hash deterministically). None when none were given."""
+    if row_ids is None:
+        return None
+    joined = "\n".join(sorted(row_ids))
+    return {"count": len(row_ids), "sha256": hashlib.sha256(joined.encode()).hexdigest()}
+
+
+def row_error_kind(error: BaseException | None) -> RowErrorKind:
+    """The stable class of a failed row's error, from its type (the last attempt of a fallback)."""
+    if isinstance(error, FallbackExhaustedError) and error.causes:
+        error = error.causes[-1][2]
+    if isinstance(error, ProviderTimeoutError | TimeoutError):
+        return "timeout"
+    if isinstance(error, ProviderRateLimitError):
+        return "rate_limited"
+    if isinstance(error, StructuredOutputError | ForgeValidationError):
+        return "invalid_output"
+    if isinstance(error, ProviderError):
+        return "model_error"
+    return "other"
 
 
 async def _run_batches(
@@ -779,9 +926,13 @@ async def _run_batches(
                             "output": response.text,
                             "reasoning": response.reasoning,
                             "error": None,
+                            "error_kind": None,
                             "finish_reason": response.finish_reason,
                             "input_tokens": response.usage.input_tokens,
                             "output_tokens": response.usage.output_tokens,
+                            # The client's own per-request measure (a guided retry's is both
+                            # attempts), rounded to whole milliseconds.
+                            "latency_ms": round(response.latency_ms),
                             **columns,
                         }
                     )
@@ -800,9 +951,12 @@ async def _run_batches(
                             "output": None,
                             "reasoning": None,
                             "error": error,
+                            "error_kind": row_error_kind(result.error),
                             "finish_reason": None,
                             "input_tokens": None,
                             "output_tokens": None,
+                            # No response, so nothing measured how long it took.
+                            "latency_ms": None,
                             **columns,
                         }
                     )
@@ -1377,6 +1531,10 @@ def _build_manifest(
         ),
         "guided": guided,
         "column_mapping": spec.column_mapping,
+        # How each results row is named, and the rows a subset run was asked for (as a count and
+        # a digest, never the ids themselves: an id is the user's data).
+        "id_column": spec.id_column,
+        "row_ids": row_ids_digest(spec.row_ids),
         "hyperparams": spec.hyperparams.model_dump(),
         "counts": {
             "rows": len(rows),
@@ -1463,8 +1621,12 @@ async def _execute(
     config, config_commit = await _read_model_config(spec, hub_token)
     hp = _effective_hyperparams(spec.hyperparams, config)
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
-        rows = await asyncio.to_thread(_load_rows, spec, hub_token) if given is None else given
-    prompts, custom_ids = _build_requests(spec, rows)
+        if given is None:
+            rows, row_ids = await asyncio.to_thread(_load_chat_rows, spec, hub_token)
+        else:
+            # Prepared rows (the grader's cases) are named as select_rows names a split's rows.
+            rows, row_ids = select_rows(spec, given)
+    prompts, custom_ids = _build_requests(spec, rows, row_ids)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
     emit(
