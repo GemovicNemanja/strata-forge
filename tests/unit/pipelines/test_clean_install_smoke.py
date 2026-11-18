@@ -118,6 +118,12 @@ class TestEvaluation:
         assert "evaluation spec, predictions, bootstrap and items" in names
         assert not any(name.startswith("finetune ") or "vllm" in name for name in names)
 
+    def test_only_a_machine_with_the_scorer_and_the_evaluator_runs_them_together(self) -> None:
+        check = "evaluation reads an hf_classify scoring output as written"
+        assert check in [name for name, _ in smoke.plan(smoke.selected_extras("all"))]
+        for extras in ("scoring,storage,hf", "serving,storage,hf"):
+            assert check not in [name for name, _ in smoke.plan(smoke.selected_extras(extras))]
+
 
 class TestRunConfig:
     def test_restores_the_previous_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
