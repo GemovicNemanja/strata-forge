@@ -8,6 +8,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+
 ### Added
 
 - `seq_cls` monitors its eval split during training, for monitoring only: every
@@ -31,6 +33,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `strata_forge.pipelines._grading`: the LLM grader's rubric (`Rubric`, `Criterion`: pass/fail
   or a bounded integer scale), the judge's guided-JSON answer schema (`rubric_schema`, rationale
   first), its digest and `parse_grade`, which reads a reply as unscored unless it is complete.
+  A criterion id that would collide with the run's headline keys is refused: `cases`, `graded`,
+  `coverage`, a `delta_` or `agreement_` prefix, a `_lower`, `_upper` or `_unresolved` suffix, or
+  `__`.
 - `strata_forge.metrics.calibration_fit.reliability_bins` returns the bins the top-label ECE
   weighs (`ReliabilityBin`: `lo`, `hi`, `n`, `mean_confidence`, `accuracy`), and the evaluation
   report carries them as `reliability_bins` in every raw, cross-fit and applied probability read.
@@ -56,6 +61,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   recorded and must not mix, a declared premise count must match the platform's, and rows keyed
   on the premise-hash fallback are counted per slice.
 - The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
+- The clean-install smoke proves the run kinds compose end to end on a fresh install: an
+  `hf_classify` scoring run's results parquet feeds an evaluation unchanged (its `item_id`,
+  `pred`, `overflow` and raw `logit_<label>` columns, the last read by calibration), and on the
+  `all` leg a tiny `seq_cls` verifier is trained with a calibration split, scored through
+  `artifact: strata_verifier`, and evaluated with its `calibration.json`.
 - `strata_forge.metrics.calibration_fit`: `fit_temperature` (NLL bisection on 1/T within
   [0.05, 20], the bound reported when taken), `cross_fit_temperature` (the seeded permutation of
   sorted cluster keys dealt into folds, the first ceil(C/2) in fold 0 for two, each fold scored
@@ -129,11 +139,86 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   commit_sha}` of the commit the push made). The commit is what links one run's output to the run
   that reads it next. `finetune_runner._push_artifact` and `eval_runner._push` return
   `(repo_id, commit_sha)`; a push failure still leaves the receipt before the run fails.
+- `hf_classify` scores a verifier trained by `seq_cls` as it was trained
+  (`hyperparams.artifact: strata_verifier`): rendering, labels, pooling and
+  auxiliary heads come only from its `strata_verifier.json`, through the one
+  render module the trainer uses (`training/verifier_render.py`). Results add
+  `p_inconsistent` and per-premise `support_scores` when those heads exist;
+  `apply_calibration: auto` applies the artifact's `calibration.json` to `p_*`
+  with the logits kept raw. Training checks its own artifact through this path
+  before the push.
+- `Hyperparams.n` (1-16) draws `n` samples per chat row, one request each; a seeded run seeds sample
+  `k` with `seed + k`, the seed vLLM gives the `k`-th of `n` parallel samples. A run that declares
+  `n` keys its rows by `(custom_id, sample_index)` and records each sample's `seed`; the manifest
+  records `sampling` and the distinct prompt count. `n > 1` below temperature 1e-5 (vLLM's greedy threshold) is refused, and a chunk holds
+  `progress_chunk` requests, so cancel checks and progress keep their spacing at any `n`.
+- `Hyperparams.chat_template_kwargs` also applies to chat runs, fixed for the run and sent as vLLM's
+  `chat_template_kwargs` (`enable_thinking` passes only this way, as a boolean). A kwarg the
+  snapshot's chat template never reads, a model without a template and a gpt-oss model (rendered
+  with harmony, not the template) are refused before the model server starts; the manifest records
+  the template's and the kwargs' sha256.
+- `Hyperparams.guided_json`: one JSON Schema per chat run, sent with every request as vLLM's
+  `structured_outputs.json` constraint and checked against every reply. A reply that fails
+  validation gets one repair turn (the invalid reply plus a fixed message naming the error, under
+  the same constraint). Rows gain `json_valid`, `json_retried` and `json_error`; the manifest
+  records the schema's and the repair prompt's sha256 and counts valid, invalid, retried and
+  repaired rows. A schema over 16 KiB, invalid for its draft, or referencing anything outside
+  itself is refused at spec load, and references are never fetched.
+- `Hyperparams.engine` also takes `hf_label_logits`: a causal LM's next-token logits for DECLARED
+  single-token labels, read after the model's chat template, with no model server. Each row's
+  `template` is one user message; `Hyperparams.chat_template_kwargs` passes the template's own
+  variables (per-row `{name}` placeholders allowed in string values; the template's own
+  parameters, the conversation and special tokens refused; a kwarg the template never reads
+  refused at load), and `Hyperparams.assistant_prefill` is appended after the assistant header.
+  `Hyperparams.label_tokens` lists `{label, token}` in order; a token that is not one distinct
+  token, alone and as the continuation of the first prompt, is refused. Rows carry the raw
+  `logit_<label>`, the softmax over the labels, `pred` and `mass_outside` (the full-vocabulary
+  probability on every other token). It shares `hf_classify`'s frame: drop-and-count overflow,
+  `id_column` / `slice_column`, a required `dtype` (TF32 off in float32), the batch plan, the dataset
+  commit read and a `scoring` manifest, which also records the
+  chat template's, the canonical kwargs' and the prefill's sha256, the prefill's token ids and each
+  label's resolved token id.
+- The `seq_cls` fine-tuning method (`SeqClsConfig`, `SeqClsRunner`) and the `nli_pair` dataset
+  format: a premise/hypothesis classifier on `transformers.Trainer` with full weights, bf16
+  autocast over float32 master weights, length-grouped batches and an optional activation
+  checkpointing flag (`use_reentrant=False`, `preserve_rng_state=True`, off by default).
+  Gradient accumulation is refused by name. The objective (`classifier_loss`) is grouped soft
+  cross-entropy plus an optional sum-form Brier term, where a two-way row's negative is the
+  aggregate of the other labels, plus null-masked auxiliary flag and per-premise support heads.
+  Before step 0 a run checks every row's label and length (a row over `max_length` refuses the
+  run; nothing is truncated), loads under a strict guard that allows only the declared head keys
+  of the architecture to be missing, initialises a decoder's classifier from its own LM head
+  (prediction head, verbalizer rows of the output projection and its bias) and verifies that step
+  0 reproduces the base model's zero-shot label logits, and measures one optimizer step at the
+  longest real batch against the device. `head_init="existing"` continues a classifier a previous
+  run saved. Intermediate checkpoints never enter the artifact, which carries the stock
+  checkpoint, `strata_aux_heads.safetensors` and `strata_verifier.json`. Premises are lists of
+  `{pid, text}` with pids `p1..pN`; a two-way row's positive label and its two spellings are
+  declared, with no default. Logit comparisons run in float32 with TF32 off and require the same
+  predicted label on every row. The length receipt carries the per-row length distribution, and
+  the memory preflight also measures the in-run eval pass. After training the saved artifact is
+  reloaded as a scorer would and must match the trained logits (`ArtifactCheckError` otherwise),
+  with zero-held parameters asserted exactly zero at save and reload; a declared
+  `calibration_split` gets a temperature fitted on it and written to `calibration.json`.
+- `FinetuneSpec.model_revision`: a full commit id pins the base model for every load of a
+  fine-tuning run; `seq_cls` requires it and `dataset_commit_sha`.
+- Every fine-tuning run writes a `strata.run.manifest/v1` manifest of kind `finetune`, with each
+  check's receipt for `seq_cls` and the measured `gpu_seconds`, pushed with the artifact in one
+  commit to a private model repo (refused when public, before any GPU time and again at push).
+  The terminal `end` event carries `gpu_seconds`.
+- `finetune_runner.check_spec`, the spec checks that need neither the machine nor the network,
+  for a control plane to run at submit.
+- `build_trainer(..., revision=...)` on `SFTRunner` and `PreferenceRunner`, and `revision` on
+  `model_load_kwargs` / `tokenizer_load_kwargs`.
 
 ### Changed
 
 - `pipelines._common.ensure_private_output` is the one private-output-repo check, shared by the
   inference and evaluation runners.
+- `jsonschema` (`>=4.23,<5`, the range litellm already requires) is a direct dependency: guided
+  JSON validates schemas and replies with it.
+- A fine-tuning push no longer uploads `checkpoint-*` directories.
+- Only the `unpaired_preference` format coerces `label` to a boolean.
 
 ### Fixed
 
@@ -145,14 +230,6 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
-- `hf_classify` scores a verifier trained by `seq_cls` as it was trained
-  (`hyperparams.artifact: strata_verifier`): rendering, labels, pooling and
-  auxiliary heads come only from its `strata_verifier.json`, through the one
-  render module the trainer uses (`training/verifier_render.py`). Results add
-  `p_inconsistent` and per-premise `support_scores` when those heads exist;
-  `apply_calibration: auto` applies the artifact's `calibration.json` to `p_*`
-  with the logits kept raw. Training checks its own artifact through this path
-  before the push.
 - The batch-inference runner serves reasoning models with their reasoning kept apart from the
   answer. `Hyperparams.reasoning_parser` (`openai_gptoss` | `qwen3`) becomes vLLM's
   `--reasoning-parser`, results rows gain a `reasoning` column (string or `None`) and `output`
@@ -191,83 +268,16 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   state, the batch plan, the overflow policy, counts per slice, and the dataset commit actually
   read (an unpinned dataset is resolved once and loaded at that commit). A scoring run pushes only
   to an output repo of its own.
-- `Hyperparams.n` (1-16) draws `n` samples per chat row, one request each; a seeded run seeds sample
-  `k` with `seed + k`, the seed vLLM gives the `k`-th of `n` parallel samples. A run that declares
-  `n` keys its rows by `(custom_id, sample_index)` and records each sample's `seed`; the manifest
-  records `sampling` and the distinct prompt count. `n > 1` below temperature 1e-5 (vLLM's greedy threshold) is refused, and a chunk holds
-  `progress_chunk` requests, so cancel checks and progress keep their spacing at any `n`.
-- `Hyperparams.chat_template_kwargs` also applies to chat runs, fixed for the run and sent as vLLM's
-  `chat_template_kwargs` (`enable_thinking` passes only this way, as a boolean). A kwarg the
-  snapshot's chat template never reads, a model without a template and a gpt-oss model (rendered
-  with harmony, not the template) are refused before the model server starts; the manifest records
-  the template's and the kwargs' sha256.
-- `Hyperparams.guided_json`: one JSON Schema per chat run, sent with every request as vLLM's
-  `structured_outputs.json` constraint and checked against every reply. A reply that fails
-  validation gets one repair turn (the invalid reply plus a fixed message naming the error, under
-  the same constraint). Rows gain `json_valid`, `json_retried` and `json_error`; the manifest
-  records the schema's and the repair prompt's sha256 and counts valid, invalid, retried and
-  repaired rows. A schema over 16 KiB, invalid for its draft, or referencing anything outside
-  itself is refused at spec load, and references are never fetched.
-- `Hyperparams.engine` also takes `hf_label_logits`: a causal LM's next-token logits for DECLARED
-  single-token labels, read after the model's chat template, with no model server. Each row's
-  `template` is one user message; `Hyperparams.chat_template_kwargs` passes the template's own
-  variables (per-row `{name}` placeholders allowed in string values; the template's own
-  parameters, the conversation and special tokens refused; a kwarg the template never reads
-  refused at load), and `Hyperparams.assistant_prefill` is appended after the assistant header.
-  `Hyperparams.label_tokens` lists `{label, token}` in order; a token that is not one distinct
-  token, alone and as the continuation of the first prompt, is refused. Rows carry the raw
-  `logit_<label>`, the softmax over the labels, `pred` and `mass_outside` (the full-vocabulary
-  probability on every other token). It shares `hf_classify`'s frame: drop-and-count overflow,
-  `id_column` / `slice_column`, a required `dtype` (TF32 off in float32), the batch plan, the dataset
-  commit read and a `scoring` manifest, which also records the
-  chat template's, the canonical kwargs' and the prefill's sha256, the prefill's token ids and each
-  label's resolved token id.
 - `strata_forge.training.loading.check_loading_info` refuses a model load that left weights
   uninitialised, mismatched a shape, reported an error or ignored a head tensor, and returns the
   other ignored checkpoint keys for the record.
-- The `seq_cls` fine-tuning method (`SeqClsConfig`, `SeqClsRunner`) and the `nli_pair` dataset
-  format: a premise/hypothesis classifier on `transformers.Trainer` with full weights, bf16
-  autocast over float32 master weights, length-grouped batches and an optional activation
-  checkpointing flag (`use_reentrant=False`, `preserve_rng_state=True`, off by default).
-  Gradient accumulation is refused by name. The objective (`classifier_loss`) is grouped soft
-  cross-entropy plus an optional sum-form Brier term, where a two-way row's negative is the
-  aggregate of the other labels, plus null-masked auxiliary flag and per-premise support heads.
-  Before step 0 a run checks every row's label and length (a row over `max_length` refuses the
-  run; nothing is truncated), loads under a strict guard that allows only the declared head keys
-  of the architecture to be missing, initialises a decoder's classifier from its own LM head
-  (prediction head, verbalizer rows of the output projection and its bias) and verifies that step
-  0 reproduces the base model's zero-shot label logits, and measures one optimizer step at the
-  longest real batch against the device. `head_init="existing"` continues a classifier a previous
-  run saved. Intermediate checkpoints never enter the artifact, which carries the stock
-  checkpoint, `strata_aux_heads.safetensors` and `strata_verifier.json`. Premises are lists of
-  `{pid, text}` with pids `p1..pN`; a two-way row's positive label and its two spellings are
-  declared, with no default. Logit comparisons run in float32 with TF32 off and require the same
-  predicted label on every row. The length receipt carries the per-row length distribution, and
-  the memory preflight also measures the in-run eval pass. After training the saved artifact is
-  reloaded as a scorer would and must match the trained logits (`ArtifactCheckError` otherwise),
-  with zero-held parameters asserted exactly zero at save and reload; a declared
-  `calibration_split` gets a temperature fitted on it and written to `calibration.json`.
-- `FinetuneSpec.model_revision`: a full commit id pins the base model for every load of a
-  fine-tuning run; `seq_cls` requires it and `dataset_commit_sha`.
-- Every fine-tuning run writes a `strata.run.manifest/v1` manifest of kind `finetune`, with each
-  check's receipt for `seq_cls` and the measured `gpu_seconds`, pushed with the artifact in one
-  commit to a private model repo (refused when public, before any GPU time and again at push).
-  The terminal `end` event carries `gpu_seconds`.
-- `finetune_runner.check_spec`, the spec checks that need neither the machine nor the network,
-  for a control plane to run at submit.
-- `build_trainer(..., revision=...)` on `SFTRunner` and `PreferenceRunner`, and `revision` on
-  `model_load_kwargs` / `tokenizer_load_kwargs`.
 
 ### Changed
 
-- `jsonschema` (`>=4.23,<5`, the range litellm already requires) is a direct dependency: guided
-  JSON validates schemas and replies with it.
 - A model whose response LiteLLM already split into `<think>` reasoning and content (Qwen3 with
   no parser) now has that reasoning in the `reasoning` column instead of losing it.
 - The `[serving]` extra declares `torch` and `transformers` directly (the same ranges as
   `[finetuning]`), since the scoring engine imports them itself.
-- A fine-tuning push no longer uploads `checkpoint-*` directories.
-- Only the `unpaired_preference` format coerces `label` to a boolean.
 
 ## [0.5.0] - 2026-11-18
 
@@ -651,7 +661,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 The first release this changelog records. Earlier history is in the git log.
 
-[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.3.0...v0.4.0
