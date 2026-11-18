@@ -8,6 +8,35 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.metrics.cluster_bootstrap` adds `cluster_bootstrap` and
+  `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`): seeded percentile intervals
+  for accuracy, macro-F1 and invalid rate that resample whole caller-declared clusters with
+  `numpy.random.Generator(PCG64(seed))` (default 10,000 resamples), score paired systems on the
+  same resamples and difference them before the Hyndman-Fan type 7 quantiles.
+- `strata_forge.pipelines.eval_runner` is an evaluation run kind: it joins pinned prediction
+  parquet files to a pinned gold split on a stable item id, computes the candidate's and each
+  baseline's metrics overall and per declared slice with cluster bootstrap intervals and paired
+  deltas, marks slices under `min_slice_rows` diagnostic, and pushes `items.parquet`,
+  `metrics.json`, `manifest.json` and a dataset card to a private repo in one commit (or keeps
+  them on the machine). `EvalSpec` / `EvalSettings` / `PredictionSource` are its spec models.
+  Every row has a status (`ok` / `tier_refused` / `excluded` / `overflow` / `missing`): a
+  declared `tier_rule` refuses rows for every system, the primary read is over the rows no system
+  overflowed with each system's full-tier read beside it, missing rows are always invalid,
+  comparisons report the paired discordance rate `p_d`, rows without a cluster cluster on the
+  SHA-256 of their normalised premises, and the manifest records the bootstrap contract.
+  Resamples where macro-F1 is undefined are counted, never zeroed. An interval with more than
+  `unstable_threshold` (default 0.01) of its resamples undefined is flagged `unstable`, and a
+  delta's `excludes_zero` gate read is then `unresolved`. A tier's token-count method is
+  recorded and must not mix, a declared premise count must match the platform's, and rows keyed
+  on the premise-hash fallback are counted per slice.
+- The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
+
+### Changed
+
+- `pipelines._common.ensure_private_output` is the one private-output-repo check, shared by the
+  inference and evaluation runners.
 ### Fixed
 
 - `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a

@@ -31,8 +31,18 @@ This is a pure deterministic numerical leaf. Read
   consecutive row blocks that reproduce it bit for bit), caller-supplied count (default 10,000),
   coefficient fixed by the full-sample reference selection, undefined resamples counted and
   reported, Hyndman-Fan type 7 quantiles at exact rational positions, confidence fixed at 0.95.
-  Changing any of these is a new version and needs a new approval. No other bootstrap, and no
-  inference of independence from cluster-repeated rows, is exported.
+  Changing any of these is a new version and needs a new approval. The second contract is
+  `cluster_bootstrap` / `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`, from the
+  research pre-registration's metric engine, relayed by the platform coordinator on 2026-11-18):
+  whole caller-declared clusters resampled with replacement, clusters ordered by sorted string key,
+  `Generator(PCG64(seed))` with the stream of one C-order `(resamples, C)` draw in consecutive row
+  blocks, caller-supplied count (default 10,000), classification_report definitions per resample
+  (a resample with a declared class absent from gold and predictions has no macro-F1: counted in
+  `undefined_resamples`, never dropped silently or zeroed),
+  paired systems scored on the same resample and differenced before the quantiles, Hyndman-Fan
+  type 7 quantiles at exact rational positions, confidence fixed at 0.95. The same versioning
+  rule applies. No other bootstrap, and no inference of independence from cluster-repeated
+  rows, is exported.
 - Update this file, module README, reference docs, and tests with any public API change.
 - The two-human statistic (`nominal-two-human-raters-v1`) supports only two complete
   caller-declared human raters with distinct identities, identical unique ordered item IDs and an

@@ -20,6 +20,8 @@ It constructs, offline, everything a run constructs before it loads weights:
   template never reads);
 - the guided-JSON schema check and reply validator on the installed ``jsonschema``, with a remote
   reference refused and never fetched;
+- the evaluation spec, a prediction file read back through the runner's own reader, a paired
+  cluster bootstrap and the report's items parquet;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -213,6 +215,31 @@ def inference_spec() -> dict[str, Any]:
             "max_model_len": 4096,
             "dtype": "bfloat16",
             "row_limit": 8,
+        },
+        "output_repo_id": _OUTPUT,
+        "run_id": "smoke",
+    }
+
+
+_SHA = "0" * 40
+
+
+def eval_spec() -> dict[str, Any]:
+    """The inert evaluation spec, with a baseline, slices, clusters and an output repo."""
+    return {
+        "model_id": _MODEL,
+        "dataset_id": _DATASET,
+        "dataset_commit_sha": _SHA,
+        "split": "test",
+        "evaluation": {
+            "labels": ["yes", "no"],
+            "predictions": {"name": "candidate", "repo_id": _OUTPUT, "commit_sha": _SHA},
+            "compare_to": [{"name": "baseline", "repo_id": _OUTPUT, "commit_sha": _SHA}],
+            "gold_column": "label",
+            "cluster_column": "base",
+            "slice_columns": ["tier"],
+            "seed": 1,
+            "resamples": 20,
         },
         "output_repo_id": _OUTPUT,
         "run_id": "smoke",
@@ -797,6 +824,40 @@ def check_hf_label_logits() -> None:
                 raise SmokeError(msg)
 
 
+def check_eval_spec() -> None:
+    """The evaluation spec, a prediction file, the bootstrap and the items file, offline."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from strata_forge.metrics.cluster_bootstrap import paired_cluster_bootstrap
+    from strata_forge.pipelines import eval_runner
+
+    with run_config(eval_spec()):
+        spec = eval_runner.load_spec()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "results.parquet"
+        pq.write_table(pa.Table.from_pydict({"item_id": ["a", "b"], "pred": ["yes", None]}), path)
+        columns = eval_runner._read_parquet(path, ["item_id", "pred"])  # pyright: ignore[reportPrivateUsage]
+        if columns["pred"] != ["yes", None]:
+            msg = f"the prediction file read back as {columns!r}"
+            raise SmokeError(msg)
+        paired = paired_cluster_bootstrap(
+            ["yes", "no"],
+            ["yes", "yes"],
+            columns["pred"],
+            labels=spec.evaluation.labels,
+            clusters=["c1", "c2"],
+            seed=spec.evaluation.seed,
+            resamples=spec.evaluation.resamples,
+        )
+        if paired.settings.resamples != spec.evaluation.resamples:
+            raise SmokeError("the bootstrap did not run the requested resamples")
+        items = eval_runner._write_items([{"item_id": "a", "slice__tier": ["x"]}], Path(tmp))  # pyright: ignore[reportPrivateUsage]
+        if not items.is_file() or items.stat().st_size == 0:
+            msg = f"no items parquet at {items}"
+            raise SmokeError(msg)
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -960,6 +1021,8 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
                 check_finetune_case(method, fmt, adapter)
 
             checks.append((f"finetune {method} / {fmt} / {adapter}", case))
+    if {"scoring", "storage", "hf"} <= extras:
+        checks.append(("evaluation spec, predictions, bootstrap and items", check_eval_spec))
     if {"serving", "hf"} <= extras:
         checks.append(("inference spec, requests and results", check_inference_spec))
         checks.append(("hf_classify scores a saved classifier exactly", check_hf_classify))
