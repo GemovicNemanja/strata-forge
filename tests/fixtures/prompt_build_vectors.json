@@ -1,0 +1,756 @@
+{
+ "compiler_version": "1.0.0",
+ "compile": [
+  {
+   "name": "composition",
+   "parts": [
+    {
+     "kind": "module",
+     "name": "Voice",
+     "label": "v6",
+     "text": "Be {{ tone }}.\nUse {x} braces.\n"
+    },
+    {
+     "kind": "self",
+     "name": "Instructions",
+     "text": "Q: {{question}}\r\nA:"
+    }
+   ],
+   "variables": [
+    {
+     "name": "tone",
+     "type": "enum",
+     "values": [
+      "calm",
+      "brief"
+     ]
+    },
+    {
+     "name": "question"
+    },
+    {
+     "name": "unused",
+     "required": false
+    }
+   ],
+   "referenced": [
+    "tone",
+    "question"
+   ],
+   "build": {
+    "format": "strata.prompt-build/1",
+    "compiler_version": "1.0.0",
+    "segments": [
+     {
+      "kind": "text",
+      "text": "Be "
+     },
+     {
+      "kind": "var",
+      "name": "tone"
+     },
+     {
+      "kind": "text",
+      "text": ".\nUse {x} braces.\n\nQ: "
+     },
+     {
+      "kind": "var",
+      "name": "question"
+     },
+     {
+      "kind": "text",
+      "text": "\nA:"
+     }
+    ],
+    "variables": [
+     {
+      "name": "question",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "tone",
+      "type": "enum",
+      "required": true,
+      "default": null,
+      "values": [
+       "calm",
+       "brief"
+      ],
+      "description": ""
+     }
+    ],
+    "parts": [
+     {
+      "kind": "module",
+      "name": "Voice",
+      "ref": null,
+      "label": "v6",
+      "dialect": "strata",
+      "sha256": "252509eacc40e728d0b283678b0fb95b2863c5814c47caa07a24e097c2a907dd"
+     },
+     {
+      "kind": "self",
+      "name": "Instructions",
+      "ref": null,
+      "label": null,
+      "dialect": "strata",
+      "sha256": "870d4f8798e693591c284ad6cd087eb6b5cd80efbace2f165776b4131925c870"
+     }
+    ],
+    "source_map": [
+     {
+      "part": 0,
+      "line_start": 1,
+      "line_end": 2,
+      "part_line_start": 1
+     },
+     {
+      "part": 1,
+      "line_start": 4,
+      "line_end": 5,
+      "part_line_start": 1
+     }
+    ],
+    "hash": "759f0ebb2fdb4e21720dfc3e8c8911dd423ce920804a558502e9bafd59a4b060"
+   },
+   "template": "Be {{ tone }}.\nUse {x} braces.\n\nQ: {{ question }}\nA:",
+   "renders": [
+    {
+     "values": {
+      "tone": "calm",
+      "question": "why?"
+     },
+     "text": "Be calm.\nUse {x} braces.\n\nQ: why?\nA:"
+    },
+    {
+     "values": {
+      "tone": "loud",
+      "question": "why?"
+     },
+     "error": true
+    },
+    {
+     "values": {
+      "tone": "brief"
+     },
+     "error": true
+    }
+   ]
+  },
+  {
+   "name": "legacy braces",
+   "parts": [
+    {
+     "kind": "self",
+     "name": "Template",
+     "dialect": "braces",
+     "text": "{{question}} -> {0}, {not valid} {a_b}"
+    }
+   ],
+   "variables": [
+    {
+     "name": "question"
+    },
+    {
+     "name": "0"
+    },
+    {
+     "name": "a_b"
+    }
+   ],
+   "referenced": [
+    "question",
+    "0",
+    "a_b"
+   ],
+   "build": {
+    "format": "strata.prompt-build/1",
+    "compiler_version": "1.0.0",
+    "segments": [
+     {
+      "kind": "text",
+      "text": "{"
+     },
+     {
+      "kind": "var",
+      "name": "question"
+     },
+     {
+      "kind": "text",
+      "text": "} -> "
+     },
+     {
+      "kind": "var",
+      "name": "0"
+     },
+     {
+      "kind": "text",
+      "text": ", {not valid} "
+     },
+     {
+      "kind": "var",
+      "name": "a_b"
+     }
+    ],
+    "variables": [
+     {
+      "name": "0",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "a_b",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "question",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     }
+    ],
+    "parts": [
+     {
+      "kind": "self",
+      "name": "Template",
+      "ref": null,
+      "label": null,
+      "dialect": "braces",
+      "sha256": "553744645ec0171c139089b1ce1cff427b39c847997f201365fd785d5dd563ed"
+     }
+    ],
+    "source_map": [
+     {
+      "part": 0,
+      "line_start": 1,
+      "line_end": 1,
+      "part_line_start": 1
+     }
+    ],
+    "hash": "f47ef5d1da93795fa3b54c4c4a6426428f936b932e65cd5680dcd61fed8720ca"
+   },
+   "template": "{{{ question }}} -> {{ 0 }}, {not valid} {{ a_b }}",
+   "renders": [
+    {
+     "values": {
+      "question": "Q",
+      "0": "zero",
+      "a_b": "ab"
+     },
+     "text": "{Q} -> zero, {not valid} ab"
+    }
+   ]
+  },
+  {
+   "name": "typed values",
+   "parts": [
+    {
+     "kind": "self",
+     "name": "Template",
+     "text": "n={{ n }} f={{ f }} b={{ b }} j={{ j }} s={{ s }} o={{ o }}"
+    }
+   ],
+   "variables": [
+    {
+     "name": "n",
+     "type": "number"
+    },
+    {
+     "name": "f",
+     "type": "number"
+    },
+    {
+     "name": "b",
+     "type": "boolean"
+    },
+    {
+     "name": "j",
+     "type": "json"
+    },
+    {
+     "name": "s"
+    },
+    {
+     "name": "o",
+     "required": false,
+     "default": "fallback"
+    }
+   ],
+   "referenced": [
+    "n",
+    "f",
+    "b",
+    "j",
+    "s",
+    "o"
+   ],
+   "build": {
+    "format": "strata.prompt-build/1",
+    "compiler_version": "1.0.0",
+    "segments": [
+     {
+      "kind": "text",
+      "text": "n="
+     },
+     {
+      "kind": "var",
+      "name": "n"
+     },
+     {
+      "kind": "text",
+      "text": " f="
+     },
+     {
+      "kind": "var",
+      "name": "f"
+     },
+     {
+      "kind": "text",
+      "text": " b="
+     },
+     {
+      "kind": "var",
+      "name": "b"
+     },
+     {
+      "kind": "text",
+      "text": " j="
+     },
+     {
+      "kind": "var",
+      "name": "j"
+     },
+     {
+      "kind": "text",
+      "text": " s="
+     },
+     {
+      "kind": "var",
+      "name": "s"
+     },
+     {
+      "kind": "text",
+      "text": " o="
+     },
+     {
+      "kind": "var",
+      "name": "o"
+     }
+    ],
+    "variables": [
+     {
+      "name": "b",
+      "type": "boolean",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "f",
+      "type": "number",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "j",
+      "type": "json",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "n",
+      "type": "number",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "o",
+      "type": "string",
+      "required": false,
+      "default": "fallback",
+      "values": null,
+      "description": ""
+     },
+     {
+      "name": "s",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     }
+    ],
+    "parts": [
+     {
+      "kind": "self",
+      "name": "Template",
+      "ref": null,
+      "label": null,
+      "dialect": "strata",
+      "sha256": "b423477f987c64532cabd4141f9a0d76025348fc63e2c19a4d0228b011a91eb8"
+     }
+    ],
+    "source_map": [
+     {
+      "part": 0,
+      "line_start": 1,
+      "line_end": 1,
+      "part_line_start": 1
+     }
+    ],
+    "hash": "2a044fde05aeb602c78c56e16207c9d328c666bff85949609930b4672685e051"
+   },
+   "template": "n={{ n }} f={{ f }} b={{ b }} j={{ j }} s={{ s }} o={{ o }}",
+   "renders": [
+    {
+     "values": {
+      "n": 3,
+      "f": 1.0,
+      "b": true,
+      "j": {
+       "z": [
+        1,
+        2.5,
+        null
+       ],
+       "a": "é\n"
+      },
+      "s": 1e-06
+     },
+     "text": "n=3 f=1 b=true j={\"a\":\"é\\n\",\"z\":[1,2.5,null]} s=0.000001 o=fallback"
+    },
+    {
+     "values": {
+      "n": -0.0,
+      "f": 1e-07,
+      "b": false,
+      "j": "text",
+      "s": [
+       true,
+       {
+        "k": 1e+21
+       }
+      ],
+      "o": "given"
+     },
+     "text": "n=0 f=1e-7 b=false j=\"text\" s=[true,{\"k\":1e+21}] o=given"
+    },
+    {
+     "values": {
+      "n": true,
+      "f": 1,
+      "b": false,
+      "j": 1,
+      "s": "x"
+     },
+     "error": true
+    },
+    {
+     "values": {
+      "n": 1,
+      "f": 2,
+      "b": "yes",
+      "j": 1,
+      "s": "x"
+     },
+     "error": true
+    }
+   ]
+  },
+  {
+   "name": "unicode is normalized",
+   "parts": [
+    {
+     "kind": "self",
+     "name": "Template",
+     "text": "Café {{ x }}"
+    }
+   ],
+   "variables": [
+    {
+     "name": "x"
+    }
+   ],
+   "referenced": [
+    "x"
+   ],
+   "build": {
+    "format": "strata.prompt-build/1",
+    "compiler_version": "1.0.0",
+    "segments": [
+     {
+      "kind": "text",
+      "text": "Café "
+     },
+     {
+      "kind": "var",
+      "name": "x"
+     }
+    ],
+    "variables": [
+     {
+      "name": "x",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     }
+    ],
+    "parts": [
+     {
+      "kind": "self",
+      "name": "Template",
+      "ref": null,
+      "label": null,
+      "dialect": "strata",
+      "sha256": "c967acd3eed41543d94c92be3f0b89dc7b13f38ed9a02cd43f6c95bc01cf6046"
+     }
+    ],
+    "source_map": [
+     {
+      "part": 0,
+      "line_start": 1,
+      "line_end": 1,
+      "part_line_start": 1
+     }
+    ],
+    "hash": "475b6d97aa5610245cd4723a68b85cef5075272d2d2e8aa1f84c8e056524d057"
+   },
+   "template": "Café {{ x }}",
+   "renders": [
+    {
+     "values": {
+      "x": "Café"
+     },
+     "text": "Café Café"
+    }
+   ]
+  },
+  {
+   "name": "syntax errors",
+   "parts": [
+    {
+     "kind": "self",
+     "name": "Template",
+     "text": "{{ a.b }} {% if %} {{ x\n }} {{ y }}"
+    }
+   ],
+   "variables": [],
+   "referenced": [
+    "y"
+   ],
+   "issues": [
+    {
+     "code": "unsupported_expression",
+     "part": 0,
+     "line": 1,
+     "column": 1
+    },
+    {
+     "code": "unsupported_block",
+     "part": 0,
+     "line": 1,
+     "column": 11
+    },
+    {
+     "code": "unclosed_expression",
+     "part": 0,
+     "line": 1,
+     "column": 20
+    },
+    {
+     "code": "undeclared_variable",
+     "part": 0,
+     "line": 2,
+     "column": 5
+    }
+   ]
+  },
+  {
+   "name": "empty parts are skipped",
+   "parts": [
+    {
+     "kind": "module",
+     "name": "Empty",
+     "text": "\n\n"
+    },
+    {
+     "kind": "self",
+     "name": "Template",
+     "text": "only {{ x }}"
+    }
+   ],
+   "variables": [
+    {
+     "name": "x"
+    }
+   ],
+   "referenced": [
+    "x"
+   ],
+   "build": {
+    "format": "strata.prompt-build/1",
+    "compiler_version": "1.0.0",
+    "segments": [
+     {
+      "kind": "text",
+      "text": "only "
+     },
+     {
+      "kind": "var",
+      "name": "x"
+     }
+    ],
+    "variables": [
+     {
+      "name": "x",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "values": null,
+      "description": ""
+     }
+    ],
+    "parts": [
+     {
+      "kind": "module",
+      "name": "Empty",
+      "ref": null,
+      "label": null,
+      "dialect": "strata",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+     },
+     {
+      "kind": "self",
+      "name": "Template",
+      "ref": null,
+      "label": null,
+      "dialect": "strata",
+      "sha256": "054fa72e32152546e69a23b47c358cace38007b561515bed46c6009a547bce83"
+     }
+    ],
+    "source_map": [
+     {
+      "part": 1,
+      "line_start": 1,
+      "line_end": 1,
+      "part_line_start": 1
+     }
+    ],
+    "hash": "8761f162cfbabf1e0d53a5a1cfbc665058f29ee40e916f68d0d6afe01811ca27"
+   },
+   "template": "only {{ x }}",
+   "renders": [
+    {
+     "values": {
+      "x": 1
+     },
+     "text": "only 1"
+    }
+   ]
+  }
+ ],
+ "numbers": [
+  {
+   "value": 0.0,
+   "text": "0"
+  },
+  {
+   "value": -0.0,
+   "text": "0"
+  },
+  {
+   "value": 1.0,
+   "text": "1"
+  },
+  {
+   "value": -1.5,
+   "text": "-1.5"
+  },
+  {
+   "value": 0.1,
+   "text": "0.1"
+  },
+  {
+   "value": 1e-07,
+   "text": "1e-7"
+  },
+  {
+   "value": 1.5e-07,
+   "text": "1.5e-7"
+  },
+  {
+   "value": 1e-06,
+   "text": "0.000001"
+  },
+  {
+   "value": 123456789.123,
+   "text": "123456789.123"
+  },
+  {
+   "value": 1e+21,
+   "text": "1e+21"
+  },
+  {
+   "value": 1e+20,
+   "text": "100000000000000000000"
+  },
+  {
+   "value": 1.2345e+21,
+   "text": "1.2345e+21"
+  },
+  {
+   "value": 5e-324,
+   "text": "5e-324"
+  },
+  {
+   "value": 1.7976931348623157e+308,
+   "text": "1.7976931348623157e+308"
+  },
+  {
+   "value": 1.234e-06,
+   "text": "0.000001234"
+  },
+  {
+   "value": 100.0,
+   "text": "100"
+  },
+  {
+   "value": 2.5e-05,
+   "text": "0.000025"
+  },
+  {
+   "value": 1.23e-18,
+   "text": "1.23e-18"
+  },
+  {
+   "value": 7,
+   "text": "7"
+  },
+  {
+   "value": -12,
+   "text": "-12"
+  }
+ ]
+}

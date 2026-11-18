@@ -8,6 +8,17 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- `strata_forge.prompts.compiled`: the authoritative compile and render for versioned prompts.
+  `compile_prompt` turns an ordered composition of parts (modules, other prompts, the prompt's own
+  instructions; `strata` `{{ name }}` or legacy `braces` `{name}` dialect) plus typed variable
+  declarations into a `PromptBuild` with a SHA-256 content hash, a source map and compiler errors
+  (unsupported expressions, unclosed or block tags, undeclared or duplicate variables); a build
+  re-checks its hash when constructed. `render_build` and `bind_row` render a build with typed,
+  host-independent value text. Shared vectors for ports live in
+  `tests/fixtures/prompt_build_vectors.json`.
+
 ## [0.8.0] - 2026-11-18
 
 ### Added
