@@ -62,6 +62,7 @@ from strata_forge.metrics.calibration_fit import (
     CrossFitTemperature,
     cross_fit_temperature,
     expected_calibration_error,
+    reliability_bins,
 )
 from strata_forge.metrics.classification import brier, classification_report, nll
 from strata_forge.metrics.cluster_bootstrap import (
@@ -1118,6 +1119,9 @@ def _probability_block(
     ).interval
     point = brier(actual, vectors, labels=labels, probability_kind="class_probabilities").value
     coverage = len(keep) / len(rows)
+    ids = [gold.ids[i] for i in keep]
+    # The ECE's own bins, so a reliability diagram drawn from them adds up to the ECE beside it.
+    groups = reliability_bins(actual, vectors, labels=labels, bins=bins, item_ids=ids)
     return {
         "n": len(keep),
         "n_population": len(rows),
@@ -1127,8 +1131,9 @@ def _probability_block(
         "brier": _stability({**interval.model_dump(), "point": point}, settings),
         "nll": nll(actual, vectors, labels=labels, probability_kind="class_probabilities").value,
         "ece": expected_calibration_error(
-            actual, vectors, labels=labels, bins=bins, item_ids=[gold.ids[i] for i in keep]
+            actual, vectors, labels=labels, bins=bins, item_ids=ids
         ).value,
+        "reliability_bins": [group.model_dump() for group in groups],
     }
 
 

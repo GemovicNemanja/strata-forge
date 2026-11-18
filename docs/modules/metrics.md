@@ -150,6 +150,11 @@ Direct-import only; NumPy from `[scoring]`.
   `equal_width` uses `[k/bins, (k+1)/bins)` with 1.0 in the last bin. ECE is the
   bin-count-weighted mean of `|accuracy - mean confidence|`; empty bins contribute nothing.
   Rows must sum to one within 1e-6.
+- **`reliability_bins`** (same arguments): the bins that ECE weighs, as `ReliabilityBin`s in
+  confidence order, empty ones included: `lo`/`hi` (under `equal_mass` the smallest and largest
+  confidence in the bin, null when empty; under `equal_width` the nominal edges), `n`,
+  `mean_confidence` and `accuracy` (null when empty). `expected_calibration_error` is computed
+  from them, so a reliability diagram drawn from the bins always adds up to the reported ECE.
 
 A fitted temperature is provenance for the calibrated metrics it produced. Nothing here uses one
 to select a model, a reference or a threshold.
