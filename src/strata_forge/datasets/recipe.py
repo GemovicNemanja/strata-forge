@@ -40,6 +40,7 @@ import json
 import math
 import random
 import re
+import unicodedata
 from collections.abc import Sized
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MAX_BYTE_CAP",
     "MAX_RECIPE_BYTES",
+    "MEMORY_FACTOR",
     "RECIPE_SCHEMA",
     "Condition",
     "Exclusion",
@@ -98,9 +100,13 @@ _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 #: Column names the engine writes into every output row; a recipe may not produce them itself.
 RESERVED_COLUMNS = frozenset({"_row_id", "_synthetic", "_seed_row_id"})
 MAX_ROW_CAP = 2_000_000
-#: The most bytes of row values one execution holds (estimated from the values themselves).
+#: The most memory one execution's rows may take, estimated from the values (``_size``) times
+#: ``MEMORY_FACTOR``: a row's real footprint (object headers, dict tables, string objects) over
+#: its estimate, measured with ``tracemalloc`` from 1.5x (long text) to 6.3x (short text and number
+#: columns), and set above the worst case so the cap is never an underestimate.
 MAX_BYTE_CAP = 16 * 1024**3
 DEFAULT_BYTE_CAP = 2 * 1024**3
+MEMORY_FACTOR = 7
 #: The largest recipe document, as canonical JSON.
 MAX_RECIPE_BYTES = 256 * 1024
 _MAX_TEXT = 10_000
@@ -113,7 +119,7 @@ type Column = Annotated[str, Field(pattern=_COLUMN)]
 type SplitClass = Literal["train", "held_out", "ambiguous"]
 
 _TRAIN_TOKENS = frozenset({"train", "training"})
-_FILLER_TOKEN = re.compile(r"^(?:v|v?\d+)$")
+_FILLER_TOKEN = re.compile(r"^(?:v|v?[0-9]+)$")
 _HELD_OUT_TOKENS = frozenset(
     {
         "val",
@@ -142,18 +148,25 @@ _HELD_OUT_PAIRS = frozenset({("held", "out"), ("hold", "out")})
 
 
 def _tokens(name: str) -> list[str]:
-    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
-    spaced = re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", spaced)
-    return [t for t in re.split(r"[^a-z0-9]+", spaced.lower()) if t]
+    # NFKC first, so full-width and superscript letters read as the ASCII
+    # word they display; then cut at every non-word character, case change and letter/digit
+    # boundary. A character that is not ASCII after that survives inside its token (never as a
+    # separator), so `split_class` can refuse to read it as training.
+    normal = unicodedata.normalize("NFKC", name)
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", normal)
+    spaced = re.sub(r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])", " ", spaced)
+    return [t for t in re.split(r"[\W_]+", spaced.casefold()) if t]
 
 
 def split_class(name: str) -> SplitClass:
     """What a split's NAME says it holds: ``train``, ``held_out`` or ``ambiguous``.
 
     Tokens are the name lowercased and cut at every non-alphanumeric character, case change and
-    letter/digit boundary. Any held-out signal wins (``private_test``, ``public-test``,
-    ``held_out``, ``hold-out``, ``devSet``, ``train_test``); ``train`` needs a training token and
-    nothing but version numbers besides (``train``, ``train_v2``); anything else is ambiguous.
+    letter/digit boundary, after NFKC normalization. Any held-out signal wins (``private_test``,
+    ``public-test``, ``held_out``, ``hold-out``, ``devSet``, ``train_test``, and ``train_test`` spelled in full-width letters);
+    a token that is still not ASCII makes the name ambiguous (``train`` followed by
+    Cyrillic or Chinese for test, or by a non-ASCII digit); ``train`` needs a training token and nothing but ASCII version numbers besides
+    (``train``, ``train_v2``); anything else is ambiguous.
     """
     tokens = _tokens(name)
     if not tokens:
@@ -163,6 +176,8 @@ def split_class(name: str) -> SplitClass:
         for t in tokens
     ) or any(pair in _HELD_OUT_PAIRS for pair in itertools.pairwise(tokens)):
         return "held_out"
+    if any(not t.isascii() for t in tokens):
+        return "ambiguous"
     if any(t in _TRAIN_TOKENS for t in tokens) and all(
         t in _TRAIN_TOKENS or _FILLER_TOKEN.match(t) for t in tokens
     ):
@@ -611,8 +626,8 @@ class _Budget:
         if rows > self.row_cap:
             msg = f"{where} holds more than {self.row_cap} rows"
             raise RecipeError(msg)
-        if held > self.byte_cap:
-            msg = f"{where} holds more than {self.byte_cap // 1024**2} MiB of values"
+        if held * MEMORY_FACTOR > self.byte_cap:
+            msg = f"{where} would take more than {self.byte_cap // 1024**2} MiB of memory"
             raise RecipeError(msg)
 
 

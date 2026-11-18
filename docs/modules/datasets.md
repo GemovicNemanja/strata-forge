@@ -346,11 +346,14 @@ materialized version states what it left out. Output records carry the recipe's 
 engine columns: `_row_id`, `_synthetic` (true for every generated row) and `_seed_row_id`.
 
 **Rules the engine enforces.** Held-out data never reaches generation and is never relabelled as
-training data. `split_class(name)` classifies a split's name by normalized tokens (lowercased, cut
-at non-alphanumerics, case changes and letter/digit boundaries): `held_out` when any token signals
+training data. `split_class(name)` classifies a split's name by normalized tokens (NFKC-normalized,
+case-folded, cut at non-word characters, case changes and letter/digit boundaries): `held_out` when
+any token signals
 test, validation, dev, eval or held-out (`private_test`, `public_test`, `held_out`, `hold-out`,
-`devSet`, `testset`, even `train_test`), `train` when a training token is accompanied only by
-version numbers (`train`, `train_v2`), and `ambiguous` otherwise. Only the sources a step reads
+`devSet`, `testset`, even `train_test`, and full-width or superscript spellings, which NFKC reads
+as ASCII), then `ambiguous` when any token is still not ASCII (another script's word for test, a
+non-ASCII digit), `train` when a training token is accompanied only by ASCII version numbers
+(`train`, `train_v2`), and `ambiguous` otherwise. Only the sources a step reads
 count (`Recipe.used_sources`):
 
 - a recipe that generates reads `train` sources only; an ambiguous name is refused like a held-out
@@ -359,8 +362,9 @@ count (`Recipe.used_sources`):
   (`Recipe.output_splits`) as held out, so a later recipe cannot read its output as training data.
   `Recipe.holdout_sources` lists those sources for the run's records.
 
-A table past `row_cap` rows or `byte_cap` bytes of values (estimated from the values) is refused,
-never truncated, and both are checked while a source loads and while a join grows, so a
+A table past `row_cap` rows, or whose rows would take more than `byte_cap` bytes of memory (the
+values' estimated size times `MEMORY_FACTOR`, 7, set above the 1.5x to 6.3x measured with
+`tracemalloc`), is refused, never truncated, and both are checked while a source loads and while a join grows, so a
 many-to-many join stops at the cap rather than after it. A recipe's text is bounded: templates
 20,000 characters, string constants and condition values 10,000, condition lists 1,000 values,
 the whole canonical document `MAX_RECIPE_BYTES` (256 KiB), and a `synthesize` step's

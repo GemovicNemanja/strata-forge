@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from strata_forge.datasets.recipe import (
+    MEMORY_FACTOR,
     ConcatStep,
     GenerationResult,
     Recipe,
@@ -534,6 +535,32 @@ def test_split_names_are_classified_by_their_tokens(name: str, expected: str) ->
     assert split_class(name) == expected
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("train_\uff34\uff25\uff33\uff34", "held_out"),  # full-width TEST reads as TEST after NFKC
+        ("train_ᵗᵉˢᵗ", "held_out"),  # superscript letters likewise
+        ("train_тест", "ambiguous"),
+        ("train_测试", "ambiguous"),
+        ("train_\u0661", "ambiguous"),  # an Arabic-Indic one is not a version number
+    ],
+)
+def test_names_are_normalized_and_non_ascii_tokens_are_never_training(
+    name: str, expected: str
+) -> None:
+    assert split_class(name) == expected
+    with pytest.raises(ValidationError, match="training splits only"):
+        _recipe(_synth(), sources=[_source("tickets", split=name)])
+
+
+def test_the_memory_cap_counts_the_estimate_times_the_measured_factor() -> None:
+    rows = [{**_TICKETS[0], "text": "x" * 1000}] * 100  # ~100 KiB of values
+    budget = 100 * 1100 * MEMORY_FACTOR
+    with pytest.raises(RecipeError, match="MiB of memory"):
+        execute(_recipe(), lambda _s: rows, byte_cap=budget // 2)
+    assert execute(_recipe(), lambda _s: rows, byte_cap=budget * 2).rows == 100
+
+
 @pytest.mark.parametrize("split", ["private_test", "held_out", "default", "test[0:5]"])
 def test_a_generating_recipe_refuses_any_split_that_is_not_training(split: str) -> None:
     with pytest.raises(ValidationError, match="training splits only"):
@@ -565,7 +592,7 @@ def test_a_declared_but_unread_held_out_source_does_not_mark_the_output() -> Non
 
 
 def test_the_byte_cap_stops_a_source_while_it_loads() -> None:
-    with pytest.raises(RecipeError, match="MiB of values"):
+    with pytest.raises(RecipeError, match="MiB of memory"):
         execute(_recipe(), lambda _s: [{**_TICKETS[0], "text": "x" * 4096}] * 600, byte_cap=1024**2)
 
 
