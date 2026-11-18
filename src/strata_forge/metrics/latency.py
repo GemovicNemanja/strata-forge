@@ -57,7 +57,9 @@ _CHUNK_DRAWS = 1 << 22
 
 
 class _Frozen(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
+    model_config = ConfigDict(
+        frozen=True, extra="forbid", strict=True, hide_input_in_errors=True, allow_inf_nan=False
+    )
 
 
 class PassQuantiles(_Frozen):

@@ -908,76 +908,101 @@ with both pins required (``model_revision`` and ``dataset_commit_sha``, full
 
 | Field | Meaning |
 |---|---|
-| ``engine_settings`` | Required. A batch run's own ``Hyperparams``, whose ``engine`` picks the engine: ``hf_classify`` (with its required ``pair_template``, ``dtype`` and ``label_alias``) or ``vllm_chat`` (``max_tokens`` required: a generation's length decides its latency). The grid owns ``row_limit``, ``concurrency``, ``progress_chunk``, ``scoring_batch_size``, ``id_column`` and ``slice_column``, so they are refused here. |
-| ``boundaries`` | Required: ``model_only`` and/or ``end_to_end``, reported separately. ``vllm_chat`` measures ``end_to_end`` only. |
+| ``engine_settings`` | Required. A batch run's own ``Hyperparams``, whose ``engine`` picks the engine: ``hf_classify`` or ``vllm_chat`` (``max_tokens`` required: a generation's length decides its latency). ``hf_classify`` with ``artifact: strata_verifier`` times a verifier trained by ``seq_cls`` through its own rendering and heads (the **headline path**, its templates fixed to ``{premises}`` / ``{hypothesis}``; ``apply_calibration`` applies); without ``artifact`` it is the plain AutoModel path, recorded as a **third-party reference model**. An allow-list per engine: a knob the benchmark does not apply (``row_limit``, ``scoring_batch_size``, ``slice_column``, ``n``, ...) is refused. |
+| ``boundaries`` | ``end_to_end`` (required: ``total_ms``, the headline) and optionally ``model_only`` (``forward_ms``, a diagnostic). ``vllm_chat`` measures ``end_to_end`` only. |
 | ``batch_sizes`` / ``concurrency`` | The grid; their product is the configurations, at most 32. ``hf_classify`` runs one request stream (``concurrency`` ``[1]``); ``vllm_chat`` sends one request per iteration (``batch_sizes`` ``[1]``). |
-| ``warmup`` | Iterations run and discarded before EVERY timed pass, from the start of that pass's own arrival order. Default 50, at least 1. |
-| ``passes`` | Timed passes per configuration, each over the whole sample in a fresh shuffle seeded with ``seed + pass_index``, never length-sorted. Default 5. |
-| ``sample_size`` / ``seed`` | ``random.Random(seed).sample`` of the eligible rows, in row order; unset, every eligible row. A sample larger than the eligible rows is refused, never padded. |
+| ``warmup`` | Requests (full batches above batch size one) run untimed before EVERY timed pass, on the same workload, with no restart and no cache clear, drawn with ``random.Random(warmup_seed + pass_index)``. Default 50. |
+| ``passes`` | Timed passes per configuration, each over the whole sample in the order ``random.Random(order_seed + pass_index)`` shuffles it, never length-sorted. Default 5. |
+| ``item_cap`` | Every row of the pinned split is read; a split with more rows than this is refused (read up to one past it), never truncated. Default 100,000. |
+| ``sample_size`` / ``sample_seed`` | Optional ``random.Random(sample_seed).sample`` of the eligible rows, in row order; unset, every eligible row. |
+| ``order_seed`` / ``warmup_seed`` | Defaults 1000 and 2000; at least ``passes`` apart, so a warmup never replays another pass's order. All three seeds are in the manifest. |
 | ``wall_clock_cap_s`` | A hard stop on measuring, checked before each iteration starts. Reaching it marks the results incomplete and every unstarted configuration ``not_measured``. Default 1800, at most 6 hours. |
-| ``max_input_tokens`` / ``item_count_column`` / ``max_items`` | Exclusions, counted by reason (``unmeasurable``, ``over_model_limit``, ``over_max_input_tokens``, ``over_max_items``) and never timed. Lengths are the model's own tokens: the pair with special tokens for ``hf_classify``, the prompt after the chat template for ``vllm_chat``, whose model limit is ``max_model_len`` when one is set. ``item_count_column`` is a list column whose length is a row's item count (its premises). |
-| ``length_buckets`` / ``item_buckets`` | Inclusive ascending upper edges (``[512, 2048, 4096, 8192]`` gives ``0-512``, ``513-2048``, ...). At a batch size of one each bucket gets its own percentiles. |
-| ``bootstrap_resamples`` | Optional. Percentile-bootstrap intervals for the pooled percentiles (``metrics.latency_bootstrap``, seeded with ``seed``). Unset, none are estimated. |
+| ``max_input_tokens`` / ``item_count_column`` / ``max_items`` | Exclusions (the protocol's are 8,192 tokens and 20 premises), counted by reason (``unmeasurable``, ``over_model_limit``, ``over_max_input_tokens``, ``over_max_items``) and never timed. Lengths are measured at run time with this model's own tokenizer and template: the verifier's own rendering, the pair with special tokens for the reference path, the prompt after the chat template for ``vllm_chat``. |
+| ``length_buckets`` / ``item_buckets`` | Inclusive ascending upper edges (``[512, 2048, 4096, 8192]`` gives ``0-512``, ``513-2048``, ...). At a batch size of one each bucket (L by tokens, P by items) gets its own percentiles. |
+| ``bootstrap_resamples`` / ``bootstrap_seed`` | Optional, off by default, diagnostic only: percentile-bootstrap intervals for the pooled percentiles (``metrics.latency_bootstrap``). Never the headline and never a pass/fail input. |
+| ``prefix_caching`` | ``vllm_chat`` only, default ``false``: the model server is launched with ``--no-enable-prefix-caching``, since every pass replays the same prompts and a cached prefill would understate the time. Recorded in the engine facts. |
 | ``require_gpu`` | Optional. Refuse to measure unless every visible GPU's reported name contains it (``H100``). |
 
-**Timing boundaries.** Every interval is read from ``time.perf_counter_ns``.
-With ``hf_classify`` the classifier loads exactly as a scoring run loads it
-and each request is timed in this process: **end to end** runs from the text
-pair in memory through tokenization, the host-to-device copy, the forward
-pass and a softmax over every class to the probabilities copied back to the
-host, and stops after ``torch.cuda.synchronize()``; **model only** is the
-forward pass alone, with a synchronization immediately before and after it.
-Both are measured in the same iteration, so the model-only time is a
-sub-interval of the end-to-end time. A batch above one is the consecutive
-rows of the arrival order, padded to its longest pair; the trailing rows that
-do not fill a last batch are counted, not timed as a smaller batch. With
-``vllm_chat`` the model is served on loopback exactly as a batch run serves
-it, and **end to end** is one chat request from this process: the HTTP
-request, the server's templating, tokenization, queueing, prefill and decode,
-and the response. The client has no cache and makes one attempt, so a cached
-or retried request is never reported as one measurement. An iteration that
-raises stops its configuration, which is then reported as not clean, with its
-exception text redacted like every surfaced message. No GPU
-counter is sampled while iterations are timed (sampling shells out to
-``nvidia-smi``).
+**Timing boundaries.** ``total_ms`` (the headline) is read from
+``time.perf_counter_ns``. On the verifier path it runs from the raw
+``(premises, hypothesis)`` cells in memory through the verifier's own
+rendering, tokenization, the host-to-device copy, the forward pass and the
+auxiliary heads, the copies back to the host, the 3-way softmax, the flag
+head's sigmoid (``p_inconsistent``) and the support head's per-premise
+sigmoids (``support_scores``), and stops after ONE
+``torch.cuda.synchronize()``. On the reference path it runs from the text
+pair through tokenization, the forward pass and a softmax to the
+probabilities on the host, and stops after the same single synchronization.
+``forward_ms`` (diagnostic) is two CUDA events recorded around the forward
+pass in the same request and read after that synchronization; no
+synchronization is added to take it (on a CPU, ``perf_counter_ns`` around
+the forward pass). The dtype (bf16 accepted) and the attention
+implementation are recorded. A batch above one is consecutive rows of the
+order, padded to its longest pair; the rows that do not fill a last batch are
+counted, not timed. With ``vllm_chat`` the model is served on loopback, and
+end to end is one chat request: the HTTP request, templating, tokenization,
+queueing, prefill and decode, and the response; the client has no cache and
+makes one attempt. An iteration that raises stops its configuration, with its
+exception text redacted.
 
-**Statistics.** Per configuration and boundary: per-pass p50/p95/p99
-(Hyndman-Fan type 7, equal to ``numpy.percentile``'s default), their median
+**The GPU.** Before anything is loaded, ``nvidia-smi`` is asked for compute
+processes on the GPUs ``CUDA_VISIBLE_DEVICES`` exposes, other than this
+runner and its model server: one refuses the run. The same check runs before
+every pass's warmup; a process found then stops the run as incomplete,
+``gpu_busy``. Clocks are never locked: the SM and memory clocks, power limit
+and draw, temperature and persistence mode are recorded at the start and end
+of every pass (``gpu_telemetry``). The probes run between passes, never
+while an iteration is timed. Without ``nvidia-smi`` the check is
+``unavailable`` and the headline is not readable.
+
+**Statistics.** Only completed passes are summarized: a pass cut short (a
+failure, the cap, a busy GPU) stays in ``timings.parquet`` with
+``pass_completed`` false and never enters a percentile, the across-pass
+median, the throughput or a bucket. Per configuration and boundary: per-pass
+p50/p95/p99 (Hyndman-Fan type 7, equal to ``numpy.percentile``), their median
 across passes with min and max, and the pooled percentiles; throughput is
-items (and input and output tokens) per second over the union of the
-measured intervals. Latency is per request at a batch size of one and per
-batch above it (``latency_unit``).
+items (and tokens) per second over the union of the measured intervals.
+Latency is per request at a batch size of one and per batch above it. The
+**headline** of each configuration is the median of the per-pass end-to-end
+p95 with their minimum and maximum (``headline``). ``headline_readable`` is
+true only for a complete run whose GPU was checked idle throughout: an
+incomplete run has no T13 read, and ``headline_unreadable_reason`` says why.
+Every summary number is finite: NaN and infinity are refused.
 
 **Outputs.** ``timings.parquet`` (one row per measured iteration: the
-configuration, pass and iteration, the row indices, token and item counts,
-buckets, ``end_to_end_ms``, ``model_only_ms`` and output tokens; never row
-text), ``summary.json`` (``BenchmarkSummary``, ``format``
-``strata.benchmark.summary/v1``: completeness and its reason, the sample and
+configuration, pass and ``pass_completed``, the iteration, the row indices,
+token and item counts, buckets, ``total_ms``, ``forward_ms`` and output
+tokens; never row text), ``summary.json`` (``BenchmarkSummary``, ``format``
+``strata.benchmark.summary/v1``: completeness, its reason and
+``incomplete_codes`` (``gpu_busy``, ``wall_clock_cap``,
+``stopped_on_failure``, ``server_died``, ``not_measured``), the headline
+readability, the model path, the GPU idle check and telemetry, the sample and
 exclusion counts, the cold start, a short GPU receipt and every
 configuration's result) and ``manifest.json`` (``kind`` ``benchmark``: both
-pins and commits, the protocol in words, the engine facts, the full
-environment receipt, the counts and ``compute``). They are written outside the
-workdir under ``~/strata-benchmark-results/<run_id>`` and pushed in ONE commit
-to a private output repo that holds nothing else, refused before anything
-loads and again at push time; with no write token they stay on the machine.
-A copy of the summary is left in the workdir as ``benchmark-summary.json``
-for the orchestrator to read.
+pins and commits, the protocol in words with its seeds, the engine facts, the
+full environment receipt, the counts and ``compute``). They are written
+outside the workdir under ``~/strata-benchmark-results/<run_id>`` and pushed
+in ONE commit to a private output repo that holds nothing else; with no write
+token they stay on the machine. A copy of the summary is left in the workdir
+as ``benchmark-summary.json`` for the orchestrator to read. If the model
+server dies mid-run, the measured configurations are still written and pushed
+(the rest ``not_measured``) and the run then fails as incomplete.
 
 **The environment receipt** is what the machine reports, never what the run
-asked for: per GPU from ``nvidia-smi`` (index, name, total memory, driver,
-persistence mode, current and maximum SM clock, power limit, PCI bus id) and
-how many compute processes held a GPU before the model loaded; from torch,
-its version, CUDA runtime, cuDNN, and the device it computes on; the
-installed versions of torch, transformers, tokenizers, safetensors, vLLM,
-NumPy, datasets and huggingface-hub; and ``CUDA_VISIBLE_DEVICES``. A field
-the machine could not report is ``null``. The cold start is recorded
-separately from every percentile: the model load (or the model server's
-start) in seconds and the first warmup iteration in milliseconds.
+asked for: per visible GPU from ``nvidia-smi`` (index, name, total memory,
+driver, persistence mode, current and maximum SM clock, power limit, PCI bus
+id) and how many compute processes held one before the model loaded; from
+torch, its version, CUDA runtime, cuDNN, and the device; the installed
+versions of torch, transformers, tokenizers, safetensors, vLLM, NumPy,
+datasets and huggingface-hub; and ``CUDA_VISIBLE_DEVICES``. A field the
+machine could not report is ``null``. The cold start is recorded separately
+from every percentile.
 
 The ``end`` event's metrics are ``iterations_measured``,
-``configurations_measured``, ``configurations``, ``complete`` (1 or 0),
-``gpu_count`` and ``gpu_seconds`` (this process's wall time times the GPUs it
-saw). A run that measured no iteration at all fails after writing its files.
+``configurations_measured``, ``configurations``, ``complete`` and
+``headline_readable`` (1 or 0), ``gpu_count`` and ``gpu_seconds`` (this
+process's wall time times the visible GPUs). A run that measured no
+iteration at all fails after writing its files.
 
 ### The runner contract
 

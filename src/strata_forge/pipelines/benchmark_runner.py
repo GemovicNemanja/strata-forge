@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -54,6 +55,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    StrictBool,
     StrictFloat,
     StrictInt,
     field_validator,
@@ -90,8 +92,22 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
-from strata_forge.pipelines._environment import gpu_matches, receipt, short_receipt
-from strata_forge.pipelines._scoring import build_inputs, load_classifier
+from strata_forge.pipelines._environment import (
+    compute_pids,
+    gpu_matches,
+    gpu_state,
+    own_processes,
+    receipt,
+    short_receipt,
+)
+from strata_forge.pipelines._scoring import (
+    VerifierRunScorer,
+    VerifierScorer,
+    build_inputs,
+    load_classifier,
+    load_verifier,
+    timed_verifier_request,
+)
 from strata_forge.pipelines.inference_runner import Hyperparams, RunSpec, render_template
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
@@ -147,6 +163,9 @@ MAX_CONFIGURATIONS = 32
 #: The bound on measured iterations summed over every configuration and pass.
 MAX_MEASURED_ITERATIONS = 2_000_000
 _MAX_SAMPLE = 100_000
+# The most rows a split may hold: every row is read, and a split past `item_cap` is refused.
+_MAX_ITEM_CAP = 1_000_000
+_SEED_MAX = 2**53 - 1
 _MAX_PASSES = 20
 _MAX_WARMUP = 10_000
 _MAX_WALL_CLOCK_S = 6 * 3600.0
@@ -158,7 +177,15 @@ _MAX_BOOTSTRAP_RESAMPLES = 100_000
 # concurrency and the row count; one iteration is one request, so `n` samples per row are refused.
 _ENGINE_FIELDS: dict[str, frozenset[str]] = {
     "hf_classify": frozenset(
-        {"pair_template", "label_alias", "dtype", "max_model_len", "list_separator"}
+        {
+            "pair_template",
+            "label_alias",
+            "dtype",
+            "max_model_len",
+            "list_separator",
+            "artifact",
+            "apply_calibration",
+        }
     ),
     "vllm_chat": frozenset(
         {
@@ -186,17 +213,32 @@ _GPU_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 _PROGRESS_INTERVAL_S = 1.0
 # A rendered chat prompt longer than this is over any model's limit without tokenizing it.
 _MAX_RENDERED_CHARS = 200_000
+_FORWARD_DEFINITION = (
+    "forward_ms (diagnostic): two CUDA events recorded on the current stream around the forward "
+    "pass inside the same request, read after the request's one torch.cuda.synchronize(); no "
+    "synchronization is added to take it (on a CPU, time.perf_counter_ns around the forward pass)"
+)
 _DEFINITIONS = {
-    "hf_classify": {
+    "strata_verifier": {
         "end_to_end": (
-            "time.perf_counter_ns from the text pairs in memory through tokenization, the "
-            "host-to-device copy, the forward pass and a softmax over every class to the "
-            "probabilities copied to the host, stopped after torch.cuda.synchronize()"
+            "total_ms (headline): time.perf_counter_ns from the raw (premises, hypothesis) cells in "
+            "memory through the verifier's own rendering (strata_verifier.json), tokenization, "
+            "the host-to-device copy, the forward pass and the auxiliary heads, the copies to the "
+            "host, the 3-way softmax, the flag head's sigmoid (p_inconsistent) and the support "
+            "head's per-premise sigmoids (support_scores), stopped after ONE "
+            "torch.cuda.synchronize()"
         ),
-        "model_only": (
-            "time.perf_counter_ns around the forward pass alone, with torch.cuda.synchronize() "
-            "immediately before and after it"
+        "model_only": _FORWARD_DEFINITION + "; the auxiliary heads are inside the interval",
+    },
+    "reference_automodel": {
+        "end_to_end": (
+            "total_ms (headline): time.perf_counter_ns from the text pairs in memory through "
+            "tokenization, the host-to-device copy, the forward pass and a softmax over every "
+            "class to the probabilities copied to the host, stopped after ONE "
+            "torch.cuda.synchronize(); a third-party reference model, run as a plain "
+            "AutoModelForSequenceClassification"
         ),
+        "model_only": _FORWARD_DEFINITION,
     },
     "vllm_chat": {
         "end_to_end": (
@@ -229,15 +271,25 @@ class BenchmarkHyperparams(BaseModel):
     # The engine and how it loads or serves the model: a batch run's own hyperparameters, so a
     # benchmark measures the model exactly as a batch or scoring run would run it.
     engine_settings: Hyperparams
+    # `end_to_end` (total_ms) is the headline and always measured; `model_only` adds the
+    # forward_ms diagnostic, taken inside the same requests.
     boundaries: list[bench.Boundary] = Field(min_length=1, max_length=2)
     batch_sizes: list[StrictInt] = Field(min_length=1, max_length=16)
     concurrency: list[StrictInt] = Field(default_factory=lambda: [1], min_length=1, max_length=16)
     # Warmup iterations before EVERY timed pass, discarded.
     warmup: StrictInt = Field(default=50, ge=1, le=_MAX_WARMUP)
     passes: StrictInt = Field(default=5, ge=1, le=_MAX_PASSES)
+    # Every row of the pinned split is read; a split with more rows than this is refused, never
+    # truncated, so the workload is the whole split or nothing.
+    item_cap: StrictInt = Field(default=_MAX_SAMPLE, ge=1, le=_MAX_ITEM_CAP)
     # Rows drawn from the eligible rows; unset, every eligible row is measured.
     sample_size: StrictInt | None = Field(default=None, ge=1, le=_MAX_SAMPLE)
-    seed: StrictInt = Field(default=0, ge=0, le=2**53 - 1)
+    # Three seeds, all recorded: the sample draw, each pass's timed order (order_seed + pass) and
+    # each pass's warmup draw (warmup_seed + pass).
+    sample_seed: StrictInt = Field(default=0, ge=0, le=_SEED_MAX)
+    order_seed: StrictInt = Field(default=1_000, ge=0, le=_SEED_MAX)
+    warmup_seed: StrictInt = Field(default=2_000, ge=0, le=_SEED_MAX)
+    bootstrap_seed: StrictInt = Field(default=0, ge=0, le=_SEED_MAX)
     wall_clock_cap_s: StrictFloat | StrictInt = Field(default=1800.0, gt=0, le=_MAX_WALL_CLOCK_S)
     # Rows whose rendered input is longer than this many tokens are excluded and counted.
     max_input_tokens: StrictInt | None = Field(default=None, ge=1)
@@ -249,6 +301,10 @@ class BenchmarkHyperparams(BaseModel):
     item_buckets: list[StrictInt] = Field(default_factory=list[int], max_length=_MAX_BUCKET_EDGES)
     # Opt-in percentile-bootstrap intervals for the pooled percentiles; unset, none are estimated.
     bootstrap_resamples: StrictInt | None = Field(default=None, ge=1, le=_MAX_BOOTSTRAP_RESAMPLES)
+    # vllm_chat only: the model server's automatic prefix caching. Off by default: every pass
+    # replays the same prompts, so a cached prefill would understate the end-to-end time. Recorded
+    # in the manifest either way.
+    prefix_caching: StrictBool = False
     # Refuse to measure unless every visible GPU's reported name contains this (e.g. "H100").
     require_gpu: str | None = Field(default=None, max_length=64)
 
@@ -274,6 +330,9 @@ class BenchmarkHyperparams(BaseModel):
     @classmethod
     def _boundaries(cls, values: list[bench.Boundary]) -> list[bench.Boundary]:
         _unique(values, "boundaries")
+        if "end_to_end" not in values:
+            msg = "boundaries must include end_to_end: total_ms is the headline"
+            raise ValueError(msg)
         return [b for b in bench.BOUNDARIES if b in values]
 
     @field_validator("length_buckets", "item_buckets")
@@ -323,8 +382,20 @@ class BenchmarkHyperparams(BaseModel):
                     "decides its latency, so it is part of the workload"
                 )
                 raise ValueError(msg)
+        elif self.prefix_caching:
+            msg = "prefix_caching applies to engine 'vllm_chat' only"
+            raise ValueError(msg)
         elif self.concurrency != [1]:
             msg = "engine 'hf_classify' runs one request stream in this process: concurrency must be [1]"
+            raise ValueError(msg)
+        if abs(self.order_seed - self.warmup_seed) < self.passes:
+            msg = (
+                "order_seed and warmup_seed are each offset by the pass index, so they must be at "
+                "least `passes` apart, or a pass's warmup would replay another pass's order"
+            )
+            raise ValueError(msg)
+        if self.sample_size is not None and self.sample_size > self.item_cap:
+            msg = "sample_size cannot exceed item_cap"
             raise ValueError(msg)
         if len(self.batch_sizes) * len(self.concurrency) > MAX_CONFIGURATIONS:
             msg = f"the grid has more than {MAX_CONFIGURATIONS} configurations"
@@ -454,18 +525,32 @@ def _chat_lengths(
 # ------------------------------ steps ------------------------------
 
 
-def _classify_step(
-    classifier: Classifier, texts: list[str], pairs: list[str], *, model_only: bool
-) -> bench.Step:
+def _reference_step(classifier: Classifier, texts: list[str], pairs: list[str]) -> bench.Step:
+    """A third-party reference model's request, through a plain AutoModel classifier."""
+
     async def _step(rows: list[int]) -> bench.StepTiming:
-        start, end, model = await asyncio.to_thread(
+        start, end, forward = await asyncio.to_thread(
             classifier.timed_forward,
             [texts[i] for i in rows],
             [pairs[i] for i in rows],
             clock=time.perf_counter_ns,
-            model_only=model_only,
         )
-        return bench.StepTiming(start_ns=start, end_ns=end, model_ns=model)
+        return bench.StepTiming(start_ns=start, end_ns=end, forward_ms=forward)
+
+    return _step
+
+
+def _verifier_step(scorer: VerifierScorer, cells: list[tuple[Any, Any]]) -> bench.Step:
+    """A trained verifier's request, from the raw cells to every score it ships."""
+
+    async def _step(rows: list[int]) -> bench.StepTiming:
+        start, end, forward = await asyncio.to_thread(
+            timed_verifier_request,
+            scorer,
+            [cells[i] for i in rows],
+            clock=time.perf_counter_ns,
+        )
+        return bench.StepTiming(start_ns=start, end_ns=end, forward_ms=forward)
 
     return _step
 
@@ -537,15 +622,75 @@ class _Progress:
         )
 
 
+class _GpuGuard:
+    """Whether another process holds the GPU, and the GPUs' state around every timed pass.
+
+    Checked once before anything is loaded (a busy GPU refuses the run) and again before every
+    pass's warmup (a busy GPU stops the run as incomplete, ``gpu_busy``). The probes run between
+    passes, never while an iteration is timed. Clocks are recorded, never locked.
+    """
+
+    def __init__(self) -> None:
+        self.checked = True
+        self.configuration = 0
+        self.telemetry: list[bench.PassTelemetry] = []
+
+    @staticmethod
+    def _others() -> set[int] | None:
+        pids = compute_pids()
+        return None if pids is None else pids - own_processes(os.getpid())
+
+    async def require_idle(self) -> None:
+        others = await asyncio.to_thread(self._others)
+        if others is None:
+            self.checked = False
+            return
+        if others:
+            msg = (
+                f"{len(others)} other process(es) hold a compute context on this GPU; a latency "
+                "benchmark needs the GPU to itself"
+            )
+            raise RunError(msg)
+
+    async def before_pass(self, pass_index: int) -> str | None:
+        others = await asyncio.to_thread(self._others)
+        if others is None:
+            self.checked = False
+        await self._record(pass_index, "start")
+        return "gpu_busy" if others else None
+
+    async def after_pass(self, pass_index: int) -> str | None:
+        await self._record(pass_index, "end")
+        return None
+
+    async def _record(self, pass_index: int, at: Literal["start", "end"]) -> None:
+        state = await asyncio.to_thread(gpu_state)
+        if state is None:
+            return
+        self.telemetry.append(
+            bench.PassTelemetry(
+                configuration=self.configuration,
+                pass_index=pass_index,
+                at=at,
+                gpus=tuple(bench.GpuState.model_validate(g) for g in state[:16]),
+            )
+        )
+
+
 async def _measure(
     spec: BenchmarkSpec,
     sample: list[int],
     step: bench.Step,
     *,
     progress: _Progress,
+    guard: _GpuGuard,
     is_alive: Callable[[], Any] | None = None,
 ) -> tuple[list[bench.ConfigurationOutcome], str | None]:
-    """Every configuration in grid order, under one wall-clock cap. Returns the stop reason."""
+    """Every configuration in grid order, under one wall-clock cap. Returns the stop reason.
+
+    A stop (the cap, a busy GPU, a model server that died) leaves the configurations after it
+    ``not_measured`` with that reason, so the measured ones are still summarized and pushed.
+    """
     hp = spec.hyperparams
     deadline = time.perf_counter_ns() + int(hp.wall_clock_cap_s * 1e9)
     outcomes: list[bench.ConfigurationOutcome] = []
@@ -562,41 +707,84 @@ async def _measure(
             )
             continue
         if is_alive is not None and not await is_alive():
-            msg = "the model server died between configurations (its log is in the job directory)"
-            raise RunError(msg)
+            stopped = _SERVER_DIED
+            outcomes.append(
+                bench.ConfigurationOutcome(
+                    configuration=configuration,
+                    status="not_measured",
+                    passes_planned=hp.passes,
+                    error=stopped,
+                )
+            )
+            continue
+        guard.configuration = configuration.index
         outcome = await bench.measure_configuration(
             configuration,
             sample=sample,
             passes=hp.passes,
             warmup=hp.warmup,
-            seed=hp.seed,
+            order_seed=hp.order_seed,
+            warmup_seed=hp.warmup_seed,
             step=step,
             clock_ns=time.perf_counter_ns,
             deadline_ns=deadline,
             on_iteration=progress.iteration,
+            before_pass=guard.before_pass,
+            after_pass=guard.after_pass,
         )
         progress.finished(outcome)
         outcomes.append(outcome)
         if outcome.status == "wall_clock_cap":
             stopped = "the wall-clock cap was reached before this configuration started"
+        elif outcome.status == "gpu_busy":
+            stopped = (
+                "gpu_busy: another process took the GPU before an earlier configuration's pass"
+            )
+        elif (
+            outcome.status == "stopped_on_failure" and is_alive is not None and not await is_alive()
+        ):
+            # The failure was the model server dying; the configurations after it cannot run.
+            stopped = _SERVER_DIED
     return outcomes, stopped
 
 
-def _incomplete_reason(results: Sequence[bench.ConfigurationResult]) -> str | None:
-    unclean = [r for r in results if r.status != "measured" or r.iterations_failed]
-    if not unclean:
-        return None
-    capped = [r for r in results if r.status in ("wall_clock_cap", "not_measured")]
-    failed = [r for r in results if r.status == "stopped_on_failure"]
+_SERVER_DIED = "the model server died (its log is in the job directory)"
+
+
+def _incomplete(
+    results: Sequence[bench.ConfigurationResult],
+) -> tuple[str | None, tuple[bench.IncompleteCode, ...]]:
+    """Why the run is incomplete, in a sentence and as codes; ``(None, ())`` when it is complete."""
+    total = len(results)
+    measured = sum(1 for r in results if r.status == "measured" and not r.iterations_failed)
+    if measured == total:
+        return None, ()
+    codes: list[bench.IncompleteCode] = []
     parts: list[str] = []
-    if capped:
-        measured = sum(1 for r in results if r.status == "measured")
+    busy = [r for r in results if r.status == "gpu_busy"]
+    if busy:
+        codes.append("gpu_busy")
         parts.append(
-            f"wall-clock cap reached with {measured} of {len(results)} configurations measured"
+            f"gpu_busy: another process took the GPU before a pass of configuration "
+            f"{busy[0].index}, so the run stopped there"
         )
+    capped = [r for r in results if r.status == "wall_clock_cap"]
+    if capped:
+        codes.append("wall_clock_cap")
+        parts.append(f"the wall-clock cap cut configuration {capped[0].index} short")
+    failed = [r for r in results if r.status == "stopped_on_failure"]
     if failed:
+        codes.append("stopped_on_failure")
         parts.append(f"{len(failed)} configuration(s) stopped on a failed iteration")
-    return "; ".join(parts) or "a configuration was not measured"
+    died = [r for r in results if r.status == "not_measured" and r.error == _SERVER_DIED]
+    if died:
+        codes.append("server_died")
+        parts.append("the model server died before the remaining configurations")
+    skipped = [r for r in results if r.status == "not_measured"]
+    if skipped:
+        codes.append("not_measured")
+        parts.append(f"{len(skipped)} of {total} configuration(s) were not measured")
+    return "; ".join(parts), tuple(codes)
 
 
 # ------------------------------ outputs ------------------------------
@@ -620,13 +808,28 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _model_path(
+    hp: BenchmarkHyperparams,
+) -> Literal["strata_verifier", "reference_automodel", "vllm_chat"]:
+    if hp.engine_settings.engine == "vllm_chat":
+        return "vllm_chat"
+    return "strata_verifier" if hp.engine_settings.artifact is not None else "reference_automodel"
+
+
 def _protocol(spec: BenchmarkSpec, sample: dict[str, int]) -> dict[str, Any]:
     hp = spec.hyperparams
     engine = hp.engine_settings.engine
-    definitions = _DEFINITIONS[engine]
+    path = _model_path(hp)
+    definitions = _DEFINITIONS[path]
     return {
         "engine": engine,
+        "model_path": path,
         "boundaries": {b: definitions[b] for b in hp.boundaries},
+        "headline": (
+            "per configuration, the median across completed passes of each pass's end-to-end "
+            "(total_ms) p95, with the minimum and maximum of those p95s; read only from a complete "
+            "run whose GPU was checked idle at the start and before every pass"
+        ),
         "clock": "time.perf_counter_ns",
         "grid": {"batch_sizes": hp.batch_sizes, "concurrency": hp.concurrency},
         "configurations": [
@@ -635,20 +838,38 @@ def _protocol(spec: BenchmarkSpec, sample: dict[str, int]) -> dict[str, Any]:
         ],
         "warmup": {
             "iterations": hp.warmup,
-            "scope": "before_every_timed_pass",
-            "source": "the first iterations of the pass's own arrival order, discarded",
+            "unit": "requests at batch size 1, full batches above it",
+            "scope": "before_every_timed_pass, untimed, no restart and no cache clear",
+            "source": "random.Random(warmup_seed + pass_index).shuffle of the sample, discarded",
         },
         "passes": hp.passes,
-        "order": "random.Random(seed + pass_index).shuffle of the sample; not length-sorted",
+        "order": "random.Random(order_seed + pass_index).shuffle of the sample; not length-sorted",
         "batching": (
             "consecutive full batches of the arrival order, padded to the longest pair in the "
             "batch; the rows that do not fill a last batch are counted, not timed"
         ),
-        "sampling": "random.Random(seed).sample of the eligible rows, in row order",
-        "seed": hp.seed,
+        "sampling": (
+            "every row of the pinned split (refused past item_cap); with sample_size, "
+            "random.Random(sample_seed).sample of the eligible rows, in row order"
+        ),
+        "item_cap": hp.item_cap,
+        "seeds": {
+            "sample_seed": hp.sample_seed,
+            "order_seed": hp.order_seed,
+            "warmup_seed": hp.warmup_seed,
+            "bootstrap_seed": hp.bootstrap_seed if hp.bootstrap_resamples is not None else None,
+        },
         "sample": sample,
         "wall_clock_cap_s": float(hp.wall_clock_cap_s),
         "on_failure": "an iteration that raises stops its configuration",
+        "gpu": {
+            "idle_check": (
+                "nvidia-smi compute processes on the visible GPUs, other than this runner and its "
+                "model server: refused at the start, gpu_busy (incomplete) before a pass"
+            ),
+            "clocks": "not locked; SM/memory clocks, power limit and draw, temperature and "
+            "persistence mode recorded at the start and end of every pass",
+        },
         "exclusions": {
             "max_input_tokens": hp.max_input_tokens,
             "item_count_column": hp.item_count_column,
@@ -656,10 +877,15 @@ def _protocol(spec: BenchmarkSpec, sample: dict[str, int]) -> dict[str, Any]:
         },
         "buckets": {"length": hp.length_buckets, "items": hp.item_buckets},
         "statistics": {
-            "percentiles": "per-pass p50/p95/p99 (Hyndman-Fan type 7), their median across "
-            "passes with min and max, and the pooled percentiles",
+            "percentiles": "per completed pass p50/p95/p99 (Hyndman-Fan type 7), their median "
+            "across completed passes with min and max, and the pooled percentiles; a truncated "
+            "pass is kept in timings.parquet (pass_completed false) and never summarized",
             "bootstrap": (
-                {"resamples": hp.bootstrap_resamples, "seed": hp.seed}
+                {
+                    "resamples": hp.bootstrap_resamples,
+                    "seed": hp.bootstrap_seed,
+                    "role": "diagnostic only: never the headline, never a pass/fail input",
+                }
                 if hp.bootstrap_resamples is not None
                 else None
             ),
@@ -706,6 +932,10 @@ def _build_manifest(
         "counts": counts,
         "complete": summary.complete,
         "incomplete_reason": summary.incomplete_reason,
+        "incomplete_codes": list(summary.incomplete_codes),
+        "headline_readable": summary.headline_readable,
+        "gpu_idle_check": summary.gpu_idle_check,
+        "gpu_telemetry": [t.model_dump(mode="json") for t in summary.gpu_telemetry],
         "files": {"timings": TIMINGS_FILENAME, "summary": SUMMARY_FILENAME},
         "template_sha256": _digest(spec.template),
         "pair_template_sha256": _digest(spec.hyperparams.engine_settings.pair_template or ""),
@@ -764,6 +994,8 @@ async def _execute(
             await _require_fresh_output(batch_spec, cast("str", hf_token))
     # Before anything is loaded: whether the GPU was idle is a fact about the machine as found.
     environment = await asyncio.to_thread(receipt, use_torch=False)
+    guard = _GpuGuard()
+    await guard.require_idle()
     if environment.get("gpus"):
         # Refused before any download when nvidia-smi already names the GPUs; a machine it cannot
         # describe is checked against torch's answer once the model is loaded.
@@ -774,10 +1006,23 @@ async def _execute(
         # not fit the architecture is refused in seconds, as in a batch run.
         config, _ = await _read_model_config(batch_spec, hub_token)
         chat_settings = _effective_hyperparams(hp.engine_settings, config)
+    # Every row of the pinned split, read up to one past the cap so a larger split is refused
+    # without materializing it whole.
+    bounded = batch_spec.model_copy(
+        update={
+            "hyperparams": batch_spec.hyperparams.model_copy(update={"row_limit": hp.item_cap + 1})
+        }
+    )
     async with ticking_phase(phase, "Loading the workload", stage="load_model"):
-        rows = await asyncio.to_thread(_load_rows, batch_spec, hub_token)
+        rows = await asyncio.to_thread(_load_rows, bounded, hub_token)
     if not rows:
         msg = "the workload split is empty"
+        raise RunError(msg)
+    if len(rows) > hp.item_cap:
+        msg = (
+            f"the split holds more than item_cap ({hp.item_cap}) rows; every row is measured, so "
+            "raise item_cap or pin a smaller split"
+        )
         raise RunError(msg)
     items = _item_counts(rows, hp.item_count_column)
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
@@ -792,6 +1037,7 @@ async def _execute(
             snapshot,
             model_commit,
             environment=environment,
+            guard=guard,
             writer=writer,
             quiet=quiet,
             phase=phase,
@@ -805,6 +1051,7 @@ async def _execute(
         snapshot,
         model_commit,
         environment=environment,
+        guard=guard,
         writer=writer,
         quiet=quiet,
         phase=phase,
@@ -828,7 +1075,7 @@ def _admit(
         max_input_tokens=hp.max_input_tokens,
         max_items=hp.max_items,
     )
-    sample = bench.draw_sample(eligible, hp.sample_size, hp.seed)
+    sample = bench.draw_sample(eligible, hp.sample_size, hp.sample_seed)
     if not sample:
         msg = f"no row of the workload is eligible to measure; excluded: {excluded}"
         raise RunError(msg)
@@ -858,6 +1105,7 @@ async def _finish(
     excluded: dict[str, int],
     counts: dict[str, int],
     environment: dict[str, Any],
+    guard: _GpuGuard,
     engine_facts: dict[str, Any],
     cold_start: dict[str, float | None],
     model_commit: str | None,
@@ -865,8 +1113,13 @@ async def _finish(
     phase: PhaseSink,
     hf_token: str | None,
     started: float,
+    stopped: str | None = None,
 ) -> str:
-    """Summarize, write the three files, push them in one commit, and report the verdict."""
+    """Summarize, write the three files, push them in one commit, and report the verdict.
+
+    ``stopped`` is the model server's death when that ended the run: the measured configurations
+    are still written and pushed, and the run then fails as incomplete.
+    """
     hp = spec.hyperparams
     tokens = [length or 0 for length in lengths]
     # An iteration's exception text reaches summary.json, which is pushed beside the timings.
@@ -883,7 +1136,9 @@ async def _finish(
             return None
         return bench.bucket_label(int(items[row] or 0), hp.item_buckets)
 
-    bootstrap = (hp.seed, hp.bootstrap_resamples) if hp.bootstrap_resamples is not None else None
+    bootstrap = (
+        (hp.bootstrap_seed, hp.bootstrap_resamples) if hp.bootstrap_resamples is not None else None
+    )
     results = await asyncio.to_thread(
         lambda: [
             bench.summarize(
@@ -897,7 +1152,17 @@ async def _finish(
             for outcome in outcomes
         ]
     )
-    reason = _incomplete_reason(results)
+    reason, codes = _incomplete(results)
+    if reason is None:
+        unreadable = (
+            None
+            if guard.checked
+            else (
+                "the GPU's idleness could not be checked (no nvidia-smi), so this is not a T13 read"
+            )
+        )
+    else:
+        unreadable = "an incomplete run has no T13 read"
     gpu_count = int(short_receipt(environment).get("count") or 0)
     wall = round(time.monotonic() - started, 3)
     compute = {
@@ -911,6 +1176,12 @@ async def _finish(
         boundaries=tuple(hp.boundaries),
         complete=reason is None,
         incomplete_reason=reason,
+        incomplete_codes=codes,
+        headline_readable=reason is None and guard.checked,
+        model_path=_model_path(hp),
+        headline_unreadable_reason=unreadable,
+        gpu_idle_check="checked" if guard.checked else "unavailable",
+        gpu_telemetry=tuple(guard.telemetry),
         sample=counts,
         excluded=excluded,
         cold_start=cold_start,
@@ -966,6 +1237,7 @@ async def _finish(
                 "configurations_measured": float(configured),
                 "configurations": float(len(results)),
                 "complete": 1.0 if summary.complete else 0.0,
+                "headline_readable": 1.0 if summary.headline_readable else 0.0,
                 "gpu_count": float(gpu_count),
                 "gpu_seconds": float(compute["gpu_seconds"]),
             },
@@ -975,6 +1247,9 @@ async def _finish(
     if not measured:
         failures = [r.error for r in results if r.error]
         msg = f"no configuration measured an iteration: {failures[0] if failures else reason}"
+        raise RunError(msg)
+    if stopped == _SERVER_DIED:
+        msg = f"incomplete: {_SERVER_DIED}; the measured configurations are at {destination}"
         raise RunError(msg)
     return destination
 
@@ -987,6 +1262,7 @@ async def _execute_classifier(
     model_commit: str | None,
     *,
     environment: dict[str, Any],
+    guard: _GpuGuard,
     writer: JsonlProgressWriter | None,
     quiet: PhaseSink,
     phase: PhaseSink,
@@ -997,36 +1273,73 @@ async def _execute_classifier(
     settings = hp.engine_settings
     inputs = build_inputs(spec.batch_spec(), rows)
     load_started = time.monotonic()
-    async with ticking_phase(phase, "Loading the classifier", stage="load_model"):
-        classifier = await asyncio.to_thread(
-            load_classifier,
-            snapshot,
-            label_alias=cast("dict[str, str | None]", settings.label_alias),
-            max_length=settings.max_model_len,
-            dtype=cast("str", settings.dtype),
-        )
+    verifier: VerifierScorer | None = None
+    classifier: Classifier
+    if settings.artifact is not None:
+        async with ticking_phase(phase, "Loading the verifier", stage="load_model"):
+            verifier = await asyncio.to_thread(
+                load_verifier,
+                snapshot,
+                label_alias=settings.label_alias,
+                max_length=settings.max_model_len,
+                dtype=cast("str", settings.dtype),
+                apply_calibration=settings.apply_calibration == "auto",
+            )
+        classifier = verifier
+    else:
+        async with ticking_phase(phase, "Loading the reference classifier", stage="load_model"):
+            classifier = await asyncio.to_thread(
+                load_classifier,
+                snapshot,
+                label_alias=cast("dict[str, str | None]", settings.label_alias),
+                max_length=settings.max_model_len,
+                dtype=cast("str", settings.dtype),
+            )
     load_seconds = round(time.monotonic() - load_started, 3)
     environment = {
         **environment,
         "torch": (await asyncio.to_thread(receipt, use_torch=True))["torch"],
     }
     _require_gpu(spec, environment)
+    # Each row's token count with this model's own tokenizer and template (for a verifier, its
+    # own rendering), at run time: the exclusions and the length buckets are this model's.
     async with ticking_phase(phase, "Measuring the workload", stage="load_model"):
-        lengths = await asyncio.to_thread(classifier.lengths, inputs.texts, inputs.pairs)
+        if verifier is not None:
+            lengths = await asyncio.to_thread(VerifierRunScorer(verifier).lengths, inputs)
+        else:
+            lengths = await asyncio.to_thread(classifier.lengths, inputs.texts, inputs.pairs)
     sample, excluded, counts = _admit(spec, lengths, items, classifier.max_length)
     progress = _Progress(writer, planned_iterations(hp, len(sample)))
     emit(writer, ProgressEvent(kind="start", stage="run", total_steps=progress.total))
-    step = _classify_step(
-        classifier, inputs.texts, inputs.pairs, model_only="model_only" in hp.boundaries
+    step = (
+        _verifier_step(verifier, inputs.cells or [])
+        if verifier is not None
+        else _reference_step(classifier, inputs.texts, inputs.pairs)
     )
     async with ticking_phase(quiet, "Measuring", stage="run"):
-        outcomes, _ = await _measure(spec, sample, step, progress=progress)
+        outcomes, _ = await _measure(spec, sample, step, progress=progress, guard=guard)
+    path_facts: dict[str, Any] = (
+        {
+            "model_path": "strata_verifier",
+            "verifier_sha256": verifier.verifier_sha256,
+            "heads": verifier.heads,
+            "decoder": verifier.rendering.decoder,
+            "calibration_temperature_applied": verifier.temperature,
+        }
+        if verifier is not None
+        else {
+            "model_path": "reference_automodel",
+            "label": "third-party reference model, run as a plain AutoModelForSequenceClassification",
+        }
+    )
     engine_facts = {
+        **path_facts,
         "engine": "hf_classify",
         "dtype": classifier.dtype,
         "tf32": classifier.tf32,
         "device": classifier.device,
         "attention": classifier.attention,
+        "forward_timer": classifier.forward_timer().method,
         "max_length": classifier.max_length,
         "max_length_source": classifier.max_length_source,
         "padding_side": "right",
@@ -1042,6 +1355,7 @@ async def _execute_classifier(
         excluded=excluded,
         counts=counts,
         environment=environment,
+        guard=guard,
         engine_facts=engine_facts,
         cold_start={"load_seconds": load_seconds, "first_iteration_ms": first},
         model_commit=model_commit,
@@ -1060,6 +1374,7 @@ async def _execute_chat(
     model_commit: str | None,
     *,
     environment: dict[str, Any],
+    guard: _GpuGuard,
     writer: JsonlProgressWriter | None,
     quiet: PhaseSink,
     phase: PhaseSink,
@@ -1085,7 +1400,10 @@ async def _execute_chat(
         dtype=hp.dtype,
         setup="",
         python_executable=sys.executable,
-        extra_args=_serve_args(hp),
+        extra_args=(
+            *_serve_args(hp),
+            *(() if spec.hyperparams.prefix_caching else ("--no-enable-prefix-caching",)),
+        ),
     )
     task = task.model_copy(
         update={
@@ -1118,6 +1436,8 @@ async def _execute_chat(
             },
             "flags": _serve_flags(task.run),
             "reasoning_parser": hp.reasoning_parser,
+            # A declared setting: off unless the spec asks, since passes replay the same prompts.
+            "prefix_caching": spec.hyperparams.prefix_caching,
             "harmony_date": harmony_date,
             "client": {"cache": None, "retry_max_attempts": 1},
         }
@@ -1137,11 +1457,12 @@ async def _execute_chat(
         progress = _Progress(writer, planned_iterations(spec.hyperparams, len(sample)))
         emit(writer, ProgressEvent(kind="start", stage="run", total_steps=progress.total))
         async with ticking_phase(quiet, "Measuring", stage="run"):
-            outcomes, _ = await _measure(
+            outcomes, stopped = await _measure(
                 spec,
                 sample,
                 _chat_step(client, prompts, hp),
                 progress=progress,
+                guard=guard,
                 is_alive=endpoint.is_alive,
             )
     first = next((o.first_iteration_ms for o in outcomes if o.first_iteration_ms is not None), None)
@@ -1153,6 +1474,7 @@ async def _execute_chat(
         excluded=excluded,
         counts=counts,
         environment=environment,
+        guard=guard,
         engine_facts=engine_facts,
         cold_start={"load_seconds": load_seconds, "first_iteration_ms": first},
         model_commit=model_commit,
@@ -1160,6 +1482,7 @@ async def _execute_chat(
         phase=phase,
         hf_token=hf_token,
         started=started,
+        stopped=stopped,
     )
 
 

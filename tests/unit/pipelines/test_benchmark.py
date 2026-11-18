@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
+import os
 import types
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -139,7 +141,7 @@ def _sequential_step(
         start = clock.now
         # The first call is slow, like a cold kernel; every later one costs 1 ms per row.
         clock.now += (500 if len(seen) == 1 else 1) * 1_000_000 * len(rows)
-        return bench.StepTiming(start_ns=start, end_ns=clock.now, model_ns=600_000 * len(rows))
+        return bench.StepTiming(start_ns=start, end_ns=clock.now, forward_ms=0.6 * len(rows))
 
     return _step
 
@@ -153,7 +155,8 @@ async def test_warmup_runs_before_every_pass_and_is_never_measured() -> None:
         sample=list(range(10)),
         passes=3,
         warmup=2,
-        seed=5,
+        order_seed=5,
+        warmup_seed=1005,
         step=_sequential_step(clock, seen),
         clock_ns=clock,
         deadline_ns=10**18,
@@ -165,11 +168,13 @@ async def test_warmup_runs_before_every_pass_and_is_never_measured() -> None:
     # The 500 ms cold first call was a warmup: it is the recorded first iteration, not a sample.
     assert outcome.first_iteration_ms == 500.0
     assert all(i.end_ns - i.start_ns == 1_000_000 for i in outcome.iterations)
-    # Each pass serves its own shuffle, and its warmups come from the start of that order.
+    # Each pass serves its own order_seed shuffle; its warmups are drawn from the workload with
+    # warmup_seed + pass, not from the start of the timed order.
     for pass_index in range(3):
         order = bench.pass_order(list(range(10)), 5, pass_index)
+        warm = bench.pass_order(list(range(10)), 1005, pass_index)
         start = pass_index * 12
-        assert seen[start : start + 2] == [[order[0]], [order[1]]]
+        assert seen[start : start + 2] == [[warm[0]], [warm[1]]]
         timed = [i.rows[0] for i in outcome.iterations if i.pass_index == pass_index]
         assert timed == order
 
@@ -195,7 +200,8 @@ async def test_concurrency_bounds_the_iterations_in_flight() -> None:
         sample=list(range(12)),
         passes=1,
         warmup=1,
-        seed=0,
+        order_seed=0,
+        warmup_seed=1000,
         step=_step,
         clock_ns=lambda: 0,
         deadline_ns=1,
@@ -212,7 +218,8 @@ async def test_the_wall_clock_cap_stops_measurement_and_marks_it() -> None:
         sample=list(range(10)),
         passes=5,
         warmup=1,
-        seed=0,
+        order_seed=0,
+        warmup_seed=1000,
         step=_sequential_step(clock, seen),
         clock_ns=clock,
         deadline_ns=505 * 1_000_000,
@@ -229,7 +236,8 @@ async def test_a_pass_that_ends_exactly_at_the_cap_is_complete() -> None:
         sample=list(range(10)),
         passes=1,
         warmup=1,
-        seed=0,
+        order_seed=0,
+        warmup_seed=1000,
         step=_sequential_step(clock, []),
         clock_ns=clock,
         deadline_ns=510 * 1_000_000,
@@ -246,7 +254,8 @@ async def test_a_failed_iteration_stops_its_configuration() -> None:
         sample=list(range(10)),
         passes=2,
         warmup=1,
-        seed=0,
+        order_seed=0,
+        warmup_seed=1000,
         step=_sequential_step(clock, seen, fail_on=4),
         clock_ns=clock,
         deadline_ns=10**18,
@@ -264,7 +273,8 @@ async def test_a_sample_smaller_than_a_batch_is_not_measured() -> None:
         sample=[1, 2, 3],
         passes=1,
         warmup=1,
-        seed=0,
+        order_seed=0,
+        warmup_seed=1000,
         step=_sequential_step(_Clock(), []),
         clock_ns=lambda: 0,
         deadline_ns=10**18,
@@ -283,7 +293,8 @@ async def _outcome(batch: int, passes: int = 2) -> bench.ConfigurationOutcome:
         sample=list(range(8)),
         passes=passes,
         warmup=1,
-        seed=0,
+        order_seed=0,
+        warmup_seed=1000,
         step=_sequential_step(clock, []),
         clock_ns=clock,
         deadline_ns=10**18,
@@ -361,13 +372,16 @@ async def test_iteration_rows_carry_indices_and_numbers_only() -> None:
         "items",
         "length_bucket",
         "items_bucket",
-        "end_to_end_ms",
-        "model_only_ms",
+        "pass_completed",
+        "total_ms",
+        "forward_ms",
         "output_tokens",
     }
     assert first["input_tokens"] == 20
     assert first["items"] == 6
-    assert first["model_only_ms"] is None
+    assert first["total_ms"] == pytest.approx(2.0)
+    assert first["forward_ms"] == pytest.approx(1.2)
+    assert first["pass_completed"] is True
     # A batch spans rows of several lengths, so it has no bucket of its own.
     assert first["length_bucket"] is None
 
@@ -390,7 +404,9 @@ def _bench_hp(**overrides: Any) -> dict[str, Any]:
         "batch_sizes": [1, 2],
         "warmup": 2,
         "passes": 2,
-        "seed": 11,
+        "sample_seed": 11,
+        "order_seed": 100,
+        "warmup_seed": 200,
     }
     return base | overrides
 
@@ -456,6 +472,10 @@ def test_the_spec_orders_boundaries_and_defaults_the_protocol() -> None:
         ({"require_gpu": "H100; rm -rf"}, "GPU name fragment"),
         ({"sample_size": 100_000, "passes": 20, "batch_sizes": [1, 2]}, "limit"),
         ({"engine_settings": {"engine": "hf_classify"}}, "engine 'hf_classify' needs"),
+        ({"boundaries": ["model_only"]}, "must include end_to_end"),
+        ({"order_seed": 5, "warmup_seed": 6, "passes": 5}, "at least `passes` apart"),
+        ({"sample_size": 50, "item_cap": 10}, "cannot exceed item_cap"),
+        ({"prefix_caching": True}, "'vllm_chat' only"),
     ],
 )
 def test_the_spec_refuses_what_it_cannot_measure(overrides: dict[str, Any], message: str) -> None:
@@ -527,20 +547,23 @@ class _FakeClassifier:
         self.pad_token = "tokenizer"
         self.attention = "sdpa"
         self.now = 0
-        self.calls: list[tuple[list[str], bool]] = []
+        self.calls: list[list[str]] = []
 
     def lengths(self, texts: Sequence[str], pairs: Sequence[str]) -> list[int | None]:
         del pairs
         return [len(t.split("\n")) + 3 for t in texts]
 
+    def forward_timer(self) -> Any:
+        return types.SimpleNamespace(method="perf_counter_ns_cpu")
+
     def timed_forward(
-        self, texts: Sequence[str], pairs: Sequence[str], *, clock: Any, model_only: bool
-    ) -> tuple[int, int, int | None]:
+        self, texts: Sequence[str], pairs: Sequence[str], *, clock: Any
+    ) -> tuple[int, int, float]:
         del clock, pairs
-        self.calls.append((list(texts), model_only))
+        self.calls.append(list(texts))
         start = self.now
         self.now += 1_000_000 * len(texts)
-        return start, self.now, 600_000 * len(texts) if model_only else None
+        return start, self.now, 0.6 * len(texts)
 
 
 class _Hub:
@@ -625,6 +648,30 @@ def bench_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]
         return record["environment"]
 
     monkeypatch.setattr(br, "receipt", _receipt)
+    # An idle GPU by default: nvidia-smi lists only this runner's own process.
+    record["pids"] = lambda: {os.getpid()}
+    record["probes"] = 0
+
+    def _pids() -> set[int] | None:
+        record["probes"] += 1
+        return record["pids"]()
+
+    monkeypatch.setattr(br, "compute_pids", _pids)
+    monkeypatch.setattr(
+        br,
+        "gpu_state",
+        lambda: [
+            {
+                "index": "0",
+                "clocks_sm_mhz": 1980.0,
+                "clocks_mem_mhz": 2619.0,
+                "power_limit_w": 700.0,
+                "power_draw_w": 120.0,
+                "temperature_c": 41.0,
+                "persistence_mode": "Enabled",
+            }
+        ],
+    )
     record["progress"] = tmp_path / "progress.jsonl"
     record["results_dir"] = tmp_path / "strata-benchmark-results" / "run1"
     record["workdir"] = tmp_path
@@ -658,9 +705,8 @@ async def test_a_classifier_benchmark_measures_the_grid_and_pushes_one_commit(
 
     # The long row (30 premises) is excluded and counted, never timed.
     classifier = bench_run["classifier"]
-    timed_texts = {text for texts, _ in classifier.calls for text in texts}
+    timed_texts = {text for texts in classifier.calls for text in texts}
     assert all(len(t.split("\n")) <= 2 for t in timed_texts)
-    assert all(model_only for _, model_only in classifier.calls)
     # Two passes over 10 rows at batch 1 and 2, with 2 warmups before each pass.
     assert len(classifier.calls) == 2 * (2 + 10) + 2 * (2 + 5)
     assert bench_run["loaded_at"] == _DATA_SHA
@@ -697,15 +743,40 @@ async def test_a_classifier_benchmark_measures_the_grid_and_pushes_one_commit(
     assert e2e.by_items is not None
     assert [row.bucket for row in e2e.by_length or ()] == ["0-4", "5-8"]
     assert parsed.cold_start["first_iteration_ms"] == pytest.approx(1.0)
+    # The headline: the median of the per-pass end-to-end p95, with min and max, readable.
+    assert parsed.headline_readable
+    assert parsed.headline_unreadable_reason is None
+    assert parsed.model_path == "reference_automodel"
+    assert parsed.gpu_idle_check == "checked"
+    assert (one.headline.p95_median_ms, one.headline.passes) == (pytest.approx(1.0), 2)
+    assert one.headline.unit == "ms_per_request"
+    assert two.headline.unit == "ms_per_batch"
+    assert (model.role, e2e.role) == ("diagnostic", "headline")
+    # Clocks, power and temperature at the start and end of every pass of every configuration.
+    assert len(parsed.gpu_telemetry) == 2 * 2 * 2
+    assert {t.at for t in parsed.gpu_telemetry} == {"start", "end"}
+    assert parsed.gpu_telemetry[0].gpus[0].temperature_c == 41.0
 
     manifest = json.loads(_Hub.uploaded["manifest.json"])
     assert manifest["kind"] == "benchmark"
     assert manifest["model"] == {"id": "org/nli", "requested_revision": _SHA, "commit": _SHA}
     assert manifest["dataset"]["commit"] == _DATA_SHA
     protocol = manifest["benchmark"]
-    assert protocol["warmup"]["scope"] == "before_every_timed_pass"
+    assert protocol["warmup"]["scope"].startswith("before_every_timed_pass")
     assert set(protocol["boundaries"]) == {"model_only", "end_to_end"}
-    assert "torch.cuda.synchronize()" in protocol["boundaries"]["model_only"]
+    assert "CUDA events" in protocol["boundaries"]["model_only"]
+    assert "ONE torch.cuda.synchronize()" in protocol["boundaries"]["end_to_end"]
+    assert protocol["model_path"] == "reference_automodel"
+    assert protocol["seeds"] == {
+        "sample_seed": 11,
+        "order_seed": 100,
+        "warmup_seed": 200,
+        "bootstrap_seed": 0,
+    }
+    assert protocol["item_cap"] == 100_000
+    assert manifest["headline_readable"] is True
+    assert manifest["engine_facts"]["model_path"] == "reference_automodel"
+    assert "third-party reference" in manifest["engine_facts"]["label"]
     assert manifest["environment"]["gpus"][0]["name"] == "NVIDIA H100 80GB HBM3"
     assert manifest["engine_facts"]["attention"] == "sdpa"
     assert manifest["compute"]["gpu_count"] == 1
@@ -752,6 +823,8 @@ async def test_a_failed_iteration_is_reported_redacted_and_the_run_keeps_the_res
     summary = json.loads(_Hub.uploaded["summary.json"])
     assert summary["complete"] is False
     assert "stopped on a failed iteration" in summary["incomplete_reason"]
+    assert summary["incomplete_codes"] == ["stopped_on_failure"]
+    assert summary["headline_readable"] is False
     one, two = summary["configurations"]
     assert one["status"] == "measured"
     assert two["status"] == "stopped_on_failure"
@@ -795,6 +868,8 @@ async def test_the_cap_marks_the_results_incomplete(
     assert summary["complete"] is False
     assert "wall-clock cap" in summary["incomplete_reason"]
     assert [c["status"] for c in summary["configurations"]] == ["wall_clock_cap", "not_measured"]
+    assert summary["incomplete_codes"] == ["wall_clock_cap", "not_measured"]
+    assert "wall-clock cap" in summary["configurations"][1]["error"]
 
 
 async def test_without_a_write_token_the_measurements_stay_on_the_vm(
@@ -864,6 +939,8 @@ async def test_a_chat_benchmark_serves_the_model_and_times_requests(
     assert "cache" not in served["client"]
     assert served["sampling"]["max_tokens"] == 16
     assert served["task"].env["HF_HUB_OFFLINE"] == "1"
+    # Every pass replays the same prompts: the server's prefix cache is off unless declared.
+    assert "--no-enable-prefix-caching" in served["task"].run
     assert "HF_TOKEN" not in served["task"].env
     # 11 rows, two configurations, one warmup each.
     assert served["requests"] == 2 * (1 + 11)
@@ -872,6 +949,9 @@ async def test_a_chat_benchmark_serves_the_model_and_times_requests(
     assert summary["boundaries"] == ["end_to_end"]
     first = summary["configurations"][0]["boundaries"][0]
     assert first["throughput"]["output_tokens_per_s"] is not None
+    manifest = json.loads(_Hub.uploaded["manifest.json"])
+    assert manifest["engine_facts"]["prefix_caching"] is False
+    assert summary["model_path"] == "vllm_chat"
 
 
 def test_item_counts_read_list_lengths_and_refuse_a_missing_column() -> None:
@@ -880,3 +960,351 @@ def test_item_counts_read_list_lengths_and_refuse_a_missing_column() -> None:
     assert br._item_counts(rows, None) is None  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(RunError, match="not a column"):
         br._item_counts(rows, "q")  # pyright: ignore[reportPrivateUsage]
+
+
+# ------------------------------ rulings: headline, GPU, workload ------------------------------
+
+
+async def test_a_truncated_pass_never_enters_the_headline_or_the_percentiles() -> None:
+    clock = _Clock()
+    seen: list[list[int]] = []
+    # Pass 0: 1 warmup (500 ms cold) + 10 timed at 1 ms; pass 1 is cut by the cap mid-way.
+    outcome = await bench.measure_configuration(
+        bench.Configuration(index=0, batch_size=1, concurrency=1),
+        sample=list(range(10)),
+        passes=3,
+        warmup=1,
+        order_seed=0,
+        warmup_seed=1000,
+        step=_sequential_step(clock, seen),
+        clock_ns=clock,
+        deadline_ns=(500 + 10 + 1 + 4) * 1_000_000,
+    )
+    assert outcome.status == "wall_clock_cap"
+    assert outcome.passes_completed == 1
+    assert {i.pass_index for i in outcome.iterations} == {0, 1}
+    result = bench.summarize(
+        outcome,
+        boundaries=["end_to_end"],
+        tokens=[1] * 10,
+        length_of=lambda _row: None,
+        items_of=lambda _row: None,
+        bootstrap=None,
+    )
+    assert result.passes_completed == 1
+    assert result.iterations_summarized == 10
+    assert result.iterations_measured > 10
+    assert result.headline.passes == 1
+    (e2e,) = result.boundaries
+    assert e2e.latency.n == 10
+    assert [p.pass_index for p in e2e.latency.passes] == [0]
+    rows = bench.iteration_rows(
+        [outcome],
+        boundaries=["end_to_end"],
+        tokens=[1] * 10,
+        items=None,
+        length_of=lambda _row: None,
+        items_of=lambda _row: None,
+    )
+    assert {r["pass"] for r in rows if not r["pass_completed"]} == {1}
+
+
+async def test_the_headline_is_the_median_of_per_pass_p95_with_min_and_max() -> None:
+    passes = [[1.0] * 19 + [10.0], [1.0] * 19 + [20.0], [1.0] * 19 + [40.0]]
+    iterations = [
+        bench.Iteration(
+            configuration=0,
+            pass_index=p,
+            iteration=i,
+            rows=(i,),
+            start_ns=0,
+            end_ns=int(value * 1_000_000),
+            forward_ms=None,
+            output_tokens=None,
+        )
+        for p, values in enumerate(passes)
+        for i, value in enumerate(values)
+    ]
+    outcome = bench.ConfigurationOutcome(
+        configuration=bench.Configuration(index=0, batch_size=1, concurrency=1),
+        status="measured",
+        passes_planned=3,
+        passes_completed=3,
+        iterations=iterations,
+    )
+    result = bench.summarize(
+        outcome,
+        boundaries=["end_to_end"],
+        tokens=[1] * 20,
+        length_of=lambda _row: None,
+        items_of=lambda _row: None,
+        bootstrap=None,
+    )
+    p95s = [env_percentile(v) for v in passes]
+    assert result.headline.p95_median_ms == pytest.approx(sorted(p95s)[1])
+    assert result.headline.p95_min_ms == pytest.approx(min(p95s))
+    assert result.headline.p95_max_ms == pytest.approx(max(p95s))
+
+
+def env_percentile(values: list[float]) -> float:
+    numpy: Any = pytest.importorskip("numpy")
+    return float(numpy.percentile(values, 95))
+
+
+def test_a_summary_refuses_nan_and_infinity() -> None:
+    with pytest.raises(ValidationError):
+        bench.Headline(
+            p95_median_ms=math.nan, p95_min_ms=1.0, p95_max_ms=1.0, passes=1, unit="ms_per_request"
+        )
+    with pytest.raises(ValidationError):
+        bench.GpuState(temperature_c=math.inf)
+
+
+async def test_a_busy_gpu_at_the_start_refuses_the_run_before_anything_loads(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    bench_run["pids"] = lambda: {os.getpid(), 999_999}
+    _launch(monkeypatch, bench_run)
+    assert await br.main() == 1
+    error = next(e for e in _events(bench_run) if e["kind"] == "error")
+    assert "needs the GPU to itself" in error["message"]
+    assert "token" not in bench_run
+    assert bench_run["classifier"].calls == []
+
+
+async def test_a_gpu_taken_between_passes_stops_the_run_as_incomplete_gpu_busy(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    # Idle at the start and before pass 0; another process appears before pass 1.
+    def _pids() -> set[int]:
+        return {os.getpid()} if bench_run["probes"] <= 2 else {os.getpid(), 4242}
+
+    bench_run["pids"] = _pids
+    _launch(monkeypatch, bench_run)
+    assert await br.main() == 0
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    assert summary.complete is False
+    assert summary.headline_readable is False
+    assert summary.headline_unreadable_reason == "an incomplete run has no T13 read"
+    assert summary.incomplete_codes == ("gpu_busy", "not_measured")
+    assert "gpu_busy" in (summary.incomplete_reason or "")
+    one, two = summary.configurations
+    assert (one.status, one.passes_completed) == ("gpu_busy", 1)
+    assert two.status == "not_measured"
+    assert "gpu_busy" in (two.error or "")
+
+
+async def test_without_nvidia_smi_the_headline_is_not_a_t13_read(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    bench_run["pids"] = lambda: None
+    _launch(monkeypatch, bench_run)
+    assert await br.main() == 0
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    assert summary.complete is True
+    assert summary.gpu_idle_check == "unavailable"
+    assert summary.headline_readable is False
+    assert "could not be checked" in (summary.headline_unreadable_reason or "")
+
+
+async def test_every_row_is_read_and_a_split_past_item_cap_is_refused(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    limits: list[Any] = []
+    real = br._load_rows  # pyright: ignore[reportPrivateUsage]
+
+    def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
+        limits.append(spec.hyperparams.row_limit)
+        return real(spec, token)
+
+    monkeypatch.setattr(br, "_load_rows", _rows)
+    _launch(monkeypatch, bench_run, item_cap=10)
+    assert await br.main() == 1
+    assert limits == [11]
+    error = next(e for e in _events(bench_run) if e["kind"] == "error")
+    assert "more than item_cap (10) rows" in error["message"]
+    assert bench_run["classifier"].calls == []
+
+
+async def test_a_trained_verifier_is_timed_through_its_own_request(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    verifier = types.SimpleNamespace(
+        max_length=32,
+        max_length_source="artifact",
+        dtype="bfloat16",
+        tf32={"matmul": False, "cudnn": False},
+        device="cpu",
+        pad_token="tokenizer",
+        attention="sdpa",
+        labels=["entailed", "contradicted", "neutral"],
+        verifier_sha256="ab" * 32,
+        heads=["flag", "support"],
+        rendering=types.SimpleNamespace(decoder=False),
+        temperature=None,
+        forward_timer=lambda: types.SimpleNamespace(method="perf_counter_ns_cpu"),
+    )
+    loaded: dict[str, Any] = {}
+    timed: list[list[Any]] = []
+
+    def _load(snapshot: Path, **kwargs: Any) -> Any:
+        loaded.update(kwargs)
+        return verifier
+
+    class _Lengths:
+        def __init__(self, scorer: Any) -> None:
+            assert scorer is verifier
+
+        def lengths(self, inputs: Any) -> list[int | None]:
+            return [len(c[0]) + 3 for c in inputs.cells]
+
+    now = [0]
+
+    def _request(scorer: Any, cells: list[Any], *, clock: Any) -> tuple[int, int, float]:
+        assert scorer is verifier
+        timed.append(cells)
+        start = now[0]
+        now[0] += 2_000_000
+        return start, now[0], 1.5
+
+    monkeypatch.setattr(br, "load_verifier", _load)
+    monkeypatch.setattr(br, "VerifierRunScorer", _Lengths)
+    monkeypatch.setattr(br, "timed_verifier_request", _request)
+    spec = _spec_dict(
+        engine_settings={
+            "engine": "hf_classify",
+            "artifact": "strata_verifier",
+            "pair_template": "{hypothesis}",
+            "dtype": "bfloat16",
+        },
+        batch_sizes=[1],
+    ) | {
+        "template": "{premises}",
+        "column_mapping": {"premises": "premises", "hypothesis": "hypothesis"},
+        "progress_path": str(bench_run["progress"]),
+    }
+    monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(spec))
+    assert await br.main() == 0
+    assert loaded["dtype"] == "bfloat16"
+    assert loaded["apply_calibration"] is False
+    # The raw cells reach the timed request: rendering is inside the boundary.
+    assert all(isinstance(c[0][0], list) for c in timed)
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    assert summary.model_path == "strata_verifier"
+    (config,) = summary.configurations
+    model, e2e = config.boundaries
+    assert e2e.latency.pooled["p95"] == pytest.approx(2.0)
+    assert model.latency.pooled["p95"] == pytest.approx(1.5)
+    manifest = json.loads(_Hub.uploaded["manifest.json"])
+    facts = manifest["engine_facts"]
+    assert (facts["model_path"], facts["dtype"], facts["attention"]) == (
+        "strata_verifier",
+        "bfloat16",
+        "sdpa",
+    )
+    assert "3-way softmax" in manifest["benchmark"]["boundaries"]["end_to_end"]
+
+
+async def test_a_model_server_that_dies_mid_run_still_writes_what_was_measured(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    state: dict[str, Any] = {"alive": True, "requests": 0}
+
+    @contextlib.asynccontextmanager
+    async def _serving(_backend: Any, task: Any, **_kw: Any) -> AsyncGenerator[Any]:
+        async def _alive() -> bool:
+            return state["alive"]
+
+        yield types.SimpleNamespace(base_url="http://127.0.0.1:8000/v1", is_alive=_alive)
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def complete(self, messages: Any, **kwargs: Any) -> Any:
+            state["requests"] += 1
+            if state["requests"] > 12:
+                state["alive"] = False
+                raise ConnectionError("connection refused")
+            return types.SimpleNamespace(usage=types.SimpleNamespace(output_tokens=3))
+
+    async def _config(spec: Any, token: Any) -> tuple[dict[str, Any], str]:
+        return {"model_type": "qwen3"}, _SHA
+
+    async def _no_len(*_a: Any) -> None:
+        return None
+
+    monkeypatch.setattr(br, "serving_endpoint", _serving)
+    monkeypatch.setattr(br, "LLMClient", _Client)
+    monkeypatch.setattr(br, "_read_model_config", _config)
+
+    def _lengths(_snapshot: Path, prompts: Sequence[str], kwargs: Any = None) -> list[int | None]:
+        del kwargs
+        return [5] * len(prompts)
+
+    monkeypatch.setattr(br, "_chat_lengths", _lengths)
+    monkeypatch.setattr(br, "_served_max_model_len", _no_len)
+    _launch(
+        monkeypatch,
+        bench_run,
+        engine_settings=_CHAT,
+        boundaries=["end_to_end"],
+        batch_sizes=[1],
+        concurrency=[1, 2, 4],
+        passes=1,
+        warmup=1,
+    )
+    assert await br.main() == 1
+    error = next(e for e in _events(bench_run) if e["kind"] == "error")
+    assert "model server died" in error["message"]
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    assert [c.status for c in summary.configurations] == [
+        "measured",
+        "stopped_on_failure",
+        "not_measured",
+    ]
+    assert "server_died" in summary.incomplete_codes
+    assert summary.headline_readable is False
+
+
+def test_visible_devices_follow_cuda_visible_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert env.visible_tokens(None) is None
+    assert env.visible_tokens("") == []
+    assert env.visible_tokens("1, GPU-abc,x,2") == ["1", "GPU-abc"]
+    answers = {
+        "--query-gpu=index,uuid": "0, GPU-aaa\n1, GPU-bbb\n2, GPU-ccc\n",
+        "--query-compute-apps=gpu_uuid,pid": "GPU-aaa, 100\nGPU-bbb, 200\nGPU-ccc, 300\n",
+    }
+
+    def _smi(args: list[str]) -> str | None:
+        return answers.get(args[0])
+
+    monkeypatch.setattr(env, "_nvidia_smi", _smi)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,GPU-cc")
+    assert env.visible_indices() == {"1", "2"}
+    # A process on a GPU this run cannot see is not competing with it.
+    assert env.compute_pids() == {200, 300}
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    assert env.compute_pids() == {100, 200, 300}
+
+
+def test_own_processes_include_the_runner_itself() -> None:
+    assert os.getpid() in env.own_processes(os.getpid())
+
+
+async def test_a_summary_must_say_complete_only_when_every_configuration_was_measured(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    _launch(monkeypatch, bench_run, wall_clock_cap_s=1e-9)
+    assert await br.main() == 1
+    text = (bench_run["results_dir"] / br.SUMMARY_FILENAME).read_text()
+    data = json.loads(text)
+    bench.BenchmarkSummary.model_validate_json(text)
+    with pytest.raises(ValidationError, match="complete must say"):
+        bench.BenchmarkSummary.model_validate_json(json.dumps(data | {"complete": True}))
+    with pytest.raises(ValidationError, match="readable only"):
+        bench.BenchmarkSummary.model_validate_json(json.dumps(data | {"headline_readable": True}))
+    nan = text.replace('"p95_median_ms": null', '"p95_median_ms": NaN', 1)
+    assert nan != text
+    with pytest.raises(ValidationError):
+        bench.BenchmarkSummary.model_validate_json(nan)

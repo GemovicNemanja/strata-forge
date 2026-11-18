@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from strata_forge.pipelines._common import installed_versions
@@ -26,10 +27,16 @@ from strata_forge.pipelines._common import installed_versions
 __all__ = [
     "GPU_FIELDS",
     "RECORDED_DISTRIBUTIONS",
+    "STATE_FIELDS",
+    "compute_pids",
     "gpu_matches",
+    "gpu_state",
+    "own_processes",
     "parse_gpus",
     "receipt",
     "short_receipt",
+    "visible_indices",
+    "visible_tokens",
 ]
 
 #: The ``nvidia-smi --query-gpu`` fields recorded per device, in CSV order.
@@ -98,6 +105,56 @@ def _number(raw: str | None) -> float | None:
         return None
 
 
+def visible_tokens(value: str | None) -> list[str] | None:
+    """``CUDA_VISIBLE_DEVICES`` as its device tokens, or ``None`` when unset (every device).
+
+    As CUDA reads it: comma-separated indices or ``GPU-`` UUID prefixes, ending at the first token
+    that is neither (an empty value hides every device).
+    """
+    if value is None:
+        return None
+    tokens: list[str] = []
+    for raw in value.split(","):
+        token = raw.strip()
+        if not (token.isdigit() or token.startswith("GPU-")):
+            break
+        tokens.append(token)
+    return tokens
+
+
+def _visible(index: str | None, uuid: str | None, tokens: list[str] | None) -> bool:
+    if tokens is None:
+        return True
+    for token in tokens:
+        if token.isdigit() and index is not None and index.isdigit() and int(token) == int(index):
+            return True
+        if token.startswith("GPU-") and uuid is not None and uuid.startswith(token):
+            return True
+    return False
+
+
+def _device_map() -> dict[str, str | None] | None:
+    """Each physical GPU's index mapped to its UUID, or ``None`` without ``nvidia-smi``."""
+    raw = _nvidia_smi(["--query-gpu=index,uuid", "--format=csv,noheader"])
+    if raw is None:
+        return None
+    out: dict[str, str | None] = {}
+    for line in raw.splitlines():
+        cells = [_field(c) for c in line.split(",")]
+        if len(cells) == 2 and cells[0] is not None:
+            out[cells[0]] = cells[1]
+    return out
+
+
+def visible_indices() -> set[str] | None:
+    """The physical indices of the GPUs this process may use (``CUDA_VISIBLE_DEVICES``)."""
+    devices = _device_map()
+    if devices is None:
+        return None
+    tokens = visible_tokens(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    return {index for index, uuid in devices.items() if _visible(index, uuid, tokens)}
+
+
 def parse_gpus(raw: str) -> list[dict[str, Any]]:
     """One record per CSV row of :data:`GPU_FIELDS`; a row of the wrong width is skipped."""
     gpus: list[dict[str, Any]] = []
@@ -124,12 +181,99 @@ def parse_gpus(raw: str) -> list[dict[str, Any]]:
     return gpus
 
 
+#: The per-GPU state recorded at the start and end of every timed pass. Clocks are recorded, not
+#: locked: the measurement is of the machine as it runs.
+STATE_FIELDS = (
+    "index",
+    "clocks.sm",
+    "clocks.mem",
+    "power.limit",
+    "power.draw",
+    "temperature.gpu",
+    "persistence_mode",
+)
+
+
+def compute_pids() -> set[int] | None:
+    """The processes holding a compute context on a GPU this process may use (``None``: unknown).
+
+    A process on a GPU that ``CUDA_VISIBLE_DEVICES`` hides is another tenant's, not a competitor.
+    """
+    devices = _device_map()
+    raw = _nvidia_smi(["--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"])
+    if raw is None or devices is None:
+        return None
+    tokens = visible_tokens(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    visible = {uuid for index, uuid in devices.items() if _visible(index, uuid, tokens)}
+    pids: set[int] = set()
+    for line in raw.splitlines():
+        cells = [c.strip() for c in line.split(",")]
+        if len(cells) == 2 and cells[1].isdigit() and cells[0] in visible:
+            pids.add(int(cells[1]))
+    return pids
+
+
+def own_processes(root: int) -> set[int]:
+    """``root`` and every process descended from it (a model server the runner started).
+
+    Read from ``/proc``; where there is none, ``root`` alone.
+    """
+    parents: dict[int, int] = {}
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+            except OSError:
+                continue
+            # `pid (comm) state ppid ...`; comm may hold spaces and parentheses.
+            fields = stat[stat.rfind(")") + 2 :].split()
+            if len(fields) > 1 and fields[1].isdigit():
+                parents[int(entry.name)] = int(fields[1])
+    tree = {root}
+    grew = True
+    while grew:
+        grew = False
+        for pid, parent in parents.items():
+            if parent in tree and pid not in tree:
+                tree.add(pid)
+                grew = True
+    return tree
+
+
 def _compute_processes() -> int | None:
-    """How many processes hold a compute context on any visible GPU, or ``None`` if unknown."""
-    raw = _nvidia_smi(["--query-compute-apps=pid", "--format=csv,noheader"])
+    pids = compute_pids()
+    return None if pids is None else len(pids)
+
+
+def gpu_state() -> list[dict[str, Any]] | None:
+    """Every visible GPU's clocks, power, temperature and persistence mode right now."""
+    raw = _nvidia_smi([f"--query-gpu={','.join(STATE_FIELDS)}", "--format=csv,noheader,nounits"])
     if raw is None:
         return None
-    return sum(1 for line in raw.splitlines() if line.strip())
+    visible = visible_indices()
+    out: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        cells = [_field(c) for c in line.split(",")]
+        if len(cells) != len(STATE_FIELDS):
+            continue
+        record = dict(zip(STATE_FIELDS, cells, strict=True))
+        if visible is not None and record["index"] not in visible:
+            continue
+        out.append(
+            {
+                "index": record["index"],
+                "clocks_sm_mhz": _number(record["clocks.sm"]),
+                "clocks_mem_mhz": _number(record["clocks.mem"]),
+                "power_limit_w": _number(record["power.limit"]),
+                "power_draw_w": _number(record["power.draw"]),
+                "temperature_c": _number(record["temperature.gpu"]),
+                "persistence_mode": record["persistence_mode"],
+            }
+        )
+    return out
 
 
 def _torch_facts() -> dict[str, Any]:
@@ -171,6 +315,10 @@ def receipt(*, use_torch: bool) -> dict[str, Any]:
     """
     raw = _nvidia_smi([f"--query-gpu={','.join(GPU_FIELDS)}", "--format=csv,noheader,nounits"])
     gpus = parse_gpus(raw) if raw is not None else None
+    visible = visible_indices() if gpus is not None else None
+    if gpus is not None and visible is not None:
+        # Only the devices this process may use: the count is the GPU-seconds multiplier.
+        gpus = [gpu for gpu in gpus if str(gpu.get("index")) in visible]
     return {
         "nvidia_smi": raw is not None,
         "gpus": gpus,

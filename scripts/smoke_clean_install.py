@@ -1385,9 +1385,9 @@ def check_eval_consumes_verifier() -> None:
 def check_benchmark() -> None:
     """The benchmark's ``hf_classify`` timing on a tiny CPU classifier, through its real loop.
 
-    Covers what the fakes cannot: the timed forward pass runs on the installed torch and
-    transformers, its model-only interval sits inside its end-to-end one, warmups are excluded,
-    the summary validates from its JSON text, and the timings parquet is written.
+    Covers what the fakes cannot: the timed request runs on the installed torch and
+    transformers with ONE synchronization, its forward_ms sits inside its total_ms, warmups are
+    excluded, the summary validates from its JSON text, and the timings parquet is written.
     """
     import asyncio
     import time
@@ -1403,20 +1403,26 @@ def check_benchmark() -> None:
         classifier = _scoring.load_classifier(
             Path(tmp), label_alias=identity, max_length=None, dtype="float32"
         )
-        start, end, model = classifier.timed_forward(
-            texts[:2], pairs[:2], clock=time.perf_counter_ns, model_only=True
+        syncs = 0
+        real_sync = classifier.synchronize
+
+        def _counted() -> None:
+            nonlocal syncs
+            syncs += 1
+            real_sync()
+
+        classifier.synchronize = _counted  # type: ignore[method-assign]
+        start, end, forward = classifier.timed_forward(
+            texts[:2], pairs[:2], clock=time.perf_counter_ns
         )
-        if model is None or not 0 < model <= end - start:
-            msg = f"the model-only interval is not inside the request: {model} of {end - start}"
+        if not 0 < forward * 1_000_000 <= end - start:
+            msg = f"forward_ms is not inside the request: {forward} ms of {end - start} ns"
             raise SmokeError(msg)
-        _, _, unmeasured = classifier.timed_forward(
-            texts[:1], pairs[:1], clock=time.perf_counter_ns, model_only=False
-        )
-        if unmeasured is not None:
-            msg = "a request timed end to end only reported a model-only interval"
+        if syncs != 1:
+            msg = f"a timed request synchronized {syncs} times; the protocol allows one"
             raise SmokeError(msg)
-        step = benchmark_runner._classify_step(  # pyright: ignore[reportPrivateUsage]
-            classifier, texts, pairs, model_only=True
+        step = benchmark_runner._reference_step(  # pyright: ignore[reportPrivateUsage]
+            classifier, texts, pairs
         )
         outcome = asyncio.run(
             bench.measure_configuration(
@@ -1424,7 +1430,8 @@ def check_benchmark() -> None:
                 sample=[0, 1, 2, 3],
                 passes=2,
                 warmup=1,
-                seed=7,
+                order_seed=7,
+                warmup_seed=1007,
                 step=step,
                 clock_ns=time.perf_counter_ns,
                 deadline_ns=time.perf_counter_ns() + 60 * 10**9,
@@ -1449,6 +1456,10 @@ def check_benchmark() -> None:
             engine="hf_classify",
             boundaries=("model_only", "end_to_end"),
             complete=True,
+            headline_readable=False,
+            model_path="reference_automodel",
+            headline_unreadable_reason="a CPU smoke check is not a T13 read",
+            gpu_idle_check="unavailable",
             sample={"rows": 4, "eligible": 4, "sampled": 4},
             excluded={},
             cold_start={"load_seconds": None, "first_iteration_ms": outcome.first_iteration_ms},
