@@ -1,4 +1,8 @@
-"""Fitting one softmax temperature, cross-fitting it by cluster, and expected calibration error."""
+"""Fitting one softmax temperature, cross-fitting it by cluster, and expected calibration error.
+
+The ECE's bins are reported too (:func:`reliability_bins`), from the same grouping the ECE
+weighs, so a reliability diagram drawn from them always adds up to the ECE beside it.
+"""
 
 from __future__ import annotations
 
@@ -32,10 +36,12 @@ __all__ = [
     "TEMPERATURE_FIT_VERSION",
     "CalibrationError",
     "CrossFitTemperature",
+    "ReliabilityBin",
     "TemperatureFit",
     "cross_fit_temperature",
     "expected_calibration_error",
     "fit_temperature",
+    "reliability_bins",
 ]
 
 
@@ -73,6 +79,22 @@ class CalibrationError(_Frozen):
     n: int = Field(ge=1)
     bins: int = Field(ge=1)
     scheme: Literal["equal_mass", "equal_width"]
+
+
+class ReliabilityBin(_Frozen):
+    """One ECE bin: its confidence edges, its row count, mean confidence and accuracy.
+
+    ``equal_mass`` edges are the smallest and largest confidence of the rows in the bin (a tie
+    split by item id can put one confidence on both sides of a boundary); ``equal_width`` edges
+    are the nominal ``[k/bins, (k+1)/bins)``. An empty bin has ``n`` 0 and null means, and under
+    ``equal_mass`` null edges too.
+    """
+
+    lo: float | None = Field(ge=0, le=1, allow_inf_nan=False)
+    hi: float | None = Field(ge=0, le=1, allow_inf_nan=False)
+    n: int = Field(ge=0)
+    mean_confidence: float | None = Field(ge=0, le=1, allow_inf_nan=False)
+    accuracy: float | None = Field(ge=0, le=1, allow_inf_nan=False)
 
 
 def _require_numpy() -> None:
@@ -235,7 +257,7 @@ def cross_fit_temperature(
     )
 
 
-def expected_calibration_error(
+def reliability_bins(
     gold: Iterable[object],
     probabilities: Iterable[Iterable[object]],
     *,
@@ -243,14 +265,14 @@ def expected_calibration_error(
     bins: int = ECE_BINS,
     scheme: Literal["equal_mass", "equal_width"] = "equal_mass",
     item_ids: Sequence[str] | None = None,
-) -> CalibrationError:
-    """Top-label ECE over rows with a probability vector in ``labels`` order.
+) -> tuple[ReliabilityBin, ...]:
+    """The bins :func:`expected_calibration_error` weighs, in confidence order, empty ones included.
 
     Confidence is the largest probability and the prediction its first argmax. ``equal_mass``
     sorts rows by confidence, ties broken by ``item_ids`` (else by input order; the sort is
     stable either way), and splits them into ``bins`` contiguous groups with ``array_split``
-    semantics (the first ``n mod bins`` groups hold one row more); ``equal_width`` uses [k/bins, (k+1)/bins)
-    with 1.0 in the last bin. Empty bins contribute nothing.
+    semantics (the first ``n mod bins`` groups hold one row more); ``equal_width`` uses
+    [k/bins, (k+1)/bins) with 1.0 in the last bin.
     """
     import numpy as np
 
@@ -280,9 +302,47 @@ def expected_calibration_error(
         groups = [np.flatnonzero(index == b) for b in range(bins)]
     else:
         raise ValidationError("calibration_scheme_invalid")
-    total = math.fsum(
-        len(group) * abs(float(correct[group].mean()) - float(confidence[group].mean()))
-        for group in groups
-        if len(group)
+    out: list[ReliabilityBin] = []
+    for k, group in enumerate(groups):
+        filled = len(group) > 0
+        if scheme == "equal_width":
+            lo, hi = k / bins, (k + 1) / bins
+        else:
+            lo = float(confidence[group].min()) if filled else None
+            hi = float(confidence[group].max()) if filled else None
+        out.append(
+            ReliabilityBin(
+                lo=lo,
+                hi=hi,
+                n=len(group),
+                mean_confidence=float(confidence[group].mean()) if filled else None,
+                accuracy=float(correct[group].mean()) if filled else None,
+            )
+        )
+    return tuple(out)
+
+
+def expected_calibration_error(
+    gold: Iterable[object],
+    probabilities: Iterable[Iterable[object]],
+    *,
+    labels: Sequence[str],
+    bins: int = ECE_BINS,
+    scheme: Literal["equal_mass", "equal_width"] = "equal_mass",
+    item_ids: Sequence[str] | None = None,
+) -> CalibrationError:
+    """Top-label ECE over rows with a probability vector in ``labels`` order.
+
+    The bin-count-weighted mean of ``|accuracy - mean confidence|`` over the bins of
+    :func:`reliability_bins` (same arguments, same grouping); empty bins contribute nothing.
+    """
+    groups = reliability_bins(
+        gold, probabilities, labels=labels, bins=bins, scheme=scheme, item_ids=item_ids
     )
-    return CalibrationError(value=total / len(target), n=len(target), bins=bins, scheme=scheme)
+    n = sum(group.n for group in groups)
+    total = math.fsum(
+        group.n * abs((group.accuracy or 0.0) - (group.mean_confidence or 0.0))
+        for group in groups
+        if group.n
+    )
+    return CalibrationError(value=total / n, n=n, bins=bins, scheme=scheme)

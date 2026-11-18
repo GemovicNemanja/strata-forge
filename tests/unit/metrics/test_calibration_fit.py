@@ -15,6 +15,7 @@ from strata_forge.metrics.calibration_fit import (
     cross_fit_temperature,
     expected_calibration_error,
     fit_temperature,
+    reliability_bins,
 )
 
 LABELS = ("no", "yes")
@@ -167,3 +168,37 @@ def test_ece_ties_break_by_item_id() -> None:
     )
     # {right, right} -> 0.4 each, {wrong} -> 0.6, {right @ 0.9} -> 0.1
     assert wrong_last.value == pytest.approx((2 * 0.4 + 0.6 + 0.1) / 4)
+
+
+def test_reliability_bins_are_the_bins_the_ece_weighs() -> None:
+    # The tie case above: three rows at 0.6 (right, wrong, right) and one right at 0.9.
+    gold = ["yes", "no", "yes", "yes"]
+    probs = [[0.4, 0.6], [0.4, 0.6], [0.4, 0.6], [0.1, 0.9]]
+    ids = ["b", "a", "c", "d"]
+    got = reliability_bins(gold, probs, labels=LABELS, bins=3, item_ids=ids)
+    assert [(b.n, b.accuracy) for b in got] == [(2, 0.5), (1, 1.0), (1, 1.0)]
+    assert [(b.lo, b.hi) for b in got] == [(0.6, 0.6), (0.6, 0.6), (0.9, 0.9)]
+    assert got[0].mean_confidence == pytest.approx(0.6)
+    ece = expected_calibration_error(gold, probs, labels=LABELS, bins=3, item_ids=ids)
+    weighted = sum(b.n * abs((b.accuracy or 0) - (b.mean_confidence or 0)) for b in got) / 4
+    assert ece.value == pytest.approx(weighted)
+
+
+def test_reliability_bins_keep_empty_bins() -> None:
+    probs = [[0.4, 0.6], [0.1, 0.9]]
+    mass = reliability_bins(["yes", "no"], probs, labels=LABELS, bins=3)
+    assert [b.n for b in mass] == [1, 1, 0]
+    assert (mass[2].lo, mass[2].hi, mass[2].mean_confidence, mass[2].accuracy) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    width = reliability_bins(["yes", "no"], probs, labels=LABELS, bins=4, scheme="equal_width")
+    assert [(b.lo, b.hi, b.n) for b in width] == [
+        (0.0, 0.25, 0),
+        (0.25, 0.5, 0),
+        (0.5, 0.75, 1),
+        (0.75, 1.0, 1),
+    ]
+    assert width[3].accuracy == 0.0
