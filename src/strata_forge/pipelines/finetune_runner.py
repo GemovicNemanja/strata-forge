@@ -76,6 +76,7 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
+from strata_forge.pipelines._split_overlap import may_overlap
 from strata_forge.pipelines.inference_runner import SNAPSHOT_IGNORED, SNAPSHOT_PATTERNS
 from strata_forge.storage import HFHubClient
 from strata_forge.training.dataset_format import (
@@ -246,6 +247,16 @@ def check_spec(spec: FinetuneSpec) -> None:
             raise RunError(msg)
         if spec.adapter != "none":
             msg = "seq_cls trains full weights; set adapter to 'none'"
+            raise RunError(msg)
+        # The in-training eval monitors on an in-distribution dev split: another split of the
+        # training dataset, read at the same pinned commit (the spec names one repo and commit).
+        # Sharing even one row with the training split is refused, and so is a pair whose overlap
+        # the specs alone cannot rule out (`_split_overlap.may_overlap`).
+        if spec.eval_split is not None and may_overlap(spec.split, spec.eval_split):
+            msg = (
+                "seq_cls's eval split must be a different split of the training dataset, sharing "
+                f"no row with the training split; {spec.eval_split!r} may overlap {spec.split!r}"
+            )
             raise RunError(msg)
         if (
             spec.calibration_split is not None

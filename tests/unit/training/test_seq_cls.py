@@ -519,6 +519,30 @@ class TestAcceptanceSmoke:
         assert verifier["input"]["encoding"] == "pair"
         assert verifier["pooling"] == "first_token"
 
+    def test_smoke_monitors_on_the_dev_split_and_keeps_the_final_checkpoint(
+        self, tmp_path: Path, encoder_dir: Path
+    ) -> None:
+        progress = tmp_path / "progress.jsonl"
+        result, _, _ = _smoke(
+            tmp_path, encoder_dir, _config(tmp_path, progress_jsonl=str(progress))
+        )
+        monitoring = result.receipts["monitoring"]
+        assert monitoring["label"] == "monitoring (ID dev, final checkpoint is the model)"
+        assert monitoring["selects_checkpoint"] is False
+        # 24 rows at 4 a batch: 6 steps an epoch, so every 2 steps, plus the final step (3).
+        assert monitoring["cadence"]["eval_steps"] == 2
+        assert [h["step"] for h in monitoring["history"]] == [2, 3]
+        final = monitoring["final"]
+        assert final["step"] == 3
+        assert {"eval_loss", "monitor/3way/macro_f1", "monitor/3way/accuracy"} <= set(final)
+        assert "monitor/2way/f1_entailed" in final
+        events = [json.loads(line) for line in progress.read_text().splitlines()]
+        evals = [e for e in events if e["kind"] == "eval"]
+        assert len(evals) == 2
+        assert all(e["message"] == monitoring["label"] for e in evals)
+        assert all("monitor/3way/macro_f1" in e["metrics"] for e in evals)
+        assert not any(k.startswith("eval_monitor") for e in evals for k in e["metrics"])
+
     def test_smoke_decoder_with_activation_checkpointing(
         self, tmp_path: Path, decoder_dir: Path
     ) -> None:

@@ -183,3 +183,21 @@ def test_the_check_sample_and_tolerance_cannot_be_set(key: str) -> None:
     with pytest.raises(ValidationError, match=f"{key} cannot be set for seq_cls"):
         _config(**{key: 1.0 if key.endswith("tolerance") else 1})
     assert (CHECK_ROWS, CHECK_TOLERANCE) == (8, 1e-4)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "eval_steps",
+        "load_best_model_at_end",
+        "metric_for_best_model",
+        "greater_is_better",
+        "early_stopping_patience",
+        "early_stopping_threshold",
+    ],
+)
+def test_nothing_may_pick_a_checkpoint_or_move_the_monitoring(key: str) -> None:
+    with pytest.raises(
+        ValidationError, match=f"{key} cannot be set for seq_cls: the final checkpoint"
+    ):
+        _config(**{key: 1})

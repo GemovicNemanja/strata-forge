@@ -10,6 +10,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- `seq_cls` monitors its eval split during training, for monitoring only: every
+  `ceil(steps_per_epoch / 4)` steps and on the final checkpoint, macro-F1, accuracy and per-class
+  F1 over three-way rows and accuracy and F1 for `entailed` over two-way rows (`monitor/...` keys,
+  argmax, uncalibrated) beside `eval_loss`, as `eval` events labelled
+  `monitoring (ID dev, final checkpoint is the model)` and in the manifest. The final checkpoint is
+  the model: best-model selection, early stopping and `eval_steps` are refused, and the eval split
+  must share no row with the training split (overlapping or undecidable split specs, such as
+  `train[:80%]` with `train[70%:]`, are refused).
 - `strata_forge.metrics.judge_agreement.judge_agreement` (`judge-gold-agreement-v1`): an LLM
   judge's scores against gold scores of the same outputs, per criterion (contingency table, exact
   agreement, Cohen's kappa, and for an integer scale the mean absolute error and the

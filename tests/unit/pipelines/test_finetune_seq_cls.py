@@ -202,6 +202,9 @@ class TestAcceptanceSmoke:
         assert manifest["checks"]["overflow"]["length_distribution"]["max"] <= 64
         assert manifest["checks"]["reload_parity"]["passed"] is True
         assert manifest["checks"]["scoring_parity"]["passed"] is True
+        monitoring = manifest["checks"]["monitoring"]
+        assert monitoring["label"] == "monitoring (ID dev, final checkpoint is the model)"
+        assert monitoring["final"]["eval_loss"] > 0
         assert manifest["checks"]["scoring_parity"]["argmax_agree"] == 8
         assert manifest["checks"]["load"]["classifier_bias"]["value"] is True
         assert set(manifest["checks"]["loss"]) == {
@@ -277,6 +280,16 @@ class TestTerminalErrorsCarryGpuTime:
             _drive(monkeypatch, tmp_path, checkpoint, _spec())
         metrics = cast("dict[str, float]", getattr(exc.value, "metrics", {}))
         assert set(metrics) >= {"gpu_seconds", "gpu_count"}
+
+
+class TestMonitoringSplit:
+    @pytest.mark.parametrize("eval_split", ["train", "train[:100%]", "train[90%:]", "train[5:]"])
+    def test_an_eval_split_sharing_rows_with_training_is_refused(self, eval_split: str) -> None:
+        with pytest.raises(RunError, match="sharing no row with the training split"):
+            fr.check_spec(_spec(eval_split=eval_split))
+
+    def test_a_disjoint_slice_of_the_same_split_passes(self) -> None:
+        fr.check_spec(_spec(split="train[:80%]", eval_split="train[80%:]"))
 
 
 class TestPinnedChecks:
