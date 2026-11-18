@@ -365,6 +365,47 @@ never holds one run's results beside another run's manifest. The check
 creates a missing repo private, so a run that fails afterwards can leave an
 empty private repo behind.
 
+### Samples per row (`n`) and chat-template kwargs
+
+``Hyperparams.n`` (1-16, default 1) draws ``n`` samples per row, each its
+own request. A seeded run gives sample ``k`` the seed ``seed + k``, which
+is exactly the seed vLLM gives the ``k``-th child of an ``n``-sample
+request (``vllm/v1/engine/parallel_sampling.py``,
+``_get_child_sampling_params``), so each sample is one reproducible request
+with its own token counts and finish reason, which a shared ``n``-choice
+response does not report. Each sample's requests for a chunk run as one
+batch, and the model server's prefix cache serves the repeated prompt.
+``n > 1`` below ``temperature`` 1e-5 is refused (vLLM decodes greedily
+below that, ``_SAMPLING_EPS``, so it would draw the same reply ``n`` times), as is a ``seed`` for which ``seed + n - 1`` leaves the
+server's int64 range. Scoring engines refuse ``n``.
+
+Whenever a run declares ``n`` (``1`` included), every results row is keyed
+by ``(custom_id, sample_index)`` and carries the ``seed`` its request sent
+(``None`` unseeded), rows ordered by row, then sample. Progress counts
+sample rows (``total_steps`` is rows x ``n``), and a chunk holds
+``progress_chunk`` requests (``progress_chunk // n`` rows), so the liveness
+check and the progress event between chunks keep their spacing; with guided JSON each
+sample gets its own repair turn under its own seed. The manifest adds
+``sampling: {n, seed, sample_seed: "seed + sample_index"}`` and
+``counts.prompts`` (distinct rows); a run that does not declare ``n`` has
+``sampling: null`` and its rows are unchanged.
+
+``Hyperparams.chat_template_kwargs`` also applies to chat runs, with the
+rules of the label-logits engine below, except that values are FIXED for
+the run (a ``{name}`` placeholder in them is refused; per-row values are
+rendered only by ``hf_label_logits``). They ride every request as vLLM's
+``chat_template_kwargs`` in canonical key order; ``enable_thinking`` is
+passed only this way and must be a boolean. Before the model server
+starts, the runner reads the snapshot's chat template
+in vLLM's order of preference: the processor's ``chat_template.json``,
+then ``chat_template.jinja``, then ``tokenizer_config.json``'s
+``chat_template`` (the ``default`` entry of a named list) and refuses a
+kwarg it never reads, since vLLM keeps only the kwargs its template reads
+(``vllm/renderers/hf.py``, ``resolve_chat_template_kwargs``); a model with
+no template; and any kwarg on a gpt-oss model, which vLLM renders with
+openai-harmony rather than the template. The manifest records
+``chat_template: {sha256, kwargs_sha256}``.
+
 ### Guided JSON (`guided_json`)
 
 ``Hyperparams.guided_json`` is ONE JSON Schema for every reply of a chat
