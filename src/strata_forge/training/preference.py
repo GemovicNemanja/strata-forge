@@ -289,11 +289,13 @@ class PreferenceRunner:
         ref_model: Any = None,
         reward_funcs: Any = None,
         token: HubToken = None,
+        revision: str | None = None,
     ) -> Any:
         """Construct the TRL preference trainer for this config.
 
         ``token`` is the Hub credential for every model and tokenizer this method downloads (see
-        :mod:`strata_forge.training.loading`); it is never stored on the config. When this method
+        :mod:`strata_forge.training.loading`); it is never stored on the config, and ``revision`` pins
+        the commit every one of those loads reads. When this method
         loads the policy for DPO or KTO without an adapter, it loads the reference model too, with
         the same arguments: left to TRL, the reference is re-downloaded by name with none of them,
         so a gated base would fail there and a pickle checkpoint would be accepted. A caller that
@@ -303,7 +305,7 @@ class PreferenceRunner:
         method = self._config.method
         trl_kwargs = self._config.to_trl_kwargs()
         if model is None:
-            load_kwargs = model_load_kwargs(token)
+            load_kwargs = model_load_kwargs(token, revision)
             if self._peft_config is not None and hasattr(self._peft_config, "to_bnb_config"):
                 load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
             model = transformers_mod.AutoModelForCausalLM.from_pretrained(
@@ -322,7 +324,7 @@ class PreferenceRunner:
                 )
         if tokenizer is None:
             tokenizer = transformers_mod.AutoTokenizer.from_pretrained(
-                self._config.model_id, **tokenizer_load_kwargs(token)
+                self._config.model_id, **tokenizer_load_kwargs(token, revision)
             )
 
         trl_config_cls: Any = _resolve_trl_class(trl_mod, method, _TRL_CONFIG_CLASS[method])
@@ -365,6 +367,7 @@ class PreferenceRunner:
         ref_model: Any = None,
         reward_funcs: Any = None,
         token: HubToken = None,
+        revision: str | None = None,
     ) -> PreferenceRunResult:
         """Run the preference loop end to end."""
         trainer = self.build_trainer(
@@ -375,6 +378,7 @@ class PreferenceRunner:
             ref_model=ref_model,
             reward_funcs=reward_funcs,
             token=token,
+            revision=revision,
         )
         train_output: Any = trainer.train()
         trainer.save_model(self._config.output_dir)

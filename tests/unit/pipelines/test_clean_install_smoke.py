@@ -49,7 +49,10 @@ class TestFinetuneCases:
             (method.name, fmt, adapter)
             for method in enabled_methods()
             for fmt in method.formats
-            for adapter in ("none", "lora", "qlora")
+            # A full-weight method is checked with no adapter: its runner refuses the others.
+            for adapter in (
+                ("none",) if method.task_type == "SEQ_CLS" else ("none", "lora", "qlora")
+            )
         }
         assert set(smoke.finetune_cases()) == expected
 
@@ -71,7 +74,10 @@ class TestFinetuneCases:
         assert built_method.name == method
         assert config.model_id == "smoke-org/smoke-model"
         assert (peft is None) == (adapter == "none")
-        assert "output_dir" in config.to_trl_kwargs()
+        if built_method.task_type == "SEQ_CLS":
+            assert config.output_dir == str(tmp_path / "out")
+        else:
+            assert "output_dir" in config.to_trl_kwargs()
 
     @pytest.mark.parametrize("fmt", sorted(FORMATS))
     def test_rows_map_every_role_and_drop_the_rest(self, fmt: str) -> None:

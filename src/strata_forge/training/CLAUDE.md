@@ -1,7 +1,8 @@
 # Agent rules — strata_forge.training
 
 `strata_forge.training` ships fine-tuning primitives: SFT, preference
-tuning (DPO / ORPO / KTO / GRPO), and PEFT (LoRA / QLoRA), plus
+tuning (DPO / ORPO / KTO / GRPO), sequence classification (``seq_cls``),
+and PEFT (LoRA / QLoRA), plus
 the supporting chat-template formatting and sequence-packing
 helpers. The module wraps TRL / peft / transformers with typed
 Pydantic configs and runner classes that defer all heavy imports
@@ -15,6 +16,15 @@ until ``train()`` is called.
   :class:`GRPOConfig` + :class:`PreferenceRunner` +
   :class:`PreferenceRunResult` — preference-tuning dispatcher
   over TRL's family of preference trainers.
+- :class:`SeqClsConfig` + :class:`SeqClsRunner` + :class:`SeqClsResult`
+  — the classifier on ``transformers.Trainer`` (``seq_cls.py``), its
+  objective (``classifier_loss.py``) and its heads, load guard and
+  decoder LM-head initialisation (``classifier_heads.py``). The checks
+  before step 0 (overflow, load guard, decoder step-0, memory
+  preflight) are part of the method; gradient accumulation stays
+  refused because the loss's means are over the declared batch. A new
+  architecture is an explicit table entry plus a tiny synthetic test,
+  never a key-name heuristic.
 - :class:`LoRAConfig` / :class:`QLoRAConfig` — adapter configs
   with sensible Forge defaults; both expose ``to_peft_config``,
   QLoRA additionally exposes ``to_bnb_config``.
@@ -33,7 +43,8 @@ until ``train()`` is called.
 
 ## Boundaries
 
-- **Owns:** ``sft.py``, ``preference.py``, ``peft.py``,
+- **Owns:** ``sft.py``, ``preference.py``, ``seq_cls.py``,
+  ``classifier_loss.py``, ``classifier_heads.py``, ``peft.py``,
   ``chat_template.py``, ``packing.py``, ``methods.py``,
   ``dataset_format.py``.
 - **Imports from inside ``forge``:** :mod:`strata_forge.llm.messages`
@@ -63,7 +74,9 @@ The module's ``__init__.py`` re-exports:
   :class:`LoRAConfig`, :class:`QLoRAConfig`.
 - QLoRA precondition: :func:`require_bitsandbytes`,
   :class:`MissingBitsAndBytesError`.
-- Runners: :class:`SFTRunner`, :class:`PreferenceRunner`.
+- Runners: :class:`SFTRunner`, :class:`PreferenceRunner`,
+  :class:`SeqClsRunner` (with :class:`SeqClsConfig`,
+  :class:`SeqClsResult`, :class:`PreflightError`, :class:`Step0Error`).
 - Result types: :class:`SFTRunResult`,
   :class:`PreferenceRunResult`.
 - Type alias: :data:`AnyPreferenceConfig`.

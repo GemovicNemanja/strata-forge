@@ -75,6 +75,51 @@ def _spec(**overrides: Any) -> fr.FinetuneSpec:
 
 # What `_train` returns: the trainer's own numbers, extracted where the phase boundary needs them.
 _TRAINED: tuple[dict[str, float], int | None] = ({"train_loss": 0.5}, 12)
+_SHA = "a" * 40
+_SEQ_CLS = {
+    "method": "seq_cls",
+    "dataset_format": "nli_pair",
+    "column_mapping": {"premises": "p", "hypothesis": "h", "label": "y"},
+    "adapter": "none",
+    "model_revision": _SHA,
+    "dataset_commit_sha": _SHA,
+    "hyperparams": {"labels": ["entailment", "contradiction", "neutral"]},
+}
+
+
+class TestCheckSpec:
+    """The spec checks a control plane runs at submit and the runner runs again on the machine."""
+
+    def test_a_pinned_classifier_spec_passes(self) -> None:
+        fr.check_spec(_spec(**_SEQ_CLS))
+
+    @pytest.mark.parametrize("field", ["model_revision", "dataset_commit_sha"])
+    def test_a_classifier_refuses_an_unpinned_input(self, field: str) -> None:
+        with pytest.raises(RunError, match=f"seq_cls needs pinned inputs; set {field}"):
+            fr.check_spec(_spec(**{**_SEQ_CLS, field: None}))
+
+    @pytest.mark.parametrize("adapter", ["lora", "qlora"])
+    def test_a_classifier_trains_full_weights(self, adapter: str) -> None:
+        with pytest.raises(RunError, match="full weights"):
+            fr.check_spec(_spec(**{**_SEQ_CLS, "adapter": adapter}))
+
+    def test_gradient_accumulation_is_refused_at_the_spec(self) -> None:
+        hyperparams = {"labels": ["a", "b"], "gradient_accumulation_steps": 2}
+        with pytest.raises(RunError, match="gradient_accumulation_steps is refused"):
+            fr.check_spec(_spec(**{**_SEQ_CLS, "hyperparams": hyperparams}))
+
+    def test_a_classifier_needs_its_labels(self) -> None:
+        with pytest.raises(RunError, match="labels"):
+            fr.check_spec(_spec(**{**_SEQ_CLS, "hyperparams": {}}))
+
+    @pytest.mark.parametrize("bad", ["main", "abc1234", "A" * 40, "a" * 39])
+    def test_a_model_revision_must_be_a_full_commit(self, bad: str) -> None:
+        with pytest.raises(RunError, match="model_revision must be a full"):
+            fr.check_spec(_spec(model_revision=bad))
+
+    def test_the_causal_methods_take_an_optional_pin(self) -> None:
+        fr.check_spec(_spec(model_revision=_SHA))
+        fr.check_spec(_spec())
 
 
 # ------------------------------ the inert spec ------------------------------
@@ -498,6 +543,10 @@ class TestLoadSplit:
 # ------------------------------ the run ---------------------------------------
 
 
+async def _private_ok(*_a: Any, **_k: Any) -> None:
+    return None
+
+
 def _drive(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -506,6 +555,7 @@ def _drive(
     token: str | None = _TOKEN,
     push: Any = None,
     train: Any = None,
+    build: Any = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run `_execute` with the heavy externals faked; returns (destination, progress events)."""
     import asyncio
@@ -530,9 +580,10 @@ def _drive(
 
     monkeypatch.setattr(fr, "_load_split", _rows)
     monkeypatch.setattr(fr, "_to_dataset", _identity)
-    monkeypatch.setattr(fr, "_build_trainer", _fake_build)
+    monkeypatch.setattr(fr, "_build_trainer", build or _fake_build)
     monkeypatch.setattr(fr, "_train", train or _fake_train)
     monkeypatch.setattr(fr, "results_dir", _dir)
+    monkeypatch.setattr(fr, "ensure_private_repo", _private_ok)
     if push is not None:
         monkeypatch.setattr(fr, "_push_artifact", push)
 
@@ -566,7 +617,84 @@ class TestExecute:
         _, events = _drive(monkeypatch, tmp_path, push=_push)
         assert events[-1]["step"] == 12
         assert events[-1]["total_steps"] == 12
-        assert events[-1]["metrics"] == {"train_loss": 0.5}
+        # The run's measured GPU time rides the terminal event too (0 on a machine with no GPU).
+        assert events[-1]["metrics"] == {"train_loss": 0.5, "gpu_seconds": 0.0}
+
+    def test_the_manifest_lands_in_the_artifact_and_names_the_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pushed: list[Path] = []
+
+        async def _push(_spec_arg: Any, directory: Path, _token: str) -> str:
+            pushed.append(directory)
+            return "org/out"
+
+        spec = _spec(model_revision=_SHA, dataset_commit_sha=_SHA)
+        _drive(monkeypatch, tmp_path, spec=spec, push=_push)
+        manifest = json.loads((pushed[0] / "manifest.json").read_text())
+        assert manifest["schema"] == "strata.run.manifest/v1"
+        assert manifest["kind"] == "finetune"
+        assert manifest["outcome"] == "succeeded"
+        assert manifest["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
+        assert manifest["dataset"]["requested_revision"] == _SHA
+        assert manifest["result"] == {"steps": 12, "metrics": {"train_loss": 0.5}}
+        assert manifest["counts"] == {"train_rows": 1, "eval_rows": 0}
+        assert manifest["compute"]["gpu_count"] == 0
+        assert manifest["compute"]["gpu_seconds"] == 0.0
+        assert manifest["compute"]["wall_seconds"] >= 0
+        assert "model_id" not in manifest["hyperparams"]
+        assert "output_dir" not in manifest["hyperparams"]
+
+    def test_a_public_output_repo_refuses_before_training(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        trained: list[bool] = []
+
+        def _train(*_a: Any, **_k: Any) -> tuple[dict[str, float], int | None]:
+            trained.append(True)
+            return _TRAINED
+
+        async def _public(*_a: Any, **_k: Any) -> None:
+            raise fr.RunError("the output repo org/out is public")
+
+        def _dir(_run_id: str | None, *, name: str) -> Path:
+            return tmp_path / name
+
+        monkeypatch.setattr(fr, "results_dir", _dir)
+        monkeypatch.setattr(fr, "_train", _train)
+        import asyncio
+
+        async def _run() -> None:
+            monkeypatch.setattr(fr, "ensure_private_repo", _public)
+            await fr._execute(_spec(), RunSecrets(hf_token=SecretStr(_TOKEN)), None)  # pyright: ignore[reportPrivateUsage]
+
+        with pytest.raises(fr.RunError, match="public"):
+            asyncio.run(_run())
+        assert trained == []
+
+    def test_a_pinned_base_that_loaded_another_commit_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        class _Config:
+            _commit_hash = "f" * 40
+
+        class _Model:
+            config = _Config()
+
+        class _Trainer:
+            model = _Model()
+
+        def _build(*_a: Any, **_k: Any) -> object:
+            return _Trainer()
+
+        monkeypatch.setattr(fr, "_build_trainer", _build)
+        with pytest.raises(fr.RunError, match="not the pinned"):
+            _drive(
+                monkeypatch,
+                tmp_path,
+                spec=_spec(output_repo_id=None, model_revision=_SHA),
+                build=_build,
+            )
 
     def test_with_no_output_repo_the_artifact_stays_on_the_vm(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -706,7 +834,7 @@ class TestHubCredential:
             seen["split"].append(credential)
             return [{"prompt": "q", "completion": "a"}]
 
-        def _build(*args: Any) -> object:
+        def _build(*args: Any, **_kwargs: Any) -> object:
             seen["build"].append(args[-1])
             return object()
 
@@ -880,7 +1008,7 @@ class TestPhaseBoundary:
         # this module needs the boundary between the first two, which is why it does not use it.
         import inspect
 
-        source = inspect.getsource(fr._execute)  # pyright: ignore[reportPrivateUsage]
+        source = inspect.getsource(fr._train_causal_lm)  # pyright: ignore[reportPrivateUsage]
         assert "_build_trainer" in source
         build_at = source.index("_build_trainer")
         train_at = source.index("_train, trainer")

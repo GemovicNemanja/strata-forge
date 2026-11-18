@@ -61,6 +61,8 @@ from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
+    from strata_forge.storage import HFHubClient
+    from strata_forge.storage.hf_hub import RepoType
     from strata_forge.training.hardware import GpuSampler
     from strata_forge.training.progress import RunStage
 
@@ -97,6 +99,7 @@ __all__ = [
     "check_engine_version",
     "emit",
     "engine_version_required",
+    "ensure_private_repo",
     "install_termination_handlers",
     "installed_engine_commit",
     "installed_engine_version",
@@ -831,3 +834,23 @@ def write_manifest(manifest: dict[str, Any], outdir: Path) -> Path:
     path = outdir / MANIFEST_FILENAME
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return path
+
+
+async def ensure_private_repo(hub: HFHubClient, repo_id: str, *, repo_type: RepoType) -> None:
+    """Create ``repo_id`` private when it is missing, and refuse it when it is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and a
+    run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    try:
+        await hub.create_repo(repo_id, repo_type=repo_type, private=True, exist_ok=True)
+        private = await hub.is_private(repo_id, repo_type=repo_type)
+    except Exception as exc:
+        msg = f"could not prepare the output repo {repo_id}: {exc}"
+        raise RunError(msg) from exc
+    if not private:
+        msg = (
+            f"the output repo {repo_id} is public; a run pushes only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)

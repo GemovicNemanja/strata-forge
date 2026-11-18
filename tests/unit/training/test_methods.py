@@ -13,6 +13,7 @@ from strata_forge.training.methods import (
     pick_method,
 )
 from strata_forge.training.preference import DPOConfig, KTOConfig, ORPOConfig, PreferenceRunner
+from strata_forge.training.seq_cls import SeqClsConfig, SeqClsRunner
 from strata_forge.training.sft import SFTConfig, SFTRunner
 
 
@@ -21,8 +22,8 @@ class TestRegistry:
         for key, spec in METHODS.items():
             assert key == spec.name
 
-    def test_enabled_methods_are_the_four_declarable_ones(self) -> None:
-        assert [s.name for s in enabled_methods()] == ["sft", "dpo", "orpo", "kto"]
+    def test_enabled_methods_are_the_declarable_ones(self) -> None:
+        assert [s.name for s in enabled_methods()] == ["sft", "dpo", "orpo", "kto", "seq_cls"]
 
     def test_every_enabled_method_declares_at_least_one_format(self) -> None:
         for spec in enabled_methods():
@@ -32,9 +33,16 @@ class TestRegistry:
         for spec in METHODS.values():
             assert spec.formats <= set(FORMATS), f"{spec.name} names an unknown format"
 
-    def test_shipped_methods_train_a_causal_head(self) -> None:
-        for spec in enabled_methods():
-            assert spec.task_type == "CAUSAL_LM"
+    def test_each_method_declares_the_head_it_trains(self) -> None:
+        heads = {spec.name: spec.task_type for spec in enabled_methods()}
+        assert heads.pop("seq_cls") == "SEQ_CLS"
+        assert set(heads.values()) == {"CAUSAL_LM"}
+
+    def test_seq_cls_trains_the_nli_pair_format(self) -> None:
+        spec = pick_method("seq_cls")
+        assert spec.formats == {"nli_pair"}
+        assert spec.config_cls is SeqClsConfig
+        assert spec.runner_cls is SeqClsRunner
 
     def test_config_and_runner_pairings(self) -> None:
         assert pick_method("sft").config_cls is SFTConfig
@@ -54,7 +62,7 @@ class TestPickMethod:
     def test_unknown_method_lists_only_the_enabled_ones(self) -> None:
         with pytest.raises(UnsupportedMethodError) as exc:
             pick_method("ppo")
-        assert "sft, dpo, orpo, kto" in str(exc.value)
+        assert "sft, dpo, orpo, kto, seq_cls" in str(exc.value)
         assert "grpo" not in str(exc.value)
 
     def test_disabled_method_explains_itself_rather_than_reading_as_unknown(self) -> None:

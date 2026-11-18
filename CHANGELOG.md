@@ -8,6 +8,39 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- The `seq_cls` fine-tuning method (`SeqClsConfig`, `SeqClsRunner`) and the `nli_pair` dataset
+  format: a premise/hypothesis classifier on `transformers.Trainer` with full weights, bf16
+  autocast over float32 master weights, length-grouped batches and an optional activation
+  checkpointing flag (`use_reentrant=False`, `preserve_rng_state=True`, off by default).
+  Gradient accumulation is refused by name. The objective (`classifier_loss`) is grouped soft
+  cross-entropy plus an optional sum-form Brier term, where a two-way row's negative is the
+  aggregate of the other labels, plus null-masked auxiliary flag and per-premise support heads.
+  Before step 0 a run checks every row's label and length (a row over `max_length` refuses the
+  run; nothing is truncated), loads under a strict guard that allows only the declared head keys
+  of the architecture to be missing, initialises a decoder's classifier from its own LM head
+  (prediction head, verbalizer rows of the output projection and its bias) and verifies that step
+  0 reproduces the base model's zero-shot label logits, and measures one optimizer step at the
+  longest real batch against the device. `head_init="existing"` continues a classifier a previous
+  run saved. Intermediate checkpoints never enter the artifact, which carries the stock
+  checkpoint, `strata_aux_heads.safetensors` and `strata_verifier.json`.
+- `FinetuneSpec.model_revision`: a full commit id pins the base model for every load of a
+  fine-tuning run; `seq_cls` requires it and `dataset_commit_sha`.
+- Every fine-tuning run writes a `strata.run.manifest/v1` manifest of kind `finetune`, with each
+  check's receipt for `seq_cls` and the measured `gpu_seconds`, pushed with the artifact in one
+  commit to a private model repo (refused when public, before any GPU time and again at push).
+  The terminal `end` event carries `gpu_seconds`.
+- `finetune_runner.check_spec`, the spec checks that need neither the machine nor the network,
+  for a control plane to run at submit.
+- `build_trainer(..., revision=...)` on `SFTRunner` and `PreferenceRunner`, and `revision` on
+  `model_load_kwargs` / `tokenizer_load_kwargs`.
+
+### Changed
+
+- A fine-tuning push no longer uploads `checkpoint-*` directories.
+- Only the `unpaired_preference` format coerces `label` to a boolean.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

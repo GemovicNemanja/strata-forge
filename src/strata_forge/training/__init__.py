@@ -1,4 +1,4 @@
-"""Fine-tuning: SFT, preference tuning (DPO/ORPO/KTO/GRPO), and PEFT (LoRA/QLoRA).
+"""Fine-tuning: SFT, preference tuning (DPO/ORPO/KTO/GRPO), sequence classification, and PEFT.
 
 The public surface is:
 
@@ -74,6 +74,13 @@ from strata_forge.training.progress import (
     ProgressEvent,
     trainer_callback,
 )
+from strata_forge.training.seq_cls import (
+    PreflightError,
+    SeqClsConfig,
+    SeqClsResult,
+    SeqClsRunner,
+    Step0Error,
+)
 from strata_forge.training.sft import SFTConfig, SFTRunner, SFTRunResult
 
 __all__ = [
@@ -96,11 +103,16 @@ __all__ = [
     "PackedSequence",
     "PreferenceRunResult",
     "PreferenceRunner",
+    "PreflightError",
     "ProgressEvent",
     "QLoRAConfig",
     "SFTConfig",
     "SFTRunResult",
     "SFTRunner",
+    "SeqClsConfig",
+    "SeqClsResult",
+    "SeqClsRunner",
+    "Step0Error",
     "UnsupportedMethodError",
     "apply_chat_template",
     "build_training_rows",

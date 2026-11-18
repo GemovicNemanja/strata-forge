@@ -327,6 +327,62 @@ never holds one run's results beside another run's manifest. The check
 creates a missing repo private, so a run that fails afterwards can leave an
 empty private repo behind.
 
+### Fine-tuning pins, checks and manifest
+
+``FinetuneSpec.model_revision`` pins the base model to a full 40-character
+lowercase commit id; the model, its tokenizer and the merge step read only
+that commit, and a run whose base loaded at another commit is refused. A
+branch, tag or abbreviated id is refused at spec load, like an unpinned
+``dataset_commit_sha`` of the wrong shape. Left unset (allowed for the
+causal-LM methods), the run reads the default branch and records the commit
+it got. ``seq_cls`` requires both pins: it refuses a spec missing either.
+
+``check_spec(spec)`` runs every check that needs neither the machine nor the
+network, including the method's own config over ``hyperparams``, so a control
+plane can refuse at submit, against the engine it bundles, exactly what the
+runner would refuse on the machine.
+
+A ``seq_cls`` run downloads the pinned snapshot (safetensors, configs and
+tokenizer files only) and refuses one whose commit is not the pin; reads each
+split as Arrow, projected onto the ``nli_pair`` roles (``row_limit`` takes a
+prefix), never as a Python list; and runs the classifier's checks before step 0
+(length, load guard, decoder step-0, memory; see
+[training](training.md#checks-before-step-0)). Each passed check is a
+``phase`` event at stage ``load_model`` whose ``message`` is a sentence and
+whose ``metrics`` carry the numbers (``check_rows``,
+``check_longest_tokens``, ``check_template_token_overhead``,
+``step0_max_abs_logit_diff``, ``step0_tolerance``,
+``preflight_peak_bytes``, ``preflight_total_bytes``,
+``preflight_gradient_checkpointing``, ...). A refused check fails the run
+with its measurement in the message (the memory refusal also names the
+flag and the base commit) and leaves a ``manifest.json`` with ``outcome``
+``refused`` in the run directory on the machine.
+
+Every fine-tuning run writes ``manifest.json`` (schema
+``strata.run.manifest/v1``, ``kind`` ``finetune``) into the artifact
+directory, so the push carries the weights and their record in one Hub
+commit and the copy on the machine carries it too. It records the outcome;
+the method and its ``task_type``; the model id, requested revision and
+commit; the dataset id, config, splits, requested revision, format, column
+mapping and row limit; the adapter; the validated hyperparameters (without
+the runner-owned fields); train and eval row counts; the trainer's steps and
+metrics; the engine and the installed versions of ``torch``,
+``transformers``, ``trl``, ``peft``, ``accelerate``, ``datasets``,
+``tokenizers`` and ``safetensors``; for ``seq_cls``, every check's receipt;
+and ``compute``: the device, the GPU count, ``wall_seconds``, per-phase
+``timing`` and ``gpu_seconds``. ``gpu_seconds`` is the runner's own measured
+wall-clock time, from the spec check to the manifest, times the GPUs it used
+(one for ``seq_cls``); provisioning and the engine install happen before the
+runner exists and are the control plane's to measure. The terminal ``end``
+event carries ``gpu_seconds`` in its metrics too. The manifest holds no row
+content and no credential.
+
+A pushed fine-tune goes only to a **private** model repo, checked before any
+download or GPU time and again at push time, as for batch inference. The push
+never uploads ``checkpoint-*``: a ``seq_cls`` run writes its intermediate
+checkpoints beside the artifact, and the causal-LM methods' are excluded from
+the upload by name.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a
