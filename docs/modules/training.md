@@ -378,7 +378,13 @@ loads it: stock `AutoModelForSequenceClassification` from its own safetensors, n
 float32, under `check_loading_info`. Its logits on a fixed set of rows (the first `step0_rows` of
 the eval split, else of the training split) must equal the trained classifier's in-memory float32
 logits within `step0_tolerance`, with the same predicted label on every row (`reload_parity`
-receipt). A failure raises `ArtifactCheckError`; the run is refused and nothing is pushed. When a
+receipt). The first `step0_rows` TRAINING rows are then scored through the scoring path itself
+(`hf_classify` with `artifact: strata_verifier`, loading the saved artifact and rendering the raw
+rows from its `strata_verifier.json`), and those logits must also equal the trainer's in-memory
+float32 logits within `step0_tolerance` with the same argmax on every row (`scoring_parity`
+receipt). A failure of either raises `ArtifactCheckError`; the run is refused and nothing is
+pushed. Rendering is one module, `verifier_render.py` (`render_row`, `encode_rows`,
+`marker_tokens`), which the trainer and the scorer both import. When a
 decoder's classifier has a bias, the load receipt records `classifier_bias: true` (read from the
 model's config) and why.
 

@@ -1409,7 +1409,10 @@ class SeqClsRunner:
                 )
                 scored: list[Any] = scorer.score(rendered)
             except scoring.RunError as exc:
-                msg = f"the saved classifier could not be scored as a verifier: {exc}"
+                # The exception's type only: a loader's text can name paths on the machine.
+                msg = (
+                    f"the saved classifier could not be scored as a verifier ({type(exc).__name__})"
+                )
                 raise ArtifactCheckError(msg, {}) from exc
             trained: list[list[float]] = []
             module.eval()

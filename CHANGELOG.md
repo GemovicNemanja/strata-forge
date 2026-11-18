@@ -10,6 +10,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Fixed
 
+- `hf_classify` with a `label_alias` that excludes a class other than the last read that
+  class's logit as the next class's; each `logit_<label>` column is now its own class id's logit.
 - `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a
   `list<struct>` premises column, a nested list, a boolean, a null), naming the column and asking for
   a `list<string>` column, instead of scoring each element's Python text.
@@ -18,6 +20,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- `hf_classify` scores a verifier trained by `seq_cls` as it was trained
+  (`hyperparams.artifact: strata_verifier`): rendering, labels, pooling and
+  auxiliary heads come only from its `strata_verifier.json`, through the one
+  render module the trainer uses (`training/verifier_render.py`). Results add
+  `p_inconsistent` and per-premise `support_scores` when those heads exist;
+  `apply_calibration: auto` applies the artifact's `calibration.json` to `p_*`
+  with the logits kept raw. Training checks its own artifact through this path
+  before the push.
 - The batch-inference runner serves reasoning models with their reasoning kept apart from the
   answer. `Hyperparams.reasoning_parser` (`openai_gptoss` | `qwen3`) becomes vLLM's
   `--reasoning-parser`, results rows gain a `reasoning` column (string or `None`) and `output`
