@@ -198,7 +198,10 @@ def _check_columns(monkeypatch: pytest.MonkeyPatch, spec: ir.RunSpec) -> None:
         def __iter__(self) -> Any:
             return iter([{"q": "x"}])
 
-    fake = types.SimpleNamespace(load_dataset=lambda *_a, **_k: _Dataset())
+    def load_dataset(*_a: object, **_k: object) -> _Dataset:
+        return _Dataset()
+
+    fake = types.SimpleNamespace(load_dataset=load_dataset)
     monkeypatch.setitem(sys.modules, "datasets", fake)
     ir._load_rows(spec, False)  # pyright: ignore[reportPrivateUsage]
 
