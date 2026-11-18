@@ -587,3 +587,20 @@ async def test_an_identifier_column_holding_text_refuses(
     code, events = await _run(monkeypatch, env, _spec())
     assert code == 1
     assert "short identifiers" in events[-1]["message"]
+
+
+async def test_an_undefined_macro_f1_leaves_its_bounds_out_of_the_end_event(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    # "neutral" is declared but appears in no gold row and no prediction: macro-F1 has no
+    # defined resample, so the end event carries its point and count but no bounds.
+    for table, column in ((env["gold"], "label"), (env["cand"], "pred"), (env["base"], "pred")):
+        table[column] = ["entailment" if v == "neutral" else v for v in table[column]]
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 0, events[-1]
+    metrics = events[-1]["metrics"]
+    assert "macro_f1" in metrics
+    assert "macro_f1_lower" not in metrics
+    assert metrics["macro_f1_undefined_resamples"] == 200
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["slices"][0]["absent_classes"] == ["neutral"]

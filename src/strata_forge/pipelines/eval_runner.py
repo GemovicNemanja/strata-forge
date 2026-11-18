@@ -828,16 +828,25 @@ def _headline(report: dict[str, Any], settings: EvalSettings) -> dict[str, float
         "clusters": float(overall["clusters"]),
     }
     for name in ("accuracy", "macro_f1", "invalid_rate"):
-        metrics[name] = candidate[name]["point"]
-        metrics[f"{name}_lower"] = candidate[name]["lower"]
-        metrics[f"{name}_upper"] = candidate[name]["upper"]
+        _put_interval(metrics, name, candidate[name])
+    # Only macro-F1 can be undefined in a resample; its count rides beside the bounds.
+    metrics["macro_f1_undefined_resamples"] = float(candidate["macro_f1"]["undefined_resamples"])
     for comparison in overall["comparisons"]:
         for name in ("accuracy", "macro_f1"):
             delta = comparison["delta"][name]
-            for part in ("point", "lower", "upper"):
-                suffix = "" if part == "point" else f"_{part}"
-                metrics[f"delta_{name}{suffix}__{comparison['baseline']}"] = delta[part]
+            metrics[f"delta_{name}__{comparison['baseline']}"] = delta["point"]
+            for part in ("lower", "upper"):
+                if delta[part] is not None:
+                    metrics[f"delta_{name}_{part}__{comparison['baseline']}"] = delta[part]
     return metrics
+
+
+def _put_interval(metrics: dict[str, float], name: str, interval: dict[str, Any]) -> None:
+    """A point and, when any resample defined it, its bounds: an event metric is a number."""
+    metrics[name] = interval["point"]
+    if interval["lower"] is not None:
+        metrics[f"{name}_lower"] = interval["lower"]
+        metrics[f"{name}_upper"] = interval["upper"]
 
 
 # ------------------------------------------------------------------ writing
