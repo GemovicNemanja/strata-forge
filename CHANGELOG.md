@@ -105,6 +105,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - Results rows gain `latency_ms` (the client's per-request measure, `None` without a response) and
   `error_kind` (`timeout`, `rate_limited`, `model_error`, `invalid_output` or `other`, from the
   exception's type; `None` on success).
+- A chat run writes `receipt.json` (`strata.run.receipt/v1`) into its working directory, where the
+  orchestrator reads it before the workdir is removed: the manifest's SHA-256, the model and
+  dataset pins requested and served, the template digest, the engine version, `id_column`,
+  `row_ids`, row counts and the output repo with the commit the push made. `_push_results` returns
+  that commit id beside the repo (`commit_oid`).
 
 ### Changed
 

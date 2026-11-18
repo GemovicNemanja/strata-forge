@@ -125,8 +125,10 @@ from strata_forge.pipelines._chat_template import (
 from strata_forge.pipelines._common import (
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA,
+    RECEIPT_SCHEMA,
     RunError,
     RunSecrets,
+    commit_oid,
     emit,
     ensure_private_output,
     load_config,
@@ -141,6 +143,7 @@ from strata_forge.pipelines._common import (
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
 from strata_forge.pipelines._guided import (
     OutputValidator,
@@ -1561,7 +1564,7 @@ async def _check_output_repo(spec: RunSpec, hf_token: str | None) -> None:
     await ensure_private_output(HFHubClient(token=hf_token), out_repo)
 
 
-async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
+async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> tuple[str, str | None]:
     """Push the results and the manifest beside them in ONE Hub commit.
 
     One commit, because two can half-land: a results file next to an earlier run's manifest is a
@@ -1574,7 +1577,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     # Re-checked at push time: visibility can change during a long run.
     await ensure_private_output(hub, out_repo)
-    await hub.upload_files(
+    commit = await hub.upload_files(
         {
             _RESULTS_FILENAME: results_path,
             MANIFEST_FILENAME: results_path.parent / MANIFEST_FILENAME,
@@ -1583,7 +1586,44 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
         repo_type="dataset",
         commit_message="batch inference results",
     )
-    return out_repo
+    # The repo and the commit the results landed in: the commit, not the repo's head, is what a
+    # receipt can point at, since a later run may push to the same repo.
+    return out_repo, commit_oid(commit)
+
+
+def _build_receipt(
+    manifest: dict[str, Any],
+    manifest_bytes: bytes,
+    rows: list[dict[str, Any]],
+    output: tuple[str, str | None] | None,
+) -> dict[str, Any]:
+    """The execution receipt of a chat run, from the manifest it wrote (and that manifest's
+    digest), its row counts and where the results were pushed (None when they were not)."""
+    model: dict[str, Any] = manifest.get("model") or {}
+    dataset: dict[str, Any] = manifest.get("dataset") or {}
+    engine: dict[str, Any] = manifest.get("engine") or {}
+    ok = sum(1 for r in rows if r["error"] is None)
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "model": {
+            "id": model.get("id"),
+            "requested_revision": model.get("requested_revision"),
+            "commit": model.get("commit"),
+        },
+        "dataset": {
+            "id": dataset.get("id"),
+            "config": dataset.get("config"),
+            "split": dataset.get("split"),
+            "requested_revision": dataset.get("requested_revision"),
+        },
+        "template_sha256": manifest.get("template_sha256"),
+        "engine_version": engine.get("version"),
+        "id_column": manifest.get("id_column"),
+        "row_ids": manifest.get("row_ids"),
+        "rows": {"total": len(rows), "succeeded": ok, "failed": len(rows) - ok},
+        "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},
+    }
 
 
 async def _execute(
@@ -1752,28 +1792,38 @@ async def _execute(
     #
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
+    manifest = _build_manifest(
+        spec, out, model_commit, serving_facts, chat_template_sha256=chat_template_sha256
+    )
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         # Beside the results, so the push and the on-VM copy carry it alike.
-        await asyncio.to_thread(
-            write_manifest,
-            _build_manifest(
-                spec, out, model_commit, serving_facts, chat_template_sha256=chat_template_sha256
-            ),
-            Path(results_path).parent,
-        )
+        manifest_path = await asyncio.to_thread(write_manifest, manifest, Path(results_path).parent)
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if hf_token and spec.output_repo_id:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
-                destination = await _push_results(spec, results_path, hf_token)
+                pushed = await _push_results(spec, results_path, hf_token)
+            destination = pushed[0]
         except Exception as exc:
-            # Name WHERE the results are. The run still fails — the user asked for them on the Hub
-            # and they are not there — but a failure at the last step of a long run is the moment
-            # it matters most that the output was not lost with it.
-            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(results_path)
     else:
         destination = str(results_path)
+    # In the working directory, which the orchestrator reads before it removes it: the manifest
+    # sits beside the results, outside it. Written whatever the push did, so a failed push still
+    # leaves the evidence of what ran.
+    manifest_bytes = await asyncio.to_thread(Path(manifest_path).read_bytes)
+    await asyncio.to_thread(
+        write_receipt, _build_receipt(manifest, manifest_bytes, out, pushed), Path.cwd()
+    )
+    if push_error is not None:
+        # Name WHERE the results are. The run still fails — the user asked for them on the Hub
+        # and they are not there — but a failure at the last step of a long run is the moment it
+        # matters most that the output was not lost with it.
+        msg = f"results are on the VM at {results_path}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
 
     ok = sum(1 for r in out if r["error"] is None)
     guided_metrics = (
@@ -1934,7 +1984,7 @@ async def _execute_scoring(
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
                 await _require_fresh_output(spec, cast("str", hf_token))
-                destination = await _push_results(spec, results_path, cast("str", hf_token))
+                destination, _ = await _push_results(spec, results_path, cast("str", hf_token))
         except Exception as exc:
             msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
             raise RunError(msg) from exc

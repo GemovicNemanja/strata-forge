@@ -89,6 +89,8 @@ __all__ = [
     "MAX_PHASE_CHARS",
     "MAX_SECRETS_FILE_BYTES",
     "PHASE_TICK_SECONDS",
+    "RECEIPT_FILENAME",
+    "RECEIPT_SCHEMA",
     "REPO_ID_RE",
     "REQUIRE_ENGINE_VERSION_ENV",
     "SAFE_NAME_RE",
@@ -97,6 +99,7 @@ __all__ = [
     "RunError",
     "RunSecrets",
     "check_engine_version",
+    "commit_oid",
     "emit",
     "engine_version_required",
     "ensure_private_output",
@@ -120,6 +123,7 @@ __all__ = [
     "ticking_phase",
     "validate_repo_id",
     "write_manifest",
+    "write_receipt",
 ]
 
 # An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
@@ -894,3 +898,31 @@ async def ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
             "Make it private or choose another output repo"
         )
         raise RunError(msg)
+
+
+# ------------------------------ run receipt ------------------------------
+
+#: The execution receipt a runner leaves in its job WORKDIR (its working directory), where the
+#: orchestrator can read it before it removes that directory. The manifest lives beside the
+#: results, outside the workdir, so the receipt carries the manifest's digest and the facts an
+#: orchestrator compares against what it admitted: no row text and no secret.
+RECEIPT_SCHEMA = "strata.run.receipt/v1"
+RECEIPT_FILENAME = "receipt.json"
+
+_COMMIT_AT_END_RE = re.compile(r"([0-9a-f]{40})/?$")
+
+
+def commit_oid(commit: str | None) -> str | None:
+    """The 40-character commit id a Hub commit answer names (an oid or a ``.../commit/<oid>``
+    URL), or None when it names none."""
+    if not commit:
+        return None
+    match = _COMMIT_AT_END_RE.search(commit.strip())
+    return match.group(1) if match else None
+
+
+def write_receipt(receipt: dict[str, Any], workdir: Path) -> Path:
+    """Write ``receipt`` as ``receipt.json`` in ``workdir`` (the runner's working directory)."""
+    path = workdir / RECEIPT_FILENAME
+    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    return path

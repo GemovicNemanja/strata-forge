@@ -380,6 +380,21 @@ the machine. It records:
 
 It holds no row content and no credential.
 
+The runner also writes ``receipt.json`` (``RECEIPT_FILENAME``, schema
+``strata.run.receipt/v1``) into its **working directory**, the job
+workdir an orchestrator reads before it removes it; the manifest sits
+beside the results, outside that directory. Written once the results and
+manifest are written, whether the push succeeded or failed, it carries the
+SHA-256 of the ``manifest.json`` bytes as written and the facts an
+orchestrator compares with what it admitted: ``model`` (``id``,
+``requested_revision``, ``commit``), ``dataset`` (``id``, ``config``,
+``split``, ``requested_revision``), ``template_sha256``,
+``engine_version``, ``id_column``, ``row_ids`` (``{count, sha256}`` or
+``None``), ``rows`` (``total``, ``succeeded``, ``failed``) and ``output``
+(``repo_id`` and the ``commit_sha`` of the Hub commit the push made, or
+``None`` when nothing was pushed). No row text, no prompt text and no
+credential. A scoring run writes none yet.
+
 A pushed run goes only to a **private** output dataset repo: the runner
 creates it private when it is missing and refuses a public one, first
 before any download or GPU time and again at push time, because a run's

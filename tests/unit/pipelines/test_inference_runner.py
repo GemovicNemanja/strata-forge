@@ -10,6 +10,7 @@ provider are kept, so the provider_clients= seam is validated at runtime.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import sys
 import types
@@ -48,6 +49,15 @@ def _output_repo_is_private(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright
         del spec, hf_token
 
     monkeypatch.setattr(ir, "_check_output_repo", _ok)
+
+
+@pytest.fixture(autouse=True)
+def _in_a_job_workdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyright: ignore[reportUnusedFunction]
+    # A run writes its receipt into its working directory (the job workdir on the VM); a test
+    # that does not choose one must not leave it in the repository.
+    workdir = tmp_path / "job-workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +133,9 @@ def _ok(
 
 def _fail(exc: Exception) -> BatchInferenceResult:
     return BatchInferenceResult(error=exc)
+
+
+_PUSHED_COMMIT = "c" * 40
 
 
 def _spec_json(**overrides: Any) -> str:
@@ -421,10 +434,10 @@ async def test_main_happy_path_pushes_and_never_leaks_token(
 
     pushed: dict[str, Any] = {}
 
-    async def _fake_push(spec: Any, results_path: Any, token: str) -> str:
+    async def _fake_push(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
         del results_path
         pushed["token"] = token  # the runner must pass the EXPLICIT write token
-        return cast("str", spec.output_repo_id)
+        return cast("str", spec.output_repo_id), None
 
     _FakeRunner.scripted = [_ok("A"), _ok("B")]
     monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_rows))
@@ -497,9 +510,9 @@ def _mock_main_deps(
             written.append(list(cast("list[dict[str, Any]]", rows)))
         return tmp_path / "results.parquet"
 
-    async def _push(spec: Any, results_path: Any, token: str) -> str:
+    async def _push(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
         del results_path, token
-        return cast("str", spec.output_repo_id)
+        return cast("str", spec.output_repo_id), None
 
     async def _no_served_len(base_url: str, model_id: str) -> int | None:
         del base_url, model_id
@@ -865,10 +878,10 @@ async def test_main_accepts_the_deprecated_env_token_and_says_so(
     monkeypatch.setenv(LEGACY_TOKEN_ENV, _TOKEN)
     pushed: list[str] = []
 
-    async def _push(spec: Any, results_path: Any, token: str) -> str:
+    async def _push(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
         del results_path
         pushed.append(token)
-        return cast("str", spec.output_repo_id)
+        return cast("str", spec.output_repo_id), None
 
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
     monkeypatch.setattr(ir, "_push_results", _push)
@@ -929,9 +942,9 @@ async def test_main_no_token_keeps_results_on_vm_and_skips_push(
 
     pushed = {"called": False}
 
-    async def _fake_push(*_a: Any, **_kw: Any) -> str:
+    async def _fake_push(*_a: Any, **_kw: Any) -> tuple[str, str | None]:
         pushed["called"] = True
-        return "unreachable"
+        return "unreachable", None
 
     _FakeRunner.scripted = [_ok("A")]
     monkeypatch.setattr(ir, "_load_chat_rows", _chat_rows(_rows))
@@ -1284,9 +1297,9 @@ async def test_results_are_written_outside_the_workdir_even_when_pushing(
         outdirs.append(outdir)
         return outdir / "results.parquet"
 
-    async def _push(spec: Any, results_path: Any, token: str) -> str:
+    async def _push(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
         del results_path, token
-        return cast("str", spec.output_repo_id)
+        return cast("str", spec.output_repo_id), None
 
     _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
     monkeypatch.setattr(ir, "_write_results", _write)
@@ -1311,7 +1324,7 @@ async def test_a_failed_push_says_where_the_results_are(
     )
     _deliver_token(monkeypatch, tmp_path)
 
-    async def _push_boom(spec: Any, results_path: Any, token: str) -> str:
+    async def _push_boom(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
         del spec, results_path, token
         msg = "429 rate limited"
         raise RuntimeError(msg)
@@ -1596,8 +1609,10 @@ class _Hub:
     async def is_private(self, repo_id: str, **_kw: Any) -> bool:
         return repo_id not in _Hub.public
 
-    async def upload_files(self, files: Any, repo_id: str, **kwargs: Any) -> None:
+    async def upload_files(self, files: Any, repo_id: str, **kwargs: Any) -> str:
         _Hub.calls.append(("upload_files", (dict(files), repo_id, kwargs)))
+        # What the Hub answers a commit with: its URL, ending in the commit id.
+        return f"https://huggingface.co/datasets/{repo_id}/commit/{_PUSHED_COMMIT}"
 
     async def upload_file(self, *_a: Any, **_kw: Any) -> None:  # pragma: no cover - must not run
         raise AssertionError("results and manifest go up in one commit, never file by file")
@@ -1617,7 +1632,7 @@ async def test_results_and_manifest_go_up_in_one_commit(tmp_path: Path, hub: typ
     (tmp_path / "manifest.json").write_text("{}")
     spec = ir.RunSpec.model_validate_json(_spec_json())
 
-    assert await ir._push_results(spec, results, _TOKEN) == "org/out"  # pyright: ignore[reportPrivateUsage]
+    assert await ir._push_results(spec, results, _TOKEN) == ("org/out", _PUSHED_COMMIT)  # pyright: ignore[reportPrivateUsage]
     uploads = [c for c in hub.calls if c[0] == "upload_files"]
     assert len(uploads) == 1
     files, repo_id, kwargs = uploads[0][1]
@@ -2192,7 +2207,7 @@ async def test_the_wire_carries_the_effort_and_the_reply_splits_end_to_end(
     assert out[0]["reasoning"] == "Six times seven."
 
 
-# ------------------------------ stable row ids ------------------------------
+# ------------------------- stable row ids and the receipt -------------------------
 
 _SPLIT = [
     {"question": "a", "ticket": "t-1"},
@@ -2342,3 +2357,99 @@ async def test_a_run_names_its_rows_by_the_declared_column(
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["id_column"] == "ticket"
     assert manifest["row_ids"] == ir.row_ids_digest(["t-1", "t-3"])
+
+
+async def test_a_run_leaves_its_execution_receipt_in_the_workdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(
+            id_column="ticket",
+            row_ids=["t-1", "t-3"],
+            model_revision=_SHA,
+            template="SECRET-PROMPT-TEXT {q}",
+        ),
+    )
+    _deliver_token(monkeypatch, tmp_path)
+    written: list[list[dict[str, Any]]] = []
+    _mock_main_deps(
+        monkeypatch,
+        tmp_path,
+        _fake_serving,
+        rows=_SPLIT,
+        scripted=[_ok("A", latency_ms=812.4), _fail(TimeoutError())],
+        written=written,
+    )
+
+    def _select(spec: Any, token: Any) -> tuple[list[dict[str, Any]], list[str]]:
+        del token
+        return ir.select_rows(spec, iter(_SPLIT))
+
+    monkeypatch.setattr(ir, "_load_chat_rows", _select)
+
+    async def _push(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
+        del results_path, token
+        return cast("str", spec.output_repo_id), _PUSHED_COMMIT
+
+    monkeypatch.setattr(ir, "_push_results", _push)
+
+    assert await ir.main() == 0
+    rows = written[0]
+    assert [(r["custom_id"], r["latency_ms"], r["error_kind"]) for r in rows] == [
+        ("t-1", 812, None),
+        ("t-3", None, "timeout"),
+    ]
+    manifest_bytes = (tmp_path / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    assert manifest["id_column"] == "ticket"
+    assert manifest["row_ids"] == ir.row_ids_digest(["t-1", "t-3"])
+    receipt_text = (workdir / "receipt.json").read_text()
+    receipt = json.loads(receipt_text)
+    assert receipt["schema"] == "strata.run.receipt/v1"
+    assert receipt["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
+    assert receipt["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
+    assert receipt["dataset"]["id"] == "org/ds"
+    assert receipt["template_sha256"] == manifest["template_sha256"]
+    assert receipt["engine_version"] == manifest["engine"]["version"]
+    assert receipt["id_column"] == "ticket"
+    assert receipt["row_ids"]["count"] == 2
+    assert receipt["rows"] == {"total": 2, "succeeded": 1, "failed": 1}
+    assert receipt["output"] == {"repo_id": "org/out", "commit_sha": _PUSHED_COMMIT}
+    # No row text, no prompt text and no token in the receipt.
+    for text in ("SECRET-PROMPT-TEXT", "t-1", _TOKEN, '"A"'):
+        assert text not in receipt_text
+
+
+async def test_a_failed_push_still_leaves_the_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _deliver_token(monkeypatch, tmp_path)
+    _mock_main_deps(monkeypatch, tmp_path, _fake_serving)
+
+    async def _push_boom(spec: Any, results_path: Any, token: str) -> tuple[str, str | None]:
+        del spec, results_path, token
+        msg = "the Hub said no"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(ir, "_push_results", _push_boom)
+    assert await ir.main() != 0
+    receipt = json.loads((workdir / "receipt.json").read_text())
+    assert receipt["output"] is None
+    assert receipt["rows"] == {"total": 1, "succeeded": 1, "failed": 0}
+
+
+def test_a_hub_commit_answer_names_its_commit() -> None:
+    from strata_forge.pipelines._common import commit_oid
+
+    assert commit_oid(f"https://huggingface.co/datasets/o/r/commit/{_SHA}") == _SHA
+    assert commit_oid(_SHA) == _SHA
+    assert commit_oid("https://huggingface.co/datasets/o/r") is None
+    assert commit_oid(None) is None
