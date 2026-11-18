@@ -886,7 +886,10 @@ and a card they are pushed in one commit to a private output repo; the ``end`` e
 (at most 64) are ``cases``, ``graded``, ``coverage``, each criterion's candidate
 mean (bounds only at full coverage; ``<criterion>_unresolved: 1`` below it),
 ``delta_<criterion>__<baseline>`` (with ``delta_<criterion>_unresolved__<baseline>: 1``
-below full coverage) and ``agreement_<criterion>``. The machine needs
+below full coverage) and ``agreement_<criterion>``. Because those keys are built from
+criterion ids, an id may not be ``cases``, ``graded`` or ``coverage``, start with ``delta_`` or
+``agreement_``, end with ``_lower``, ``_upper`` or ``_unresolved``, or contain ``__``: any of
+them could overwrite another figure or make a key ambiguous. The machine needs
 ``strata-forge[serving,scoring,storage,hf]`` and a GPU for the judge.
 
 ### Fine-tuning pins, checks and manifest
