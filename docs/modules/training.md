@@ -145,6 +145,17 @@ explicitly, from :mod:`strata_forge.training.loading`
 | ``token`` | the caller's | ``build_trainer(..., token=...)`` / ``train(..., token=...)``. |
 | ``revision`` | the caller's pin, when given | ``build_trainer(..., revision=...)``: a full commit id reads exactly that commit. |
 
+A load that reads a checkpoint into a model class it must fill
+completely also passes ``output_loading_info=True`` and hands the
+report to ``check_loading_info(info, head_prefixes=...)``. It raises
+:class:`LoadRefusedError` (a ``ForgeError``) for a missing weight (the
+library would have initialised it at random), a shape mismatch, a
+reported load error, or an ignored checkpoint tensor under one of
+``head_prefixes``, naming the keys; it returns the other ignored
+checkpoint keys (a pooler, a ``position_ids`` buffer) so the caller can
+record them. The inference runner's ``hf_classify`` engine uses it with
+``classifier.`` / ``score.`` / ``head.``.
+
 ``token`` is a :data:`HubToken`: a token string, ``False`` to send
 no credential at all, or ``None`` (the default) for the library's
 own lookup (an ``HF_TOKEN`` variable or a cached login). It is a

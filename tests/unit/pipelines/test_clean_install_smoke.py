@@ -131,6 +131,7 @@ class TestPlan:
     def test_inference_leg_checks_serving_and_no_training(self) -> None:
         names = self._names("serving,storage,hf")
         assert "inference spec, requests and results" in names
+        assert "hf_classify scores a saved classifier exactly" in names
         assert "vllm accepts the serving command line" in names
         assert not any(name.startswith("finetune ") for name in names)
 

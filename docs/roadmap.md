@@ -535,7 +535,10 @@ manager that launches + health-checks + cleans up the server
 around an OpenAI-compatible `LLMClient` session. The SSH and
 SkyPilot backends lazy-import their SDKs behind the `[compute]`
 extra; `LocalBackend`, batch inference, and the serving task
-builders have no extra requirements. Reference doc:
+builders have no extra requirements. The batch-inference runner also
+scores rows with a sequence-classification head (`engine="hf_classify"`):
+raw logits per label, over-long pairs dropped and counted rather than
+truncated. Reference doc:
 [`docs/modules/compute.md`](modules/compute.md).
 
 `strata_forge.training` ships fine-tuning primitives: `SFTConfig` /

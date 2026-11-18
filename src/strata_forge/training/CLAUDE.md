@@ -120,6 +120,11 @@ the ``train`` CLI) calls :func:`require_bitsandbytes` first.
   When a runner loads the DPO / KTO policy without an adapter it also
   loads the reference model itself, on the same terms; never leave
   that load to TRL, which re-downloads by name with none of them.
+- **A load is complete or refused.** A load that reads a checkpoint
+  into a model class passes ``output_loading_info=True`` and hands the
+  report to ``loading.check_loading_info``, which refuses missing,
+  shape-mismatched or errored weights and ignored head tensors, and
+  returns the other ignored checkpoint keys for the caller to record.
 - **PEFT is opt-in.** Runners accept ``peft_config=None``;
   when set, the adapter config flows into TRL's
   ``peft_config=`` and (for QLoRA) the BitsAndBytes config flows
