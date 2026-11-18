@@ -3,8 +3,8 @@
 This pure leaf is shared by training and evaluation. It performs no I/O, reads no datasets,
 calls no models, and imports neither consumer. Functions are synchronous under
 [ADR 0020](../architecture/adr/0020-pure-metric-functions.md). Execution workers own scheduling
-and persistence. NumPy is required only by nonempty temperature application and the agreement and
-cluster bootstraps, through `[scoring]`.
+and persistence. NumPy is required only by nonempty temperature application, the agreement and
+cluster bootstraps and the latency bootstrap, through `[scoring]`.
 
 ## Public surface
 
@@ -648,3 +648,25 @@ It supports strict JSON round trips. Input errors use fixed Forge `ValidationErr
   non-number;
 - `agreement_reference_invalid` for a blank `source_ref` or `version_ref`, as
   `reference_prevalence` refuses.
+
+## Latency percentiles
+
+`strata_forge.metrics.latency` summarizes timed passes of a latency measurement in milliseconds.
+`percentile(values, q)` is Hyndman-Fan type 7, computed with the same float operations as
+`numpy.percentile`'s default `linear` method, so the two agree exactly; it needs no NumPy.
+`latency_summary(passes)` takes each timed pass's measured latencies and returns a frozen
+`LatencySummary` (`latency-pass-percentiles-v1`): per-pass `n`, p50, p95 and p99; for each of
+those percentiles the median of the per-pass values with their min and max (`across_passes`, the
+protocol's headline form); the pooled percentiles over every iteration; and the pooled mean, min
+and max. A pass with no measurement is kept with `n=0` and no percentiles and is not counted in a
+median. Values must be finite, non-negative numbers; a boolean is refused.
+
+`latency_bootstrap(values, seed=..., resamples=...)` (`latency-iteration-percentile-bootstrap-v1`)
+is an opt-in interval for the pooled percentiles. It resamples measured iterations, pooled across
+passes: one C-order `(resamples, n)` index draw from `Generator(PCG64(seed))` over the measurement
+order, drawn in row blocks that reproduce it; type-7 percentiles per resample; the interval ends
+are the type-7 2.5th and 97.5th percentiles of the resampled values (confidence 0.95). Its
+population is a declared assumption: iterations of one pass are not independent draws. Resamples
+are bounded to 1,000,000 and resamples times iterations to 2,000,000,000. NumPy from `[scoring]`
+is imported only here. The result records the population, RNG, quantile rule, seed, resample
+count, `n` and the NumPy version.

@@ -53,8 +53,15 @@ This is a pure deterministic numerical leaf. Read
   type 7 quantiles at exact rational positions, confidence fixed at 0.95.
   `cluster_mean_bootstrap` / `paired_cluster_mean_bootstrap` apply the same contract to the mean
   of a finite per-row score (a Brier term): cluster sums over cluster sizes per resample. The same versioning
-  rule applies. No other bootstrap, and no inference of independence from cluster-repeated
-  rows, is exported.
+  rule applies. The third is `latency_bootstrap` (`latency-iteration-percentile-bootstrap-v1`), for
+  the latency benchmark (research ruling of 2026-11-18: opt-in, off by default, diagnostic only,
+  never the headline and never a pass/fail input): it reuses the RNG, stream order, type 7
+  quantiles and 0.95 confidence above and resamples measured latency iterations pooled across
+  passes, and records its population in its result.
+  No other bootstrap, and no inference of independence from cluster-repeated rows, is exported.
+- `latency.py` point statistics (`latency-pass-percentiles-v1`) are the latency protocol's: type 7
+  percentiles equal to `numpy.percentile`'s default without NumPy, per pass, then their median
+  across passes with min and max. Keep the float operations equal to NumPy's `linear` method.
 - Update this file, module README, reference docs, and tests with any public API change.
 - The two-human statistic (`nominal-two-human-raters-v1`) supports only two complete
   caller-declared human raters with distinct identities, identical unique ordered item IDs and an
