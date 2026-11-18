@@ -51,7 +51,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `Hyperparams.n` (1-16) draws `n` samples per chat row, one request each; a seeded run seeds sample
   `k` with `seed + k`, the seed vLLM gives the `k`-th of `n` parallel samples. A run that declares
   `n` keys its rows by `(custom_id, sample_index)` and records each sample's `seed`; the manifest
-  records `sampling` and the distinct prompt count. `n > 1` at temperature 0 is refused.
+  records `sampling` and the distinct prompt count. `n > 1` below temperature 1e-5 (vLLM's greedy threshold) is refused, and a chunk holds
+  `progress_chunk` requests, so cancel checks and progress keep their spacing at any `n`.
 - `Hyperparams.chat_template_kwargs` also applies to chat runs, fixed for the run and sent as vLLM's
   `chat_template_kwargs` (`enable_thinking` passes only this way, as a boolean). A kwarg the
   snapshot's chat template never reads, a model without a template and a gpt-oss model (rendered

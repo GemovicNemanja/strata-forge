@@ -275,6 +275,8 @@ _ENGINE_FIELDS: dict[str, frozenset[str]] = {
 _SCORING_FIELDS = (
     _CLASSIFY_FIELDS | _LABEL_LOGITS_FIELDS | _SCORING_COMMON_FIELDS
 ) - _CHAT_SHARED_FIELDS
+# vLLM samples greedily below this temperature (`vllm/sampling_params.py`, `_SAMPLING_EPS`).
+_GREEDY_TEMPERATURE = 1e-5
 #: The most samples a chat run draws per row.
 MAX_SAMPLES = 16
 _INT64_MAX = 2**63 - 1
@@ -438,9 +440,10 @@ class Hyperparams(BaseModel):
                 f"{placeholders} are rendered per row only by engine 'hf_label_logits'"
             )
             raise ValueError(msg)
-        if self.n > 1 and self.temperature == 0:
+        if self.n > 1 and self.temperature is not None and self.temperature < _GREEDY_TEMPERATURE:
             msg = (
-                "n > 1 at temperature 0 draws the same greedy reply n times; raise the temperature"
+                f"n > 1 below temperature {_GREEDY_TEMPERATURE} is greedy decoding: the same "
+                "reply n times; raise the temperature"
             )
             raise ValueError(msg)
         if self.seed is not None and self.seed + self.n - 1 > _INT64_MAX:
@@ -691,7 +694,10 @@ async def _run_batches(
     latencies_ms: deque[float] = deque(maxlen=_LATENCY_WINDOW)
     output_tokens = 0
     invalid = retried = 0
-    for start in range(0, total, hp.progress_chunk):
+    # A chunk is `progress_chunk` REQUESTS: with n samples per row it holds 1/n as many rows, so
+    # the liveness check and the progress event between chunks keep their spacing.
+    rows_per_chunk = max(1, hp.progress_chunk // hp.n)
+    for start in range(0, total, rows_per_chunk):
         # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
         # the granularity the run already reports at. It bounds the waste at one chunk rather than
         # the whole remaining batch.
@@ -701,8 +707,8 @@ async def _run_batches(
                 "(its log is beside the results on the VM)"
             )
             raise RunError(msg)
-        chunk = prompts[start : start + hp.progress_chunk]
-        ids = custom_ids[start : start + hp.progress_chunk]
+        chunk = prompts[start : start + rows_per_chunk]
+        ids = custom_ids[start : start + rows_per_chunk]
         # One request per row per sample. Each sample's requests run as one batch, so the model
         # server sees a full batch and its prefix cache serves the repeated prompts.
         per_sample: list[tuple[list[BatchInferenceResult], list[dict[str, Any]] | None]] = []
@@ -1190,10 +1196,18 @@ def _effective_hyperparams(hp: Hyperparams, config: dict[str, Any]) -> Hyperpara
 def _snapshot_chat_template(snapshot: Path) -> str | None:
     """The chat template the model server renders with, read from the downloaded snapshot.
 
-    ``chat_template.jinja`` when the repo ships one (transformers saves the template there and
-    prefers it), else ``tokenizer_config.json``'s ``chat_template``: a string, or a list of named
-    templates of which ``default`` is the one used. ``None`` when the snapshot has none.
+    In vLLM's own order of preference (``vllm/renderers/hf.py``, ``resolve_chat_template``): the
+    processor's template first, which a repo ships as ``chat_template.json``; then the
+    tokenizer's, which is ``chat_template.jinja`` when the repo ships one (transformers saves the
+    template there and prefers it), else ``tokenizer_config.json``'s ``chat_template``: a string,
+    or a list of named templates of which ``default`` is the one used. ``None`` when the
+    snapshot has none.
     """
+    processor = _json_file(snapshot / "chat_template.json")
+    if processor is not None:
+        template: object = processor.get("chat_template")
+        if isinstance(template, str):
+            return template
     jinja = snapshot / "chat_template.jinja"
     if jinja.is_file():
         return jinja.read_text()
@@ -1213,6 +1227,15 @@ def _snapshot_chat_template(snapshot: Path) -> str | None:
                 if named.get("name") == "default" and isinstance(named.get("template"), str):
                     return cast("str", named["template"])
     return None
+
+
+def _json_file(path: Path) -> dict[str, Any] | None:
+    """A JSON object file's content, or ``None`` when it is missing, unreadable or not an object."""
+    try:
+        data: Any = json.loads(path.read_text())  # pyright: ignore[reportAny] - untyped JSON
+    except OSError, ValueError:
+        return None
+    return cast("dict[str, Any]", data) if isinstance(data, dict) else None
 
 
 def _check_chat_template_kwargs(snapshot: Path, hp: Hyperparams) -> str | None:

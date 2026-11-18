@@ -59,10 +59,13 @@ def test_n_is_bounded() -> None:
         _hp(n=True)
 
 
-def test_n_samples_at_temperature_zero_are_refused() -> None:
-    with pytest.raises(ValueError, match="same greedy reply"):
-        _hp(n=4, temperature=0)
-    assert _hp(n=1, temperature=0).n == 1
+@pytest.mark.parametrize("temperature", [0, 1e-6, 9.9e-6])
+def test_n_samples_below_the_greedy_threshold_are_refused(temperature: float) -> None:
+    # vLLM decodes greedily below 1e-5 (`_SAMPLING_EPS`), so these would be one reply n times.
+    with pytest.raises(ValueError, match="greedy decoding"):
+        _hp(n=4, temperature=temperature)
+    assert _hp(n=1, temperature=temperature).n == 1
+    assert _hp(n=4, temperature=1e-5).n == 4
 
 
 def test_every_sample_seed_fits_int64() -> None:
@@ -187,6 +190,19 @@ async def test_n_samples_are_keyed_by_row_and_sample(monkeypatch: pytest.MonkeyP
     assert [c["n"] for c in _RecordingRunner.calls] == [2, 2, 2]
 
 
+async def test_a_chunk_holds_progress_chunk_requests_not_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With n samples per row a chunk holds 1/n as many rows, so the liveness check and the
+    # progress event between chunks stay `progress_chunk` requests apart.
+    _RecordingRunner.calls = []
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _RecordingRunner)
+    out = await _batch(_spec(n=4, seed=1, temperature=1.0, progress_chunk=8), list("abcde"))
+    assert len(out) == 20
+    # 5 rows at 2 rows per chunk: chunks of 2, 2, 1 rows, each sent once per sample.
+    assert [c["n"] for c in _RecordingRunner.calls] == [2] * 4 + [2] * 4 + [1] * 4
+
+
 async def test_an_unseeded_sample_records_no_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ir, "BatchInferenceRunner", _RecordingRunner)
     out = await _batch(_spec(n=2, temperature=1.0), ["a"])
@@ -257,6 +273,14 @@ def test_a_plain_manifest_records_neither() -> None:
 
 
 # ------------------------------ the snapshot's template ------------------------------
+
+
+def test_the_processor_template_wins_as_it_does_in_vllm(tmp_path: Path) -> None:
+    (tmp_path / "chat_template.jinja").write_text("tokenizer's")
+    (tmp_path / "chat_template.json").write_text(json.dumps({"chat_template": "processor's"}))
+    assert ir._snapshot_chat_template(tmp_path) == "processor's"  # pyright: ignore[reportPrivateUsage]
+    (tmp_path / "chat_template.json").write_text("not json")
+    assert ir._snapshot_chat_template(tmp_path) == "tokenizer's"  # pyright: ignore[reportPrivateUsage]
 
 
 def test_the_template_file_wins_over_the_tokenizer_config(tmp_path: Path) -> None:
