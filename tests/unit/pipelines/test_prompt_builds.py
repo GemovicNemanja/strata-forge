@@ -217,4 +217,4 @@ def test_a_system_build_needs_the_chat_engine(monkeypatch: pytest.MonkeyPatch) -
 def test_the_manifest_records_the_system_build(monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = ir._build_manifest(_load(monkeypatch, _with_system()), [], None)  # pyright: ignore[reportPrivateUsage]
     assert manifest["system_prompt"]["build_hash"] == _SYSTEM.hash
-    assert set(manifest["system_prompt"]["bindings"]["persona"]) == {"value_sha256"}
+    assert manifest["system_prompt"]["bindings"]["persona"] == {"fixed": True}
