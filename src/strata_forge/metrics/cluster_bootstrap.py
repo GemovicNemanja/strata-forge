@@ -47,7 +47,10 @@ __all__ = [
     "paired_cluster_bootstrap",
 ]
 
-type _Values = tuple[list[float], list[float], list[float]]
+# Per system: accuracy, macro-F1, invalid rate and present-class macro-F1 per resample.
+type _Values = tuple[list[float], list[float], list[float], list[float]]
+# Per system: the point values (macro-F1 None when a declared class is absent) and absent classes.
+type _Point = tuple[float, float | None, float, float | None, tuple[str, ...]]
 
 
 class _Frozen(BaseModel):
@@ -83,14 +86,28 @@ class MetricInterval(_Frozen):
     are null with a reason. A one-sided 97.5% bound is the matching end of this interval.
     """
 
-    point: float = Field(allow_inf_nan=False)
+    point: float | None = Field(allow_inf_nan=False)
     lower: float | None = Field(allow_inf_nan=False)
     upper: float | None = Field(allow_inf_nan=False)
     undefined_resamples: int = Field(default=0, ge=0)
-    reason: Literal["all_resamples_undefined"] | None = None
+    reason: Literal["all_resamples_undefined", "absent_classes"] | None = None
+    # With reason "absent_classes": the declared classes with neither gold rows nor predictions in
+    # the whole population, so the metric has no value at all (never one averaged with a zero).
+    absent_classes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _ordered(self) -> MetricInterval:
+        if self.point is None:
+            if (
+                self.lower is not None
+                or self.upper is not None
+                or self.reason != "absent_classes"
+                or not self.absent_classes
+            ):
+                raise ValueError("cluster_bootstrap_invalid")
+            return self
+        if self.absent_classes or self.reason == "absent_classes":
+            raise ValueError("cluster_bootstrap_invalid")
         if self.lower is None or self.upper is None:
             if self.lower is not None or self.upper is not None or self.reason is None:
                 raise ValueError("cluster_bootstrap_invalid")
@@ -100,11 +117,18 @@ class MetricInterval(_Frozen):
 
 
 class SystemIntervals(_Frozen):
-    """Accuracy, macro-F1 and invalid rate for one system, or a candidate-minus-baseline delta."""
+    """Accuracy, macro-F1 and invalid rate for one system, or a candidate-minus-baseline delta.
+
+    ``macro_f1_present_classes`` is a DIAGNOSTIC: macro-F1 averaged over ``present_classes`` only
+    (the declared classes with gold rows or predictions from any compared system in the whole
+    population), under the same undefined-resample rule. It is never a gate read.
+    """
 
     accuracy: MetricInterval
     macro_f1: MetricInterval
     invalid_rate: MetricInterval
+    macro_f1_present_classes: MetricInterval
+    present_classes: tuple[str, ...]
 
 
 class ClusterBootstrap(_Frozen):
@@ -196,8 +220,8 @@ def _weights(clusters: int, *, seed: int, resamples: int) -> Iterator[NDArray[np
 
 
 def _metrics(
-    counts: NDArray[np.float64], size: int
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    counts: NDArray[np.float64], size: int, present: NDArray[np.bool_]
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Accuracy, macro-F1 and invalid rate per resample, from ``(R, K*K + K)`` cell counts.
 
     The definitions of ``classification_report`` (invalid outputs stay in gold support), except
@@ -212,23 +236,35 @@ def _metrics(
     tp = np.diagonal(matrix, axis1=1, axis2=2)
     denominator = matrix.sum(axis=2) + invalid + matrix.sum(axis=1)
     f1 = np.divide(2 * tp, denominator, out=np.zeros_like(tp), where=denominator > 0)
-    macro = np.where((denominator > 0).all(axis=1), f1.sum(axis=1) / size, np.nan)
-    return tp.sum(axis=1) / n, macro, invalid.sum(axis=1) / n
+    defined = denominator > 0
+    macro = np.where(defined.all(axis=1), f1.sum(axis=1) / size, np.nan)
+    subset = f1[:, present]
+    macro_present = np.where(
+        defined[:, present].all(axis=1), subset.sum(axis=1) / max(int(present.sum()), 1), np.nan
+    )
+    return tp.sum(axis=1) / n, macro, invalid.sum(axis=1) / n, macro_present
 
 
 def _resampled(
-    per_system: list[list[list[int]]], size: int, *, seed: int, resamples: int
+    per_system: list[list[list[int]]],
+    size: int,
+    present: list[bool],
+    *,
+    seed: int,
+    resamples: int,
 ) -> list[_Values]:
-    """Per system, the resampled accuracy, macro-F1 and invalid-rate values, unsorted."""
+    """Per system, the resampled accuracy, macro-F1, invalid-rate and present-class macro-F1
+    values, unsorted."""
     import numpy as np
 
+    mask = np.asarray(present, dtype=np.bool_)
     tables = [np.asarray(cells, dtype=np.float64) for cells in per_system]
-    out: list[_Values] = [([], [], []) for _ in tables]
+    out: list[_Values] = [([], [], [], []) for _ in tables]
     for weights in _weights(len(per_system[0]), seed=seed, resamples=resamples):
         for table, values in zip(tables, out, strict=True):
             # Integer counts summed in float64 stay exact below 2**53 in any summation order.
             counts = np.rint(weights @ table)
-            for target, column in zip(values, _metrics(counts, size), strict=True):
+            for target, column in zip(values, _metrics(counts, size, mask), strict=True):
                 target.extend(float(value) for value in column.tolist())
     return out
 
@@ -245,7 +281,19 @@ def _percentile(values: Sequence[float], probability: Fraction) -> float:
     return min(max(low + weight * (high - low), low), high)
 
 
-def _interval(point: float, values: list[float]) -> MetricInterval:
+def _interval(
+    point: float | None, values: list[float], absent: tuple[str, ...] = ()
+) -> MetricInterval:
+    if point is None:
+        # A class absent from the whole population is absent from every resample of it.
+        return MetricInterval(
+            point=None,
+            lower=None,
+            upper=None,
+            undefined_resamples=len(values),
+            reason="absent_classes",
+            absent_classes=absent,
+        )
     ordered = sorted(value for value in values if not math.isnan(value))
     undefined = len(values) - len(ordered)
     if not ordered:
@@ -265,19 +313,36 @@ def _interval(point: float, values: list[float]) -> MetricInterval:
     )
 
 
-def _points(report: ClassificationReport) -> tuple[float, float, float]:
-    values = (report.accuracy.value, report.macro_f1.value, report.invalid_rate.value)
+def _points(report: ClassificationReport, present: tuple[str, ...]) -> _Point:
+    values = (report.accuracy.value, report.invalid_rate.value)
     if any(value is None for value in values):  # unreachable: the population is nonempty
         raise ValidationError("cluster_bootstrap_empty")
-    return (float(values[0] or 0), float(values[1] or 0), float(values[2] or 0))
-
-
-def _system(point: tuple[float, float, float], values: _Values) -> SystemIntervals:
-    return SystemIntervals(
-        accuracy=_interval(point[0], values[0]),
-        macro_f1=_interval(point[1], values[1]),
-        invalid_rate=_interval(point[2], values[2]),
+    scores = {score.label: score for score in report.per_class}
+    absent = tuple(
+        score.label for score in report.per_class if score.support == 0 and score.predicted == 0
     )
+    macro = None if absent else float(report.macro_f1.value or 0)
+    unseen = [label for label in present if scores[label].support + scores[label].predicted == 0]
+    macro_present = (
+        None if unseen else math.fsum(scores[label].f1 for label in present) / len(present)
+    )
+    return (float(values[0] or 0), macro, float(values[1] or 0), macro_present, absent)
+
+
+def _system(point: _Point, values: _Values, present: tuple[str, ...]) -> SystemIntervals:
+    accuracy, macro, invalid, macro_present, absent = point
+    unseen = tuple(label for label in present if label in absent)
+    return SystemIntervals(
+        accuracy=_interval(accuracy, values[0]),
+        macro_f1=_interval(macro, values[1], absent),
+        invalid_rate=_interval(invalid, values[2]),
+        macro_f1_present_classes=_interval(macro_present, values[3], unseen),
+        present_classes=present,
+    )
+
+
+def _difference(a: float | None, b: float | None) -> float | None:
+    return None if a is None or b is None else a - b
 
 
 def _run(
@@ -289,7 +354,7 @@ def _run(
     index_map: Mapping[int, str] | None,
     seed: object,
     resamples: object,
-) -> tuple[ClusterBootstrapSettings, list[tuple[float, float, float]], list[_Values]]:
+) -> tuple[ClusterBootstrapSettings, list[_Point], list[_Values], tuple[str, ...]]:
     chosen_seed = _setting(
         seed, MAX_CLUSTER_BOOTSTRAP_SEED, "cluster_bootstrap_seed_invalid", low=0
     )
@@ -312,7 +377,20 @@ def _run(
         _cluster_cells(actual, system, codes, cluster_count, labels=names, index_map=index_map)
         for system in rows
     ]
-    values = _resampled(per_system, len(names), seed=chosen_seed, resamples=count)
+    seen = {
+        score.label
+        for report in reports
+        for score in report.per_class
+        if score.support > 0 or score.predicted > 0
+    }
+    present = tuple(label for label in names if label in seen)
+    values = _resampled(
+        per_system,
+        len(names),
+        [label in seen for label in names],
+        seed=chosen_seed,
+        resamples=count,
+    )
     settings = ClusterBootstrapSettings(
         seed=chosen_seed,
         resamples=count,
@@ -320,7 +398,7 @@ def _run(
         clusters=cluster_count,
         numpy_version=numpy_version,
     )
-    return settings, [_points(report) for report in reports], values
+    return settings, [_points(report, present) for report in reports], values, present
 
 
 def cluster_bootstrap(
@@ -338,7 +416,7 @@ def cluster_bootstrap(
     ``clusters`` gives each row's nonempty string cluster key (for example a base problem id).
     Invalid or missing predictions follow ``classification_report``: wrong, and in gold support.
     """
-    settings, points, values = _run(
+    settings, points, values, present = _run(
         gold,
         [predictions],
         labels=labels,
@@ -347,7 +425,7 @@ def cluster_bootstrap(
         seed=seed,
         resamples=resamples,
     )
-    return ClusterBootstrap(settings=settings, intervals=_system(points[0], values[0]))
+    return ClusterBootstrap(settings=settings, intervals=_system(points[0], values[0], present))
 
 
 def paired_cluster_bootstrap(
@@ -366,7 +444,7 @@ def paired_cluster_bootstrap(
     ``delta`` is candidate minus baseline, differenced per resample before the quantiles are
     taken, so its interval reflects the pairing rather than two independent intervals.
     """
-    settings, points, values = _run(
+    settings, points, values, present = _run(
         gold,
         [baseline, candidate],
         labels=labels,
@@ -376,19 +454,23 @@ def paired_cluster_bootstrap(
         resamples=resamples,
     )
     (base_point, cand_point), (base_values, cand_values) = points, values
-    delta_point = (
+    # A delta has no value where either side has none; its absent classes are both sides'.
+    absent = tuple(dict.fromkeys(base_point[4] + cand_point[4]))
+    delta_point: _Point = (
         cand_point[0] - base_point[0],
-        cand_point[1] - base_point[1],
+        _difference(cand_point[1], base_point[1]),
         cand_point[2] - base_point[2],
+        _difference(cand_point[3], base_point[3]),
+        absent,
     )
-    accuracy, macro, invalid = (
+    accuracy, macro, invalid, macro_present = (
         [c - b for b, c in zip(bv, cv, strict=True)]
         for bv, cv in zip(base_values, cand_values, strict=True)
     )
-    delta_values: _Values = (accuracy, macro, invalid)
+    delta_values: _Values = (accuracy, macro, invalid, macro_present)
     return PairedClusterBootstrap(
         settings=settings,
-        baseline=_system(base_point, base_values),
-        candidate=_system(cand_point, cand_values),
-        delta=_system(delta_point, delta_values),
+        baseline=_system(base_point, base_values, present),
+        candidate=_system(cand_point, cand_values, present),
+        delta=_system(delta_point, delta_values, present),
     )

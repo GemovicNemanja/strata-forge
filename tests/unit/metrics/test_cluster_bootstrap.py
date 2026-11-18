@@ -196,9 +196,10 @@ def test_paired_delta_is_narrower_than_marginal_differences() -> None:
     alone = cluster_bootstrap(gold, base, labels=LABELS, clusters=keys, seed=SEED, resamples=2000)
     assert paired.baseline == alone.intervals
     delta = paired.delta.accuracy
-    assert delta.point == pytest.approx(
-        paired.candidate.accuracy.point - paired.baseline.accuracy.point
-    )
+    cand_point, base_point = paired.candidate.accuracy.point, paired.baseline.accuracy.point
+    assert cand_point is not None
+    assert base_point is not None
+    assert delta.point == pytest.approx(cand_point - base_point)
     cand_lo, cand_hi = _bounds(paired.candidate.accuracy)
     base_lo, base_hi = _bounds(paired.baseline.accuracy)
     delta_lo, delta_hi = _bounds(delta)
@@ -223,11 +224,34 @@ def test_a_class_absent_from_both_sides_leaves_macro_f1_undefined() -> None:
     result = cluster_bootstrap(
         gold, pred, labels=LABELS, clusters=["a", "a", "b", "b"], seed=1, resamples=50
     )
-    # U is declared but absent everywhere: no resample has a macro-F1, and none is scored zero.
+    # U is declared but absent from the whole population: macro-F1 has no value at all (never one
+    # averaged with a zero), and no resample has one either.
     macro = result.intervals.macro_f1
-    assert (macro.lower, macro.upper, macro.reason) == (None, None, "all_resamples_undefined")
+    assert (macro.point, macro.lower, macro.upper) == (None, None, None)
+    assert (macro.reason, macro.absent_classes) == ("absent_classes", ("U",))
     assert macro.undefined_resamples == 50
     assert result.intervals.accuracy.undefined_resamples == 0
+    # The diagnostic averages the classes present (E and C), under the same undefined rule.
+    present = result.intervals.macro_f1_present_classes
+    assert result.intervals.present_classes == ("E", "C")
+    assert present.point == 1.0
+    assert present.reason is None
+
+
+def test_a_delta_is_undefined_where_either_side_lacks_a_class() -> None:
+    gold = ["E", "E", "C", "C"]
+    base = ["E", "E", "C", "C"]
+    cand = ["E", "U", "C", "C"]
+    paired = paired_cluster_bootstrap(
+        gold, base, cand, labels=LABELS, clusters=["a", "b", "c", "d"], seed=1, resamples=50
+    )
+    assert paired.baseline.macro_f1.absent_classes == ("U",)
+    assert paired.candidate.macro_f1.point is not None
+    delta = paired.delta.macro_f1
+    assert (delta.point, delta.reason, delta.absent_classes) == (None, "absent_classes", ("U",))
+    # Present classes are those seen in gold or ANY compared system: E, C and U here.
+    assert paired.delta.present_classes == ("E", "C", "U")
+    assert paired.delta.macro_f1_present_classes.point is None
 
 
 def test_undefined_resamples_are_counted_not_zeroed() -> None:

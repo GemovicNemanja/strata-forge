@@ -640,6 +640,26 @@ example ``tokenizer:<repo>@<commit>``): every row needs one, a tier that mixes
 methods refuses, and each tier's method is echoed in ``population.token_methods``.
 A declared ``premise_count_column`` must equal the platform's count of the
 ``premises_column`` list on every row, else the run refuses naming the row.
+Premises are ``{pid, text}`` objects; a plain-string premise refuses.
+
+``label_space_column`` with ``label_spaces`` (``{<value>: [labels]}``, each two or
+more of the declared ``labels``) gives each row its declared label space (a 2-way
+tier declares its own two labels; a row with no entry declares ``labels``). A
+population declares the union of its rows' spaces (``labels`` on each slice), so
+a 2-way slice is never missing the 3-way classes; a gold label outside its row's
+space refuses, and a prediction outside the population's labels is invalid.
+
+When a declared class has neither gold rows nor predictions in a population,
+that system's macro-F1 has NO value: ``point``, ``lower`` and ``upper`` are null
+with ``reason: "absent_classes"`` and the classes listed (never a mean with a
+zero in it), and a delta is null where either side is. The ``end`` event then
+carries ``macro_f1_undefined: 1`` (and ``delta_macro_f1_undefined__<baseline>``)
+in place of the value. Beside it, ``macro_f1_present_classes`` averages the
+classes present (gold rows or predictions from any compared system, listed in
+``classes``) under the same undefined-resample rule; it is a diagnostic with
+``gate_read: false`` and decides nothing. Each slice also reports its
+``tier_refused`` rows.
+
 ``population.fallback_keyed`` and each slice's ``fallback_keyed`` count the rows
 clustered on the premise-hash fallback (0 on a suite tier, whose rows all carry a
 cluster value).

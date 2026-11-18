@@ -269,6 +269,12 @@ It needs NumPy from `[scoring]`, imported only when a function runs.
   `reason="all_resamples_undefined"`. A paired delta is undefined where either side is. Accuracy
   and invalid rate are always defined (every resample has rows). The point value keeps
   `classification_report`'s convention; the evaluation runner lists a slice's absent classes.
+- **Absent classes.** When a declared class has neither gold rows nor predictions in the whole
+  population, macro-F1 has no point value either: `point`, `lower` and `upper` are null with
+  `reason="absent_classes"` and `absent_classes` listed, and a paired delta is null where either
+  side is. `macro_f1_present_classes` is the diagnostic over `present_classes` (the classes with
+  gold rows or predictions from any system in the run), under the same undefined-resample rule; it
+  is never a gate read.
 - **One-sided bounds.** A one-sided 97.5% bound is the matching end of the two-sided 95% interval.
 - **Pairing.** `paired_cluster_bootstrap` scores both systems on every resample and differences
   them per resample (candidate minus baseline) before taking quantiles, so the delta interval

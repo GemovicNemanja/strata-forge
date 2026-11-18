@@ -186,11 +186,11 @@ async def test_report_matches_the_metrics_library(
     )
     stable = {"undefined_share": 0.0, "unstable": False}
     assert overall["systems"]["candidate"]["macro_f1"] == {
-        **expected.intervals.macro_f1.model_dump(),
+        **expected.intervals.macro_f1.model_dump(mode="json"),
         **stable,
     }
     assert overall["systems"]["candidate"]["accuracy"] == {
-        **expected.intervals.accuracy.model_dump(),
+        **expected.intervals.accuracy.model_dump(mode="json"),
         **stable,
     }
     paired = paired_cluster_bootstrap(
@@ -206,7 +206,7 @@ async def test_report_matches_the_metrics_library(
     assert comparison["baseline"] == "baseline"
     delta = comparison["delta"]["macro_f1"]
     assert delta == {
-        **paired.delta.macro_f1.model_dump(),
+        **paired.delta.macro_f1.model_dump(mode="json"),
         **stable,
         "excludes_zero": bool(delta["lower"] > 0 or delta["upper"] < 0),
     }
@@ -473,7 +473,9 @@ async def test_public_output_repo_refuses_before_reading(
 async def test_a_tier_rule_refuses_rows_for_every_system(
     monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
 ) -> None:
-    env["gold"]["premises"] = [["p"] * (25 if i < 5 else 3) for i in range(60)]
+    env["gold"]["premises"] = [
+        [{"pid": f"p{k}", "text": "p"} for k in range(25 if i < 5 else 3)] for i in range(60)
+    ]
     env["gold"]["tokens"] = [3000 if i == 10 else 100 for i in range(60)]
     rule = {
         "tier_column": "tier",
@@ -506,7 +508,9 @@ async def test_rows_without_a_cluster_cluster_on_their_premises(
     report = json.loads((_outdir(env) / "metrics.json").read_text())
     assert report["slices"][0]["clusters"] == 15
     items = pq.read_table(str(_outdir(env) / "items.parquet")).to_pylist()
-    assert items[0]["cluster"] == er.premise_cluster_key(["rule", "fact 0"])
+    assert items[0]["cluster"] == er.premise_cluster_key(
+        [{"pid": "a", "text": "rule"}, {"pid": "b", "text": "fact 0"}]
+    )
 
 
 def test_the_premise_key_normalises_order_spacing_and_form() -> None:
@@ -514,11 +518,18 @@ def test_the_premise_key_normalises_order_spacing_and_form() -> None:
     import unicodedata
 
     decomposed = unicodedata.normalize("NFD", "café")
-    key = er.premise_cluster_key([{"pid": "p2", "text": f"  {decomposed}\n"}, "a  b"])
-    assert key == er.premise_cluster_key(["a b", "café"])
+
+    def p(*texts: str) -> list[dict[str, str]]:
+        return [{"pid": f"p{i}", "text": t} for i, t in enumerate(texts)]
+
+    key = er.premise_cluster_key(p(f"  {decomposed}\n", "a  b"))
+    assert key == er.premise_cluster_key(p("a b", "café"))
     expected = hashlib.sha256('["a b","café"]'.encode()).hexdigest()
     assert key == f"premises:sha256:{expected}"
-    assert er.premise_cluster_key(["A"]) != er.premise_cluster_key(["a"])
+    assert er.premise_cluster_key(p("A")) != er.premise_cluster_key(p("a"))
+    # Premises are {pid, text} objects; a plain string refuses.
+    with pytest.raises(er.RunError, match="pid, text"):
+        er.premise_cluster_key(["a b"])
 
 
 async def test_comparisons_report_the_paired_discordance_rate(
@@ -604,18 +615,32 @@ async def test_an_identifier_column_holding_text_refuses(
 async def test_an_undefined_macro_f1_leaves_its_bounds_out_of_the_end_event(
     monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
 ) -> None:
-    # "neutral" is declared but appears in no gold row and no prediction: macro-F1 has no
-    # defined resample, so the end event carries its point and count but no bounds.
+    # "neutral" is declared but appears in no gold row and no prediction: macro-F1 has no value,
+    # so the end event says it is undefined and carries no point or bounds for it.
     for table, column in ((env["gold"], "label"), (env["cand"], "pred"), (env["base"], "pred")):
         table[column] = ["entailment" if v == "neutral" else v for v in table[column]]
     code, events = await _run(monkeypatch, env, _spec())
     assert code == 0, events[-1]
     metrics = events[-1]["metrics"]
-    assert "macro_f1" in metrics
+    assert "macro_f1" not in metrics
     assert "macro_f1_lower" not in metrics
+    assert metrics["macro_f1_undefined"] == 1.0
+    assert metrics["delta_macro_f1_undefined__baseline"] == 1.0
     assert metrics["macro_f1_undefined_resamples"] == 200
     report = json.loads((_outdir(env) / "metrics.json").read_text())
-    assert report["slices"][0]["absent_classes"] == ["neutral"]
+    overall = report["slices"][0]
+    assert overall["absent_classes"] == ["neutral"]
+    macro = overall["systems"]["candidate"]["macro_f1"]
+    assert (macro["point"], macro["reason"], macro["absent_classes"]) == (
+        None,
+        "absent_classes",
+        ["neutral"],
+    )
+    assert overall["comparisons"][0]["delta"]["macro_f1"]["excludes_zero"] == "unresolved"
+    present = overall["systems"]["candidate"]["macro_f1_present_classes"]
+    assert present["classes"] == ["entailment", "contradiction"]
+    assert present["gate_read"] is False
+    assert present["point"] is not None
 
 
 async def test_rows_clustered_on_the_fallback_are_counted_per_slice(
@@ -624,7 +649,9 @@ async def test_rows_clustered_on_the_fallback_are_counted_per_slice(
     env["gold"]["base_problem_id"] = [
         None if i < 7 else v for i, v in enumerate(env["gold"]["base_problem_id"])
     ]
-    env["gold"]["premises"] = [["fact", f"rule {i}"] for i in range(60)]
+    env["gold"]["premises"] = [
+        [{"pid": "a", "text": "fact"}, {"pid": "b", "text": f"rule {i}"}] for i in range(60)
+    ]
     code, events = await _run(
         monkeypatch, env, _spec(evaluation=_settings(premises_column="premises"))
     )
@@ -662,7 +689,7 @@ async def test_the_token_method_is_one_per_tier_and_echoed(
 async def test_a_declared_premise_count_must_match_the_platform_s(
     monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
 ) -> None:
-    env["gold"]["premises"] = [["a", "b"]] * 60
+    env["gold"]["premises"] = [[{"pid": "1", "text": "a"}, {"pid": "2", "text": "b"}]] * 60
     env["gold"]["n_premises"] = [2] * 60
     settings = _settings(premises_column="premises", premise_count_column="n_premises")
     code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
@@ -698,3 +725,50 @@ async def test_an_unstable_interval_never_decides_a_gate(
     code, _ = await _run(monkeypatch, env, _spec(evaluation=_settings(unstable_threshold=1.0)))
     report = json.loads((_outdir(env) / "metrics.json").read_text())
     assert report["slices"][0]["systems"]["candidate"]["macro_f1"]["unstable"] is False
+
+
+async def test_a_two_way_tier_declares_its_own_label_space(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    # The "hard" tier is 2-way over entailment / contradiction: its slice declares only those,
+    # so it is never "missing" neutral, while the overall population declares all three.
+    hard = [t == "hard" for t in env["gold"]["tier"]]
+    for table, column in ((env["gold"], "label"), (env["cand"], "pred"), (env["base"], "pred")):
+        ids = env["gold"]["item_id"] if table is env["gold"] else table["item_id"]
+        by_id = dict(zip(env["gold"]["item_id"], hard, strict=True))
+        table[column] = [
+            "contradiction" if v == "neutral" and by_id.get(i, False) else v
+            for v, i in zip(table[column], ids, strict=True)
+        ]
+    settings = _settings(
+        label_space_column="tier", label_spaces={"hard": ["entailment", "contradiction"]}
+    )
+    code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    hard_slice = next(s for s in report["slices"] if s["value"] == "hard")
+    assert hard_slice["labels"] == ["entailment", "contradiction"]
+    assert hard_slice["absent_classes"] == []
+    assert hard_slice["systems"]["candidate"]["macro_f1"]["point"] is not None
+    assert report["slices"][0]["labels"] == LABELS
+    # A gold label outside its row's space refuses.
+    env["gold"]["label"][next(i for i, h in enumerate(hard) if h)] = "neutral"
+    code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
+    assert code == 1
+    assert "outside its label space" in events[-1]["message"]
+
+
+async def test_each_slice_reports_its_tier_refused_rows(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["n_tokens"] = [5000 if i % 10 == 0 else 10 for i in range(60)]
+    rule = {"default": {"max_tokens": 2048}, "token_column": "n_tokens"}
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(tier_rule=rule)))
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["slices"][0]["tier_refused"] == 6
+    by_tier = {s["value"]: s["tier_refused"] for s in report["slices"] if s["column"] == "tier"}
+    expected: dict[str, int] = {}
+    for i in range(0, 60, 10):
+        expected[env["gold"]["tier"][i]] = expected.get(env["gold"]["tier"][i], 0) + 1
+    assert {k: v for k, v in by_tier.items() if v} == expected
