@@ -764,9 +764,9 @@ none.
   branch's content in ONE commit: the recipe's files (``data/``,
   ``exclusions.parquet``, ``recipe.json``, ``manifest.json``, ``README.md``)
   replace the previous version's, and nothing else in the repo is touched
-  (``HFHubClient.replace_files``). That commit, normalized to its 40-character
-id (``commit_oid``; a push that reports none fails the run), is the new dataset
-version, recorded in ``receipt.json`` (``kind`` ``dataset_recipe``, the output
+  (``HFHubClient.replace_files``). That commit, as the exact 40-character id
+the Hub reports (``commit_oid``; none when the Hub reports only a URL, and
+then no version is recorded), is the new dataset version, recorded in ``receipt.json`` (``kind`` ``dataset_recipe``, the output
 repo and commit, rows per split, and the recipe revision, hash,
 ``holdout_sources`` and ``held_out_splits``).
 

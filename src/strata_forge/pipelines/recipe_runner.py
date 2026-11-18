@@ -765,10 +765,9 @@ async def _execute(
     except Exception as exc:
         msg = f"the dataset is on the machine at {outdir}, but the push failed: {exc}"
         raise RunError(msg) from exc
+    # The exact commit the push made, or None when the Hub reported none (never parsed out of a
+    # URL): the control plane records a dataset version only from an exact commit.
     commit = commit_oid(pushed)
-    if commit is None:
-        msg = f"the push to {out_repo} reported no commit, so the version cannot be pinned"
-        raise RunError(msg)
     summary = _summary(spec, output, generation, commit=commit, written=written)
     receipt = build_receipt(
         _MANIFEST_KIND,
@@ -788,7 +787,12 @@ async def _execute(
     )
     emit(
         writer,
-        ProgressEvent(kind="end", stage="push", metrics=metrics, message=f"{out_repo}@{commit}"),
+        ProgressEvent(
+            kind="end",
+            stage="push",
+            metrics=metrics,
+            message=f"{out_repo}@{commit}" if commit else out_repo,
+        ),
     )
     return out_repo
 
