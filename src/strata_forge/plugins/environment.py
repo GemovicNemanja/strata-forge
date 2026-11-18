@@ -375,32 +375,37 @@ def tree_digest(site: Path) -> str:
     path, executable bit and content hash, sorted. The plugin's own RECORD covers only its own
     files; this covers its dependencies, their data files, bytecode and anything added beside
     them, so a reused directory must be byte for byte the one this runner built. A link or a
-    special file anywhere refuses the directory (``pip --target`` writes neither)."""
+    special file anywhere refuses the directory (``pip --target`` writes neither).
+
+    Each entry is its fields as the file system's own bytes (``os.fsencode``), each ended by a NUL,
+    which no path component can hold: a name with a newline cannot pose as two entries, and a name
+    that is not valid text is hashed as it is rather than refused."""
     digest = hashlib.sha256()
-    for path in sorted(site.rglob("*"), key=lambda p: p.relative_to(site).as_posix()):
-        rel = path.relative_to(site).as_posix()
+    entries = sorted((os.fsencode(p.relative_to(site)), p) for p in site.rglob("*"))
+    for rel, path in entries:
         if path.is_symlink():
-            msg = f"the plugin environment holds a link ({rel}); it is not reused"
+            msg = f"the plugin environment holds a link ({rel!a}); it is not reused"
             raise PluginManifestError(msg)
         if path.is_dir():
-            digest.update(f"d {rel}\n".encode())
+            digest.update(b"d\0" + rel + b"\0")
             continue
         if not path.is_file():
-            msg = f"the plugin environment holds a special file ({rel}); it is not reused"
+            msg = f"the plugin environment holds a special file ({rel!a}); it is not reused"
             raise PluginManifestError(msg)
         content = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 content.update(chunk)
-        mode = "x" if path.stat().st_mode & 0o111 else "-"
-        digest.update(f"f {rel} {mode} {content.hexdigest()}\n".encode())
+        mode = b"x" if path.stat().st_mode & 0o111 else b"-"
+        digest.update(b"f\0" + rel + b"\0" + mode + b"\0" + content.hexdigest().encode() + b"\0")
     return digest.hexdigest()
 
 
 def _tree_matches(site: Path, recorded: str) -> bool:
+    """Whether the directory still hashes to ``recorded``; any failure to hash it means no."""
     try:
         return tree_digest(site) == recorded
-    except OSError, PluginManifestError:
+    except OSError, ValueError, PluginManifestError:
         return False
 
 

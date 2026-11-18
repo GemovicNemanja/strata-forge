@@ -430,6 +430,36 @@ def test_the_scores_are_parsed_in_a_process_of_their_own(
     assert plugin_runner.DIAGNOSTICS_FILENAME in _FakeHub.pushed[0][2]
 
 
+@pytest.mark.parametrize(
+    ("asked", "returned"), [((), ["min"]), (("min", "last"), ["min"]), (("min",), None)]
+)
+def test_diagnostics_other_than_those_asked_for_push_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_env: Path,
+    pin: PluginPin,
+    asked: tuple[str, ...],
+    returned: list[str] | None,
+) -> None:
+    _allow(monkeypatch, pin)
+    _wire(monkeypatch, plugin_env)
+    real = plugin_runner._check_record  # pyright: ignore[reportPrivateUsage]
+
+    def tampered(*args: Any) -> dict[str, Any]:
+        record = {k: v for k, v in real(*args).items() if k != "diagnostics"}
+        if returned is not None:
+            record["diagnostics"] = {
+                "path": plugin_runner.DIAGNOSTICS_FILENAME,
+                "diagnostic": True,
+                "aggregations": returned,
+            }
+        return record
+
+    monkeypatch.setattr(plugin_runner, "_check_record", tampered)
+    with pytest.raises(RunError, match="not asked for"):
+        _execute(_spec(pin, diagnostic_aggregations=list(asked)))
+    assert _FakeHub.pushed == []
+
+
 def test_the_plugin_process_never_sees_a_credential(
     monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
 ) -> None:

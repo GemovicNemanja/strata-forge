@@ -560,6 +560,13 @@ async def _check_staged(
     with written.open("rb") as handle:
         checked = _check_record(handle.read(MAX_CHECK_RECORD_BYTES + 1), entry, expected_rows)
     diagnostics: dict[str, Any] | None = checked.get("diagnostics")
+    # Exactly what the spec asked for: none unless requested, else the requested reductions.
+    asked = list(spec.diagnostic_aggregations)
+    if (diagnostics is None) != (not asked) or (
+        diagnostics is not None and diagnostics["aggregations"] != asked
+    ):
+        msg = "infrastructure fault: the scores check returned diagnostics that were not asked for"
+        raise RunError(msg)
     if diagnostics is not None:
         made = out / DIAGNOSTICS_FILENAME
         if made.is_symlink() or not made.is_file():

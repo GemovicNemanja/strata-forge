@@ -8,6 +8,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import sys
 import zipfile
 from importlib import metadata
@@ -237,6 +238,31 @@ def test_the_directory_digest_covers_paths_modes_and_refuses_links(tmp_path: Pat
     (site / "link").symlink_to(site / "pkg" / "a.py")
     with pytest.raises(PluginManifestError, match="link"):
         environment.tree_digest(site)
+
+
+def test_a_newline_in_a_name_cannot_pose_as_two_entries(tmp_path: Path) -> None:
+    first, second = b"one", b"two"
+    two = tmp_path / "two"
+    two.mkdir()
+    (two / "p").write_bytes(first)
+    (two / "q").write_bytes(second)
+    # One file whose name spells the first entry and the start of the second, newline included.
+    one = tmp_path / "one"
+    one.mkdir()
+    name = f"p - {hashlib.sha256(first).hexdigest()}\nf q"
+    (one / name).write_bytes(second)
+    assert environment.tree_digest(one) != environment.tree_digest(two)
+
+
+def test_a_name_that_is_not_text_is_hashed_not_refused(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    try:
+        (site / os.fsdecode(b"bad-\xff")).write_bytes(b"x")
+    except OSError:
+        pytest.skip("this file system refuses names that are not UTF-8")
+    first = environment.tree_digest(site)
+    assert environment._tree_matches(site, first)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_a_build_that_is_not_the_pin_is_refused_and_removed(tmp_path: Path) -> None:
