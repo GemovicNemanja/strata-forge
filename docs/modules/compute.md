@@ -422,7 +422,8 @@ Every other pushing runner writes one too, through
 run (``kind`` ``scoring``: ``hf_classify``, ``hf_label_logits``, verifier
 artifacts), a fine-tuning run including ``seq_cls`` (``training``) and an
 evaluation run (``eval``). It carries the manifest digest, the ``model``,
-``dataset`` and ``engine_version`` the manifest records (null where that
+``dataset`` (with the ``commit`` the split was read at), ``template_sha256``
+and ``engine_version`` the manifest records (null where that
 manifest has none), ``rows`` where the run has rows, and ``output`` with the
 commit the push made. That commit is what an orchestrator links runs by: a
 scoring run that reads a trained model at that commit, and an evaluation
