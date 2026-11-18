@@ -110,6 +110,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   dataset pins requested and served, the template digest, the engine version, `id_column`,
   `row_ids`, row counts and the output repo with the commit the push made. `_push_results` returns
   that commit id beside the repo (`commit_oid`).
+- Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):
+  scoring (`hf_classify`, `hf_label_logits`, verifier artifacts), fine-tuning (incl. `seq_cls`) and
+  evaluation runs write `_common.build_receipt`'s shape (manifest digest, the model, dataset and
+  engine their manifest records, row counts where they have rows, and `output` `{repo_id,
+  commit_sha}` of the commit the push made). The commit is what links one run's output to the run
+  that reads it next. `finetune_runner._push_artifact` and `eval_runner._push` return
+  `(repo_id, commit_sha)`; a push failure still leaves the receipt before the run fails.
 
 ### Changed
 

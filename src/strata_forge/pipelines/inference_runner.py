@@ -128,6 +128,7 @@ from strata_forge.pipelines._common import (
     RECEIPT_SCHEMA,
     RunError,
     RunSecrets,
+    build_receipt,
     commit_oid,
     emit,
     ensure_private_output,
@@ -1605,6 +1606,7 @@ def _build_receipt(
     ok = sum(1 for r in rows if r["error"] is None)
     return {
         "schema": RECEIPT_SCHEMA,
+        "kind": "chat",
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "model": {
             "id": model.get("id"),
@@ -1969,7 +1971,7 @@ async def _execute_scoring(
     out = scorer.result_rows(lengths, logits, inputs)
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
-        await asyncio.to_thread(
+        manifest_path = await asyncio.to_thread(
             write_manifest,
             scorer.manifest(
                 requested,
@@ -1980,18 +1982,33 @@ async def _execute_scoring(
             ),
             Path(results_path).parent,
         )
+    counts = tally(out)
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if pushing:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
                 await _require_fresh_output(spec, cast("str", hf_token))
-                destination, _ = await _push_results(spec, results_path, cast("str", hf_token))
+                pushed = await _push_results(spec, results_path, cast("str", hf_token))
+            destination = pushed[0]
         except Exception as exc:
-            msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(results_path)
     else:
         destination = str(results_path)
+    # Whatever the push did, the receipt says what ran and where (if anywhere) it landed.
+    receipt = await asyncio.to_thread(
+        build_receipt,
+        "scoring",
+        Path(manifest_path),
+        pushed,
+        rows={"total": len(out), "succeeded": counts["scored"], "failed": counts["overflow"]},
+    )
+    await asyncio.to_thread(write_receipt, receipt, Path.cwd())
+    if push_error is not None:
+        msg = f"results are on the VM at {results_path}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
 
-    counts = tally(out)
     emit(
         writer,
         ProgressEvent(

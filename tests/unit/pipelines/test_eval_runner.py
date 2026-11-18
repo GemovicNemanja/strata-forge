@@ -1082,3 +1082,19 @@ async def test_probability_reads_short_of_full_coverage_decide_no_gate(
     assert comparison["discordance"]["n"] == 57
     assert comparison["discordance"]["gate"] == "unresolved"
     assert events[-1]["metrics"]["brier_coverage"] == 1.0
+
+
+async def test_a_pushed_report_leaves_a_receipt_with_its_commit(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any], tmp_path: Path
+) -> None:
+    from strata_forge.pipelines._common import RECEIPT_FILENAME
+
+    monkeypatch.chdir(tmp_path)
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 0, events[-1]
+    receipt = json.loads((tmp_path / RECEIPT_FILENAME).read_text())
+    assert receipt["kind"] == "eval"
+    assert len(receipt["manifest_sha256"]) == 64
+    # Pushed or not, the receipt is written; when pushed it names the commit the push made.
+    output = receipt["output"]
+    assert output is None or set(output) == {"repo_id", "commit_sha"}

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -98,6 +99,7 @@ __all__ = [
     "PhaseSink",
     "RunError",
     "RunSecrets",
+    "build_receipt",
     "check_engine_version",
     "commit_oid",
     "emit",
@@ -919,6 +921,47 @@ def commit_oid(commit: str | None) -> str | None:
         return None
     match = _COMMIT_AT_END_RE.search(commit.strip())
     return match.group(1) if match else None
+
+
+def build_receipt(
+    kind: str,
+    manifest_path: Path,
+    output: tuple[str, str | None] | None,
+    *,
+    rows: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """The execution receipt of a run of ``kind`` (``chat`` has its own, with its row ids): the
+    digest of the manifest it wrote, the model, dataset and engine that manifest records where it
+    records them, its row counts when it has rows, and the repo and COMMIT its push made (None
+    when nothing was pushed). The commit is what links a run's output to the run that reads it
+    next, exactly; a repo's head can move."""
+    raw = manifest_path.read_bytes()
+    manifest: dict[str, Any] = json.loads(raw)
+
+    def block(key: str) -> dict[str, Any]:
+        value: Any = manifest.get(key)
+        return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+    model, dataset, engine = block("model"), block("dataset"), block("engine")
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "kind": kind,
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "model": {
+            "id": model.get("id"),
+            "requested_revision": model.get("requested_revision"),
+            "commit": model.get("commit"),
+        },
+        "dataset": {
+            "id": dataset.get("id"),
+            "config": dataset.get("config"),
+            "split": dataset.get("split"),
+            "requested_revision": dataset.get("requested_revision"),
+        },
+        "engine_version": engine.get("version"),
+        "rows": rows,
+        "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},
+    }
 
 
 def write_receipt(receipt: dict[str, Any], workdir: Path) -> Path:

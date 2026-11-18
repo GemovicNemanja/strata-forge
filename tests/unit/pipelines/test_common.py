@@ -1276,3 +1276,32 @@ def test_a_run_error_carries_its_metrics_onto_the_terminal_event(
     last = json.loads(progress.read_text().splitlines()[-1])
     assert last["kind"] == "error"
     assert last["metrics"] == {"gpu_seconds": 12.5, "gpu_count": 1.0}
+
+
+def test_build_receipt_names_the_pushed_commit_for_any_kind(tmp_path: Path) -> None:
+    import hashlib
+    import json as _json
+
+    from strata_forge.pipelines._common import build_receipt, write_manifest
+
+    manifest = {
+        "schema": "strata.run.manifest/v1",
+        "model": {"id": "org/m", "requested_revision": None, "commit": "b" * 40},
+        "dataset": {"id": "org/d", "config": None, "split": "dev", "requested_revision": "d" * 40},
+        "engine": {"version": "0.7.0"},
+    }
+    path = write_manifest(manifest, tmp_path)
+    receipt = build_receipt(
+        "scoring", path, ("org/out", "a" * 40), rows={"total": 3, "succeeded": 3, "failed": 0}
+    )
+    assert receipt["kind"] == "scoring"
+    assert receipt["manifest_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert receipt["model"]["commit"] == "b" * 40
+    assert receipt["output"] == {"repo_id": "org/out", "commit_sha": "a" * 40}
+    assert receipt["rows"]["total"] == 3
+    # A manifest without model or dataset blocks (an evaluation's) still yields a receipt.
+    bare = write_manifest({"schema": "strata.run.manifest/v1"}, tmp_path / "eval")
+    unpushed = build_receipt("eval", bare, None)
+    assert unpushed["output"] is None
+    assert unpushed["model"]["id"] is None
+    _json.dumps(unpushed)

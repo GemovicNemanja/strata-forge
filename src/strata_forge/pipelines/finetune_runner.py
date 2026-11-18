@@ -60,9 +60,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.pipelines._common import (
+    MANIFEST_FILENAME,
     MANIFEST_SCHEMA,
     RunError,
     RunSecrets,
+    build_receipt,
+    commit_oid,
     emit,
     ensure_private_repo,
     load_config,
@@ -75,6 +78,7 @@ from strata_forge.pipelines._common import (
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
 from strata_forge.pipelines._split_overlap import may_overlap
 from strata_forge.pipelines.inference_runner import SNAPSHOT_IGNORED, SNAPSHOT_PATTERNS
@@ -721,8 +725,11 @@ def _compute_block(started: float, gpu: dict[str, Any], timing: dict[str, Any]) 
     }
 
 
-async def _push_artifact(spec: FinetuneSpec, artifact_dir: Path, hf_token: str) -> str:
-    """Push the artifact and its manifest in ONE commit to a private repo; never checkpoints."""
+async def _push_artifact(
+    spec: FinetuneSpec, artifact_dir: Path, hf_token: str
+) -> tuple[str, str | None]:
+    """Push the artifact and its manifest in ONE commit to a private repo; never checkpoints.
+    Returns the repo and the commit the push made."""
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push the trained model"
         raise RunError(msg)
@@ -730,14 +737,14 @@ async def _push_artifact(spec: FinetuneSpec, artifact_dir: Path, hf_token: str) 
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     # Re-checked at push time: visibility can change during a long run.
     await ensure_private_repo(hub, out_repo, repo_type="model")
-    await hub.upload_folder(
+    commit = await hub.upload_folder(
         artifact_dir,
         out_repo,
         repo_type="model",
         commit_message=f"strata fine-tune ({spec.method})",
         ignore_patterns=_PUSH_IGNORED,
     )
-    return out_repo
+    return out_repo, commit_oid(commit)
 
 
 async def _train_causal_lm(
@@ -989,18 +996,30 @@ async def _execute_run(
         artifact_dir,
     )
 
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if pushing:
         try:
             async with ticking_phase(phase, "Uploading the model to the Hub", stage="push"):
-                destination = await _push_artifact(spec, artifact_dir, cast("str", hf_token))
+                pushed = await _push_artifact(spec, artifact_dir, cast("str", hf_token))
+            destination = pushed[0]
         except Exception as exc:
-            # Name WHERE the weights are. The run still fails — the user asked for them on the Hub
-            # and they are not there — but at the last step of a run that may have taken hours it
-            # matters most that the output was not lost with it.
-            msg = f"the trained model is on the VM at {artifact_dir}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(artifact_dir)
     else:
         destination = str(artifact_dir)
+    # The trained model's repo and the commit that holds it: what a later run reading the model
+    # pins, so the two link exactly. Written whatever the push did.
+    receipt = await asyncio.to_thread(
+        build_receipt, "training", artifact_dir / MANIFEST_FILENAME, pushed
+    )
+    await asyncio.to_thread(write_receipt, receipt, Path.cwd())
+    if push_error is not None:
+        # Name WHERE the weights are. The run still fails — the user asked for them on the Hub
+        # and they are not there — but at the last step of a run that may have taken hours it
+        # matters most that the output was not lost with it.
+        msg = f"the trained model is on the VM at {artifact_dir}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
 
     steps = cast("int | None", result.get("steps"))
     # The RUN's end, after the TRAINER's own end (its callback emits one when TRL stops). The step

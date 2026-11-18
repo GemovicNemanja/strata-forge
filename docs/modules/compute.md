@@ -393,7 +393,20 @@ orchestrator compares with what it admitted: ``model`` (``id``,
 ``None``), ``rows`` (``total``, ``succeeded``, ``failed``) and ``output``
 (``repo_id`` and the ``commit_sha`` of the Hub commit the push made, or
 ``None`` when nothing was pushed). No row text, no prompt text and no
-credential. A scoring run writes none yet.
+credential. Its ``kind`` is ``chat``.
+
+Every other pushing runner writes one too, through
+``_common.build_receipt(kind, manifest_path, output, rows=...)``: a scoring
+run (``kind`` ``scoring``: ``hf_classify``, ``hf_label_logits``, verifier
+artifacts), a fine-tuning run including ``seq_cls`` (``training``) and an
+evaluation run (``eval``). It carries the manifest digest, the ``model``,
+``dataset`` and ``engine_version`` the manifest records (null where that
+manifest has none), ``rows`` where the run has rows, and ``output`` with the
+commit the push made. That commit is what an orchestrator links runs by: a
+scoring run that reads a trained model at that commit, and an evaluation
+that reads a scoring run's predictions at theirs, link exactly, where a
+repo's head could have moved. A model registry pinning a training output
+reads the same commit.
 
 A pushed run goes only to a **private** output dataset repo: the runner
 creates it private when it is missing and refuses a public one, first
