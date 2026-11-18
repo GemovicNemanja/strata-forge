@@ -331,12 +331,18 @@ def _parse_reasoning(message: Any) -> str | None:
 
     LiteLLM moves vLLM's ``reasoning`` field (``reasoning_content`` before vLLM renamed it) onto
     ``message.reasoning_content``; a bare ``reasoning`` is read too, for a message that did not
-    pass through LiteLLM's normalizer. An empty string is no reasoning.
+    pass through LiteLLM's normalizer, and so is ``provider_specific_fields``, where LiteLLM keeps
+    a message field it does not model. An empty string is no reasoning.
     """
-    for key in ("reasoning_content", "reasoning"):
-        value = _duck_get(message, key)
-        if isinstance(value, str) and value:
-            return value
+    extra: Any = _duck_get(message, "provider_specific_fields")
+    sources: list[Any] = [message]
+    if isinstance(extra, dict):
+        sources.append(cast("dict[str, Any]", extra))
+    for source in sources:
+        for key in ("reasoning_content", "reasoning"):
+            value = _duck_get(source, key)
+            if isinstance(value, str) and value:
+                return value
     return None
 
 

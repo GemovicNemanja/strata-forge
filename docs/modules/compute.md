@@ -295,20 +295,24 @@ A reasoning model's reasoning is kept out of its answer. ``Hyperparams.reasoning
 (``openai_gptoss`` or ``qwen3``, an allow-list because it becomes the model server's
 ``--reasoning-parser`` flag) makes vLLM split the reasoning from the final text and return it in
 the response's ``reasoning`` field; the runner stores it in the ``reasoning`` column and the final
-text alone in ``output``. The parser is declared rather than inferred from the model id. The
-runner reads ``model_type`` from the downloaded ``config.json`` before the server starts and
-refuses a gpt-oss checkpoint (``gpt_oss``) without ``openai_gptoss``, whose harmony analysis
-channel would otherwise land inside every ``output``, and ``openai_gptoss`` on any other model.
+text alone in ``output``. The parser is settled against the checkpoint rather than the model id:
+before the dataset or the weights are downloaded, the runner reads only the model's
+``config.json`` (at the pinned revision; an unpinned run then downloads the weights at the commit
+that file was read at) and its ``model_type`` decides. A gpt-oss checkpoint (``gpt_oss``) with no
+parser is served with ``openai_gptoss``, whose absence would put the harmony analysis channel
+inside every ``output``, and any other parser on it is refused; ``openai_gptoss`` on another
+model, and ``qwen3`` on anything but ``qwen3`` / ``qwen3_moe``, are refused. The parser served
+with is recorded as ``serving.reasoning_parser``.
 
 ``Hyperparams.reasoning_effort`` (``low`` / ``medium`` / ``high``) is gpt-oss's harmony effort and
-is sent in ``extra_body`` with every request. It is refused at spec load unless
-``reasoning_parser`` is ``openai_gptoss``, the one parser whose model reads an effort level.
+is sent in ``extra_body`` (a top-level field of the request body) with every request. It is
+refused at spec load with any parser but ``openai_gptoss``, and at the config check on a model
+that is not gpt-oss; the same holds for ``harmony_date``.
 
 The harmony system message states a "Current date", which vLLM takes from
 ``VLLM_SYSTEM_START_DATE`` and otherwise from its own clock on every request, so unpinned
 prompts differ from one day to the next and a run can cross midnight. A gpt-oss run therefore
-always pins it: ``Hyperparams.harmony_date`` (a calendar date written ``YYYY-MM-DD``, refused
-unless ``reasoning_parser`` is ``openai_gptoss``) when given, else the serving machine's local
+always pins it: ``Hyperparams.harmony_date`` (a calendar date written ``YYYY-MM-DD``) when given, else the serving machine's local
 date taken once at start-up. The manifest records the date used as ``serving.harmony_date``
 (``None`` for a model without harmony).
 

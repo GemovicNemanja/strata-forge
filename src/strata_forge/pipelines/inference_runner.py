@@ -77,6 +77,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    StrictFloat,
     StrictInt,
     field_validator,
     model_validator,
@@ -196,6 +197,8 @@ _SERVE_LOAD_FORMAT = ("--load-format", "safetensors")
 #: splits it out.
 _HARMONY_MODEL_TYPE = "gpt_oss"
 _HARMONY_REASONING_PARSER = "openai_gptoss"
+#: The ``model_type`` values the ``qwen3`` reasoning parser is for.
+_QWEN3_MODEL_TYPES = frozenset({"qwen3", "qwen3_moe"})
 # The harmony system message states a "Current date", which the model server takes from this
 # variable and otherwise from its own clock, per request. Unpinned, the same prompts differ across
 # days, and a long run can cross midnight.
@@ -226,13 +229,14 @@ class Hyperparams(BaseModel):
     # The share of GPU memory the model server may claim, and its per-step token budget. vLLM's
     # defaults run gpt-oss-120b out of memory on a single 80 GB GPU; its recipe lowers the budget
     # or raises the share. ``None`` keeps the server's default.
-    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+    gpu_memory_utilization: StrictFloat | None = Field(default=None, gt=0, le=1)
     max_num_batched_tokens: StrictInt | None = Field(default=None, ge=1)
     # The model server's reasoning parser: it moves the model's reasoning out of the answer into
     # the response's own reasoning field, which the runner stores in the ``reasoning`` column.
-    # Declared rather than guessed from the model id, and an allow-list because it becomes a
-    # command-line argument. A gpt-oss checkpoint requires ``openai_gptoss`` (checked against the
-    # downloaded config, see `_check_reasoning_parser`).
+    # An allow-list because it becomes a command-line argument. Checked against the checkpoint's
+    # ``config.json`` before anything large is downloaded (see `_effective_hyperparams`): unset on
+    # a gpt-oss checkpoint it defaults to ``openai_gptoss``, and a parser for another
+    # architecture is refused.
     reasoning_parser: Literal["openai_gptoss", "qwen3"] | None = None
     # gpt-oss's harmony reasoning effort, sent with every request.
     reasoning_effort: Literal["low", "medium", "high"] | None = None
@@ -257,22 +261,19 @@ class Hyperparams(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _effort_needs_the_harmony_parser(self) -> Hyperparams:
-        # Only gpt-oss reads an effort level. The model server would accept one for any other
-        # model and ignore it (or read it as "think"), and a run that records an effort its model
-        # never saw is a false record.
-        if self.reasoning_effort is not None and self.reasoning_parser != _HARMONY_REASONING_PARSER:
-            msg = (
-                "reasoning_effort applies only to gpt-oss models, served with "
-                f"reasoning_parser={_HARMONY_REASONING_PARSER!r}"
-            )
-            raise ValueError(msg)
-        if self.harmony_date is not None and self.reasoning_parser != _HARMONY_REASONING_PARSER:
-            msg = (
-                "harmony_date applies only to gpt-oss models, served with "
-                f"reasoning_parser={_HARMONY_REASONING_PARSER!r}"
-            )
-            raise ValueError(msg)
+    def _harmony_settings_need_the_harmony_parser(self) -> Hyperparams:
+        # Only gpt-oss reads an effort level or states a date. The model server would accept an
+        # effort for any other model and ignore it (or read it as "think"), and a run that records
+        # a setting its model never saw is a false record. An unset parser may still turn out to be
+        # gpt-oss's, so that is decided against the checkpoint (`_effective_hyperparams`).
+        if self.reasoning_parser not in (None, _HARMONY_REASONING_PARSER):
+            for name in ("reasoning_effort", "harmony_date"):
+                if getattr(self, name) is not None:
+                    msg = (
+                        f"{name} applies only to gpt-oss models, served with "
+                        f"reasoning_parser={_HARMONY_REASONING_PARSER!r}"
+                    )
+                    raise ValueError(msg)
         return self
 
 
@@ -578,10 +579,11 @@ def _serve_flags(run: str) -> list[str]:
     """The flags of the model server's command line, from ``--host`` on.
 
     What precedes them is the interpreter and the local snapshot path, which describe this
-    machine rather than the run; the manifest already records the model and its commit.
+    machine rather than the run; the manifest already records the model and its commit. A command
+    line without ``--host`` records no flags rather than all of it.
     """
     argv = shlex.split(run)
-    return argv[argv.index("--host") :] if "--host" in argv else argv
+    return argv[argv.index("--host") :] if "--host" in argv else []
 
 
 def _throughput(
@@ -656,7 +658,9 @@ def _require_safetensors(snapshot: Path, model_id: str) -> None:
         raise RunError(msg)
 
 
-async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
+async def _fetch_model(
+    spec: RunSpec, token: str | Literal[False], revision: str | None = None
+) -> Path:
     """Download the model's servable files with the run's credential; return the local snapshot.
 
     The model server is pointed at this directory with the Hub switched off, so what it can load
@@ -667,7 +671,7 @@ async def _fetch_model(spec: RunSpec, token: str | Literal[False]) -> Path:
     try:
         snapshot = await hub.download_snapshot(
             spec.model_id,
-            revision=spec.model_revision,
+            revision=revision or spec.model_revision,
             allow_patterns=SNAPSHOT_PATTERNS,
             ignore_patterns=SNAPSHOT_IGNORED,
         )
@@ -749,28 +753,66 @@ def _checkpoint_dtype(snapshot: Path) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _check_reasoning_parser(snapshot: Path, hp: Hyperparams) -> None:
-    """Refuse a gpt-oss run without the harmony reasoning parser, and that parser on anything else.
+async def _read_model_config(
+    spec: RunSpec, token: str | Literal[False]
+) -> tuple[dict[str, Any], str | None]:
+    """The model's ``config.json`` alone, and the commit it was read at.
 
-    Without the parser the model server returns gpt-oss's analysis channel inside the answer, so
-    every row's ``output`` would carry the reasoning; with it on another model there is no
-    harmony output to split. Checked against the downloaded ``config.json``, before the server
-    starts, because the model id says nothing reliable about the architecture.
+    One small file, read before the weights so that a parser that does not fit the architecture
+    fails within seconds rather than after a download of tens of gigabytes. The commit is what an
+    unpinned run then downloads, so the weights come from the same revision the check read.
     """
-    model_type = _checkpoint_config(snapshot).get("model_type")
-    harmony = model_type == _HARMONY_MODEL_TYPE
-    if harmony and hp.reasoning_parser != _HARMONY_REASONING_PARSER:
-        msg = (
-            f"a gpt-oss model needs reasoning_parser={_HARMONY_REASONING_PARSER!r}: without it the "
-            "model's reasoning is returned inside every output"
-        )
-        raise RunError(msg)
-    if not harmony and hp.reasoning_parser == _HARMONY_REASONING_PARSER:
+    hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
+    try:
+        path = await hub.download_file(spec.model_id, "config.json", revision=spec.model_revision)
+    except Exception as exc:
+        msg = f"could not read the config of the model {spec.model_id}: {exc}"
+        if token is False:
+            msg += (
+                " (the run carries no Hugging Face token, so a gated or private model is"
+                " unreadable)"
+            )
+        raise RunError(msg) from exc
+    config = await asyncio.to_thread(_checkpoint_config, path.parent)
+    return config, spec.model_revision or snapshot_commit(path.parent)
+
+
+def _effective_hyperparams(hp: Hyperparams, config: dict[str, Any]) -> Hyperparams:
+    """The hyperparameters as served, with the reasoning parser settled against ``model_type``.
+
+    A gpt-oss checkpoint is always served with ``openai_gptoss``: without it the model server
+    returns the analysis channel inside every answer. So an unset parser defaults to it, and
+    any other parser is refused. ``openai_gptoss`` on another architecture has no harmony output
+    to split, and ``qwen3`` is for Qwen3 checkpoints only, so both are refused, as are the
+    harmony-only settings on a model without harmony. The model id says nothing reliable about
+    the architecture; the checkpoint's own ``model_type`` does.
+    """
+    model_type = config.get("model_type")
+    if model_type == _HARMONY_MODEL_TYPE:
+        if hp.reasoning_parser not in (None, _HARMONY_REASONING_PARSER):
+            msg = (
+                f"a gpt-oss model is served with reasoning_parser="
+                f"{_HARMONY_REASONING_PARSER!r}, not {hp.reasoning_parser!r}"
+            )
+            raise RunError(msg)
+        return hp.model_copy(update={"reasoning_parser": _HARMONY_REASONING_PARSER})
+    if hp.reasoning_parser == _HARMONY_REASONING_PARSER:
         msg = (
             f"reasoning_parser={_HARMONY_REASONING_PARSER!r} is for gpt-oss models; this model "
             f"declares model_type={model_type!r}"
         )
         raise RunError(msg)
+    if hp.reasoning_parser == "qwen3" and model_type not in _QWEN3_MODEL_TYPES:
+        msg = (
+            f"reasoning_parser='qwen3' is for Qwen3 models; this model declares "
+            f"model_type={model_type!r}"
+        )
+        raise RunError(msg)
+    for name in ("reasoning_effort", "harmony_date"):
+        if getattr(hp, name) is not None:
+            msg = f"{name} applies only to gpt-oss models; this model declares model_type={model_type!r}"
+            raise RunError(msg)
+    return hp
 
 
 def _build_manifest(
@@ -803,7 +845,13 @@ def _build_manifest(
         },
         # What the model server actually ran with, next to what was asked for in `hyperparams`.
         "serving": serving
-        or {"max_model_len": None, "dtype": None, "flags": None, "harmony_date": None},
+        or {
+            "max_model_len": None,
+            "dtype": None,
+            "flags": None,
+            "reasoning_parser": None,
+            "harmony_date": None,
+        },
         "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
         "column_mapping": spec.column_mapping,
         "hyperparams": spec.hyperparams.model_dump(),
@@ -890,6 +938,10 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # runs BEFORE the first countable milestone and can take minutes on its own.
     # to_thread, not a direct call: `load_dataset` downloads and materialises the split, and a
     # blocked event loop cannot tick the caption that says it is still going.
+    # The model's config before anything large: a reasoning parser that does not fit the
+    # architecture is refused here, and an unset one is settled, in seconds.
+    config, config_commit = await _read_model_config(spec, hub_token)
+    hp = _effective_hyperparams(spec.hyperparams, config)
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         rows = await asyncio.to_thread(_load_rows, spec, hub_token)
     prompts, custom_ids = _build_requests(spec, rows)
@@ -900,11 +952,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     # Before the server starts, and in this process: the download is the one step that needs the
     # token, and the server that follows is third-party code that must not hold it.
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
-        snapshot = await _fetch_model(spec, hub_token)
+        snapshot = await _fetch_model(spec, hub_token, config_commit)
     model_commit = spec.model_revision or snapshot_commit(snapshot)
 
-    hp = spec.hyperparams
-    await asyncio.to_thread(_check_reasoning_parser, snapshot, hp)
     harmony_date = _harmony_date(hp)
     task = build_vllm_task(
         str(snapshot),
@@ -973,6 +1023,8 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
                 "served": await asyncio.to_thread(_served_dtype, Path.cwd()),
             },
             "flags": _serve_flags(task.run),
+            # The parser served with, which an unset one on a gpt-oss checkpoint defaults to.
+            "reasoning_parser": hp.reasoning_parser,
             "harmony_date": harmony_date,
         }
         # The endpoint this runner just launched is on loopback and takes no credential, and
