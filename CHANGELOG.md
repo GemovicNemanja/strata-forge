@@ -59,6 +59,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- `hf_classify` scores a verifier trained by `seq_cls` as it was trained
+  (`hyperparams.artifact: strata_verifier`): rendering, labels, pooling and
+  auxiliary heads come only from its `strata_verifier.json`, through the one
+  render module the trainer uses (`training/verifier_render.py`). Results add
+  `p_inconsistent` and per-premise `support_scores` when those heads exist;
+  `apply_calibration: auto` applies the artifact's `calibration.json` to `p_*`
+  with the logits kept raw. Training checks its own artifact through this path
+  before the push.
 - The batch-inference runner serves reasoning models with their reasoning kept apart from the
   answer. `Hyperparams.reasoning_parser` (`openai_gptoss` | `qwen3`) becomes vLLM's
   `--reasoning-parser`, results rows gain a `reasoning` column (string or `None`) and `output`

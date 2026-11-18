@@ -47,6 +47,7 @@ __all__ = [
     "HeadLoadError",
     "HeadPlan",
     "LoadReceipt",
+    "aux_outputs",
     "build_aux_heads",
     "check_load",
     "head_plan",
@@ -346,6 +347,38 @@ def build_aux_heads(hidden_size: int, *, flag: bool, support: bool, std: float) 
             return torch.einsum("bh,bph->bp", projected, markers) + self.bias
 
     return _AuxHeads()
+
+
+def aux_outputs(
+    torch: Any,
+    aux: Any,
+    hidden: Any,
+    attention_mask: Any,
+    *,
+    last_token: bool,
+    support_positions: Any = None,
+) -> dict[str, Any]:
+    """The auxiliary heads' logits from the base model's last hidden state.
+
+    Every head reads one pooled vector: the final non-padding token for a decoder (right padding,
+    by the attention mask), the first token for an encoder. The stock decoder head reads the
+    rightmost token whose id is not the pad id; the two are one position on every row whose last
+    real token is not the pad id, and the trainer and the scorer both refuse a row that ends on
+    it, so the primary and auxiliary heads always read the same token. The support head also reads each premise marker's token. The
+    trainer and the scorer both call this, so a verifier is scored as it was trained.
+    """
+    result: dict[str, Any] = {}
+    if aux.flag is None and aux.support is None:
+        return result
+    rows: Any = torch.arange(hidden.shape[0], device=hidden.device)
+    position: Any = attention_mask.sum(-1) - 1 if last_token else torch.zeros_like(rows)
+    pooled: Any = hidden[rows, position]
+    if aux.flag is not None:
+        result["flag_logits"] = aux.flag(pooled).squeeze(-1)
+    if aux.support is not None and support_positions is not None:
+        markers: Any = hidden[rows.unsqueeze(-1), support_positions]
+        result["support_logits"] = aux.support(pooled, markers)
+    return result
 
 
 def save_aux_heads(heads: Any, directory: Path) -> Path | None:

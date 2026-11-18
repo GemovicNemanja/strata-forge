@@ -660,3 +660,117 @@ async def test_an_empty_split_fails(
     _launch(monkeypatch, scoring_run)
     assert await ir.main() == 1
     assert "split was empty" in _events(scoring_run)[-1]["message"]
+
+
+class _ExcludingClassifier(_FakeClassifier):
+    """Three classes, the FIRST excluded: its logit must never be read as another class's."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.names = ["NEUTRAL", "ENTAILMENT", "NOT_ENTAILMENT"]
+        self.outputs = [None, "entailed", "not_entailed"]
+
+    def logits(self, texts: Sequence[str], pairs: Sequence[str]) -> list[list[float]]:
+        self.batches.append(list(texts))
+        return [[1000.0, float(len(t)), float(len(p))] for t, p in zip(texts, pairs, strict=True)]
+
+
+async def test_an_excluded_first_class_does_not_shift_the_columns(
+    monkeypatch: pytest.MonkeyPatch, scoring_run: dict[str, Any]
+) -> None:
+    scoring_run["classifier"] = _ExcludingClassifier()
+    _launch(
+        monkeypatch,
+        scoring_run,
+        label_alias={"NEUTRAL": None, "ENTAILMENT": "entailed", "NOT_ENTAILMENT": "not_entailed"},
+    )
+    assert await ir.main() == 0
+    first = scoring_run["written"][0]
+    assert first["logit_entailed"] == float(len("all\ncats\npurr"))
+    assert first["logit_not_entailed"] == float(len("tom"))
+    assert "logit_NEUTRAL" not in first
+
+
+async def test_a_trained_verifier_scores_through_the_runner(
+    monkeypatch: pytest.MonkeyPatch, scoring_run: dict[str, Any], tmp_path: Path
+) -> None:
+    pytest.importorskip("torch")
+    datasets: Any = pytest.importorskip("datasets")
+    pytest.importorskip("safetensors.torch")
+    from strata_forge.training.seq_cls import SeqClsConfig, SeqClsRunner
+    from tests.unit.training import tiny_classifier as tiny
+
+    class _Probe:
+        def reset(self) -> None:
+            return None
+
+        def peak_bytes(self) -> int:
+            return 1
+
+        def total_bytes(self) -> int:
+            return 100
+
+    artifact = tmp_path / "verifier"
+    SeqClsRunner(
+        SeqClsConfig.model_validate(
+            {
+                "model_id": "synthetic/tiny",
+                "output_dir": str(tmp_path / "ckpt"),
+                "labels": tiny.LABELS,
+                **tiny.TWO_WAY,
+                "max_length": 64,
+                "per_device_batch_size": 8,
+                "max_steps": 1,
+            }
+        ),
+        memory_probe=_Probe(),
+    ).run(
+        checkpoint=tiny.encoder(tmp_path / "base"),
+        artifact_dir=artifact,
+        train_dataset=datasets.Dataset.from_list(tiny.rows(8)),
+    )
+    (artifact / "calibration.json").write_text(
+        json.dumps(
+            {
+                "schema": "strata.calibration/v1",
+                "labels": list(tiny.LABELS),
+                "fit": {"temperature": 1.5},
+            }
+        )
+    )
+
+    async def _fetch(spec: Any, token: Any) -> Path:
+        return artifact
+
+    monkeypatch.setattr(ir, "_fetch_model", _fetch)
+    scoring_run["rows"] = tiny.rows(4, seed=9)
+    spec = _spec_dict() | {
+        "template": "{premises}",
+        "column_mapping": {"premises": "premises", "hypothesis": "hypothesis"},
+        "hyperparams": {
+            "engine": "hf_classify",
+            "artifact": "strata_verifier",
+            "pair_template": "{hypothesis}",
+            "dtype": "float32",
+            "apply_calibration": "auto",
+        },
+        "progress_path": str(scoring_run["progress"]),
+    }
+    monkeypatch.setenv("STRATA_RUN_CONFIG", json.dumps(spec))
+    assert await ir.main() == 0
+
+    written = scoring_run["written"]
+    assert len(written) == 4
+    assert all(row["overflow"] is False for row in written)
+    assert {"logit_entailment", "p_entailment", "p_inconsistent", "support_scores"} <= set(
+        written[0]
+    )
+    manifest = json.loads((scoring_run["results_dir"] / "manifest.json").read_text())
+    scoring = manifest["scoring"]
+    assert scoring["input"] == "strata_verifier"
+    assert scoring["artifact"]["heads"] == ["flag", "support"]
+    assert scoring["artifact"]["rendering"]["encoding"] == "pair"
+    assert scoring["calibration"]["applied"] is True
+    assert scoring["calibration"]["temperature"] == 1.5
+    assert scoring["calibration"]["raw_logits_kept"] is True
+    assert scoring["max_length_source"] == "artifact"

@@ -141,11 +141,16 @@ from strata_forge.pipelines._guided import (
 )
 from strata_forge.pipelines._label_logits import load_label_reader
 from strata_forge.pipelines._scoring import (
+    ARTIFACT_PAIR_TEMPLATE,
     LABEL_RE,
     SCORING_DTYPES,
+    VERIFIER_ARTIFACT,
     ClassifierScorer,
+    VerifierRunScorer,
+    artifact_template_error,
     build_inputs,
     load_classifier,
+    load_verifier,
     plan_batches,
     tally,
 )
@@ -260,7 +265,7 @@ _MAX_PREFILL = 1_024
 _MAX_LABEL_TOKEN = 64
 # The knobs each scoring engine reads on top of the ones every scoring engine reads, and the ones
 # every engine reads. A knob outside an engine's set is refused rather than ignored.
-_CLASSIFY_FIELDS = frozenset({"pair_template", "label_alias"})
+_CLASSIFY_FIELDS = frozenset({"pair_template", "label_alias", "artifact", "apply_calibration"})
 _LABEL_LOGITS_FIELDS = frozenset({"label_tokens", "assistant_prefill", "chat_template_kwargs"})
 # Knobs a chat run reads that a scoring engine also reads: the template's own variables.
 _CHAT_SHARED_FIELDS = frozenset({"chat_template_kwargs"})
@@ -359,6 +364,12 @@ class Hyperparams(BaseModel):
     slice_column: str | None = Field(default=None, min_length=1, max_length=255)
     list_separator: str = Field(default="\n", max_length=16)
     scoring_batch_size: int = Field(default=16, ge=1, le=1024)
+    # A verifier trained by `seq_cls`: score it with the rendering, labels, pooling and auxiliary
+    # heads its `strata_verifier.json` records, never with run parameters. Unset is pair mode.
+    artifact: Literal["strata_verifier"] | None = None
+    # Artifact scoring only: `auto` applies the artifact's `calibration.json` temperature to the
+    # `p_*` columns (the `logit_*` columns stay raw); `off` (the default) applies none.
+    apply_calibration: Literal["off", "auto"] = "off"
     # `hf_label_logits`: the labels, in order, each with the one token whose logit it reads.
     label_tokens: list[LabelToken] | None = Field(default=None, min_length=2, max_length=64)
     # Text appended after the chat template's assistant header, before the label position. Not a
@@ -400,6 +411,22 @@ class Hyperparams(BaseModel):
         if self.pair_template is None:
             msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
             raise ValueError(msg)
+        if self.artifact is None and "apply_calibration" in given:
+            msg = "apply_calibration applies to artifact scoring only (artifact: strata_verifier)"
+            raise ValueError(msg)
+        if self.artifact == VERIFIER_ARTIFACT:
+            if "list_separator" in given:
+                msg = "artifact scoring renders premises as the verifier was trained; no list_separator"
+                raise ValueError(msg)
+            if self.pair_template != ARTIFACT_PAIR_TEMPLATE:
+                msg = (
+                    f"artifact scoring takes pair_template {ARTIFACT_PAIR_TEMPLATE!r}: the "
+                    "verifier renders its own input, so the templates only name the roles"
+                )
+                raise ValueError(msg)
+            if self.label_alias is None:
+                # The artifact's own label order; an alias may still rename or exclude a class.
+                return self
         if self.label_alias is None:
             msg = (
                 "engine 'hf_classify' needs label_alias: every model class mapped to an output "
@@ -533,6 +560,13 @@ class RunSpec(BaseModel):
     progress_path: str | None = None
     # The control plane's run id — names the on-VM results dir when NOT pushing to the Hub.
     run_id: str | None = None
+
+    @model_validator(mode="after")
+    def _artifact_templates_name_the_roles(self) -> RunSpec:
+        error = artifact_template_error(self.template, self.hyperparams)
+        if error:
+            raise ValueError(error)
+        return self
 
 
 def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
@@ -1675,7 +1709,7 @@ async def _execute_scoring(
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
     model_commit = spec.model_revision or snapshot_commit(snapshot)
-    async with ticking_phase(phase, _LOADING_PHASE[hp.engine], stage="load_model"):
+    async with ticking_phase(phase, _loading_phase(hp), stage="load_model"):
         scorer = await asyncio.to_thread(_load_scorer, snapshot, hp)
     async with ticking_phase(phase, "Measuring rows", stage="run"):
         lengths = await asyncio.to_thread(scorer.lengths, inputs)
@@ -1760,6 +1794,10 @@ async def _execute_scoring(
 _LOADING_PHASE = {"hf_classify": "Loading the classifier", "hf_label_logits": "Loading the model"}
 
 
+def _loading_phase(hp: Hyperparams) -> str:
+    return "Loading the verifier" if hp.artifact is not None else _LOADING_PHASE[hp.engine]
+
+
 class _Scorer(Protocol):
     """What the scoring frame drives: measure rows, score a batch, describe the results."""
 
@@ -1789,6 +1827,17 @@ class _Scorer(Protocol):
 
 def _load_scorer(snapshot: Path, hp: Hyperparams) -> _Scorer:
     """The run's scoring engine, loaded from the local snapshot."""
+    if hp.artifact is not None:
+        # A verifier trained by `seq_cls`, scored with the rendering its own record holds.
+        return VerifierRunScorer(
+            load_verifier(
+                snapshot,
+                label_alias=hp.label_alias,
+                max_length=hp.max_model_len,
+                dtype=cast("str", hp.dtype),
+                apply_calibration=hp.apply_calibration == "auto",
+            )
+        )
     if hp.engine == "hf_label_logits":
         return load_label_reader(
             snapshot,

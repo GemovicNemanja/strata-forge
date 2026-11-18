@@ -511,6 +511,49 @@ token, the loaded dtype, the TF32 switches as they stood, the device, the
 batch plan (``order`` ``token_length_desc_then_row_index``, ``batch_size``,
 the number of batches and a SHA-256 of the plan), and the ignored checkpoint
 keys; ``counts`` holds rows, scored and overflow, overall and ``by_slice``.
+An excluded class leaves no column and never shifts another class's: each
+``logit_<label>`` is that class id's logit.
+
+#### Scoring a trained verifier (``artifact: strata_verifier``)
+
+``hyperparams.artifact = "strata_verifier"`` scores a verifier trained by
+``seq_cls`` (encoder or decoder) exactly as it was trained. Everything about
+its input comes from the artifact's ``strata_verifier.json``, never from run
+parameters: the premise lines (``"{pid}: {text}"`` or the text alone, joined
+by ``"\n"``), the encoding (an encoder's ``(premises, hypothesis)`` pair, or a
+decoder's ``decoder_template`` filled in one pass with the tokenizer's own
+special tokens, answer read at the final token), the pooling, the label order
+(the model's ``id2label`` must name the verifier's labels in order) and the
+auxiliary heads. The trainer and the scorer render through one module,
+``strata_forge.training.verifier_render``, and read the auxiliary heads
+through one function, ``classifier_heads.aux_outputs``. The spec's templates
+only name the two roles, so they are fixed: ``template`` ``{premises}``,
+``pair_template`` ``{hypothesis}``, each mapped to its column; ``premises`` is
+a list of ``{pid, text}`` with pids ``p1..pN``, as in training, and a malformed
+cell refuses the run naming its row. ``label_alias`` is optional (each label
+as itself), ``list_separator`` is refused, and ``dtype`` stays required. The
+length limit is the artifact's training ``max_length`` unless
+``max_model_len`` asks for a smaller one (a larger one is refused: a verifier
+is scored only on rows it could have been trained on; ``max_length_source``
+``artifact``); overflow is dropped and counted as in pair mode. The record is
+read back under the trainer's rules: a decoder template must hold
+``{premises}`` and ``{hypothesis}`` once each and match its recorded
+``decoder_template_sha256``. A decoder row whose last token is the pad id is
+refused, as training refuses it: the stock head reads the rightmost non-pad
+token and the auxiliary heads the last one the attention mask keeps, and only
+on such a row would they differ.
+
+Results rows add, when the artifact has those heads, ``logit_inconsistent``
+and ``p_inconsistent`` (its sigmoid) and ``support_scores``: a list of
+``{pid, logit, p}``, one per premise in premise order (``null`` on an
+unscored row). ``apply_calibration`` (artifact mode only) is ``off`` by
+default; ``auto`` divides the logits by the artifact's ``calibration.json``
+temperature before the ``p_*`` softmax. The ``logit_*`` columns are always the
+raw logits. The manifest's ``scoring`` block adds ``input``
+(``strata_verifier`` or ``pair``), ``artifact`` (the verifier record's SHA-256,
+its rendering, pooling and heads) and ``calibration`` (the mode, whether it
+was applied, the temperature, the record's SHA-256 and fit, and
+``raw_logits_kept``).
 
 A scoring run pushes only to an output repo of its own: one holding any
 file but ``.gitattributes`` is refused before the dataset loads and again at

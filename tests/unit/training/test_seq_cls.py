@@ -572,6 +572,9 @@ class TestAcceptanceSmoke:
         record = json.loads((artifact / CALIBRATION_FILENAME).read_text())
         assert record == result.receipts["calibration"]
         assert record["split"]["commit"] == "c" * 40
+        # One contract with the evaluator: the temperature and the labels it applies to.
+        assert record["schema"] == "strata.calibration/v1"
+        assert record["labels"] == list(tiny.LABELS)
         assert record["fit"]["temperature"] > 0
         assert record["fit"]["nll_after"] <= record["fit"]["nll_before"] + 1e-12
         # Two-way rows have no three-way gold and are excluded, by count.

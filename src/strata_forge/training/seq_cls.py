@@ -44,7 +44,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Generator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -56,6 +56,7 @@ from strata_forge.training.classifier_heads import (
     ENCODER_NEW_HEAD,
     HeadLoadError,
     LoadReceipt,
+    aux_outputs,
     build_aux_heads,
     check_load,
     init_decoder_head,
@@ -72,6 +73,15 @@ from strata_forge.training.loading import (
 )
 from strata_forge.training.progress import attach as _attach_progress
 from strata_forge.training.progress import coerce_int, numeric_metrics
+from strata_forge.training.verifier_render import (
+    RenderedRow,
+    Rendering,
+    encode_rows,
+    fill_template,
+    marker_tokens,
+    render_premises,
+    render_row,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,7 +114,6 @@ MAX_SEQ_CLS_ROWS = 600_000
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]+)\}")
-_PREMISE_SEPARATOR = "\n"
 _ROLES_PRIMARY = ("premises", "hypothesis", "label")
 _TWO_WAY = "2way_entail_vs_not"
 _FULL = "3way"
@@ -360,64 +369,6 @@ class CudaMemoryProbe:
 # ----------------------------------------------------------------------------- rendering
 
 
-def render_premises(value: Any, premise_format: str) -> tuple[str, list[tuple[str, int]]]:
-    """Render a ``premises`` cell and return ``(text, [(pid, first_char_offset), ...])``.
-
-    A cell is a non-empty list of ``{pid, text}`` objects whose pids are ``p1``, ``p2``, ... in
-    order; a bare string or a list of strings is refused, because a premise without its declared
-    id cannot be supervised or audited. Under ``ids`` each premise is the line
-    ``"{pid}: {text}"`` and its marker is the pid's first character; under ``plain`` the line is
-    the text and there are no markers.
-    """
-    if isinstance(value, str | bytes) or not isinstance(value, Sequence) or not value:
-        msg = "premises must be a non-empty list of {pid, text} objects"
-        raise DatasetFormatError(msg)
-    entries: list[tuple[str, str]] = []
-    for i, item in enumerate(value):  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType] - a dataset cell
-        if not (isinstance(item, Mapping) and "pid" in item and "text" in item):
-            msg = "each premise must be an object with pid and text"
-            raise DatasetFormatError(msg)
-        pid: Any = item["pid"]  # pyright: ignore[reportUnknownVariableType] - a dataset cell
-        text: Any = item["text"]  # pyright: ignore[reportUnknownVariableType] - a dataset cell
-        if not isinstance(text, str):
-            msg = "each premise's text must be a string"
-            raise DatasetFormatError(msg)
-        if pid != f"p{i + 1}":
-            msg = f"premise ids must be p1..pN in order; premise {i + 1} is not p{i + 1}"
-            raise DatasetFormatError(msg)
-        entries.append((str(pid), text))  # pyright: ignore[reportUnknownArgumentType] - checked equal to a str
-    lines: list[str] = []
-    markers: list[tuple[str, int]] = []
-    offset = 0
-    for pid, text in entries:
-        line = f"{pid}: {text}" if premise_format == "ids" else text
-        if premise_format == "ids":
-            markers.append((pid, offset))
-        lines.append(line)
-        offset += len(line) + len(_PREMISE_SEPARATOR)
-    return _PREMISE_SEPARATOR.join(lines), markers
-
-
-def _decoder_text(template: str, premises: str, hypothesis: str) -> tuple[str, int]:
-    """Fill the template in one pass; return the text and where the premises start in it."""
-    start = -1
-    pieces: list[str] = []
-    cursor = 0
-    length = 0
-    for match in _PLACEHOLDER_RE.finditer(template):
-        literal = template[cursor : match.start()]
-        pieces.append(literal)
-        length += len(literal)
-        value = premises if match.group(1) == "premises" else hypothesis
-        if match.group(1) == "premises":
-            start = length
-        pieces.append(value)
-        length += len(value)
-        cursor = match.end()
-    pieces.append(template[cursor:])
-    return "".join(pieces), start
-
-
 @dataclass
 class _Encoder:
     """Turns role rows into model inputs and targets. One instance per run; pure Python."""
@@ -425,7 +376,7 @@ class _Encoder:
     config: SeqClsConfig
     tokenizer: Any
     roles: frozenset[str]
-    decoder: bool
+    rendering: Rendering
 
     def _label(self, raw: Any, row: int) -> str:
         if isinstance(raw, bool) or raw is None:
@@ -533,30 +484,16 @@ class _Encoder:
                 "support_row",
             )
         }
-        texts: list[str] = []
-        pairs: list[str] = []
-        marker_sets: list[list[tuple[str, int]]] = []
+        rendered: list[RenderedRow] = []
         for i in range(len(indices)):
-            premises, markers = render_premises(batch["premises"][i], self.config.premise_format)
-            hypothesis: Any = batch["hypothesis"][i]
-            if not isinstance(hypothesis, str):
-                msg = f"row {indices[i]}: hypothesis must be a string"
-                raise DatasetFormatError(msg)
-            if self.decoder:
-                text, start = _decoder_text(self.config.decoder_template, premises, hypothesis)
-                texts.append(text)
-                marker_sets.append([(pid, start + off) for pid, off in markers])
-            else:
-                texts.append(premises)
-                pairs.append(hypothesis)
-                marker_sets.append(markers)
-        encoded: Any = self.tokenizer(
-            texts,
-            *([pairs] if pairs else []),
-            add_special_tokens=True,
-            truncation=False,
-            return_offsets_mapping=True,
-        )
+            try:
+                rendered.append(
+                    render_row(self.rendering, batch["premises"][i], batch["hypothesis"][i])
+                )
+            except DatasetFormatError as exc:
+                msg = f"row {indices[i]}: {exc}"
+                raise DatasetFormatError(msg) from exc
+        encoded: Any = encode_rows(self.tokenizer, rendered, return_offsets_mapping=True)
         for i, row in enumerate(indices):
             ids: list[int] = list(encoded["input_ids"][i])
             offsets: list[tuple[int, int]] = [tuple(o) for o in encoded["offset_mapping"][i]]  # pyright: ignore[reportAssignmentType] - tokenizer output
@@ -567,7 +504,7 @@ class _Encoder:
                 out[key].append(value)
             out["flag"].append(self._flag(batch, i, row))
             positions, support_target, support_row = self._support(
-                batch, i, row, marker_sets[i], offsets, sequence_ids
+                batch, i, row, rendered[i].markers, offsets, sequence_ids
             )
             out["support_positions"].append(positions)
             out["support_target"].append(support_target)
@@ -599,20 +536,10 @@ class _Encoder:
         if not wanted <= known:
             msg = f"row {row}: support_set names a premise id the row does not have"
             raise DatasetFormatError(msg)
-        positions: list[int] = []
-        for _pid, char in markers:
-            token = next(
-                (
-                    j
-                    for j, (start, end) in enumerate(offsets)
-                    if start <= char < end and sequence_ids[j] == 0
-                ),
-                None,
-            )
-            if token is None:
-                msg = f"row {row}: no token covers a premise id's first character"
-                raise DatasetFormatError(msg)
-            positions.append(token)
+        positions = marker_tokens(markers, offsets, sequence_ids)
+        if positions is None:
+            msg = f"row {row}: no token covers a premise id's first character"
+            raise DatasetFormatError(msg)
         targets = [1.0 if pid in wanted else 0.0 for pid, _ in markers]
         return positions, targets, 1
 
@@ -700,18 +627,16 @@ def _classes(torch: Any, transformers: Any) -> tuple[Any, Any]:
             result: dict[str, Any] = {"logits": out.logits}
             if self.aux.flag is None and self.aux.support is None:
                 return result
-            hidden: Any = self._hidden[-1]
-            rows: Any = torch.arange(hidden.shape[0], device=hidden.device)
-            if self._last_token:
-                position: Any = attention_mask.sum(-1) - 1
-            else:
-                position = torch.zeros_like(rows)
-            pooled: Any = hidden[rows, position]
-            if self.aux.flag is not None:
-                result["flag_logits"] = self.aux.flag(pooled).squeeze(-1)
-            if self.aux.support is not None and support_positions is not None:
-                markers: Any = hidden[rows.unsqueeze(-1), support_positions]
-                result["support_logits"] = self.aux.support(pooled, markers)
+            result.update(
+                aux_outputs(
+                    torch,
+                    self.aux,
+                    self._hidden[-1],
+                    attention_mask,
+                    last_token=self._last_token,
+                    support_positions=support_positions,
+                )
+            )
             return result
 
     class SeqClsTrainer(transformers.Trainer):  # pyright: ignore[reportUntypedBaseClass] - transformers is lazy
@@ -842,6 +767,17 @@ class SeqClsRunner:
             raise RuntimeError(msg)
         return self._decoder
 
+    @property
+    def rendering(self) -> Rendering:
+        """This run's rendering, shared with the scorer through ``strata_verifier.json``."""
+        cfg = self._config
+        return Rendering(
+            encoding="template" if self.decoder else "pair",
+            premise_format=cfg.premise_format,
+            decoder_template=cfg.decoder_template if self.decoder else None,
+            max_length=cfg.max_length,
+        )
+
     def _is_decoder(self, checkpoint: Path) -> bool:
         """The base's kind, from its own config; an ``existing`` decoder keeps its rendering.
 
@@ -922,7 +858,7 @@ class SeqClsRunner:
         if rows == 0 or rows > MAX_SEQ_CLS_ROWS:
             msg = f"{split}: {rows} rows; a seq_cls split holds 1 to {MAX_SEQ_CLS_ROWS} rows"
             raise PreflightError(msg, {"rows": rows})
-        encoder = _Encoder(self._config, tokenizer, roles, self.decoder)
+        encoder = _Encoder(self._config, tokenizer, roles, self.rendering)
         try:
             encoded: Any = dataset.map(
                 encoder.encode,
@@ -976,7 +912,7 @@ class SeqClsRunner:
     def _overhead(self, tokenizer: Any) -> int:
         """Tokens the rendering adds around the fields: special tokens plus template literals."""
         if self.decoder:
-            literal, _ = _decoder_text(self._config.decoder_template, "", "")
+            literal, _ = fill_template(self._config.decoder_template, "", "")
             literal_tokens = len(tokenizer(literal, add_special_tokens=False)["input_ids"])
             return int(tokenizer.num_special_tokens_to_add(pair=False)) + literal_tokens
         return int(tokenizer.num_special_tokens_to_add(pair=True))
@@ -1354,14 +1290,8 @@ class SeqClsRunner:
             "pooling": "last_token" if self.decoder else "first_token",
             "classifier_pooling": getattr(classifier.config, "classifier_pooling", None),
             "input": {
-                "encoding": "template" if self.decoder else "pair",
-                "premise_format": cfg.premise_format,
-                "premise_line": "{pid}: {text}" if cfg.premise_format == "ids" else "{text}",
-                "premise_separator": _PREMISE_SEPARATOR,
-                "decoder_template": cfg.decoder_template if self.decoder else None,
+                **self.rendering.to_verifier(),
                 "decoder_template_sha256": _sha256(cfg.decoder_template) if self.decoder else None,
-                "special_tokens": True,
-                "max_length": cfg.max_length,
                 "overflow": "error",
             },
             "verbalizers": dict(cfg.verbalizers) if cfg.verbalizers else None,
@@ -1449,7 +1379,11 @@ class SeqClsRunner:
                 f"{len(rows)} rows"
             )
             raise ArtifactCheckError(msg, parity)
-        out: dict[str, Any] = {"reload_parity": parity, "calibration": None}
+        out: dict[str, Any] = {
+            "reload_parity": parity,
+            "scoring_parity": self._scoring_parity(prepared, artifact_dir),
+            "calibration": None,
+        }
         if prepared.calibration is not None:
             out["calibration"] = self._calibrate(
                 model, prepared, artifact_dir, calibration_source or {}
@@ -1458,6 +1392,75 @@ class SeqClsRunner:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return out
+
+    def _scoring_parity(self, prepared: PreparedRun, artifact_dir: Path) -> dict[str, Any]:
+        """Score the first training rows through the scorer and compare with the trainer.
+
+        The scorer (``hf_classify`` with ``artifact: strata_verifier``) loads the saved artifact
+        and renders the RAW rows from its ``strata_verifier.json``; the trainer's in-memory
+        classifier reads the same rows as it encoded them. Both in float32 with TF32 off: the
+        logits must agree within ``CHECK_TOLERANCE`` with the same predicted label on every row,
+        or the artifact is refused before it is pushed.
+        """
+        torch, _ = _modules()
+        # Imported here: the scoring pipeline imports this package's heads and rendering.
+        scoring: Any = importlib.import_module("strata_forge.pipelines._scoring")
+        raw = prepared.scoring_rows
+        encoded = prepared.scoring_encoded
+        module: Any = prepared.module
+        device: Any = next(module.parameters()).device
+        with _exact_fp32(torch):
+            try:
+                scorer: Any = scoring.load_verifier(
+                    artifact_dir,
+                    label_alias=None,
+                    max_length=None,
+                    dtype="float32",
+                    apply_calibration=False,
+                )
+                rendered = scorer.render(
+                    [row["premises"] for row in raw], [row["hypothesis"] for row in raw]
+                )
+                scored: list[Any] = scorer.score(rendered)
+            except scoring.RunError as exc:
+                # The exception's type only: a loader's text can name paths on the machine.
+                msg = (
+                    f"the saved classifier could not be scored as a verifier ({type(exc).__name__})"
+                )
+                raise ArtifactCheckError(msg, {}) from exc
+            trained: list[list[float]] = []
+            module.eval()
+            with torch.no_grad():
+                for row in encoded:
+                    ids: Any = torch.tensor([row["input_ids"]], device=device)
+                    logits: Any = module.classifier(
+                        input_ids=ids, attention_mask=torch.ones_like(ids)
+                    ).logits[0]
+                    trained.append(cast("list[float]", logits.float().cpu().tolist()))
+        diff = 0.0
+        agree = 0
+        for mine, theirs in zip(trained, scored, strict=True):
+            diff = max(diff, max(abs(a - b) for a, b in zip(mine, theirs.logits, strict=True)))
+            agree += int(mine.index(max(mine)) == theirs.logits.index(max(theirs.logits)))
+        receipt: dict[str, Any] = {
+            "rows": len(raw),
+            "rows_from": "train",
+            "path": "hf_classify artifact strata_verifier",
+            "max_abs_logit_diff": diff,
+            "tolerance": CHECK_TOLERANCE,
+            "argmax_agree": agree,
+            "precision": "float32, tf32 off",
+            "passed": diff <= CHECK_TOLERANCE and agree == len(raw),
+        }
+        del scorer
+        if not receipt["passed"]:
+            msg = (
+                f"scored as a verifier, the saved classifier's logits differ from the trained "
+                f"one's by {diff:.3g} (tolerance {CHECK_TOLERANCE:g}), and the predicted label "
+                f"agrees on {agree} of {len(raw)} rows"
+            )
+            raise ArtifactCheckError(msg, receipt)
+        return receipt
 
     def _calibrate(
         self,
@@ -1632,6 +1635,14 @@ class SeqClsRunner:
             parity_rows=[parity_source[i] for i in range(min(CHECK_ROWS, len(parity_source)))],
             parity_from="eval" if evaluation is not None else "train",
             calibration=calibration,
+            scoring_rows=[
+                {
+                    "premises": train_dataset[i]["premises"],
+                    "hypothesis": train_dataset[i]["hypothesis"],
+                }
+                for i in range(min(CHECK_ROWS, len(train_dataset)))
+            ],
+            scoring_encoded=[train[i] for i in range(min(CHECK_ROWS, len(train)))],
         )
 
     def finish(
@@ -1718,6 +1729,9 @@ class PreparedRun:
     parity_rows: list[dict[str, Any]]
     parity_from: str
     calibration: Any = None
+    # The first training rows, raw and as the trainer encoded them, for the scoring-path check.
+    scoring_rows: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    scoring_encoded: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
 
 @contextlib.contextmanager
