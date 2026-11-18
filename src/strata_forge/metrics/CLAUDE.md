@@ -18,7 +18,14 @@ This is a pure deterministic numerical leaf. Read
 - Keep point definitions and serialized fields consistent with the synthetic conformance
   fixture in `tests/unit/metrics/fixtures/classification_point_v1.json`.
 - `TemperatureCalibration` is a draft component, not the full training calibration-file
-  schema. Do not introduce fitting, thresholds, other interval definitions, or pooling implicitly.
+  schema. Fitting lives only in `calibration_fit.py`: `fit_temperature`
+  (`temperature-nll-bisection-v1`: NLL bisected on beta = 1/T within [0.05, 20], the bound taken
+  and reported when the optimum lies outside), `cross_fit_temperature` (`cluster-cross-fit-v1`:
+  sorted cluster keys permuted by `Generator(PCG64(seed))`, dealt into contiguous folds, each
+  fold scored with the temperature fitted on the others) and `expected_calibration_error`
+  (`top-label-ece-v1`, 15 bins, equal-mass by stable confidence sort or equal-width). A fitted
+  temperature is never used to select a model, threshold or reference. Do not introduce
+  thresholds, other interval definitions, or pooling implicitly.
 - `comparison.py` owns Wilson binomial intervals, exact conditional McNemar, and explicit
   named-family Holm adjustment. Keep all-pair effect denominators distinct from discordant
   test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
@@ -40,7 +47,9 @@ This is a pure deterministic numerical leaf. Read
   (a resample with a declared class absent from gold and predictions has no macro-F1: counted in
   `undefined_resamples`, never dropped silently or zeroed),
   paired systems scored on the same resample and differenced before the quantiles, Hyndman-Fan
-  type 7 quantiles at exact rational positions, confidence fixed at 0.95. The same versioning
+  type 7 quantiles at exact rational positions, confidence fixed at 0.95.
+  `cluster_mean_bootstrap` / `paired_cluster_mean_bootstrap` apply the same contract to the mean
+  of a finite per-row score (a Brier term): cluster sums over cluster sizes per resample. The same versioning
   rule applies. No other bootstrap, and no inference of independence from cluster-repeated
   rows, is exported.
 - Update this file, module README, reference docs, and tests with any public API change.

@@ -111,8 +111,46 @@ Omitted `CalibrationScores` measurements are null. `.apply(logits, labels=...)` 
 exact recorded column order and class count. The fit reference is supplied provenance; the
 caller resolves an immutable source and enforces fit/evaluation split separation.
 
-This surface applies a supplied T. It does not fit T, choose thresholds, write artifacts,
-compute ECE, bootstrap intervals, or impose research acceptance gates.
+This surface applies a supplied T. Fitting and ECE live in
+[Temperature fitting, cross-fitting and ECE](#temperature-fitting-cross-fitting-and-ece); nothing
+here chooses thresholds, writes artifacts or imposes research acceptance gates.
+
+## Temperature fitting, cross-fitting and ECE
+
+```python
+from strata_forge.metrics.calibration_fit import (
+    cross_fit_temperature, expected_calibration_error, fit_temperature,
+)
+
+fit = fit_temperature(logits, gold, labels=labels)            # TemperatureFit
+held_out = cross_fit_temperature(logits, gold, labels=labels, clusters=base_ids, seed=20261104)
+ece = expected_calibration_error(gold, held_out.probabilities, labels=labels)  # 15 equal-mass bins
+```
+
+Direct-import only; NumPy from `[scoring]`.
+
+- **`fit_temperature`** (`temperature-nll-bisection-v1`) minimises mean NLL of
+  `softmax(logits / T)`. NLL is convex in beta = 1/T and its gradient `mean(E_p[z] - z_gold)` is
+  nondecreasing, so the gradient is bisected on `[1/20, 1/0.05]` to float precision (at most 200
+  steps). An optimum outside `[MIN_TEMPERATURE, MAX_TEMPERATURE]` = `[0.05, 20]` takes the bound
+  and sets `at_bound` (`"min"` for a population the logits already separate, `"max"` for one
+  they mislead). It records `n`, `nll_before` (T = 1) and `nll_after`. Every row needs finite
+  logits in label order and a declared gold label; a constant added to a row changes nothing.
+- **`cross_fit_temperature`** (`cluster-cross-fit-v1`) sorts the cluster keys, permutes them with
+  `Generator(PCG64(seed))` and deals them into `folds` (default 2) contiguous groups by position,
+  so a cluster's rows are never on both sides of a fit. Fold k's rows get `softmax(z / T_k)`
+  where `T_k` was fitted on every OTHER fold. The result holds the per-fold fits, the fold row
+  counts and every row's held-out probabilities in input order. Fewer clusters than folds
+  refuses (`calibration_too_few_clusters`).
+- **`expected_calibration_error`** (`top-label-ece-v1`): confidence is the largest probability and
+  the prediction its first argmax. `equal_mass` (default) sorts by confidence with a stable sort
+  and splits into `bins` (default 15) contiguous groups whose sizes differ by at most one;
+  `equal_width` uses `[k/bins, (k+1)/bins)` with 1.0 in the last bin. ECE is the
+  bin-count-weighted mean of `|accuracy - mean confidence|`; empty bins contribute nothing.
+  Rows must sum to one within 1e-6.
+
+A fitted temperature is provenance for the calibrated metrics it produced. Nothing here uses one
+to select a model, a reference or a threshold.
 
 ## Explicit-population comparisons
 
@@ -286,7 +324,11 @@ It needs NumPy from `[scoring]`, imported only when a function runs.
 `ClusterBootstrap` holds a `settings` block (the contract fields, `seed`, `resamples`, `n`,
 `clusters`, `numpy_version`) and `intervals` (`accuracy`, `macro_f1`, `invalid_rate`, each a
 `MetricInterval` of `point`, `lower`, `upper`; `point` is the full-sample value).
-`PairedClusterBootstrap` holds `settings`, `baseline`, `candidate` and `delta`. One call covers
+`PairedClusterBootstrap` holds `settings`, `baseline`, `candidate` and `delta`.
+`cluster_mean_bootstrap(values, clusters=..., seed=...)` and `paired_cluster_mean_bootstrap`
+apply the same contract to the mean of a finite per-row score (for example each row's Brier
+term): each resample's mean is its cluster sums over its cluster sizes, so 0/1 correctness gives
+exactly the accuracy interval above. One call covers
 one slice: a slice's interval resamples whole clusters within that slice. Both are direct-import
 only. 10,000 paired resamples over 12,000 clusters take a few seconds.
 

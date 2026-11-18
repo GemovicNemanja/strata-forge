@@ -312,3 +312,36 @@ def test_golden_bounds_pin_the_numpy_stream() -> None:
     assert result.delta.macro_f1.undefined_resamples == 16
     assert result.delta.accuracy.lower == -0.16666666666666674
     assert result.delta.accuracy.upper == 0.41666666666666663
+
+
+def test_mean_bootstrap_of_correctness_equals_the_accuracy_interval() -> None:
+    from strata_forge.metrics.cluster_bootstrap import (
+        cluster_mean_bootstrap,
+        paired_cluster_mean_bootstrap,
+    )
+
+    gold, base, cand, keys = _population(clusters=50)
+    correct_b = [1.0 if p == g else 0.0 for p, g in zip(base, gold, strict=True)]
+    correct_c = [1.0 if p == g else 0.0 for p, g in zip(cand, gold, strict=True)]
+    accuracy = cluster_bootstrap(gold, base, labels=LABELS, clusters=keys, seed=SEED, resamples=500)
+    mean = cluster_mean_bootstrap(correct_b, clusters=keys, seed=SEED, resamples=500)
+    assert mean.interval.point == pytest.approx(accuracy.intervals.accuracy.point, abs=1e-12)
+    assert mean.interval.lower == pytest.approx(accuracy.intervals.accuracy.lower, abs=1e-12)
+    assert mean.interval.upper == pytest.approx(accuracy.intervals.accuracy.upper, abs=1e-12)
+    paired = paired_cluster_bootstrap(
+        gold, base, cand, labels=LABELS, clusters=keys, seed=SEED, resamples=500
+    )
+    paired_mean = paired_cluster_mean_bootstrap(
+        correct_b, correct_c, clusters=keys, seed=SEED, resamples=500
+    )
+    assert paired_mean.delta.lower == pytest.approx(paired.delta.accuracy.lower, abs=1e-12)
+    assert paired_mean.delta.upper == pytest.approx(paired.delta.accuracy.upper, abs=1e-12)
+
+
+def test_mean_bootstrap_refusals() -> None:
+    from strata_forge.metrics.cluster_bootstrap import cluster_mean_bootstrap
+
+    with pytest.raises(ValidationError, match="cluster_bootstrap_value_invalid"):
+        cluster_mean_bootstrap([float("nan")], clusters=["a"], seed=1)
+    with pytest.raises(ValidationError, match="cluster_bootstrap_empty"):
+        cluster_mean_bootstrap([], clusters=[], seed=1)

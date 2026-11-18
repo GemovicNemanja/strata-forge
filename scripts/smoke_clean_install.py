@@ -327,6 +327,13 @@ def check_scoring() -> None:
     ):
         raise SmokeError("temperature application changed")
 
+    from strata_forge.metrics.calibration_fit import fit_temperature
+
+    # Every row says "yes" at 3:1 and 60% are: the NLL optimum is T = log 3 / log 1.5.
+    fit = fit_temperature([[0.0, math.log(3)]] * 10, ["yes"] * 6 + ["no"] * 4, labels=("no", "yes"))
+    if not math.isclose(fit.temperature, math.log(3) / math.log(1.5), rel_tol=1e-9):
+        raise SmokeError("temperature fitting changed")
+
 
 def check_guided_json() -> None:
     """The guided-JSON checks on the installed ``jsonschema``: schema, replies, no fetching."""
