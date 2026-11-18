@@ -27,7 +27,7 @@ Authoring + storage layer for prompts that compile to
 
 - **Owns:** `template.py`, `cache_aware.py`, `variables.py`,
   `registry.py`, `stores/memory.py`, `stores/langfuse.py`,
-  `rendering.py`.
+  `rendering.py`, `compiled.py`.
 - **Imports from inside `forge`:** `strata_forge.core` (errors, logging,
   reproducibility helpers) and `strata_forge.llm` (message types and the
   `AnyMessage` union — used as the rendering target).
@@ -50,6 +50,12 @@ Treat anything not in `__init__.py` as internal.
   cache hints `strata_forge.llm` consumes.
 - `PromptError`, `PromptValidationError` — errors raised from this
   module, both `ForgeError` subclasses.
+- Compiled builds (`compiled.py`): `compile_prompt(parts, variables)`
+  -> `CompileResult` (`build` or `issues`), `PromptBuild` (self-verifying
+  hash), `render_build(build, values)`, `bind_row(build, bindings, row)`,
+  `parse_part`, `value_text`, `PromptPart`, `VariableSpec`, `Binding`,
+  `CompileIssue`, `PromptBuildError`, `PromptRenderError`,
+  `COMPILER_VERSION`, `BUILD_FORMAT`.
 
 ## Internal patterns
 
@@ -90,6 +96,15 @@ Treat anything not in `__init__.py` as internal.
   variable is missing).
 
 ## Gotchas
+
+- **Compiled builds are not Jinja.** `compiled.py` parses `{{ name }}`
+  (or the legacy `{name}`) with a scanner and renders by concatenation;
+  it must never grow filters, control flow or attribute access, because
+  ports of the renderer in other languages are held to
+  `tests/fixtures/prompt_build_vectors.json` and a remote runner renders
+  builds per dataset row. A change to compile or render output is a
+  change every port must follow: regenerate the vectors with
+  `scripts/gen_prompt_build_vectors.py` and bump `COMPILER_VERSION`.
 
 - **Jinja2 sandboxing is opt-in.** Using the default `Environment`
   silently allows file includes. We use

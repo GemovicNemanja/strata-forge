@@ -35,6 +35,7 @@ Source: [`src/strata_forge/prompts/`](../../src/strata_forge/prompts/).
 - [The Jinja2 sandbox](#the-jinja2-sandbox)
 - [Cache integration with `strata_forge.llm`](#cache-integration-with-forgellm)
 - [Stores](#stores)
+- [Compiled builds](#compiled-builds)
 - [Errors](#errors)
 - [Troubleshooting](#troubleshooting)
 
@@ -302,6 +303,83 @@ labels. `versions` walks `1..latest` (an assumption that holds for
 prompts created through this store; UI edits may produce gaps).
 
 ---
+
+## Compiled builds
+
+`strata_forge.prompts.compiled` is the authoritative compile and render for **versioned** prompts:
+the ones a control plane stores as revisions and a batch runner renders per dataset row. It is
+separate from `PromptTemplate` (which renders Jinja to messages in-process) because its output has
+to render byte-identically on machines that never share a Python process: a reviewer's preview, a
+control plane, a remote batch runner, and a port of the renderer in another language.
+
+```python
+from strata_forge.prompts import (
+    Binding, PromptPart, VariableSpec, bind_row, compile_prompt, render_build,
+)
+
+result = compile_prompt(
+    [
+        PromptPart(kind="module", name="Grounding rules", ref="mod_1", label="v8",
+                   text="Answer only from the supplied evidence."),
+        PromptPart(kind="self", name="Instructions",
+                   text="Customer message: {{ customer_message }}"),
+    ],
+    [VariableSpec(name="customer_message")],
+)
+build = result.build            # None when result.issues is non-empty
+build.hash                      # sha256 of the canonical content
+render_build(build, {"customer_message": "Can I return it?"})
+render_build(build, bind_row(build, {"customer_message": Binding(column="question")}, row))
+```
+
+- **Parts** are resolved by the caller, in composition order: `kind` (`module` | `prompt` |
+  `self`), a display `name`, opaque `ref`/`label` the source map carries back, the `text`, and
+  the part's `dialect`. They are canonicalized (Unicode NFC, `\n` line endings), stripped of
+  trailing newlines and joined with one blank line; an empty part contributes nothing.
+- **Dialects.** `strata`: `{{ name }}` is a variable, a single brace is literal, and every other
+  `{{ ... }}`, an unclosed `{{`, and `{%` / `{#` tags are compile errors (never literal text, so a
+  Jinja template cannot render silently wrong). `braces`: the batch runner's legacy `{name}`
+  template, imported **byte for byte**: one part on its own (composing it is `mixed_dialect`),
+  its text taken exactly as written (no NFC, no line-ending change, no trailing-newline strip),
+  its variables plain required strings, and the build marked `value_text: "python_str"`. Such a
+  build renders through `render_braces`, the one implementation of the legacy substitution that
+  the runner's `render_template` also calls, so a value is Python's `str()` of whatever the row
+  holds (`None` -> `"None"`, `1e-07` -> `"1e-07"`, `True` -> `"True"`, a list or dict its repr).
+  The two dialects therefore differ in value text on purpose: `strata` is typed and
+  host-independent, `braces` is the legacy runner's behaviour, kept so an imported run template
+  renders exactly as it did. Only `strata` builds are covered by the shared vectors for ports.
+- **Variables** are declared with `VariableSpec`: `type` (`string` | `number` | `boolean` |
+  `enum` | `json`), `required`, an optional `default` (optional variables only, checked against
+  the type) and the `values` of an enum. Every referenced variable must be declared once;
+  declarations no part uses are left out of the build.
+- **Issues** (`CompileIssue`, all errors): `unsupported_expression`, `unclosed_expression`,
+  `unsupported_block`, `undeclared_variable`, `duplicate_variable`, `too_large`, `empty_prompt`,
+  each with the part index and a 1-based line and column where one applies.
+- **`PromptBuild`** holds `segments` (literal text and variable references), the declarations
+  they use (in name order), each part's identity and SHA-256 (`parts`), a `source_map` from output
+  lines to parts, the `compiler_version`, and `hash`: SHA-256 over the canonical JSON of the build
+  format, the segments and the declarations. Constructing a build re-derives the hash and raises
+  `PromptBuildError` on a mismatch, so a build that arrives as data cannot be altered in transit.
+  The hash covers the format, the segments, the declarations and `value_text`, i.e. everything a
+  render reads. `parts`, `source_map` and `compiler_version` are provenance and deliberately not
+  hashed: the same rendered prompt has the same hash whatever it was composed from, and none of
+  them can change a render. They are still checked when a build is constructed: a source map
+  that points past the parts or the template's lines is refused as altered. A lone surrogate in
+  a part is an `invalid_text` issue, and one anywhere else raises `PromptBuildError`.
+- **Rendering** converts each value by its declared type, in one text form independent of the
+  host language: numbers in the ECMAScript `Number` text form (`1.0` -> `1`, `1e-07` -> `1e-7`),
+  booleans `true` / `false`, enums only from their declared values, structured values as compact
+  JSON with sorted keys; a `string` variable takes scalars in that same form. A missing (or
+  `None`) required value raises `PromptRenderError`; an optional one renders its default or
+  nothing. Integers are written in full only within +/-(2^53 - 1) (`MAX_SAFE_INTEGER`, the range
+  every host holds exactly); a larger one, as a value or inside JSON, is a `PromptRenderError`
+  (pass it as a string). Floats follow ECMAScript `Number::toString`, so a magnitude of 1e21 or
+  more, or below 1e-6, takes the exponent form (`1e+21`, `1e-7`).
+- **`Binding`** maps a variable to a dataset `column` or one fixed `value`; `bind_row` reads a
+  row through the bindings and refuses a binding to a column the row lacks.
+- **Shared vectors.** `tests/fixtures/prompt_build_vectors.json` (regenerated by
+  `scripts/gen_prompt_build_vectors.py`) pins compiles, renders and number text for any port; the
+  unit suite holds this implementation to it.
 
 ## Errors
 
