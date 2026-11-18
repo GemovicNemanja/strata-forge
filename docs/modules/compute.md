@@ -338,14 +338,18 @@ classed by its last attempt.
 
 A row is named by ``custom_id``: the value of the spec's ``id_column`` when
 one is declared (it must be a column of the split, and its values present,
-at most 512 characters and unique across the rows read, else the run is
-refused naming the row position, never the value), else its position
+1 to 512 printable characters, not blank (``valid_row_id``, the rule the
+control plane applies to a retry's ids) and unique across the rows the run
+reads, else the run is refused naming the row position, never the value),
+else its position
 ``row-<i>``. A position names a different row as soon as anything before it
 changes, so a declared id is what lets a later run name the same rows.
 ``row_ids`` (1-100,000 distinct ids, as ``custom_id`` names them) runs only
-those rows: they are selected from the whole split, so ``row_limit`` does
-not cut the selection, in split order, and a run whose requested ids are
-not all in the split is refused with the count it could not find. Both are
+those rows, selected in split order from the rows the run reads (the first
+``row_limit`` rows, or the whole split without one): a retry that carries
+its source run's ``row_limit`` reads the same rows and checks their ids for
+uniqueness over the same window. A run whose requested ids are not all
+among those rows is refused with the count it could not find. Both are
 chat-only: a scoring engine's rows carry their own declared ``item_id``,
 and a spec setting either with another engine is refused. ``finish_reason`` is the client's normalized value (``stop``,
 ``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
@@ -388,12 +392,23 @@ manifest are written, whether the push succeeded or failed, it carries the
 SHA-256 of the ``manifest.json`` bytes as written and the facts an
 orchestrator compares with what it admitted: ``model`` (``id``,
 ``requested_revision``, ``commit``), ``dataset`` (``id``, ``config``,
-``split``, ``requested_revision``), ``template_sha256``,
+``split``, ``requested_revision`` and the ``commit`` the split was read at:
+an unpinned run resolves the head to a commit before the load and loads at
+it, so this names the rows read), ``template_sha256``,
 ``engine_version``, ``id_column``, ``row_ids`` (``{count, sha256}`` or
 ``None``), ``rows`` (``total``, ``succeeded``, ``failed``) and ``output``
 (``repo_id`` and the ``commit_sha`` of the Hub commit the push made, or
 ``None`` when nothing was pushed). No row text, no prompt text and no
 credential. Its ``kind`` is ``chat``.
+
+Beside it the chat runner writes ``failed_rows.json``
+(``FAILED_ROWS_FILENAME``, schema ``strata.run.failed_rows/v1``): the
+``id_column``, the ``count`` of distinct failed rows and, when rows are
+named by ``id_column``, their ``row_ids`` in split order, bounded by
+``MAX_FAILED_ROW_IDS`` (10,000) and ``MAX_FAILED_ROW_ID_BYTES`` (64 KiB),
+with ``complete`` saying whether every failed row is listed. Positional
+names are counted and never listed. It is what a retry of the failed rows
+may name; the ids are the user's data and appear nowhere else.
 
 Every other pushing runner writes one too, through
 ``_common.build_receipt(kind, manifest_path, output, rows=...)``: a scoring

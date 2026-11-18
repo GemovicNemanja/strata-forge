@@ -182,13 +182,20 @@ if TYPE_CHECKING:
     from strata_forge.pipelines._scoring import ScoringInputs
 
 __all__ = [
+    "FAILED_ROWS_FILENAME",
+    "FAILED_ROWS_SCHEMA",
+    "MAX_FAILED_ROW_IDS",
+    "MAX_FAILED_ROW_ID_BYTES",
     "SNAPSHOT_IGNORED",
     "SNAPSHOT_PATTERNS",
     "LabelToken",
     "RunSpec",
+    "failed_rows_record",
     "main",
     "render_template",
     "template_placeholders",
+    "valid_row_id",
+    "write_failed_rows",
 ]
 
 # vLLM serves on loopback only — the runner talks to it via localhost, and a multi-tenant
@@ -552,6 +559,20 @@ MAX_ROW_IDS = 100_000
 _MAX_ROW_ID_CHARS = 512
 _MAX_ID_COLUMN_CHARS = 255
 
+#: The failed rows a chat run records in its working directory, beside its receipt, and the most
+#: ids (and bytes of ids) that record holds: what a retry of the failed rows may name.
+FAILED_ROWS_FILENAME = "failed_rows.json"
+FAILED_ROWS_SCHEMA = "strata.run.failed_rows/v1"
+MAX_FAILED_ROW_IDS = 10_000
+MAX_FAILED_ROW_ID_BYTES = 64 * 1024
+
+
+def valid_row_id(text: str) -> bool:
+    """A row id the platform can name: 1 to 512 characters, printable (no newline, tab or other
+    control character) and not blank. The control plane applies the same rule to a retry's ids."""
+    return 0 < len(text) <= _MAX_ROW_ID_CHARS and text.isprintable() and bool(text.strip())
+
+
 #: The stable class of a failed row's error (``error_kind``): read off the exception's type, never
 #: its text, so a consumer can count and filter failures without parsing prose.
 type RowErrorKind = Literal["timeout", "rate_limited", "model_error", "invalid_output", "other"]
@@ -589,9 +610,10 @@ class RunSpec(BaseModel):
     # Unset, a row is named by its position (``row-<i>``), which names a different row as soon
     # as anything before it changes.
     id_column: str | None = Field(default=None, min_length=1, max_length=_MAX_ID_COLUMN_CHARS)
-    # Run only the rows with these ids (as ``custom_id`` names them). Read from the whole split,
-    # so ``row_limit`` does not cut the selection, and every id must be found: a retry of the
-    # failed rows of a run that silently ran fewer rows than asked would hide the rest.
+    # Run only the rows with these ids (as ``custom_id`` names them), selected from the rows the
+    # run reads (the first ``row_limit`` rows, or the whole split): the same rows, and the same
+    # id uniqueness check, as the run whose failed rows a retry names, when the retry carries its
+    # ``row_limit``. Every id must be found: a retry that silently ran fewer rows would hide the rest.
     row_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_ROW_IDS)
 
     @field_validator("row_ids")
@@ -599,8 +621,8 @@ class RunSpec(BaseModel):
     def _distinct_row_ids(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return None
-        if any(not item or len(item) > _MAX_ROW_ID_CHARS for item in value):
-            msg = f"each row id is 1 to {_MAX_ROW_ID_CHARS} characters"
+        if not all(valid_row_id(item) for item in value):
+            msg = f"each row id is 1 to {_MAX_ROW_ID_CHARS} printable characters, not blank"
             raise ValueError(msg)
         if len(set(value)) != len(value):
             msg = "row_ids names a row more than once"
@@ -750,19 +772,26 @@ def _row_id(id_column: str | None, row: dict[str, Any], position: int) -> str:
     if len(text) > _MAX_ROW_ID_CHARS:
         msg = f"id_column {id_column!r} holds an id over {_MAX_ROW_ID_CHARS} characters in row {position}"
         raise RunError(msg)
+    if not valid_row_id(text):
+        msg = (
+            f"id_column {id_column!r} holds an id with a control character in row {position}; "
+            "an id must be printable"
+        )
+        raise RunError(msg)
     return text
 
 
 def select_rows(spec: RunSpec, source: Iterable[Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """The rows a chat run sends, and the ``custom_id`` of each, in split order.
 
-    Without ``row_ids`` this reads up to ``row_limit`` rows. With them it reads the whole split
-    (sliced during iteration otherwise, so a huge split is still never materialised whole) and
-    keeps only the named rows, and every named id must be found. An ``id_column`` value must be
-    unique across every row read.
+    It reads up to ``row_limit`` rows (sliced during iteration, so a huge split is never
+    materialised whole), or the whole split without one. With ``row_ids`` it keeps only the named
+    rows among those, and every named id must be found. An ``id_column`` value must be unique
+    across every row read: the same window, and so the same check, for a run and a retry of its
+    failed rows that carries its ``row_limit``.
     """
     wanted = set(spec.row_ids) if spec.row_ids is not None else None
-    limit = None if wanted is not None else spec.hyperparams.row_limit
+    limit = spec.hyperparams.row_limit
     rows: list[dict[str, Any]] = []
     ids: list[str] = []
     seen: set[str] = set()
@@ -785,7 +814,8 @@ def select_rows(spec: RunSpec, source: Iterable[Any]) -> tuple[list[dict[str, An
         ids.append(row_id)
     if wanted is not None and len(ids) != len(wanted):
         msg = (
-            f"{len(wanted) - len(ids)} of the {len(wanted)} requested row ids are not in the split"
+            f"{len(wanted) - len(ids)} of the {len(wanted)} requested row ids are not in the rows "
+            "this run reads"
         )
         raise RunError(msg)
     return rows, ids
@@ -1468,6 +1498,7 @@ def _build_manifest(
     serving: dict[str, Any] | None = None,
     *,
     chat_template_sha256: str | None = None,
+    dataset_commit: str | None = None,
 ) -> dict[str, Any]:
     """What a run needs to be reproduced and audited, with no row content and no secret.
 
@@ -1509,6 +1540,9 @@ def _build_manifest(
             "config": spec.dataset_config,
             "split": spec.split,
             "requested_revision": spec.dataset_commit_sha,
+            # The commit the split was actually read at: the pin, or the head resolved before
+            # the load and then loaded at, so it names the rows read even without a pin.
+            "commit": dataset_commit,
         },
         # What the model server actually ran with, next to what was asked for in `hyperparams`.
         "serving": serving
@@ -1618,6 +1652,7 @@ def _build_receipt(
             "config": dataset.get("config"),
             "split": dataset.get("split"),
             "requested_revision": dataset.get("requested_revision"),
+            "commit": dataset.get("commit"),
         },
         "template_sha256": manifest.get("template_sha256"),
         "engine_version": engine.get("version"),
@@ -1664,9 +1699,17 @@ async def _execute(
     hp = _effective_hyperparams(spec.hyperparams, config)
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
         if given is None:
-            rows, row_ids = await asyncio.to_thread(_load_chat_rows, spec, hub_token)
+            # Resolved to a commit first and loaded at it, so the receipt names the rows read.
+            dataset_commit: str | None = await _dataset_commit(spec, hub_token)
+            rows, row_ids = await asyncio.to_thread(
+                _load_chat_rows,
+                spec.model_copy(update={"dataset_commit_sha": dataset_commit}),
+                hub_token,
+            )
         else:
-            # Prepared rows (the grader's cases) are named as select_rows names a split's rows.
+            # Prepared rows (the grader's cases) read no split: they are named as select_rows
+            # names a split's rows, and only a pin the spec carries is recorded.
+            dataset_commit = spec.dataset_commit_sha
             rows, row_ids = select_rows(spec, given)
     prompts, custom_ids = _build_requests(spec, rows, row_ids)
     # `start` stays exactly here: it is the documented milestone that says inference is about
@@ -1795,7 +1838,12 @@ async def _execute(
     # Both branches sit between the last `step` (which reads 100%) and `end`, so a run that dies
     # here would otherwise look like it died complete, with no explanation.
     manifest = _build_manifest(
-        spec, out, model_commit, serving_facts, chat_template_sha256=chat_template_sha256
+        spec,
+        out,
+        model_commit,
+        serving_facts,
+        chat_template_sha256=chat_template_sha256,
+        dataset_commit=dataset_commit,
     )
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
@@ -1820,6 +1868,7 @@ async def _execute(
     await asyncio.to_thread(
         write_receipt, _build_receipt(manifest, manifest_bytes, out, pushed), Path.cwd()
     )
+    await asyncio.to_thread(write_failed_rows, spec.id_column, out, Path.cwd())
     if push_error is not None:
         # Name WHERE the results are. The run still fails — the user asked for them on the Hub
         # and they are not there — but a failure at the last step of a long run is the moment it
@@ -1854,8 +1903,46 @@ async def _execute(
     return destination
 
 
+def failed_rows_record(id_column: str | None, rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Which rows of a chat run failed, by ``custom_id``: what a retry of its failed rows may name.
+
+    The ids are listed only when rows are named by ``id_column`` (a position names a different
+    row once anything before it changes), in split order, distinct (a row sampled ``n`` times
+    fails once), up to ``MAX_FAILED_ROW_IDS`` ids and ``MAX_FAILED_ROW_ID_BYTES`` of them;
+    ``complete`` says whether every failed row is listed.
+    """
+    failed: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.get("error") is not None and row["custom_id"] not in seen:
+            seen.add(row["custom_id"])
+            failed.append(row["custom_id"])
+    listed: list[str] | None = None
+    if id_column is not None:
+        listed, size = [], 2
+        for row_id in failed:
+            size += len(json.dumps(row_id)) + 2
+            if len(listed) >= MAX_FAILED_ROW_IDS or size > MAX_FAILED_ROW_ID_BYTES:
+                break
+            listed.append(row_id)
+    return {
+        "schema": FAILED_ROWS_SCHEMA,
+        "id_column": id_column,
+        "count": len(failed),
+        "row_ids": listed,
+        "complete": listed is not None and len(listed) == len(failed),
+    }
+
+
+def write_failed_rows(id_column: str | None, rows: Sequence[dict[str, Any]], workdir: Path) -> Path:
+    """Write :func:`failed_rows_record` as ``failed_rows.json`` in ``workdir``."""
+    path = workdir / FAILED_ROWS_FILENAME
+    path.write_text(json.dumps(failed_rows_record(id_column, rows), sort_keys=True) + "\n")
+    return path
+
+
 async def _dataset_commit(spec: RunSpec, token: str | Literal[False]) -> str:
-    """The dataset commit a scoring run reads: its pin, or the default branch's head resolved now.
+    """The dataset commit a chat or scoring run reads: its pin, or the default branch's head resolved now.
 
     Resolved once, before the load, and then loaded at that commit, so the manifest names the
     exact rows scored even when the spec carried no pin.

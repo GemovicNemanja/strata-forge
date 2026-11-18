@@ -110,6 +110,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   dataset pins requested and served, the template digest, the engine version, `id_column`,
   `row_ids`, row counts and the output repo with the commit the push made. `_push_results` returns
   that commit id beside the repo (`commit_oid`).
+- A chat run records its failed rows in `failed_rows.json` beside its receipt (`failed_rows_record`:
+  the distinct failed ids when rows are named by `id_column`, bounded by count and size, with
+  `complete`), the commit it read its split at (`dataset.commit`, resolved before the load when the
+  run is unpinned), and checks one id rule shared with the control plane (`valid_row_id`: 1-512
+  printable characters, not blank). `row_ids` are selected from the rows the run reads, so
+  `row_limit` bounds a retry's window, and its id uniqueness check, as it bounded its source run.
 - Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):
   scoring (`hf_classify`, `hf_label_logits`, verifier artifacts), fine-tuning (incl. `seq_cls`) and
   evaluation runs write `_common.build_receipt`'s shape (manifest digest, the model, dataset and

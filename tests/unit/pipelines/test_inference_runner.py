@@ -2249,16 +2249,62 @@ def test_a_declared_id_column_must_hold_unique_present_ids(
     assert "SECRET-ID" not in str(caught.value)
 
 
-def test_row_ids_select_from_the_whole_split() -> None:
-    # row_limit does not cut a selection: the named rows are found wherever they are.
-    spec = _chat_spec(row_ids=["row-2", "row-0"], hyperparams={"row_limit": 1})
+def test_row_ids_select_from_the_rows_the_run_reads() -> None:
+    spec = _chat_spec(row_ids=["row-2", "row-0"])
     rows, ids = ir.select_rows(spec, iter(_SPLIT))
     assert ids == ["row-0", "row-2"]  # in split order
     assert [r["question"] for r in rows] == ["a", "c"]
     _, ids = ir.select_rows(_chat_spec(id_column="ticket", row_ids=["t-3"]), iter(_SPLIT))
     assert ids == ["t-3"]
-    with pytest.raises(ir.RunError, match="2 of the 3 requested row ids are not in the split"):
+    with pytest.raises(ir.RunError, match="2 of the 3 requested row ids are not in the rows"):
         ir.select_rows(_chat_spec(id_column="ticket", row_ids=["t-1", "t-9", "t-8"]), iter(_SPLIT))
+    # row_limit bounds the window a selection is made from, as it bounded the run being retried:
+    # the same rows, and the same id uniqueness check, so a retry names exactly those rows.
+    limited = _chat_spec(id_column="ticket", row_ids=["t-3"], hyperparams={"row_limit": 2})
+    with pytest.raises(ir.RunError, match="1 of the 1 requested row ids are not in the rows"):
+        ir.select_rows(limited, iter(_SPLIT))
+    # A duplicate past the window does not refuse a run (or its retry) that never reads it.
+    split = [*_SPLIT[:2], {**_SPLIT[0]}]
+    _, ids = ir.select_rows(
+        _chat_spec(id_column="ticket", row_ids=["t-2"], hyperparams={"row_limit": 2}), iter(split)
+    )
+    assert ids == ["t-2"]
+
+
+def test_a_row_id_is_printable_and_not_blank() -> None:
+    assert ir.valid_row_id("t-1")
+    assert ir.valid_row_id("a b")
+    for bad in ("", "   ", "a\nb", "a\tb", "x" * 513):
+        assert not ir.valid_row_id(bad)
+    with pytest.raises(ir.RunError, match="control character in row 0"):
+        ir.select_rows(_chat_spec(id_column="ticket"), iter([{"ticket": "SECRET\nID"}]))
+
+
+def test_failed_rows_are_recorded_by_id() -> None:
+    rows = [
+        {"custom_id": "t-1", "error": None},
+        {"custom_id": "t-2", "error": "boom"},
+        {"custom_id": "t-2", "error": "boom"},  # the same row's second sample
+        {"custom_id": "t-3", "error": "boom"},
+    ]
+    record = ir.failed_rows_record("ticket", rows)
+    assert record == {
+        "schema": "strata.run.failed_rows/v1",
+        "id_column": "ticket",
+        "count": 2,
+        "row_ids": ["t-2", "t-3"],
+        "complete": True,
+    }
+    # Positional names are not stable, so they are counted, never listed.
+    positional = ir.failed_rows_record(None, rows)
+    assert (positional["row_ids"], positional["complete"], positional["count"]) == (None, False, 2)
+    many = [{"custom_id": f"id-{i}", "error": "x"} for i in range(ir.MAX_FAILED_ROW_IDS + 5)]
+    capped = ir.failed_rows_record("ticket", many)
+    # Bounded by count and by size, as the retry request that names them is.
+    assert 0 < len(capped["row_ids"]) <= ir.MAX_FAILED_ROW_IDS
+    assert len(json.dumps(capped["row_ids"])) <= ir.MAX_FAILED_ROW_ID_BYTES
+    assert capped["count"] == ir.MAX_FAILED_ROW_IDS + 5
+    assert capped["complete"] is False
 
 
 def test_row_ids_are_validated_in_the_spec() -> None:
@@ -2359,6 +2405,21 @@ async def test_a_run_names_its_rows_by_the_declared_column(
     assert manifest["row_ids"] == ir.row_ids_digest(["t-1", "t-3"])
 
 
+@pytest.fixture(autouse=True)
+def _resolved_dataset_commit(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    """A run resolves its dataset to a commit before loading it; here that is the pin, or a
+    fixed commit, never a Hub call."""
+
+    async def _commit(spec: Any, token: Any) -> str:
+        del token
+        return cast("str", spec.dataset_commit_sha or _DATASET_HEAD)
+
+    monkeypatch.setattr(ir, "_dataset_commit", _commit)
+
+
+_DATASET_HEAD = "9" * 40
+
+
 async def test_a_run_leaves_its_execution_receipt_in_the_workdir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2413,6 +2474,13 @@ async def test_a_run_leaves_its_execution_receipt_in_the_workdir(
     assert receipt["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
     assert receipt["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
     assert receipt["dataset"]["id"] == "org/ds"
+    # Unpinned, the split is read at the head resolved before the load, and that is recorded.
+    assert receipt["dataset"]["requested_revision"] is None
+    assert receipt["dataset"]["commit"] == _DATASET_HEAD
+    assert manifest["dataset"]["commit"] == _DATASET_HEAD
+    # The failed row, by id, beside the receipt: what a retry of the failed rows may name.
+    failed = json.loads((workdir / ir.FAILED_ROWS_FILENAME).read_text())
+    assert (failed["row_ids"], failed["count"], failed["complete"]) == (["t-3"], 1, True)
     assert receipt["template_sha256"] == manifest["template_sha256"]
     assert receipt["engine_version"] == manifest["engine"]["version"]
     assert receipt["id_column"] == "ticket"
