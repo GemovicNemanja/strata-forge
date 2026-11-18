@@ -912,16 +912,18 @@ async def ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
 RECEIPT_SCHEMA = "strata.run.receipt/v1"
 RECEIPT_FILENAME = "receipt.json"
 
-_COMMIT_AT_END_RE = re.compile(r"([0-9a-f]{40})/?$")
+_COMMIT_OID_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def commit_oid(commit: str | None) -> str | None:
-    """The 40-character commit id a Hub commit answer names (an oid or a ``.../commit/<oid>``
-    URL), or None when it names none."""
+    """The commit id a Hub commit answer IS, exactly 40 lowercase hex characters, or None.
+
+    Nothing is extracted from a longer answer (a commit URL, which the upload returns when the Hub
+    reported no oid): a receipt records the commit a push made or no commit, never a guess."""
     if not commit:
         return None
-    match = _COMMIT_AT_END_RE.search(commit.strip())
-    return match.group(1) if match else None
+    value = commit.strip()
+    return value if _COMMIT_OID_RE.fullmatch(value) else None
 
 
 def build_receipt(
@@ -958,7 +960,12 @@ def build_receipt(
             "config": dataset.get("config"),
             "split": dataset.get("split"),
             "requested_revision": dataset.get("requested_revision"),
+            # The commit the split was read at, where the manifest records it (scoring, evaluation
+            # and grading runs read at a resolved or pinned commit).
+            "commit": dataset.get("commit"),
         },
+        # The prompt template's digest, where the run rendered one (a scoring run's premises).
+        "template_sha256": manifest.get("template_sha256"),
         "engine_version": engine.get("version"),
         "rows": rows,
         "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},

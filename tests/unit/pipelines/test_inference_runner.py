@@ -1611,8 +1611,8 @@ class _Hub:
 
     async def upload_files(self, files: Any, repo_id: str, **kwargs: Any) -> str:
         _Hub.calls.append(("upload_files", (dict(files), repo_id, kwargs)))
-        # What the Hub answers a commit with: its URL, ending in the commit id.
-        return f"https://huggingface.co/datasets/{repo_id}/commit/{_PUSHED_COMMIT}"
+        # What HFHubClient.upload_files answers when the Hub reports the commit: its oid.
+        return _PUSHED_COMMIT
 
     async def upload_file(self, *_a: Any, **_kw: Any) -> None:  # pragma: no cover - must not run
         raise AssertionError("results and manifest go up in one commit, never file by file")
@@ -2519,8 +2519,13 @@ async def test_a_failed_push_still_leaves_the_receipt(
 def test_a_hub_commit_answer_names_its_commit() -> None:
     from strata_forge.pipelines._common import commit_oid
 
-    assert commit_oid(f"https://huggingface.co/datasets/o/r/commit/{_SHA}") == _SHA
     assert commit_oid(_SHA) == _SHA
+    assert commit_oid(f" {_SHA}\n") == _SHA
+    # Only an exact oid: nothing is extracted from a URL (the upload's answer when the Hub reported
+    # no oid), so a receipt records the commit a push made or none, never a guess.
+    assert commit_oid(f"https://huggingface.co/datasets/o/r/commit/{_SHA}") is None
+    assert commit_oid(_SHA.upper()) is None
+    assert commit_oid(_SHA + "0") is None
     assert commit_oid("https://huggingface.co/datasets/o/r") is None
     assert commit_oid(None) is None
 

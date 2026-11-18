@@ -246,6 +246,13 @@ def test_a_graded_run_scores_aggregates_and_pushes_one_commit(env: dict[str, Any
     _write(env)
     destination, events = _run(_spec(), env["tmp"])
     assert destination == f"u/grades@{'e' * 40}"
+    # The grading run's own receipt, over the judge's chat receipt, naming the commit it pushed;
+    # the judge's failed-row record (the judge's rows, not this run's) is removed.
+    receipt = json.loads((env["tmp"] / "receipt.json").read_text())
+    assert receipt["kind"] == "grade"
+    assert receipt["output"] == {"repo_id": "u/grades", "commit_sha": "e" * 40}
+    assert receipt["dataset"]["commit"] == SHA_GOLD
+    assert not (env["tmp"] / "failed_rows.json").exists()
     uploads = [c for c in _Hub.calls if c[0] == "upload_files"]
     assert uploads == [
         (

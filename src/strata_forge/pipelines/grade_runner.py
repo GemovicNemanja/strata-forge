@@ -65,16 +65,20 @@ from strata_forge.pipelines._common import (
     SAFE_NAME_RE,
     RunError,
     RunSecrets,
+    build_receipt,
+    commit_oid,
     emit,
     ensure_private_output,
     load_config,
     manifest_engine,
     phase_sink,
+    pushed_at,
     results_dir,
     runner_main,
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
 from strata_forge.pipelines._grading import (
     CRITERIA_PLACEHOLDER,
@@ -89,6 +93,7 @@ from strata_forge.pipelines._grading import (
     rubric_schema,
 )
 from strata_forge.pipelines._guided import schema_digest
+from strata_forge.pipelines.inference_runner import FAILED_ROWS_FILENAME
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
@@ -1098,15 +1103,16 @@ def _write_outputs(
     }
 
 
-async def _push(spec: GradeSpec, files: dict[str, Path], hf_token: str) -> str:
-    """Push the report files in ONE commit, so a half-landed report can never exist."""
+async def _push(spec: GradeSpec, files: dict[str, Path], hf_token: str) -> tuple[str, str | None]:
+    """Push the report files in ONE commit, so a half-landed report can never exist. Returns the
+    repo and the commit the push made."""
     out_repo = validate_repo_id(cast("str", spec.output_repo_id), "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     await ensure_private_output(hub, out_repo)
     commit = await hub.upload_files(
         dict(files), out_repo, repo_type="dataset", commit_message="graded evaluation report"
     )
-    return f"{out_repo}@{commit}" if COMMIT_SHA_RE.fullmatch(commit) else out_repo
+    return out_repo, commit_oid(commit)
 
 
 def _judge_manifest(results: Path) -> dict[str, Any]:
@@ -1165,15 +1171,27 @@ async def _execute(spec: GradeSpec, secrets: RunSecrets, writer: JsonlProgressWr
         files = await asyncio.to_thread(
             _write_outputs, spec, cases, outputs, judged, report, outdir
         )
+    pushed: tuple[str, str | None] | None = None
+    push_error: Exception | None = None
     if pushing and hf_token:
         try:
             async with ticking_phase(phase, "Uploading the report to the Hub", stage="push"):
-                destination = await _push(spec, files, hf_token)
+                pushed = await _push(spec, files, hf_token)
+            destination = pushed_at(pushed)
         except Exception as exc:
-            msg = f"the report is on the VM at {outdir}, but the push failed: {exc}"
-            raise RunError(msg) from exc
+            push_error = exc
+            destination = str(outdir)
     else:
         destination = str(outdir)
+    # The grading run's own receipt, over the judge's: the judge ran as a chat run in this same
+    # working directory and left its receipt and failed-row record there, which describe the
+    # judge's rows, not this run.
+    receipt = await asyncio.to_thread(build_receipt, "grade", files[MANIFEST_FILENAME], pushed)
+    await asyncio.to_thread(write_receipt, receipt, Path.cwd())
+    (Path.cwd() / FAILED_ROWS_FILENAME).unlink(missing_ok=True)
+    if push_error is not None:
+        msg = f"the report is on the VM at {outdir}, but the push failed: {push_error}"
+        raise RunError(msg) from push_error
     emit(
         writer,
         ProgressEvent(
