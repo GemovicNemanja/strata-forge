@@ -4,25 +4,34 @@ Spec: ``RecipeRunSpec`` (inert JSON in ``STRATA_RUN_CONFIG``). It carries the re
 revision number and content hash (checked here: a spec whose recipe does not hash to the declared
 revision is refused), a ``mode`` and the output repo.
 
-- ``preview`` runs the recipe with every ``synthesize`` step bounded to ``preview_rows`` seed rows
-  and writes at most ``preview_rows`` rows per split, to a branch of the output repo
-  (``preview-<run_id>``), never its default branch: review candidates, not a version.
+- ``preview`` writes NOTHING to the Hub and needs no write token: it reads at most
+  ``preview_source_rows`` rows of each source, bounds every ``synthesize`` step to
+  ``preview_rows`` seed rows, and leaves only the summary in the workdir, with the counts and a
+  capped sample of at most ``SAMPLE_ROWS`` rows per split (each text cut to ``SAMPLE_CELL_CHARS``,
+  the whole sample under ``SAMPLE_BYTES``) for the control plane to show for review. Review
+  candidates, not a version, and not a branch anyone can read later.
 - ``materialize`` runs it in full and makes the result the default branch's content in ONE commit
   (the recipe's files replace the previous version's; nothing else in the repo is touched). That
-  commit is what the control plane records as the new dataset version.
+  commit, normalized to its 40-character id, is in ``receipt.json`` and the summary, and is what
+  the control plane records as the new dataset version.
 
-Every source is read at its pinned commit with the run's Hub credential. A ``synthesize`` step's
+Only the sources a step reads are read, each at its pinned commit with the run's Hub credential,
+streamed and bounded: at most ``row_cap + 1`` rows (so the engine refuses a larger split) and
+``byte_cap`` bytes of values, a row slice applied while streaming. A ``synthesize`` step's
 model is downloaded at its pinned revision and served on loopback with vLLM, exactly as a batch
 run serves a chat model; each request carries the step's JSON schema as guided JSON and its own
 seed, and every reply is validated against the schema (an invalid one is excluded, not repaired).
 Generated rows are marked ``_synthetic``. The engine (:mod:`strata_forge.datasets.recipe`)
-refuses generation from held-out splits.
+refuses generation from any split not classified as training, and requires a recipe reading one to
+name its outputs as held out; the summary, manifest and receipt record which read sources were not
+training splits (``holdout_sources``) and which output splits are held out.
 
 Outputs, in the one commit: ``data/<split>-00000-of-00001.parquet`` per split, ``exclusions.parquet``
 (row id, step, reason), ``recipe.json`` (the revision), ``manifest.json`` (``kind``
 ``dataset_recipe``: every source pin, every generation pin and seed, the counts) and ``README.md``
 (the dataset card's split layout). A copy of the summary (counts, column names, exclusion reasons;
-never row content) is left in the workdir as ``recipe-summary.json`` for the control plane.
+no row content after a materialization) is left in the workdir as ``recipe-summary.json`` for the
+control plane, beside ``receipt.json``.
 """
 
 from __future__ import annotations
@@ -34,13 +43,15 @@ import json
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, model_validator
 
 from strata_forge.compute import LocalBackend
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
 from strata_forge.datasets.recipe import (
+    DEFAULT_BYTE_CAP,
+    MAX_BYTE_CAP,
     GenerationRequest,
     GenerationResult,
     Recipe,
@@ -51,6 +62,7 @@ from strata_forge.datasets.recipe import (
     execute,
     profile_table,
     recipe_sha256,
+    split_class,
 )
 from strata_forge.llm import LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
@@ -62,6 +74,8 @@ from strata_forge.pipelines._common import (
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA,
     RunError,
+    build_receipt,
+    commit_oid,
     emit,
     ensure_private_output,
     load_config,
@@ -74,8 +88,10 @@ from strata_forge.pipelines._common import (
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
-from strata_forge.pipelines._guided import OutputValidator, schema_digest, schema_problem
+from strata_forge.pipelines._guided import OutputValidator, schema_digest
+from strata_forge.pipelines._split_overlap import parse_single_split
 from strata_forge.pipelines.inference_runner import SNAPSHOT_IGNORED, SNAPSHOT_PATTERNS
 from strata_forge.storage import HFHubClient
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
@@ -87,6 +103,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MANAGED_PATHS",
+    "SAMPLE_BYTES",
+    "SAMPLE_CELL_CHARS",
+    "SAMPLE_ROWS",
     "SUMMARY_FORMAT",
     "WORKDIR_SUMMARY_FILENAME",
     "RecipeRunSpec",
@@ -104,6 +123,10 @@ MANAGED_PATHS = ("data/", "exclusions.parquet", "recipe.json", MANIFEST_FILENAME
 _SERVE_HOST = "127.0.0.1"
 _SERVE_PORT = 8000
 _MAX_SUMMARY_COLUMNS = 512
+#: A preview's sample: rows per split, characters per text value, bytes for the whole sample.
+SAMPLE_ROWS = 50
+SAMPLE_CELL_CHARS = 1000
+SAMPLE_BYTES = 96 * 1024
 
 
 class Serving(BaseModel):
@@ -131,8 +154,12 @@ class RecipeRunSpec(BaseModel):
     recipe_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     mode: Literal["preview", "materialize"]
     preview_rows: StrictInt = Field(default=200, ge=1, le=5000)
+    # A preview reads at most this many rows of each source (a materialization reads them all).
+    preview_source_rows: StrictInt = Field(default=10_000, ge=1, le=100_000)
     row_cap: StrictInt = Field(default=1_000_000, ge=1, le=2_000_000)
-    output_repo_id: str
+    byte_cap: StrictInt = Field(default=DEFAULT_BYTE_CAP, ge=1, le=MAX_BYTE_CAP)
+    # Where a materialization commits; a preview writes nowhere and names none.
+    output_repo_id: str | None = None
     serving: Serving = Field(default_factory=Serving)
     progress_path: str | None = None
     run_id: str | None = None
@@ -142,18 +169,19 @@ class RecipeRunSpec(BaseModel):
         if recipe_sha256(self.recipe) != self.recipe_sha256:
             msg = "the recipe does not hash to recipe_sha256: it is not the declared revision"
             raise ValueError(msg)
-        for index, step in enumerate(self.recipe.steps):
-            if isinstance(step, SynthesizeStep):
-                problem = schema_problem(step.output_schema)
-                if problem is not None:
-                    msg = f"step {index + 1}: output_schema {problem}"
-                    raise ValueError(msg)
+        if self.mode == "preview" and self.output_repo_id is not None:
+            msg = "a preview writes nothing to the Hub, so it takes no output_repo_id"
+            raise ValueError(msg)
+        if self.mode == "materialize" and not self.output_repo_id:
+            msg = "a materialization needs output_repo_id"
+            raise ValueError(msg)
         return self
 
 
 def load_spec(*, writer: JsonlProgressWriter | None = None) -> RecipeRunSpec:
     spec = load_config(RecipeRunSpec, writer=writer)
-    validate_repo_id(spec.output_repo_id, "output repo")
+    if spec.output_repo_id is not None:
+        validate_repo_id(spec.output_repo_id, "output repo")
     for source in spec.recipe.sources:
         validate_repo_id(source.hf_repo_id, "source dataset")
     for step in spec.recipe.steps:
@@ -178,8 +206,29 @@ def _bounded(spec: RecipeRunSpec) -> Recipe:
 # ------------------------------ reading sources ------------------------------
 
 
-def _read_source(source: Source, token: str | Literal[False], row_cap: int) -> list[dict[str, Any]]:
-    """The pinned split's rows, at most ``row_cap + 1`` (so the engine refuses a larger one)."""
+def _value_bytes(value: Any) -> int:
+    if isinstance(value, str | bytes | bytearray):
+        return 8 + len(value)
+    if isinstance(value, dict):
+        mapping = cast("dict[Any, Any]", value)
+        return 8 + sum(_value_bytes(k) + _value_bytes(v) for k, v in mapping.items())
+    if isinstance(value, list | tuple):
+        return 8 + sum(_value_bytes(v) for v in cast("list[Any]", value))
+    return 8
+
+
+def _read_source(
+    source: Source, token: str | Literal[False], limit: int, byte_cap: int
+) -> list[dict[str, Any]]:
+    """At most ``limit`` rows of the pinned split, streamed (never the whole split in memory).
+
+    The split's row slice is applied while streaming; reading stops at ``limit`` rows, and a read
+    past ``byte_cap`` bytes of values is refused rather than held.
+    """
+    parsed = parse_single_split(source.split)
+    if parsed is None:  # the recipe model already refused it
+        msg = f"source {source.name!r} has an unreadable split"
+        raise RunError(msg)
     try:
         datasets_mod: Any = __import__("datasets")
     except ImportError as exc:
@@ -189,22 +238,34 @@ def _read_source(source: Source, token: str | Literal[False], row_cap: int) -> l
         dataset: Any = datasets_mod.load_dataset(
             source.hf_repo_id,
             name=source.config,
-            split=source.split,
+            split=parsed.name,
             revision=source.revision,
             token=token,
-            streaming=False,
+            streaming=True,
         )
     except Exception as exc:
         msg = f"could not read source {source.name!r} ({source.hf_repo_id}@{source.revision[:7]}): {exc}"
         raise RunError(msg) from exc
-    names = list(dataset.column_names or [])
-    wanted = list(source.columns) if source.columns is not None else names
-    missing = [c for c in wanted if c not in names]
-    if missing:
-        msg = f"source {source.name!r} has no columns {missing}"
-        raise RunError(msg)
-    rows = itertools.islice(dataset, row_cap + 1)
-    return [{c: row[c] for c in wanted} for row in rows]
+    start = parsed.start or 0
+    stop = start + limit if parsed.end is None else min(parsed.end, start + limit)
+    rows: list[dict[str, Any]] = []
+    wanted: list[str] | None = list(source.columns) if source.columns is not None else None
+    held = 0
+    for row in itertools.islice(dataset, start, stop):
+        record = cast("dict[str, Any]", row)
+        if wanted is None:
+            wanted = list(record)
+        missing = [c for c in wanted if c not in record]
+        if missing:
+            msg = f"source {source.name!r} has no columns {missing}"
+            raise RunError(msg)
+        values = {c: record[c] for c in wanted}
+        held += _value_bytes(values)
+        if held > byte_cap:
+            msg = f"source {source.name!r} holds more than {byte_cap // 1024**2} MiB of values"
+            raise RunError(msg)
+        rows.append(values)
+    return rows
 
 
 # ------------------------------ generation ------------------------------
@@ -426,8 +487,10 @@ def _summary(
     *,
     commit: str | None,
     written: dict[str, int],
+    truncated: list[str] | None = None,
 ) -> dict[str, Any]:
-    """What the control plane stores: counts, column names and reasons, never a value."""
+    """What the control plane stores: counts, column names and reasons, and for a preview the
+    capped sample (:func:`_sample`); a materialization's summary holds no row value."""
     reasons: dict[str, int] = {}
     for exclusion in output.exclusions:
         reason = exclusion.reason.split(":", 1)[0]
@@ -438,14 +501,16 @@ def _summary(
         "recipe_revision": spec.recipe_revision,
         "recipe_sha256": spec.recipe_sha256,
         "output_repo_id": spec.output_repo_id,
-        "branch": _branch(spec),
-        "commit": commit,
+        "commit": commit_oid(commit),
+        "holdout_sources": list(spec.recipe.holdout_sources),
+        "truncated_sources": truncated or [],
         "splits": {
             name: {
                 "rows": len(table.rows),
-                "written": written[name],
+                "written": written.get(name, 0),
                 "synthetic": sum(1 for r in table.rows if r.synthetic),
-                "path": f"data/{name}-00000-of-00001.parquet" if written[name] else None,
+                "held_out": split_class(name) == "held_out",
+                "path": f"data/{name}-00000-of-00001.parquet" if written.get(name) else None,
                 "columns": table.columns[:_MAX_SUMMARY_COLUMNS],
             }
             for name, table in output.splits.items()
@@ -482,8 +547,28 @@ def _summary(
     }
 
 
-def _branch(spec: RecipeRunSpec) -> str | None:
-    return f"preview-{spec.run_id or 'run'}" if spec.mode == "preview" else None
+def _cell(value: Any) -> Any:
+    """One sample value: scalars as they are, text cut to ``SAMPLE_CELL_CHARS``, anything else as
+    its JSON text, cut the same way."""
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= SAMPLE_CELL_CHARS else text[: SAMPLE_CELL_CHARS - 1] + "\u2026"
+
+
+def _sample(output: RecipeOutput, rows: int) -> dict[str, list[dict[str, Any]]]:
+    """A preview's sample: the first rows of each split, bounded per value and in total."""
+    sample: dict[str, list[dict[str, Any]]] = {name: [] for name in output.splits}
+    used = 0
+    for name, table in output.splits.items():
+        for record in table.records()[: min(rows, SAMPLE_ROWS)]:
+            row = {k: _cell(v) for k, v in record.items()}
+            size = len(json.dumps(row, ensure_ascii=False, default=str))
+            if used + size > SAMPLE_BYTES:
+                return sample
+            sample[name].append(row)
+            used += size
+    return sample
 
 
 def _manifest(
@@ -518,6 +603,8 @@ def _manifest(
         ],
         "generation": generation,
         "row_cap": spec.row_cap,
+        "holdout_sources": list(recipe.holdout_sources),
+        "held_out_splits": [name for name in output.splits if split_class(name) == "held_out"],
         "preview_rows": spec.preview_rows if spec.mode == "preview" else None,
         "counts": summary["counts"],
         "splits": {name: s["rows"] for name, s in summary["splits"].items()},
@@ -540,8 +627,6 @@ def _write_outputs(
     written: dict[str, int] = {}
     for name, table in output.splits.items():
         records = table.records()
-        if spec.mode == "preview":
-            records = records[: spec.preview_rows]
         written[name] = len(records)
         if not records:
             # An empty split has no file: the Hub's loaders refuse a split with no rows, so the
@@ -576,26 +661,44 @@ def _write_outputs(
 # ------------------------------ execution ------------------------------
 
 
+async def _read_sources(
+    spec: RecipeRunSpec, recipe: Recipe, token: str | Literal[False]
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    """Every source a step reads; a preview reads at most ``preview_source_rows`` of each."""
+    cache: dict[str, list[dict[str, Any]]] = {}
+    truncated: list[str] = []
+    preview = spec.mode == "preview"
+    for name in recipe.used_sources:
+        source = recipe.source(name)
+        limit = spec.preview_source_rows if preview else spec.row_cap
+        rows = await asyncio.to_thread(_read_source, source, token, limit + 1, spec.byte_cap)
+        if preview and len(rows) > limit:
+            rows = rows[:limit]
+            truncated.append(name)
+        cache[name] = rows
+    return cache, truncated
+
+
 async def _execute(
     spec: RecipeRunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
-    if not hf_token:
+    preview = spec.mode == "preview"
+    if not preview and not hf_token:
         msg = "a recipe run pushes its output, so it needs the account's Hugging Face write token"
         raise RunError(msg)
-    phase = phase_sink(writer, hf_token)
-    out_repo = validate_repo_id(spec.output_repo_id, "output repo")
-    hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
-    async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
-        await ensure_private_output(hub, out_repo)
+    phase = phase_sink(writer, hf_token or (hub_token or None))
+    hub: HFHubClient | None = None
+    out_repo: str | None = None
+    if not preview:
+        out_repo = validate_repo_id(spec.output_repo_id or "", "output repo")
+        hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
+        async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
+            await ensure_private_output(hub, out_repo)
     recipe = _bounded(spec)
-    cache: dict[str, list[dict[str, Any]]] = {}
     async with ticking_phase(phase, "Reading the pinned sources", stage="load_model"):
-        for source in recipe.sources:
-            cache[source.name] = await asyncio.to_thread(
-                _read_source, source, hub_token, spec.row_cap
-            )
+        cache, truncated = await _read_sources(spec, recipe, hub_token)
     generator = (
         _ServedGenerator(
             asyncio.get_running_loop(),
@@ -615,10 +718,30 @@ async def _execute(
             lambda source: cache[source.name],
             generate=generator,
             row_cap=spec.row_cap,
+            byte_cap=spec.byte_cap,
         )
     except RecipeError as exc:
         raise RunError(str(exc)) from exc
     generation = generator.facts if generator is not None else []
+    metrics = {
+        "rows": float(output.rows),
+        "synthetic_rows": float(output.synthetic_rows),
+        "excluded": float(len(output.exclusions)),
+        "splits": float(len(output.splits)),
+    }
+    workdir = Path.cwd()
+    if preview:
+        # Nothing leaves the machine but the summary: no file, no branch, no commit.
+        summary = _summary(spec, output, generation, commit=None, written={}, truncated=truncated)
+        summary["sample"] = _sample(output, spec.preview_rows)
+        workdir.joinpath(WORKDIR_SUMMARY_FILENAME).write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n"
+        )
+        emit(writer, ProgressEvent(kind="end", stage="run", metrics=metrics, message="preview"))
+        return "preview"
+    if hub is None or out_repo is None:  # unreachable: set above for every materialization
+        msg = "a materialization has no output repo"
+        raise RunError(msg)
     outdir = results_dir(spec.run_id, name=_RESULTS_DIR_NAME)
     async with ticking_phase(phase, "Writing the dataset", stage="push"):
         files, written = await asyncio.to_thread(_write_outputs, spec, output, outdir)
@@ -631,37 +754,41 @@ async def _execute(
     try:
         async with ticking_phase(phase, "Pushing the dataset to the Hub", stage="push"):
             await ensure_private_output(hub, out_repo)  # visibility can change during a run
-            commit = await hub.replace_files(
+            pushed = await hub.replace_files(
                 {k: str(v) for k, v in files.items()},
                 out_repo,
                 managed=MANAGED_PATHS,
                 repo_type="dataset",
-                commit_message=(
-                    f"{'preview' if spec.mode == 'preview' else 'materialize'} recipe "
-                    f"{spec.recipe.name} r{spec.recipe_revision}"
-                ),
-                branch=_branch(spec),
+                commit_message=f"materialize recipe {spec.recipe.name} r{spec.recipe_revision}",
+                branch=None,
             )
     except Exception as exc:
         msg = f"the dataset is on the machine at {outdir}, but the push failed: {exc}"
         raise RunError(msg) from exc
+    commit = commit_oid(pushed)
+    if commit is None:
+        msg = f"the push to {out_repo} reported no commit, so the version cannot be pinned"
+        raise RunError(msg)
     summary = _summary(spec, output, generation, commit=commit, written=written)
-    Path.cwd().joinpath(WORKDIR_SUMMARY_FILENAME).write_text(
+    receipt = build_receipt(
+        _MANIFEST_KIND,
+        files[MANIFEST_FILENAME],
+        (out_repo, commit),
+        rows={name: s["rows"] for name, s in summary["splits"].items()},
+    )
+    receipt["recipe"] = {
+        "revision": spec.recipe_revision,
+        "sha256": spec.recipe_sha256,
+        "holdout_sources": summary["holdout_sources"],
+        "held_out_splits": [n for n, s in summary["splits"].items() if s["held_out"]],
+    }
+    await asyncio.to_thread(write_receipt, receipt, workdir)
+    workdir.joinpath(WORKDIR_SUMMARY_FILENAME).write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n"
     )
     emit(
         writer,
-        ProgressEvent(
-            kind="end",
-            stage="push",
-            metrics={
-                "rows": float(output.rows),
-                "synthetic_rows": float(output.synthetic_rows),
-                "excluded": float(len(output.exclusions)),
-                "splits": float(len(output.splits)),
-            },
-            message=f"{out_repo}@{commit}",
-        ),
+        ProgressEvent(kind="end", stage="push", metrics=metrics, message=f"{out_repo}@{commit}"),
     )
     return out_repo
 

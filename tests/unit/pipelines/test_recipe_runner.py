@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sys
 import types
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -133,9 +134,10 @@ def run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     _Hub.pushed = {}
     monkeypatch.setattr(rr, "HFHubClient", _Hub)
 
-    def _read(source: Any, token: Any, row_cap: int) -> list[dict[str, Any]]:
+    def _read(source: Any, token: Any, limit: int, byte_cap: int) -> list[dict[str, Any]]:
         record.setdefault("read", []).append((source.name, source.revision, token))
-        return _ROWS[source.name]
+        record.setdefault("limits", []).append(limit)
+        return _ROWS[source.name][:limit]
 
     def _write(records: list[dict[str, Any]], columns: list[str], path: Path) -> Path:
         record["parquet"][path.name] = records
@@ -184,7 +186,9 @@ async def test_a_deterministic_recipe_is_materialized_in_one_commit(
 ) -> None:
     _launch(monkeypatch, run, _spec(_recipe()))
     assert await rr.main() == 0
-    assert run["read"] == [("tickets", _SHA, _TOKEN), ("held", _SHA, _TOKEN)]
+    # Only the sources a step reads; `held` is declared and never read.
+    assert run["read"] == [("tickets", _SHA, _TOKEN)]
+    assert run["limits"] == [1_000_001]
     (_, (files, repo, kw)) = next(c for c in _Hub.calls if c[0] == "replace_files")
     assert repo == "me/support-edge-cases"
     assert files == sorted(
@@ -220,7 +224,14 @@ async def test_a_deterministic_recipe_is_materialized_in_one_commit(
     assert "path: data/train-*.parquet" in card
     summary = json.loads((run["tmp"] / rr.WORKDIR_SUMMARY_FILENAME).read_text())
     assert summary["commit"] == "c" * 40
+    assert summary["holdout_sources"] == []
+    assert "sample" not in summary
     assert summary["splits"]["train"]["rows"] == 2
+    receipt = json.loads((run["tmp"] / "receipt.json").read_text())
+    assert receipt["kind"] == "dataset_recipe"
+    assert receipt["output"] == {"repo_id": "me/support-edge-cases", "commit_sha": "c" * 40}
+    assert receipt["rows"] == {"train": 2}
+    assert receipt["recipe"]["revision"] == 3
     assert summary["exclusions_by_reason"] == {"duplicate_of": 10}
     assert summary["profile"]["train"][0] == {
         "column": "ticket",
@@ -275,29 +286,81 @@ async def test_synthesis_serves_the_pinned_model_seeds_each_request_and_marks_ro
     assert "synthetic" in _Hub.pushed["README.md"].decode()
 
 
-async def test_a_preview_is_bounded_and_goes_to_a_branch(
-    monkeypatch: pytest.MonkeyPatch, run: dict[str, Any]
+async def test_a_preview_writes_nothing_and_returns_a_capped_sample(
+    monkeypatch: pytest.MonkeyPatch, run: dict[str, Any], tmp_path: Path
 ) -> None:
-    _launch(monkeypatch, run, _spec(_recipe(synth=True), mode="preview", preview_rows=3))
+    (tmp_path / ".secrets.json").write_text("{}")  # a preview needs no write token
+    spec = _spec(_recipe(synth=True), mode="preview", preview_rows=3, preview_source_rows=5)
+    spec.pop("output_repo_id")
+    _launch(monkeypatch, run, spec)
     assert await rr.main() == 0
     assert len(run["requests"]) == 3 * 2  # 3 seed rows, 2 samples each
-    (_, (_, _, kw)) = next(c for c in _Hub.calls if c[0] == "replace_files")
-    assert kw["branch"] == "preview-run7"
-    assert kw["commit_message"].startswith("preview recipe")
-    rows = run["parquet"]["train-00000-of-00001.parquet"]
-    assert len(rows) <= 3
+    # The only Hub client is the read-only one that downloads the generator model.
+    assert not [c for c in _Hub.calls if c[0] in ("replace_files", "create_repo")]
+    assert ("token", _TOKEN) not in _Hub.calls
+    assert "train-00000-of-00001.parquet" not in run["parquet"]
+    assert run["limits"] == [6]  # the bounded read: preview_source_rows + 1
     summary = json.loads((run["tmp"] / rr.WORKDIR_SUMMARY_FILENAME).read_text())
     assert summary["mode"] == "preview"
-    assert summary["branch"] == "preview-run7"
+    assert summary["commit"] is None
+    assert summary["output_repo_id"] is None
+    assert summary["truncated_sources"] == ["tickets"]
+    assert 0 < len(summary["sample"]["train"]) <= 3
+    assert summary["sample"]["train"][0]["_synthetic"] is True
+    assert not (run["tmp"] / "receipt.json").exists()
+
+
+async def test_a_preview_sample_is_bounded_per_value_and_in_total() -> None:
+    from strata_forge.datasets.recipe import RecipeOutput, Row, Table
+
+    table = Table(
+        [Row(f"t:{i}", {"text": "x" * 5000}, frozenset({"t"})) for i in range(60)], ["text"]
+    )
+    sample = rr._sample(RecipeOutput(splits={"train": table}), 200)  # pyright: ignore[reportPrivateUsage]
+    rows = sample["train"]
+    assert len(rows) <= rr.SAMPLE_ROWS
+    assert all(len(r["text"]) <= rr.SAMPLE_CELL_CHARS for r in rows)
+    assert len(json.dumps(sample)) <= rr.SAMPLE_BYTES + 1024
+
+
+async def test_held_out_provenance_is_recorded_in_the_summary_and_receipt(
+    monkeypatch: pytest.MonkeyPatch, run: dict[str, Any]
+) -> None:
+    recipe = {
+        "name": "support-edge-cases",
+        "sources": [{"name": "held", "hf_repo_id": "org/held", "revision": _SHA, "split": "test"}],
+        "steps": [{"kind": "load", "source": "held"}],
+        "default_split": "test",
+    }
+    _launch(monkeypatch, run, _spec(recipe))
+    assert await rr.main() == 0
+    summary = json.loads((run["tmp"] / rr.WORKDIR_SUMMARY_FILENAME).read_text())
+    assert summary["holdout_sources"] == ["held"]
+    assert summary["splits"]["test"]["held_out"] is True
+    receipt = json.loads((run["tmp"] / "receipt.json").read_text())
+    assert receipt["recipe"]["held_out_splits"] == ["test"]
+    manifest = json.loads(_Hub.pushed["manifest.json"])
+    assert manifest["holdout_sources"] == ["held"]
 
 
 async def test_generation_never_reads_a_held_out_split(
     monkeypatch: pytest.MonkeyPatch, run: dict[str, Any]
 ) -> None:
-    _launch(monkeypatch, run, _spec(_recipe(synth=True, holdout=True)))
+    recipe = _recipe(synth=True)
+    recipe["steps"].insert(1, {"kind": "concat", "source": "held"})
+    spec = {
+        "engine_version": SPEC_VERSION,
+        "recipe": recipe,
+        "recipe_revision": 3,
+        "recipe_sha256": "0" * 64,
+        "mode": "materialize",
+        "output_repo_id": "me/support-edge-cases",
+    }
+    _launch(monkeypatch, run, spec)
     assert await rr.main() == 1
     error = next(e for e in _events(run) if e["kind"] == "error")
-    assert "held-out data (held)" in error["message"]
+    assert "training splits only" in error["message"]
+    assert "read" not in run
     assert not [c for c in _Hub.calls if c[0] == "replace_files"]
 
 
@@ -306,6 +369,8 @@ async def test_generation_never_reads_a_held_out_split(
     [
         ({"recipe_sha256": "0" * 64}, "not the declared revision"),
         ({"output_repo_id": "not a repo"}, "output repo"),
+        ({"output_repo_id": None}, "needs output_repo_id"),
+        ({"mode": "preview"}, "takes no output_repo_id"),
     ],
 )
 async def test_a_spec_that_is_not_its_revision_is_refused(
@@ -353,6 +418,30 @@ async def test_an_empty_split_has_no_file_and_no_card_entry(
         "rows": 0,
         "written": 0,
         "synthetic": 0,
+        "held_out": True,
         "path": None,
         "columns": ["ticket", "text", "lang"],
     }
+
+
+def test_the_reader_streams_applies_the_slice_and_stops_at_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.datasets.recipe import Source
+
+    seen: dict[str, Any] = {}
+
+    def _load_dataset(repo: str, **kw: Any) -> Any:
+        seen.update(kw, repo=repo)
+        return iter({"a": i, "b": "x"} for i in range(1000))
+
+    monkeypatch.setitem(sys.modules, "datasets", types.SimpleNamespace(load_dataset=_load_dataset))
+    source = Source(
+        name="s", hf_repo_id="org/s", revision=_SHA, split="train[10:500]", columns=("a",)
+    )
+    rows = rr._read_source(source, False, 6, 1024**2)  # pyright: ignore[reportPrivateUsage]
+    assert seen["streaming"] is True
+    assert seen["split"] == "train"
+    assert [r["a"] for r in rows] == list(range(10, 16))
+    with pytest.raises(rr.RunError, match="MiB of values"):
+        rr._read_source(source.model_copy(update={"columns": None}), False, 900, 4096)  # pyright: ignore[reportPrivateUsage]

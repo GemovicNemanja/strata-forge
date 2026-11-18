@@ -743,32 +743,47 @@ template, the prefill and the kwargs are left out of the manifest's
 [dataset recipe](datasets.md#dataset-recipes). ``RecipeRunSpec`` carries the
 recipe itself, its ``recipe_revision`` and ``recipe_sha256`` (a recipe that does
 not hash to the declared revision is refused before anything is read), a
-``mode``, ``output_repo_id`` (a private dataset repo, created private when
-missing and refused when public, checked again at push), ``row_cap`` (a source
-or table past it is refused, never truncated; default 1,000,000), and
+``mode``, ``output_repo_id`` (a materialization's private dataset repo,
+created private when missing and refused when public, checked again at push; a
+preview takes none), ``row_cap`` and ``byte_cap`` (a source, join or table past
+either is refused, never truncated; default 1,000,000 rows and 2 GiB of
+values), ``preview_source_rows`` (default 10,000), and
 ``serving`` (how a ``synthesize`` step's model is served: tensor parallelism,
 ``max_model_len``, dtype, GPU memory fraction, start timeout, requests in
-flight). The run needs the account's write token.
+flight). A materialization needs the account's write token; a preview needs
+none.
 
-- **``preview``** bounds every ``synthesize`` step to ``preview_rows`` seed rows
-  (default 200) and writes at most ``preview_rows`` rows per split, to the
-  branch ``preview-<run_id>`` of the output repo: review candidates, never the
-  default branch.
+- **``preview``** writes nothing to the Hub: no file, branch or commit. It
+  reads at most ``preview_source_rows`` rows of each source (the summary names
+  any it cut in ``truncated_sources``), bounds every ``synthesize`` step to
+  ``preview_rows`` seed rows (default 200), and leaves only the summary, with
+  the counts and a capped ``sample``: at most ``SAMPLE_ROWS`` (50) rows per
+  split, each text value cut to ``SAMPLE_CELL_CHARS`` (1,000), the whole sample
+  under ``SAMPLE_BYTES`` (96 KiB). Review candidates, never a version.
 - **``materialize``** runs the recipe in full and makes the result the default
   branch's content in ONE commit: the recipe's files (``data/``,
   ``exclusions.parquet``, ``recipe.json``, ``manifest.json``, ``README.md``)
   replace the previous version's, and nothing else in the repo is touched
-  (``HFHubClient.replace_files``). That commit is the new dataset version.
+  (``HFHubClient.replace_files``). That commit, normalized to its 40-character
+id (``commit_oid``; a push that reports none fails the run), is the new dataset
+version, recorded in ``receipt.json`` (``kind`` ``dataset_recipe``, the output
+repo and commit, rows per split, and the recipe revision, hash,
+``holdout_sources`` and ``held_out_splits``).
 
-Every source is read at its pinned commit with the run's Hub credential. A
+Only the sources a step reads are read, each at its pinned commit with the
+run's Hub credential, streamed (``load_dataset(streaming=True)``) with the
+split's row slice applied while reading and the read stopped at its limit and
+at ``byte_cap``. A
 ``synthesize`` step's model is downloaded at its pinned revision (refused when
 the snapshot is another commit) and served on loopback with vLLM, as a batch
 run serves a chat model, offline and without the token. Each request carries
 the step's JSON schema as guided JSON (``structured_outputs``) and its own seed;
 every reply is validated against the schema, and an invalid one is excluded
 (``invalid_output``), a failed request too (``generation_failed``); neither is
-repaired or retried. Generated rows are marked ``_synthetic``; generation from
-a held-out split is refused by the engine.
+repaired or retried. Generated rows are marked ``_synthetic``. The engine
+refuses generation from any split not classified as training and requires a
+recipe reading one to name its outputs as held out
+([Dataset recipes](datasets.md#dataset-recipes)).
 
 **Outputs**, all in the one commit: ``data/<split>-00000-of-00001.parquet`` per
 non-empty split (an empty split has no file and no card entry, since the Hub's
@@ -780,11 +795,13 @@ template's and schema's SHA-256 and the valid / invalid / failed counts, the
 per-step counts and the exclusion reasons) and ``README.md`` (the card's split
 layout, tagged ``synthetic`` when any row was generated). The workdir keeps
 ``recipe-summary.json`` (``strata.recipe.summary/v1``) for the control plane:
-the commit, per split its rows, rows written, synthetic rows, path and column
-names, the per-step counts, the exclusion reasons, a per-column profile of
-counts (rows, nulls, distinct) and the generation counts; never a value. The
-``end`` event carries ``rows``, ``synthetic_rows``, ``excluded`` and ``splits``,
-and its message is ``<repo>@<commit>``.
+the commit, ``holdout_sources``, per split its rows, rows written, synthetic
+rows, whether it is held out, path and column names, the per-step counts, the
+exclusion reasons, a per-column profile of counts (rows, nulls, distinct) and
+the generation counts, plus a preview's capped ``sample``; a materialization's
+summary holds no value. The ``end`` event carries ``rows``,
+``synthetic_rows``, ``excluded`` and ``splits``; its message is
+``<repo>@<commit>`` (``preview`` for a preview).
 
 ### Evaluation runner
 
