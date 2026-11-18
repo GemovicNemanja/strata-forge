@@ -1382,6 +1382,7 @@ def _wire_prefix_run(
     bench_run: dict[str, Any],
     *,
     refusal: str | None = None,
+    entry_bytes: int = 10,
     **hp: Any,
 ) -> dict[str, Any]:
     from strata_forge.pipelines._scoring import _PrefixEntry  # pyright: ignore[reportPrivateUsage]
@@ -1401,7 +1402,7 @@ def _wire_prefix_run(
         key = tuple(cell[0])
         hit = cache.get(key) is not None
         if not hit:
-            cache.put(key, _PrefixEntry(cache=None, markers=None, length=1, nbytes=10))
+            cache.put(key, _PrefixEntry(cache=None, markers=None, length=1, nbytes=entry_bytes))
         seen["prefix"].append(hit)
         start = now[0]
         now[0] += (2 if hit else 5) * 1_000_000
@@ -1451,9 +1452,9 @@ async def test_prefix_reuse_times_hits_and_misses_and_a_no_cache_diagnostic_pass
     (config,) = summary.configurations
     cache = config.prefix_cache
     assert cache is not None
-    # The workload holds two premise sets, so at most two requests ever miss.
-    assert cache.hits + cache.misses == 20
-    assert cache.misses <= 2
+    # Two premise sets, and every timed pass starts from an empty cache (the warmup's fills are
+    # dropped): each pass fills each set once and reuses it for the rest.
+    assert (cache.hits, cache.misses) == (16, 4)
     assert cache.hit_latency["p50"] == pytest.approx(2.0)
     diagnostic = config.no_cache_diagnostic
     assert diagnostic is not None
@@ -1469,7 +1470,11 @@ async def test_prefix_reuse_times_hits_and_misses_and_a_no_cache_diagnostic_pass
     assert config.headline.p95_max_ms < 6.0
     record = summary.prefix_reuse
     assert record is not None
-    assert (record.max_bytes, record.entries_at_end, record.scope) == (1 << 20, 2, "never_cleared")
+    assert (record.max_bytes, record.scope, record.evicted_in_pass) == (1 << 20, "per_pass", False)
+    assert [(p.pass_index, p.hits, p.fills, p.evictions) for p in record.passes] == [
+        (0, 8, 2, 0),
+        (1, 8, 2, 0),
+    ]
     kinds = [row["pass_kind"] for row in bench_run["timings"]]
     assert kinds.count("timed") == 20
     assert kinds.count("no_cache_diagnostic") == 10
@@ -1480,6 +1485,8 @@ async def test_prefix_reuse_times_hits_and_misses_and_a_no_cache_diagnostic_pass
     protocol = manifest["benchmark"]["prefix_reuse"]
     assert protocol["max_bytes"] == 1 << 20
     assert "inside the request clock" in protocol["miss"]
+    assert "same timed pass" in protocol["hit"]
+    assert "no empty_cache" in protocol["scope"]
     assert manifest["engine_facts"]["prefix_reuse"] is True
     start = next(e for e in _events(bench_run) if e["kind"] == "start")
     assert start["total_steps"] == 30
@@ -1516,3 +1523,16 @@ async def test_a_gpu_taken_before_the_diagnostic_pass_makes_the_run_incomplete(
     assert summary.complete is False
     assert summary.headline_readable is False
     assert "gpu_busy" in summary.incomplete_codes
+
+
+async def test_an_eviction_inside_a_timed_pass_is_counted_and_flagged(
+    monkeypatch: pytest.MonkeyPatch, bench_run: dict[str, Any]
+) -> None:
+    # Room for one entry only: two premise sets in one pass evict each other.
+    _wire_prefix_run(monkeypatch, bench_run, entry_bytes=700 * 1024, prefix_cache_max_bytes=1 << 20)
+    assert await br.main() == 0
+    summary = bench.BenchmarkSummary.model_validate_json(_Hub.uploaded["summary.json"])
+    record = summary.prefix_reuse
+    assert record is not None
+    assert record.evicted_in_pass is True
+    assert record.in_pass_evictions == sum(p.evictions for p in record.passes) > 0

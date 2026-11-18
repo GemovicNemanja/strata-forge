@@ -89,9 +89,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   model server dies mid-run (the run then fails as incomplete). The `end` event carries
   `gpu_count` and `gpu_seconds` over the GPUs `CUDA_VISIBLE_DEVICES` exposes.
 - Premise-prefix KV reuse for a decoder verifier's latency benchmark (`prefix_reuse`,
-  `prefix_cache_max_bytes`; batch size 1): a request with an uncached premise prefix fills it
-  inside its clock, a cached one reuses it, the cache persists across warmup and passes with its
-  byte limit recorded, and each configuration adds a no-cache diagnostic pass. `prefix_cache_hit`
+  `prefix_cache_max_bytes`; batch size 1): per timed pass, the first request of each premise set
+  fills its prefix inside its clock and a later one in the same pass reuses it; the entries are
+  dropped after each pass's warmup (the process stays warm), each pass's hits, fills and
+  evictions are recorded with the byte limit, an in-pass eviction is flagged, and each
+  configuration adds a no-cache diagnostic pass. `prefix_cache_hit`
   and `pass_kind` in `timings.parquet`; `prefix_cache`, `no_cache_diagnostic` and `prefix_reuse`
   in the summary. `score_with_prefix` / `timed_prefix_request` / `PrefixCache` on the scoring
   engine, exact against the full forward pass.

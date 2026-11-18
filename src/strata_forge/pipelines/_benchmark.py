@@ -66,6 +66,7 @@ __all__ = [
     "PassKind",
     "PassTelemetry",
     "PrefixCacheResult",
+    "PrefixPassRecord",
     "PrefixReuseRecord",
     "Step",
     "StepTiming",
@@ -277,6 +278,7 @@ async def measure_configuration(
     before_pass: PassHook | None = None,
     after_pass: PassHook | None = None,
     kind: PassKind = "timed",
+    before_timed: PassHook | None = None,
 ) -> ConfigurationOutcome:
     """Run one configuration's warmups and timed passes through ``step``.
 
@@ -288,7 +290,8 @@ async def measure_configuration(
 
     ``before_pass`` runs before each pass's warmup and returns a stop reason or ``None``; the only
     one used is ``gpu_busy`` (another process took the GPU), which stops the configuration with
-    that status. ``after_pass`` runs after each timed pass. Neither runs while iterations are timed.
+    that status. ``before_timed`` runs after each pass's warmup and before its first timed
+    iteration; ``after_pass`` runs after each timed pass. None runs while iterations are timed.
     """
     batch = configuration.batch_size
     planned_batches, remainder = full_batches(sample, batch)
@@ -360,6 +363,10 @@ async def measure_configuration(
         await _run(list(enumerate(warm)), timed=False, pass_index=pass_index)
         if stop:
             break
+        if before_timed is not None:
+            # After the pass's warmup, before its first timed request (prefix reuse: drop the
+            # warmup's cache entries, so no warmup fill becomes a timed hit).
+            await before_timed(pass_index)
         batches, _ = full_batches(pass_order(sample, order_seed, pass_index), batch)
         await _run(list(enumerate(batches)), timed=True, pass_index=pass_index)
         if after_pass is not None:
@@ -511,16 +518,42 @@ class PassTelemetry(_Frozen):
     gpus: tuple[GpuState, ...] = Field(max_length=16)
 
 
-class PrefixReuseRecord(_Frozen):
-    """The premise-prefix cache of a prefix-reuse run: its limit and what it held."""
+class PrefixPassRecord(_Frozen):
+    """One timed pass's premise-prefix cache: hits, fills (a miss's prefix forward), evictions."""
 
-    scope: Literal["never_cleared"] = "never_cleared"
-    max_bytes: int = Field(ge=1)
-    peak_bytes: int = Field(ge=0)
-    bytes_at_end: int = Field(ge=0)
-    entries_at_end: int = Field(ge=0)
+    configuration: int = Field(ge=0)
+    pass_index: int = Field(ge=0)
+    hits: int = Field(ge=0)
+    fills: int = Field(ge=0)
     evictions: int = Field(ge=0)
     uncacheable: int = Field(ge=0)
+    peak_bytes: int = Field(ge=0)
+
+
+class PrefixReuseRecord(_Frozen):
+    """The premise-prefix cache of a prefix-reuse run: per pass, emptied after each warmup.
+
+    ``evictions`` and ``uncacheable`` count warmup too; ``in_pass_evictions`` counts only timed
+    passes, and ``evicted_in_pass`` flags any: such a pass refilled a prefix the limit evicted.
+    """
+
+    scope: Literal["per_pass"] = "per_pass"
+    max_bytes: int = Field(ge=1)
+    peak_bytes: int = Field(ge=0)
+    evictions: int = Field(ge=0)
+    uncacheable: int = Field(ge=0)
+    in_pass_evictions: int = Field(ge=0)
+    evicted_in_pass: bool
+    passes: tuple[PrefixPassRecord, ...] = Field(max_length=64 * 20)
+
+    @model_validator(mode="after")
+    def _flag_matches_the_count(self) -> PrefixReuseRecord:
+        if self.evicted_in_pass != (self.in_pass_evictions > 0) or self.in_pass_evictions != sum(
+            p.evictions for p in self.passes
+        ):
+            msg = "evicted_in_pass and in_pass_evictions must agree with the passes"
+            raise ValueError(msg)
+        return self
 
 
 type IncompleteCode = Literal[

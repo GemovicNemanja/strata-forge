@@ -1306,8 +1306,12 @@ class PrefixCache:
     """A decoder verifier's premise-prefix KV caches, least recently used first out, in bytes.
 
     Keyed by the prefix's token ids, so a hit is an exact match of what the model would have
-    read. It is never cleared: it persists across warmup, passes and configurations. An entry
-    larger than ``max_bytes`` is used for its own request and not kept (``uncacheable``).
+    read. Hits are per timed pass: :meth:`begin_pass` drops every entry after the pass's warmup
+    and before its first timed request, so a hit is only a prefix first filled earlier in the
+    same pass, and every pass starts from the same empty cache. Only the entries are dropped:
+    the process, its CUDA context and its allocator stay warm (no ``empty_cache``, no restart).
+    An entry larger than ``max_bytes`` is used for its own request and not kept
+    (``uncacheable``); an eviction inside a timed pass is counted and flagged.
     """
 
     def __init__(self, max_bytes: int) -> None:
@@ -1317,36 +1321,72 @@ class PrefixCache:
         self.peak_bytes = 0
         self.evictions = 0
         self.uncacheable = 0
+        self.passes: list[dict[str, int]] = []
+        self._pass: dict[str, int] | None = None
 
     def __len__(self) -> int:
         return len(self._entries)
+
+    def begin_pass(self, configuration: int, pass_index: int) -> None:
+        """Drop every entry (warmup's included) and start counting this timed pass."""
+        self._entries.clear()
+        self.bytes = 0
+        self._pass = {
+            "configuration": configuration,
+            "pass_index": pass_index,
+            "hits": 0,
+            "fills": 0,
+            "evictions": 0,
+            "uncacheable": 0,
+            "peak_bytes": 0,
+        }
+
+    def end_pass(self) -> None:
+        """Record the timed pass begun last (one cut short included)."""
+        if self._pass is not None:
+            self.passes.append(self._pass)
+            self._pass = None
 
     def get(self, key: tuple[int, ...]) -> _PrefixEntry | None:
         entry = self._entries.get(key)
         if entry is not None:
             self._entries.move_to_end(key)
+            if self._pass is not None:
+                self._pass["hits"] += 1
         return entry
 
     def put(self, key: tuple[int, ...], entry: _PrefixEntry) -> None:
+        """A miss's fill: keep ``entry``, evicting the least recently used ones to fit."""
+        if self._pass is not None:
+            self._pass["fills"] += 1
         if entry.nbytes > self.max_bytes:
             self.uncacheable += 1
+            if self._pass is not None:
+                self._pass["uncacheable"] += 1
             return
         while self._entries and self.bytes + entry.nbytes > self.max_bytes:
             _, old = self._entries.popitem(last=False)
             self.bytes -= old.nbytes
             self.evictions += 1
+            if self._pass is not None:
+                self._pass["evictions"] += 1
         self._entries[key] = entry
         self.bytes += entry.nbytes
         self.peak_bytes = max(self.peak_bytes, self.bytes)
+        if self._pass is not None:
+            self._pass["peak_bytes"] = max(self._pass["peak_bytes"], self.bytes)
 
-    def record(self) -> dict[str, int]:
+    def record(self) -> dict[str, Any]:
+        """The limit and, per timed pass, its hits, fills, evictions and peak."""
+        in_pass = sum(p["evictions"] for p in self.passes)
         return {
             "max_bytes": self.max_bytes,
             "peak_bytes": self.peak_bytes,
-            "bytes_at_end": self.bytes,
-            "entries_at_end": len(self._entries),
             "evictions": self.evictions,
             "uncacheable": self.uncacheable,
+            "in_pass_evictions": in_pass,
+            "evicted_in_pass": in_pass > 0,
+            "passes": list(self.passes),
         }
 
 

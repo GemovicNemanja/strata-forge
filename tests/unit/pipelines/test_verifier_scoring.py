@@ -446,8 +446,38 @@ def test_the_prefix_cache_evicts_least_recently_used_first() -> None:
     assert cache.record() == {
         "max_bytes": 100,
         "peak_bytes": 80,
-        "bytes_at_end": 80,
-        "entries_at_end": 2,
         "evictions": 1,
         "uncacheable": 0,
+        "in_pass_evictions": 0,
+        "evicted_in_pass": False,
+        "passes": [],
     }
+
+
+def test_each_timed_pass_starts_from_an_empty_cache_and_is_counted() -> None:
+    from strata_forge.pipelines import _scoring as scoring
+
+    cache = scoring.PrefixCache(max_bytes=100)
+    make: Any = scoring._PrefixEntry  # pyright: ignore[reportPrivateUsage]
+
+    def visit(key: tuple[int, ...]) -> bool:
+        if cache.get(key) is not None:
+            return True
+        cache.put(key, make(cache=None, markers=None, length=1, nbytes=40))
+        return False
+
+    assert visit((1,)) is False  # a warmup fill
+    cache.begin_pass(0, 0)
+    # The warmup's entry was dropped: the first timed request of the set fills it again.
+    assert [visit(k) for k in [(1,), (1,), (2,), (3,), (1,)]] == [False, True, False, False, False]
+    cache.end_pass()
+    cache.begin_pass(0, 1)
+    assert [visit(k) for k in [(1,), (1,)]] == [False, True]
+    cache.end_pass()
+    record = cache.record()
+    first, second = record["passes"]
+    # (3,) evicted (1,), whose refill then evicted (2,): two evictions in the pass, flagged.
+    assert (first["hits"], first["fills"], first["evictions"]) == (1, 4, 2)
+    assert (second["hits"], second["fills"], second["evictions"]) == (1, 1, 0)
+    assert record["in_pass_evictions"] == 2
+    assert record["evicted_in_pass"] is True

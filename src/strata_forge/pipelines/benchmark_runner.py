@@ -309,10 +309,12 @@ class BenchmarkHyperparams(BaseModel):
     # in the manifest either way.
     prefix_caching: StrictBool = False
     # A decoder verifier only (`artifact: strata_verifier`, batch size 1): reuse the premise
-    # prefix's KV cache. A request whose premise prefix is not cached fills it inside its own
-    # clock; one whose prefix is cached reuses it. The cache is never cleared (warmup, passes and
-    # configurations share it) and is bounded by `prefix_cache_max_bytes`, least recently used
-    # first out. Each configuration then makes one extra pass without the cache, a diagnostic.
+    # prefix's KV cache, per timed pass: the entries are dropped after each pass's warmup and
+    # before its first timed request, so the first request of each premise set in a pass fills
+    # its prefix inside its own clock and a later one in the same pass reuses it. Bounded by
+    # `prefix_cache_max_bytes`, least recently used first out; an eviction inside a pass is
+    # counted and flagged. Each configuration then makes one extra pass without the cache, a
+    # diagnostic.
     prefix_reuse: StrictBool = False
     prefix_cache_max_bytes: StrictInt = Field(default=8 * 1024**3, ge=1024**2, le=1024**4)
     # Refuse to measure unless every visible GPU's reported name contains this (e.g. "H100").
@@ -730,6 +732,7 @@ async def _measure(
     is_alive: Callable[[], Any] | None = None,
     no_cache_step: bench.Step | None = None,
     diagnostics: dict[int, bench.ConfigurationOutcome] | None = None,
+    prefix_cache: PrefixCache | None = None,
 ) -> tuple[list[bench.ConfigurationOutcome], str | None]:
     """Every configuration in grid order, under one wall-clock cap. Returns the stop reason.
 
@@ -766,6 +769,19 @@ async def _measure(
             )
             continue
         guard.configuration = configuration.index
+        index = configuration.index
+
+        async def _begin_timed(pass_index: int, index: int = index) -> str | None:
+            if prefix_cache is not None:
+                prefix_cache.begin_pass(index, pass_index)
+            return None
+
+        async def _after_pass(pass_index: int) -> str | None:
+            await guard.after_pass(pass_index)
+            if prefix_cache is not None:
+                prefix_cache.end_pass()
+            return None
+
         outcome = await bench.measure_configuration(
             configuration,
             sample=sample,
@@ -778,7 +794,8 @@ async def _measure(
             deadline_ns=deadline,
             on_iteration=progress.iteration,
             before_pass=guard.before_pass,
-            after_pass=guard.after_pass,
+            after_pass=_after_pass,
+            before_timed=_begin_timed,
         )
         progress.finished(outcome)
         outcomes.append(outcome)
@@ -955,9 +972,19 @@ def _protocol(spec: BenchmarkSpec, sample: dict[str, int]) -> dict[str, Any]:
                 "applies_to": "a decoder verifier at batch size 1",
                 "key": "the token ids of the row's own encoding that end within the premises",
                 "miss": "the prefix forward pass that fills the entry runs inside the request clock",
-                "hit": "the cached prefix is reused; the cache is rolled back to it afterwards",
-                "scope": "never cleared: warmup, passes and configurations share it",
-                "eviction": "least recently used first, past max_bytes",
+                "hit": (
+                    "only a prefix first filled earlier in the same timed pass; the cache is "
+                    "rolled back to it after each request"
+                ),
+                "scope": (
+                    "per timed pass: every entry is dropped after the pass's warmup and before "
+                    "its first timed request; the process, CUDA context and allocator stay warm "
+                    "(no empty_cache, no restart)"
+                ),
+                "eviction": (
+                    "least recently used first, past max_bytes; an eviction inside a timed pass "
+                    "is counted and flagged (evicted_in_pass)"
+                ),
                 "max_bytes": hp.prefix_cache_max_bytes,
                 "no_cache_diagnostic": (
                     "one extra pass per configuration without the cache, seeded with "
@@ -1451,6 +1478,7 @@ async def _execute_classifier(
             guard=guard,
             no_cache_step=no_cache_step,
             diagnostics=diagnostics,
+            prefix_cache=prefix_cache,
         )
     path_facts: dict[str, Any] = (
         {
