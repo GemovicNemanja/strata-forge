@@ -26,7 +26,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   overflowed with each system's full-tier read beside it, missing rows are always invalid,
   comparisons report the paired discordance rate `p_d`, rows without a cluster cluster on the
   SHA-256 of their normalised premises, and the manifest records the bootstrap contract.
-  Resamples where macro-F1 is undefined are counted, never zeroed.
+  Resamples where macro-F1 is undefined are counted, never zeroed. An interval with more than
+  `unstable_threshold` (default 0.01) of its resamples undefined is flagged `unstable`, and a
+  delta's `excludes_zero` gate read is then `unresolved`. A tier's token-count method is
+  recorded and must not mix, a declared premise count must match the platform's, and rows keyed
+  on the premise-hash fallback are counted per slice.
 - The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
 
 ### Changed

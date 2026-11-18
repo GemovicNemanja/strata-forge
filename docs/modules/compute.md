@@ -635,6 +635,22 @@ Each system also gets a ``full_tier`` secondary read over every non-refused row,
 its own overflow counted as invalid. A slice lists ``absent_classes`` (declared
 labels with no gold row and no prediction in it).
 
+``tier_rule.token_method_column`` names how ``token_column`` was counted (for
+example ``tokenizer:<repo>@<commit>``): every row needs one, a tier that mixes
+methods refuses, and each tier's method is echoed in ``population.token_methods``.
+A declared ``premise_count_column`` must equal the platform's count of the
+``premises_column`` list on every row, else the run refuses naming the row.
+``population.fallback_keyed`` and each slice's ``fallback_keyed`` count the rows
+clustered on the premise-hash fallback (0 on a suite tier, whose rows all carry a
+cluster value).
+
+Every interval carries ``undefined_share`` (its undefined resamples over
+``resamples``) and ``unstable``: true when that share exceeds
+``unstable_threshold`` (default 0.01, recorded in ``population``) or no resample
+was defined. An unstable interval never decides a gate: a delta's
+``excludes_zero`` is then ``"unresolved"``, and the ``end`` event leaves its
+bounds out.
+
 Id, cluster and slice columns must be short identifiers, never text: their
 values are written to ``items.parquet``, so a value over 256 characters refuses,
 as does a column that mixes value types (``1`` and ``"1"``, ``True`` and

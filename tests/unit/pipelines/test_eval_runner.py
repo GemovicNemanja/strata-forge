@@ -184,8 +184,15 @@ async def test_report_matches_the_metrics_library(
     expected = cluster_bootstrap(
         labels, cand, labels=LABELS, clusters=gold["base_problem_id"], seed=20261104, resamples=200
     )
-    assert overall["systems"]["candidate"]["macro_f1"] == expected.intervals.macro_f1.model_dump()
-    assert overall["systems"]["candidate"]["accuracy"] == expected.intervals.accuracy.model_dump()
+    stable = {"undefined_share": 0.0, "unstable": False}
+    assert overall["systems"]["candidate"]["macro_f1"] == {
+        **expected.intervals.macro_f1.model_dump(),
+        **stable,
+    }
+    assert overall["systems"]["candidate"]["accuracy"] == {
+        **expected.intervals.accuracy.model_dump(),
+        **stable,
+    }
     paired = paired_cluster_bootstrap(
         labels,
         base,
@@ -197,7 +204,12 @@ async def test_report_matches_the_metrics_library(
     )
     (comparison,) = overall["comparisons"]
     assert comparison["baseline"] == "baseline"
-    assert comparison["delta"]["macro_f1"] == paired.delta.macro_f1.model_dump()
+    delta = comparison["delta"]["macro_f1"]
+    assert delta == {
+        **paired.delta.macro_f1.model_dump(),
+        **stable,
+        "excludes_zero": bool(delta["lower"] > 0 or delta["upper"] < 0),
+    }
     point = classification_report(labels, cand, labels=LABELS)
     assert overall["systems"]["candidate"]["per_class"][0]["f1"] == point.per_class[0].f1
     assert overall["bootstrap"]["clusters"] == 20
@@ -604,3 +616,85 @@ async def test_an_undefined_macro_f1_leaves_its_bounds_out_of_the_end_event(
     assert metrics["macro_f1_undefined_resamples"] == 200
     report = json.loads((_outdir(env) / "metrics.json").read_text())
     assert report["slices"][0]["absent_classes"] == ["neutral"]
+
+
+async def test_rows_clustered_on_the_fallback_are_counted_per_slice(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["base_problem_id"] = [
+        None if i < 7 else v for i, v in enumerate(env["gold"]["base_problem_id"])
+    ]
+    env["gold"]["premises"] = [["fact", f"rule {i}"] for i in range(60)]
+    code, events = await _run(
+        monkeypatch, env, _spec(evaluation=_settings(premises_column="premises"))
+    )
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["population"]["fallback_keyed"] == 7
+    assert report["slices"][0]["fallback_keyed"] == 7
+    tiers = {s["value"]: s["fallback_keyed"] for s in report["slices"] if s["column"] == "tier"}
+    expected = {t: sum(1 for i in range(7) if env["gold"]["tier"][i] == t) for t in tiers}
+    assert tiers == expected
+
+
+async def test_the_token_method_is_one_per_tier_and_echoed(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    method = "tokenizer:answerdotai/ModernBERT-large@45bb4654"
+    env["gold"]["n_tokens"] = [100] * 60
+    env["gold"]["n_tokens_method"] = [method] * 60
+    rule = {
+        "tier_column": "tier",
+        "default": {"max_tokens": 2048},
+        "token_column": "n_tokens",
+        "token_method_column": "n_tokens_method",
+    }
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(tier_rule=rule)))
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["population"]["token_methods"] == dict.fromkeys(set(env["gold"]["tier"]), method)
+    env["gold"]["n_tokens_method"][0] = "whitespace"
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(tier_rule=rule)))
+    assert code == 1
+    assert "mixes token-count methods" in events[-1]["message"]
+
+
+async def test_a_declared_premise_count_must_match_the_platform_s(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["premises"] = [["a", "b"]] * 60
+    env["gold"]["n_premises"] = [2] * 60
+    settings = _settings(premises_column="premises", premise_count_column="n_premises")
+    code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
+    assert code == 0, events[-1]
+    env["gold"]["n_premises"][3] = 3
+    code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
+    assert code == 1
+    assert "row 3" in events[-1]["message"]
+
+
+async def test_an_unstable_interval_never_decides_a_gate(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    # "neutral" is in a few gold rows only, so many resamples lack it on both sides.
+    gold = env["gold"]["label"]
+    for i, label in enumerate(gold):
+        if label == "neutral" and i > 3:
+            gold[i] = "entailment"
+    for table in (env["cand"], env["base"]):
+        table["pred"] = ["entailment" if p == "neutral" else p for p in table["pred"]]
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["population"]["unstable_threshold"] == 0.01
+    macro = report["slices"][0]["systems"]["candidate"]["macro_f1"]
+    assert macro["undefined_share"] > 0.01
+    assert macro["unstable"] is True
+    delta = report["slices"][0]["comparisons"][0]["delta"]["macro_f1"]
+    assert delta["unstable"] is True
+    assert delta["excludes_zero"] == "unresolved"
+    assert "macro_f1_lower" not in events[-1]["metrics"]
+    # A higher recorded threshold makes the same interval stable.
+    code, _ = await _run(monkeypatch, env, _spec(evaluation=_settings(unstable_threshold=1.0)))
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["slices"][0]["systems"]["candidate"]["macro_f1"]["unstable"] is False

@@ -210,8 +210,11 @@ class TierRule(BaseModel):
     limits: dict[str, TierLimit] = Field(default_factory=dict[str, TierLimit])
     default: TierLimit | None = None
     token_column: str | None = None
+    # How token_column was counted (e.g. ``tokenizer:<repo>@<commit>``): one value per tier,
+    # echoed in the report.
+    token_method_column: str | None = None
 
-    @field_validator("tier_column", "token_column")
+    @field_validator("tier_column", "token_column", "token_method_column")
     @classmethod
     def _column(cls, value: str | None) -> str | None:
         return None if value is None else _bounded_text(value, "a column name")
@@ -234,6 +237,9 @@ class TierRule(BaseModel):
         tokens = [lim.max_tokens for lim in (*self.limits.values(), self.default) if lim]
         if any(tokens) and self.token_column is None:
             msg = "a max_tokens limit needs a token_column"
+            raise ValueError(msg)
+        if self.token_method_column is not None and self.token_column is None:
+            msg = "a token_method_column needs a token_column"
             raise ValueError(msg)
         return self
 
@@ -258,12 +264,17 @@ class EvalSettings(BaseModel):
     # A list of premises (strings, or {pid, text} objects) per row: the cluster of a row with no
     # cluster value, and what a tier rule counts.
     premises_column: str | None = None
+    # A declared per-row premise count, checked against the platform's count of premises_column.
+    premise_count_column: str | None = None
     tier_rule: TierRule | None = None
     seed: int = Field(ge=0, le=MAX_CLUSTER_BOOTSTRAP_SEED)
     resamples: int = Field(
         default=CLUSTER_BOOTSTRAP_RESAMPLES, ge=1, le=MAX_CLUSTER_BOOTSTRAP_RESAMPLES
     )
     min_slice_rows: int = Field(default=500, ge=1)
+    # An interval with more than this share of undefined resamples is ``unstable``: reported, and
+    # never the basis of a gate read (which then says ``unresolved``).
+    unstable_threshold: float = Field(default=0.01, ge=0, le=1)
 
     @field_validator("labels")
     @classmethod
@@ -274,7 +285,12 @@ class EvalSettings(BaseModel):
         return tuple(_bounded_text(label, "a label") for label in value)
 
     @field_validator(
-        "id_column", "gold_column", "cluster_column", "exclude_column", "premises_column"
+        "id_column",
+        "gold_column",
+        "cluster_column",
+        "exclude_column",
+        "premises_column",
+        "premise_count_column",
     )
     @classmethod
     def _column(cls, value: str | None) -> str | None:
@@ -310,6 +326,9 @@ class EvalSettings(BaseModel):
         limits = [*rule.limits.values(), rule.default] if rule else []
         if any(lim and lim.max_premises for lim in limits) and self.premises_column is None:
             msg = "a max_premises limit needs a premises_column"
+            raise ValueError(msg)
+        if self.premise_count_column is not None and self.premises_column is None:
+            msg = "a premise_count_column needs a premises_column"
             raise ValueError(msg)
         return self
 
@@ -392,8 +411,10 @@ def _gold_columns(settings: EvalSettings) -> list[str]:
         settings.cluster_column,
         settings.exclude_column,
         settings.premises_column,
+        settings.premise_count_column,
         rule.tier_column if rule else None,
         rule.token_column if rule else None,
+        rule.token_method_column if rule else None,
     )
     for extra in extras:
         if extra is not None:
@@ -476,6 +497,10 @@ class _Gold(BaseModel):
     slices: dict[str, list[list[str]]]
     excluded: list[bool]
     refused: list[bool]
+    # Whether each row's cluster is the premise-hash fallback (it had no cluster value).
+    fallback: list[bool]
+    # The token-count method per tier (``tier_column`` value, or ``"*"`` with no tier column).
+    token_methods: dict[str, str]
 
     def common_out(self, row: int) -> bool:
         return self.excluded[row] or self.refused[row]
@@ -558,7 +583,8 @@ def _prepare_gold(columns: dict[str, list[Any]], settings: EvalSettings) -> _Gol
             )
             raise RunError(msg)
         labels.append(mapped)
-    clusters = _clusters(columns, settings, ids)
+    clusters, fallback = _clusters(columns, settings, ids)
+    _check_premise_counts(columns, settings)
     excluded = [False] * len(ids)
     if settings.exclude_column is not None:
         flags = columns[settings.exclude_column]
@@ -581,24 +607,72 @@ def _prepare_gold(columns: dict[str, list[Any]], settings: EvalSettings) -> _Gol
         slices=slices,
         excluded=excluded,
         refused=_refused(columns, settings, len(ids)),
+        fallback=fallback,
+        token_methods=_token_methods(columns, settings, len(ids)),
     )
 
 
-def _clusters(columns: dict[str, list[Any]], settings: EvalSettings, ids: list[str]) -> list[str]:
+def _check_premise_counts(columns: dict[str, list[Any]], settings: EvalSettings) -> None:
+    """Refuse a declared premise count that disagrees with the platform's own count."""
+    if settings.premise_count_column is None or settings.premises_column is None:
+        return
+    for row, (premises, declared) in enumerate(
+        zip(columns[settings.premises_column], columns[settings.premise_count_column], strict=True)
+    ):
+        if not isinstance(premises, list):
+            msg = f"premises column {settings.premises_column!r} must hold lists"
+            raise RunError(msg)
+        counted = len(cast("list[object]", premises))
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared != counted:
+            msg = (
+                f"row {row}: {settings.premise_count_column!r} says {declared!r} premises but "
+                f"{settings.premises_column!r} holds {counted}"
+            )
+            raise RunError(msg)
+
+
+def _token_methods(columns: dict[str, list[Any]], settings: EvalSettings, n: int) -> dict[str, str]:
+    """The one token-count method of each tier; refuses a tier that mixes methods or lacks one."""
+    rule = settings.tier_rule
+    if rule is None or rule.token_method_column is None:
+        return {}
+    tiers = columns[rule.tier_column] if rule.tier_column else ["*"] * n
+    seen: dict[str, set[str]] = {}
+    for tier, method in zip(tiers, columns[rule.token_method_column], strict=True):
+        if not isinstance(method, str) or not method:
+            msg = f"every row needs a {rule.token_method_column!r} value"
+            raise RunError(msg)
+        if len(method) > _MAX_IDENTIFIER_CHARS:
+            msg = f"{rule.token_method_column!r} values must be at most {_MAX_IDENTIFIER_CHARS} characters"
+            raise RunError(msg)
+        seen.setdefault(str(tier), set()).add(method)
+    mixed = sorted(tier for tier, methods in seen.items() if len(methods) > 1)
+    if mixed:
+        msg = f"{rule.token_method_column!r} mixes token-count methods within tier(s): {mixed}"
+        raise RunError(msg)
+    return {tier: next(iter(methods)) for tier, methods in sorted(seen.items())}
+
+
+def _clusters(
+    columns: dict[str, list[Any]], settings: EvalSettings, ids: list[str]
+) -> tuple[list[str], list[bool]]:
+    """Each row's cluster key, and whether it is the premise-hash fallback."""
     premises = columns[settings.premises_column] if settings.premises_column else None
     given = columns[settings.cluster_column] if settings.cluster_column else [None] * len(ids)
     if settings.cluster_column is None and premises is None:
-        return list(ids)
+        return list(ids), [False] * len(ids)
     out: list[str] = []
+    fallback: list[bool] = []
     for row, value in enumerate(given):
         cluster = _item_id(value)
+        fallback.append(cluster is None)
         if cluster is None:
             if premises is None:
                 msg = f"every gold row needs a string or integer {settings.cluster_column!r}"
                 raise RunError(msg)
             cluster = premise_cluster_key(premises[row])
         out.append(cluster)
-    return out
+    return out, fallback
 
 
 def _refused(columns: dict[str, list[Any]], settings: EvalSettings, n: int) -> list[bool]:
@@ -701,15 +775,35 @@ def _populations(gold: _Gold) -> list[tuple[str | None, str | None, _Population]
     return out
 
 
-def _intervals(intervals: SystemIntervals) -> dict[str, dict[str, float]]:
-    return {
-        name: interval.model_dump()
-        for name, interval in (
-            ("accuracy", intervals.accuracy),
-            ("macro_f1", intervals.macro_f1),
-            ("invalid_rate", intervals.invalid_rate),
-        )
-    }
+def _stability(interval: dict[str, Any], settings: EvalSettings) -> dict[str, Any]:
+    """Add ``undefined_share`` and ``unstable`` (over ``settings.unstable_threshold``)."""
+    share = interval.get("undefined_resamples", 0) / settings.resamples
+    unstable = share > settings.unstable_threshold or interval.get("lower") is None
+    return {**interval, "undefined_share": share, "unstable": unstable}
+
+
+def _excludes_zero(interval: dict[str, Any]) -> bool | Literal["unresolved"]:
+    """The gate read on a delta: whether its interval lies wholly on one side of zero, or
+    ``unresolved`` when the interval is unstable and so may not decide anything."""
+    if interval["unstable"]:
+        return "unresolved"
+    return bool(interval["lower"] > 0 or interval["upper"] < 0)
+
+
+def _intervals(
+    intervals: SystemIntervals, settings: EvalSettings, *, delta: bool = False
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for name, interval in (
+        ("accuracy", intervals.accuracy),
+        ("macro_f1", intervals.macro_f1),
+        ("invalid_rate", intervals.invalid_rate),
+    ):
+        entry = _stability(interval.model_dump(), settings)
+        if delta:
+            entry["excludes_zero"] = _excludes_zero(entry)
+        out[name] = entry
+    return out
 
 
 def _system_read(
@@ -725,7 +819,7 @@ def _system_read(
         seed=settings.seed,
         resamples=settings.resamples,
     )
-    entry: dict[str, Any] = _intervals(result.intervals)
+    entry: dict[str, Any] = _intervals(result.intervals, settings)
     if detail:
         report = classification_report(actual, predictions, labels=settings.labels)
         entry["per_class"] = [score.model_dump() for score in report.per_class]
@@ -776,6 +870,8 @@ def _score_population(
         "overflow_excluded": len(rows) - len(shared),
         "overflow_share": (len(rows) - len(shared)) / len(rows),
         "clusters": len(set(clusters)),
+        # Rows clustered on the premise-hash fallback (no cluster value); 0 on a suite tier.
+        "fallback_keyed": sum(1 for i in rows if gold.fallback[i]),
         "diagnostic": len(shared) < settings.min_slice_rows,
         "absent_classes": [label for label in settings.labels if label not in present],
         "systems": {},
@@ -804,7 +900,7 @@ def _score_population(
             {
                 "baseline": baseline.name,
                 "candidate": candidate,
-                "delta": _intervals(paired.delta),
+                "delta": _intervals(paired.delta, settings, delta=True),
                 "discordance": _discordance(
                     shared, gold, systems[baseline.name], systems[candidate]
                 ),
@@ -836,7 +932,7 @@ def _headline(report: dict[str, Any], settings: EvalSettings) -> dict[str, float
             delta = comparison["delta"][name]
             metrics[f"delta_{name}__{comparison['baseline']}"] = delta["point"]
             for part in ("lower", "upper"):
-                if delta[part] is not None:
+                if delta[part] is not None and not delta["unstable"]:
                     metrics[f"delta_{name}_{part}__{comparison['baseline']}"] = delta[part]
     return metrics
 
@@ -844,7 +940,7 @@ def _headline(report: dict[str, Any], settings: EvalSettings) -> dict[str, float
 def _put_interval(metrics: dict[str, float], name: str, interval: dict[str, Any]) -> None:
     """A point and, when any resample defined it, its bounds: an event metric is a number."""
     metrics[name] = interval["point"]
-    if interval["lower"] is not None:
+    if interval["lower"] is not None and not interval.get("unstable", False):
         metrics[f"{name}_lower"] = interval["lower"]
         metrics[f"{name}_upper"] = interval["upper"]
 
@@ -983,6 +1079,9 @@ def _report(
             "rows": len(gold.ids),
             "excluded": sum(gold.excluded),
             "tier_refused": sum(gold.refused),
+            "fallback_keyed": sum(gold.fallback),
+            "token_methods": gold.token_methods,
+            "unstable_threshold": settings.unstable_threshold,
             "cluster_column": settings.cluster_column,
             "min_slice_rows": settings.min_slice_rows,
         },
