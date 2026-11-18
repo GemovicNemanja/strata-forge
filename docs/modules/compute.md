@@ -45,6 +45,7 @@ Source: [`src/strata_forge/compute/`](../../src/strata_forge/compute/).
 - [Task and ResourceSpec](#task-and-resourcespec)
   - [Secrets](#secrets)
 - [Job lifecycle](#job-lifecycle)
+  - [Evaluation runner](#evaluation-runner)
   - [The runner contract](#the-runner-contract)
 - [Backend protocol](#backend-protocol)
   - [Cleanup is verified](#cleanup-is-verified)
@@ -590,6 +591,52 @@ length limit and its source, the overflow policy, the padding side, dtype,
 the TF32 switches, the batch plan, device and the ignored checkpoint keys. Like the pair
 template, the prefill and the kwargs are left out of the manifest's
 ``hyperparams`` dump: only their digests are pushed.
+### Evaluation runner
+
+``strata_forge.pipelines.eval_runner`` scores pinned prediction files against a
+pinned gold split; it loads no model. Its spec (``EvalSpec``) names the gold
+dataset, ``dataset_commit_sha`` (required), config and split, plus an
+``evaluation`` block (``EvalSettings``, the model a control plane validates a
+submission with):
+
+- ``labels``: the ordered label space; ``gold_column`` and ``id_column`` on the
+  gold split; ``gold_aliases`` mapping gold values onto labels.
+- ``predictions``: the candidate system and ``compare_to`` up to eight
+  baselines. Each is a ``PredictionSource``: a ``name``, a dataset ``repo_id``,
+  a full ``commit_sha`` (required), a ``.parquet`` ``path`` (default
+  ``results.parquet``), its ``id_column`` (default ``item_id``) and
+  ``prediction_column`` (default ``pred``), an optional boolean
+  ``overflow_column`` and ``label_aliases``.
+- ``cluster_column`` (each item is its own cluster when unset),
+  ``slice_columns`` (up to eight; a list value puts a row in each listed slice;
+  at most 64 values per column), an optional boolean ``exclude_column``,
+  ``seed``, ``resamples`` (default 10,000) and ``min_slice_rows`` (default 500).
+
+Every read is pinned, so a run reads only data it was explicitly pointed at,
+and only the declared gold columns are materialised. A gold item with no
+prediction, a null or unmapped prediction, or an overflowed row is an invalid
+prediction (wrong, and in the gold class's support); a prediction id with no
+gold item is counted and ignored; a repeated id refuses. Rows the gold split
+flags in ``exclude_column`` leave every system's population, so paired systems
+always share one.
+
+The overall population and each slice get accuracy, macro-F1 and invalid rate
+per system with the [cluster percentile
+bootstrap](metrics.md#cluster-percentile-bootstrap), and a paired
+candidate-minus-baseline delta per baseline. A slice under ``min_slice_rows``
+rows is reported with ``diagnostic: true``. The outputs are ``items.parquet``
+(per gold item: id, gold, cluster, ``excluded``, ``slice__<column>``, and per
+system ``pred__<name>`` and ``correct__<name>``), ``metrics.json`` (schema
+``strata.eval.report/v1``: the systems with their join counts, the population,
+and one entry per slice with ``n``, ``clusters``, ``diagnostic``, per-system
+intervals, the overall per-class scores and confusion, and the comparisons),
+``manifest.json`` (``kind`` ``evaluation``: the pinned inputs, settings,
+engine and counts) and a dataset card whose ``configs:`` points the Hub viewer
+at ``items.parquet``. They are pushed in one commit to a private output dataset
+repo, refused when public, or kept on the machine under
+``~/strata-eval-results/<run_id>``. The ``end`` event carries the candidate's
+overall figures and bounds and each baseline's accuracy and macro-F1 deltas.
+The machine needs ``strata-forge[scoring,storage,hf]``.
 
 ### The runner contract
 
