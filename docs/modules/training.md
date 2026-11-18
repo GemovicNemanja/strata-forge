@@ -367,14 +367,20 @@ frozen parameters, so an evaluator renders rows exactly as training did.
 ### After training: reload parity and calibration
 
 `SeqClsRunner.finish` checks the saved artifact before anything else reads it
-(`artifact_checks`). Every parameter the method holds at zero (the decoder's `head.dense.bias`) is
-asserted exactly zero at save and again after reload. The artifact is reloaded the way a scorer
+(`artifact_checks`). Every parameter held at zero (the decoder's `head.dense.bias`) is asserted
+exactly zero at save and again after reload, and is recorded in `strata_verifier.json`
+(`zero_parameters`). Continuing a classifier (`head_init="existing"`) takes that list from the
+checkpoint's `strata_verifier.json` (or, for a decoder whose record predates it, from its
+config's `classifier_bias`), refuses the run at load when one of them is not exactly zero, and
+keeps them frozen. A reload failure is reported by its exception type only, never the library's
+text, which names paths on the machine. The artifact is reloaded the way a scorer
 loads it: stock `AutoModelForSequenceClassification` from its own safetensors, no remote code,
 float32, under `check_loading_info`. Its logits on a fixed set of rows (the first `step0_rows` of
 the eval split, else of the training split) must equal the trained classifier's in-memory float32
 logits within `step0_tolerance`, with the same predicted label on every row (`reload_parity`
 receipt). A failure raises `ArtifactCheckError`; the run is refused and nothing is pushed. When a
-decoder's classifier gained a bias, the load receipt records `classifier_bias: true` and why.
+decoder's classifier has a bias, the load receipt records `classifier_bias: true` (read from the
+model's config) and why.
 
 With a declared calibration split (the run spec's `calibration_split`, an in-distribution dev
 split), one temperature is then fitted on the reloaded model's float32 logits over the split's
@@ -383,7 +389,9 @@ single-label three-way rows (two-way and soft-label rows are excluded and counte
 and written to `calibration.json` in the artifact: the fit (temperature, NLL before and after, a
 boundary hit), the split and its dataset commit, the row counts, and `rows_sha256` (SHA-256 over
 one JSON line `[input_ids, label]` per fitted row, in split order). An engine without that fit
-refuses a spec that declares a calibration split.
+refuses a spec that declares a calibration split, and a fit that refuses its input is an
+`ArtifactCheckError` like any other check. The record's schema is in
+[compute](compute.md#calibrationjson).
 
 ## PEFT (LoRA / QLoRA)
 

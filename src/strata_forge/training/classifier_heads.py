@@ -106,6 +106,9 @@ class LoadReceipt:
     added_parameters: list[str] = field(default_factory=list[str])
     #: The checkpoint config's ``classifier_pooling`` when the method replaced it with ``cls``.
     pooling_changed_from: str | None = None
+    #: Parameters held at exactly zero (and frozen there): added by this run, or carried by the
+    #: continued checkpoint (its ``strata_verifier.json``, else its config's ``classifier_bias``).
+    zero_parameters: list[str] = field(default_factory=list[str])
 
 
 def _torch() -> Any:

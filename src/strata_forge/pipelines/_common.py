@@ -760,7 +760,17 @@ async def runner_main(
         return 1
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
         detail = redactor.redact(str(exc))
-        metrics = exc.metrics if isinstance(exc, RunError) else {}
+        # A RunError's measurements, or any exception a runner annotated with them on its way out.
+        raw_metrics: Any = getattr(exc, "metrics", None)
+        metrics = (
+            {
+                str(k): float(v)
+                for k, v in cast("dict[Any, Any]", raw_metrics).items()
+                if isinstance(v, int | float) and not isinstance(v, bool)
+            }
+            if isinstance(raw_metrics, dict)
+            else {}
+        )
         emit(writer, ProgressEvent(kind="error", message=detail, metrics=metrics))
         # Also to stderr, because that is where the control plane reads a failed run's reason
         # from. Catching the exception here means no traceback is printed, so without this the

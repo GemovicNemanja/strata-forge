@@ -635,6 +635,80 @@ class TestAcceptanceSmoke:
         with pytest.raises(PreflightError, match="different decoder_template"):
             SeqClsRunner(config).load_tokenizer(artifact)
 
+    def test_existing_decoder_holds_the_continued_zero_bias_at_zero(
+        self, tmp_path: Path, decoder_dir: Path
+    ) -> None:
+        _, _, artifact = _smoke(
+            tmp_path / "first", decoder_dir, _decoder_config(tmp_path / "first")
+        )
+        verifier = json.loads((artifact / VERIFIER_CONFIG_FILENAME).read_text())
+        assert verifier["zero_parameters"] == ["head.dense.bias"]
+        result, _, second = _smoke(
+            tmp_path / "second", artifact, _config(tmp_path / "second", head_init="existing")
+        )
+        load = result.receipts["load"]
+        assert load["zero_parameters"] == ["head.dense.bias"]
+        assert load["classifier_bias"]["value"] is True
+        assert "continued from a checkpoint" in load["classifier_bias"]["reason"]
+        assert result.receipts["reload_parity"]["zero_parameters"] == ["head.dense.bias"]
+        reloaded = safetensors_torch.load_file(str(second / "model.safetensors"))
+        assert bool((reloaded["head.dense.bias"] == 0).all())
+
+    @pytest.mark.parametrize("listed", [True, False])
+    def test_existing_refuses_a_continued_checkpoint_whose_zero_bias_moved(
+        self, tmp_path: Path, decoder_dir: Path, listed: bool
+    ) -> None:
+        _, _, artifact = _smoke(
+            tmp_path / "first", decoder_dir, _decoder_config(tmp_path / "first")
+        )
+        path = artifact / "model.safetensors"
+        state = safetensors_torch.load_file(str(path))
+        state["head.dense.bias"] = state["head.dense.bias"] + 1e-3
+        safetensors_torch.save_file(state, str(path), metadata={"format": "pt"})
+        if not listed:
+            # A checkpoint that predates the field: the decoder config's classifier_bias decides.
+            verifier_path = artifact / VERIFIER_CONFIG_FILENAME
+            verifier = json.loads(verifier_path.read_text())
+            del verifier["zero_parameters"]
+            verifier_path.write_text(json.dumps(verifier))
+        config = _config(tmp_path / "second", head_init="existing")
+        with pytest.raises(PreflightError, match=r"head\.dense\.bias must be exactly zero"):
+            _smoke(tmp_path / "second", artifact, config)
+
+    def test_a_reload_failure_names_no_path(self, tmp_path: Path, encoder_dir: Path) -> None:
+        runner = SeqClsRunner(_config(tmp_path), memory_probe=_Probe(10, 1000))
+        prepared = runner.prepare(checkpoint=encoder_dir, train_dataset=_dataset(16))
+        artifact = tmp_path / "artifact"
+        runner.finish(prepared, artifact_dir=artifact)
+        (artifact / "config.json").write_text("{not json")
+        with pytest.raises(ArtifactCheckError, match="does not reload cleanly") as exc:
+            runner.artifact_checks(prepared, artifact)
+        assert str(tmp_path) not in str(exc.value)
+
+    def test_a_refused_temperature_fit_is_an_artifact_refusal(
+        self, tmp_path: Path, encoder_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+        import types
+
+        fake = types.ModuleType("strata_forge.metrics.calibration_fit")
+
+        def _refuse(*_a: Any, **_k: Any) -> Any:
+            msg = "a fit input the validator refuses"
+            raise ValueError(msg)
+
+        fake.fit_temperature = _refuse  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "strata_forge.metrics.calibration_fit", fake)
+        runner = SeqClsRunner(_config(tmp_path), memory_probe=_Probe(10, 1000))
+        with pytest.raises(ArtifactCheckError, match="temperature fit refused") as exc:
+            runner.run(
+                checkpoint=encoder_dir,
+                artifact_dir=tmp_path / "artifact",
+                train_dataset=_dataset(16),
+                calibration_dataset=_dataset(12, seed=2),
+            )
+        assert exc.value.check == "artifact"
+
     def test_existing_refuses_missing_aux_heads(self, tmp_path: Path, encoder_dir: Path) -> None:
         _, _, artifact = _smoke(tmp_path / "first", encoder_dir, _config(tmp_path / "first"))
         (artifact / AUX_HEADS_FILENAME).unlink()

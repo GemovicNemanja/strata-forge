@@ -858,7 +858,41 @@ async def _train_seq_cls(
 async def _execute(
     spec: FinetuneSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
+    """Run the fine-tune; every terminal error carries the run's GPU time in its metrics.
+
+    A refusal, a failed push and a crash alike end on an ``error`` event whose metrics hold
+    ``gpu_seconds`` and ``gpu_count`` (``runner_main`` emits an exception's ``metrics``), so the
+    control plane books every attempt's GPU time, not only a finished one's.
+    """
     started = time.monotonic()
+    facts: dict[str, Any] = {}
+    try:
+        return await _execute_run(spec, secrets, writer, started, facts)
+    except Exception as exc:
+        try:
+            known = facts.get("gpu") or await asyncio.to_thread(_gpu_facts)
+        except Exception:
+            known = {"gpu_count": 0}
+        count = int(known.get("gpu_count") or 0)
+        if pick_method(spec.method).task_type == "SEQ_CLS":
+            count = min(1, count)
+        compute = _compute_block(started, {**known, "gpu_count": count}, {})
+        measured = {
+            "gpu_seconds": float(compute["gpu_seconds"]),
+            "gpu_count": float(compute["gpu_count"]),
+        }
+        previous: Any = getattr(exc, "metrics", None)
+        exc.metrics = {**measured, **(previous if isinstance(previous, dict) else {})}  # pyright: ignore[reportAttributeAccessIssue] - read back by runner_main
+        raise
+
+
+async def _execute_run(
+    spec: FinetuneSpec,
+    secrets: RunSecrets,
+    writer: JsonlProgressWriter | None,
+    started: float,
+    facts: dict[str, Any],
+) -> str:
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, so the
@@ -888,6 +922,7 @@ async def _execute(
             )
 
     gpu_facts = await asyncio.to_thread(_gpu_facts)
+    facts["gpu"] = gpu_facts
     checks: dict[str, Any] | None = None
     if seq_cls:
 

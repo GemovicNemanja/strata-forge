@@ -483,8 +483,29 @@ wall-clock time, from the spec check to the manifest, times the GPUs it used
 (one for ``seq_cls``); provisioning and the engine install happen before the
 runner exists and are the control plane's to measure. The terminal ``end``
 event carries ``gpu_seconds`` and ``gpu_count`` in its metrics too, so a control plane can book
-its own total GPU-held time against the same count. The manifest holds no row
+its own total GPU-held time against the same count; so does the terminal ``error`` event of a
+run that ends any other way (a refused check, a failed push, a crash). The manifest holds no row
 content and no credential.
+
+#### ``calibration.json``
+
+One contract, written by a ``seq_cls`` run with ``calibration_split`` and read by every
+evaluator and scorer that applies a temperature; a reader needs this file alone, never
+``strata_verifier.json``:
+
+- ``schema``: ``"strata.calibration/v1"``.
+- ``labels``: the ordered output labels the temperature applies to, one per logit, in logit
+  order.
+- ``fit``: the fit, with ``fit.temperature`` (positive; calibrated probabilities are
+  ``softmax(logits / temperature)`` over ``labels``), ``fit_version``, ``n``, ``nll_before``,
+  ``nll_after`` and ``at_bound``.
+- ``split``: the dataset id, config, split and dataset commit the temperature was fitted on.
+- ``rows`` and ``excluded_rows``: the fitted single-label three-way rows, and the rest.
+- ``rows_sha256``: SHA-256 over one JSON line ``[input_ids, label]`` per fitted row, in split
+  order.
+- ``logits_from``: which logits were fitted (the saved artifact, float32, TF32 off).
+
+A reader applies ``fit.temperature`` to the logits of exactly ``labels`` and keeps the raw logits.
 
 A pushed fine-tune goes only to a **private** model repo, checked before any
 download or GPU time and again at push time, as for batch inference. The push
