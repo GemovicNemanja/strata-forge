@@ -1581,17 +1581,19 @@ def _check_chat_template_kwargs(snapshot: Path, hp: Hyperparams) -> str | None:
 
 
 def _prompt_manifest(prompt: PromptSpec | None) -> dict[str, Any] | None:
-    """The pinned build a run rendered with: its hash and how each variable was bound. A fixed
-    value is recorded as a digest, like the template, so the manifest carries no prompt text."""
+    """The pinned build a run rendered with: its hash and how each variable was bound.
+
+    A column binding is recorded by name. A fixed value is recorded only as fixed: a digest of a
+    short value (a style, a language, a yes/no) is trivially guessable, so it would republish the
+    value beside the outputs; the spec that holds it stays with the control plane.
+    """
     if prompt is None:
         return None
-    bindings: dict[str, dict[str, str]] = {}
+    bindings: dict[str, dict[str, Any]] = {}
     for name, binding in sorted(prompt.bindings.items()):
-        if binding.column is not None:
-            bindings[name] = {"column": binding.column}
-        else:
-            text = json.dumps(binding.value, sort_keys=True, ensure_ascii=False)
-            bindings[name] = {"value_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        bindings[name] = (
+            {"column": binding.column} if binding.column is not None else {"fixed": True}
+        )
     return {
         "build_id": prompt.build_id,
         "build_hash": prompt.build.hash,

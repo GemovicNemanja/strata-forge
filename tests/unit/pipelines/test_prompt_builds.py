@@ -135,7 +135,7 @@ def test_the_manifest_records_the_build_and_its_bindings_but_no_text(
     assert prompt["build_id"] == "b1"
     assert prompt["build_hash"] == _QUESTION.hash
     assert prompt["bindings"]["question"] == {"column": "q"}
-    assert set(prompt["bindings"]["style"]) == {"value_sha256"}
+    assert prompt["bindings"]["style"] == {"fixed": True}
     assert "full" not in json.dumps(manifest)
 
 

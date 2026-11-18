@@ -379,7 +379,7 @@ the machine. It records:
 - a SHA-256 of the template (never its text), the column mapping and the
   hyperparameters; for a run that renders a compiled prompt build, ``prompt``
   records the build's id, hash and compiler version and how each variable was
-  bound (a column name, or a SHA-256 of a fixed value) and
+  bound (a column name, or only that a fixed value was bound: a digest of a short value would be guessable) and
   ``template_sha256`` is ``None``;
 - the ``id_column`` the rows were named by (``None`` for positions) and,
   for a run given ``row_ids``, their ``count`` and a ``sha256`` of the ids
