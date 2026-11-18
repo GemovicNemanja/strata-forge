@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from strata_forge.datasets.recipe import Recipe, recipe_sha256
+from strata_forge.datasets.recipe import MEMORY_FACTOR, Recipe, recipe_sha256
 from strata_forge.pipelines import SPEC_VERSION
 from strata_forge.pipelines import recipe_runner as rr
 from strata_forge.pipelines._common import LEGACY_TOKEN_ENV
@@ -363,7 +363,7 @@ async def test_a_preview_sample_is_bounded_per_value_and_in_total() -> None:
     rows = sample["train"]
     assert len(rows) <= rr.SAMPLE_ROWS
     assert all(len(r["text"]) <= rr.SAMPLE_CELL_CHARS for r in rows)
-    assert len(json.dumps(sample)) <= rr.SAMPLE_BYTES + 1024
+    assert len(json.dumps(sample, ensure_ascii=False).encode()) <= rr.SAMPLE_BYTES + 1024
 
 
 async def test_held_out_provenance_is_recorded_in_the_summary_and_receipt(
@@ -486,5 +486,40 @@ def test_the_reader_streams_applies_the_slice_and_stops_at_the_limit(
     assert seen["streaming"] is True
     assert seen["split"] == "train"
     assert [r["a"] for r in rows] == list(range(10, 16))
-    with pytest.raises(rr.RunError, match="MiB of values"):
+    with pytest.raises(rr.RunError, match="memory cap"):
         rr._read_source(source.model_copy(update={"columns": None}), False, 900, 4096)  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_memory_cap_covers_every_source_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from strata_forge.datasets.recipe import Recipe as _Recipe
+
+    rows = {"a": [{"t": "x" * 1000}] * 50, "b": [{"t": "y" * 1000}] * 50}
+    seen: list[int] = []
+
+    def _read(source: Any, _token: Any, _limit: int, byte_cap: int) -> list[dict[str, Any]]:
+        seen.append(byte_cap)
+        return rows[source.name]
+
+    monkeypatch.setattr(rr, "_read_source", _read)
+    recipe = _Recipe.model_validate(
+        {
+            "name": "two",
+            "sources": [
+                {"name": "a", "hf_repo_id": "org/a", "revision": _SHA, "split": "train"},
+                {"name": "b", "hf_repo_id": "org/b", "revision": _SHA, "split": "train"},
+            ],
+            "steps": [{"kind": "load", "source": "a"}, {"kind": "concat", "source": "b"}],
+        }
+    )
+    spec = rr.RecipeRunSpec.model_validate(_spec(recipe.canonical(), byte_cap=10**8))
+    _, _, held = await rr._read_sources(spec, recipe, False)  # pyright: ignore[reportPrivateUsage]
+
+    # The second source is read within what the first left of the one cap, and the total is
+    # what the engine's own cap is then reduced by.
+    def est(name: str) -> int:
+        return sum(rr._value_bytes(r) for r in rows[name]) * MEMORY_FACTOR  # pyright: ignore[reportPrivateUsage]
+
+    assert seen == [10**8, 10**8 - est("a")]
+    assert held == est("a") + est("b")

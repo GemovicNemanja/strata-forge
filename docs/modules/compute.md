@@ -747,7 +747,8 @@ not hash to the declared revision is refused before anything is read), a
 created private when missing and refused when public, checked again at push; a
 preview takes none), ``row_cap`` and ``byte_cap`` (a source, join or table past
 either is refused, never truncated; default 1,000,000 rows and 2 GiB of
-values), ``preview_source_rows`` (default 10,000), and
+estimated memory, ONE cap for every source read and the engine's tables
+together), ``preview_source_rows`` (default 10,000), and
 ``serving`` (how a ``synthesize`` step's model is served: tensor parallelism,
 ``max_model_len``, dtype, GPU memory fraction, start timeout, requests in
 flight). A materialization needs the account's write token; a preview needs

@@ -52,6 +52,7 @@ from strata_forge.compute.serving import build_vllm_task, serving_endpoint
 from strata_forge.datasets.recipe import (
     DEFAULT_BYTE_CAP,
     MAX_BYTE_CAP,
+    MEMORY_FACTOR,
     GenerationRequest,
     GenerationResult,
     Recipe,
@@ -223,7 +224,8 @@ def _read_source(
     """At most ``limit`` rows of the pinned split, streamed (never the whole split in memory).
 
     The split's row slice is applied while streaming; reading stops at ``limit`` rows, and a read
-    past ``byte_cap`` bytes of values is refused rather than held.
+    whose rows would take more than ``byte_cap`` bytes of memory (the values' estimate times the
+    engine's ``MEMORY_FACTOR``) is refused rather than held.
     """
     parsed = parse_single_split(source.split)
     if parsed is None:  # the recipe model already refused it
@@ -261,8 +263,8 @@ def _read_source(
             raise RunError(msg)
         values = {c: record[c] for c in wanted}
         held += _value_bytes(values)
-        if held > byte_cap:
-            msg = f"source {source.name!r} holds more than {byte_cap // 1024**2} MiB of values"
+        if held * MEMORY_FACTOR > byte_cap:
+            msg = f"the sources would take more than the run's memory cap (at {source.name!r})"
             raise RunError(msg)
         rows.append(values)
     return rows
@@ -563,7 +565,7 @@ def _sample(output: RecipeOutput, rows: int) -> dict[str, list[dict[str, Any]]]:
     for name, table in output.splits.items():
         for record in table.records()[: min(rows, SAMPLE_ROWS)]:
             row = {k: _cell(v) for k, v in record.items()}
-            size = len(json.dumps(row, ensure_ascii=False, default=str))
+            size = len(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8"))
             if used + size > SAMPLE_BYTES:
                 return sample
             sample[name].append(row)
@@ -663,20 +665,26 @@ def _write_outputs(
 
 async def _read_sources(
     spec: RecipeRunSpec, recipe: Recipe, token: str | Literal[False]
-) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
-    """Every source a step reads; a preview reads at most ``preview_source_rows`` of each."""
+) -> tuple[dict[str, list[dict[str, Any]]], list[str], int]:
+    """Every source a step reads, within ONE memory cap for all of them (``byte_cap``); a preview
+    reads at most ``preview_source_rows`` of each. Returns the rows, the sources a preview cut, and
+    the estimated memory the rows take, which the engine's own cap is then reduced by."""
     cache: dict[str, list[dict[str, Any]]] = {}
     truncated: list[str] = []
     preview = spec.mode == "preview"
+    used = 0
     for name in recipe.used_sources:
         source = recipe.source(name)
         limit = spec.preview_source_rows if preview else spec.row_cap
-        rows = await asyncio.to_thread(_read_source, source, token, limit + 1, spec.byte_cap)
+        rows = await asyncio.to_thread(
+            _read_source, source, token, limit + 1, max(1, spec.byte_cap - used)
+        )
         if preview and len(rows) > limit:
             rows = rows[:limit]
             truncated.append(name)
         cache[name] = rows
-    return cache, truncated
+        used += sum(_value_bytes(r) for r in rows) * MEMORY_FACTOR
+    return cache, truncated, used
 
 
 async def _execute(
@@ -698,7 +706,7 @@ async def _execute(
             await ensure_private_output(hub, out_repo)
     recipe = _bounded(spec)
     async with ticking_phase(phase, "Reading the pinned sources", stage="load_model"):
-        cache, truncated = await _read_sources(spec, recipe, hub_token)
+        cache, truncated, held = await _read_sources(spec, recipe, hub_token)
     generator = (
         _ServedGenerator(
             asyncio.get_running_loop(),
@@ -718,7 +726,8 @@ async def _execute(
             lambda source: cache[source.name],
             generate=generator,
             row_cap=spec.row_cap,
-            byte_cap=spec.byte_cap,
+            # One cap for the whole run: what the read sources already hold counts against it.
+            byte_cap=max(1, spec.byte_cap - held),
         )
     except RecipeError as exc:
         raise RunError(str(exc)) from exc
