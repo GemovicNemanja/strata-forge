@@ -289,8 +289,43 @@ with every request, next to ``temperature`` / ``top_p`` / ``max_tokens``:
 ``extra_body`` because chat completions has no parameter for it. Unknown
 hyperparameter keys are refused like any other unknown spec key.
 
-Each results row is ``{custom_id, output, error, finish_reason,
-input_tokens, output_tokens}``; a failed row carries ``None`` in the last
+### Reasoning models (gpt-oss)
+
+A reasoning model's reasoning is kept out of its answer. ``Hyperparams.reasoning_parser``
+(``openai_gptoss`` or ``qwen3``, an allow-list because it becomes the model server's
+``--reasoning-parser`` flag) makes vLLM split the reasoning from the final text and return it in
+the response's ``reasoning`` field; the runner stores it in the ``reasoning`` column and the final
+text alone in ``output``. The parser is settled against the checkpoint rather than the model id:
+before the dataset or the weights are downloaded, the runner reads only the model's
+``config.json`` (at the pinned revision; an unpinned run then downloads the weights at the commit
+that file was read at) and its ``model_type`` decides. A gpt-oss checkpoint (``gpt_oss``) with no
+parser is served with ``openai_gptoss``, whose absence would put the harmony analysis channel
+inside every ``output``, and any other parser on it is refused; ``openai_gptoss`` on another
+model, and ``qwen3`` on anything but ``qwen3`` / ``qwen3_moe``, are refused. The parser served
+with is recorded as ``serving.reasoning_parser``.
+
+``Hyperparams.reasoning_effort`` (``low`` / ``medium`` / ``high``) is gpt-oss's harmony effort and
+is sent in ``extra_body`` (a top-level field of the request body) with every request. It is
+refused at spec load with any parser but ``openai_gptoss``, and at the config check on a model
+that is not gpt-oss; the same holds for ``harmony_date``.
+
+The harmony system message states a "Current date", which vLLM takes from
+``VLLM_SYSTEM_START_DATE`` and otherwise from its own clock on every request, so unpinned
+prompts differ from one day to the next and a run can cross midnight. A gpt-oss run therefore
+always pins it: ``Hyperparams.harmony_date`` (a calendar date written ``YYYY-MM-DD``) when given, else the serving machine's local
+date taken once at start-up. The manifest records the date used as ``serving.harmony_date``
+(``None`` for a model without harmony).
+
+vLLM's defaults run gpt-oss-120b out of memory on a single 80 GB GPU. Its recipe raises
+``--gpu-memory-utilization`` (e.g. ``0.95``) or lowers ``--max-num-batched-tokens`` (e.g.
+``1024``), which ``Hyperparams.gpu_memory_utilization`` and ``Hyperparams.max_num_batched_tokens``
+set; ``max_model_len`` bounds the context the KV cache must hold. The ``[serving]`` extra's
+``vllm>=0.24,<1`` range serves gpt-oss's MXFP4 checkpoints with the harmony parser on every
+release in it.
+
+Each results row is ``{custom_id, output, reasoning, error, finish_reason,
+input_tokens, output_tokens}``; ``reasoning`` is ``None`` when the server
+returned none, and a failed row carries ``None`` in it and in the last
 three. ``finish_reason`` is the client's normalized value (``stop``,
 ``length``, ``tool_use``, ``content_filter``, ``error``), and a reason the
 client does not recognise is reported as ``stop``; ``length`` (the output
@@ -310,7 +345,10 @@ the machine. It records:
 - what the model server actually ran with, which can differ from what was
   requested: the ``max_model_len`` its ``/models`` route reports, and the
   dtype requested, declared by the checkpoint and resolved by the server
-  (from its start-up configuration line), each ``None`` when unknown;
+  (from its start-up configuration line), each ``None`` when unknown, and
+  the server's command-line ``flags`` from ``--host`` on (the interpreter
+  and the local snapshot path are left out), and the ``harmony_date`` a
+  gpt-oss system message stated;
 - a SHA-256 of the template (never its text), the column mapping and the
   hyperparameters;
 - row, success and failure counts, a ``finish_reason`` histogram and token

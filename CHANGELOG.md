@@ -8,6 +8,37 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- The batch-inference runner serves reasoning models with their reasoning kept apart from the
+  answer. `Hyperparams.reasoning_parser` (`openai_gptoss` | `qwen3`) becomes vLLM's
+  `--reasoning-parser`, results rows gain a `reasoning` column (string or `None`) and `output`
+  holds the final text only. Before the dataset or the weights are downloaded the runner reads
+  only the model's `config.json`: a gpt-oss checkpoint (`model_type` `gpt_oss`) with no parser is
+  served with `openai_gptoss`, any other parser on it is refused, `openai_gptoss` is refused on
+  another model and `qwen3` on anything but `qwen3` / `qwen3_moe`. An unpinned run downloads the
+  weights at the commit its config was read at. The manifest records the parser served with as
+  `serving.reasoning_parser`.
+- `Hyperparams.reasoning_effort` (`low` | `medium` | `high`) is sent in `extra_body` with every
+  request, and is refused with the `qwen3` parser or on a model that is not gpt-oss.
+- `Hyperparams.gpu_memory_utilization` and `Hyperparams.max_num_batched_tokens` set vLLM's
+  `--gpu-memory-utilization` and `--max-num-batched-tokens`, the two knobs vLLM's gpt-oss recipe
+  uses to fit gpt-oss-120b on one 80 GB GPU. `gpu_memory_utilization` is a strict float (a
+  boolean or a string is refused).
+- `Hyperparams.harmony_date` (`YYYY-MM-DD`, a real calendar date, gpt-oss only) pins
+  the "Current date" of gpt-oss's harmony system message through vLLM's `VLLM_SYSTEM_START_DATE`.
+  Unset, a gpt-oss run pins the serving machine's local date once at start-up, so every row states
+  the same date. The manifest records the date used as `serving.harmony_date`.
+- The inference manifest records the model server's command-line flags as `serving.flags`.
+- `LLMResponse.reasoning` carries the plain-text reasoning a chat-completions server returned
+  (`reasoning` / `reasoning_content`, also read from LiteLLM's `provider_specific_fields`),
+  separate from `text`.
+
+### Changed
+
+- A model whose response LiteLLM already split into `<think>` reasoning and content (Qwen3 with
+  no parser) now has that reasoning in the `reasoning` column instead of losing it.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

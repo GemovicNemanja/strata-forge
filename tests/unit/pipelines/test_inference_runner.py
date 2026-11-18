@@ -73,7 +73,13 @@ def hub_snapshots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[
         calls.append(kwargs)
         return str(snapshot)
 
+    def _hf_hub_download(**kwargs: Any) -> str:
+        # The config preflight: one file, from the same stand-in snapshot.
+        assert kwargs["filename"] == "config.json"
+        return str(snapshot / "config.json")
+
     monkeypatch.setattr("huggingface_hub.snapshot_download", _snapshot_download)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", _hf_hub_download)
     return calls
 
 
@@ -93,6 +99,7 @@ def _ok(
     output_tokens: int = 10,
     input_tokens: int = 5,
     finish_reason: str = "stop",
+    reasoning: str | None = None,
 ) -> BatchInferenceResult:
     """A successful result shaped like a real ``LLMResponse``.
 
@@ -104,6 +111,7 @@ def _ok(
             "LLMResponse",
             types.SimpleNamespace(
                 text=text,
+                reasoning=reasoning,
                 latency_ms=latency_ms,
                 finish_reason=finish_reason,
                 usage=types.SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
@@ -334,6 +342,7 @@ async def test_run_batches_reconciles_and_emits(
         {
             "custom_id": "row-0",
             "output": "OUT0",
+            "reasoning": None,
             "error": None,
             "finish_reason": "stop",
             "input_tokens": 5,
@@ -342,6 +351,7 @@ async def test_run_batches_reconciles_and_emits(
         {
             "custom_id": "row-1",
             "output": None,
+            "reasoning": None,
             "error": "RuntimeError('boom')",
             "finish_reason": None,
             "input_tokens": None,
@@ -1040,6 +1050,7 @@ async def test_a_failed_run_still_writes_its_results(
         {
             "custom_id": "row-0",
             "output": None,
+            "reasoning": None,
             "error": "RuntimeError('kaboom')",
             "finish_reason": None,
             "input_tokens": None,
@@ -1517,7 +1528,16 @@ async def test_the_manifest_records_pins_versions_and_counts_but_no_text(
     manifest = json.loads(raw)
     assert manifest["schema"] == "strata.run.manifest/v1"
     assert manifest["kind"] == "inference"
-    assert set(manifest["serving"]) == {"max_model_len", "dtype"}
+    assert set(manifest["serving"]) == {
+        "max_model_len",
+        "dtype",
+        "flags",
+        "reasoning_parser",
+        "harmony_date",
+    }
+    assert manifest["serving"]["reasoning_parser"] is None
+    assert "--load-format" in manifest["serving"]["flags"]
+    assert manifest["serving"]["harmony_date"] is None  # not a harmony model
     assert manifest["model"] == {"id": "org/model", "requested_revision": _SHA, "commit": _SHA}
     assert manifest["dataset"]["requested_revision"] == "8978b4c1c8a030706e837a239dd870a8fe8de8a4"
     assert manifest["engine"]["version"] == SPEC_VERSION
@@ -1713,3 +1733,442 @@ async def test_a_hub_failure_preparing_the_output_repo_names_the_repo(
     spec = ir.RunSpec.model_validate_json(_spec_json())
     with pytest.raises(ir.RunError, match="could not prepare the output repo org/out: 503"):
         await _REAL_CHECK_OUTPUT_REPO(spec, _TOKEN)
+
+
+# ------------------------- reasoning models (gpt-oss) -------------------------
+
+
+def _gpt_oss_snapshot(tmp_path: Path) -> None:
+    """Make the stubbed Hub snapshot a gpt-oss checkpoint."""
+    (tmp_path / "hub-snapshot" / "config.json").write_text(json.dumps({"model_type": "gpt_oss"}))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"reasoning_effort": "high", "reasoning_parser": "qwen3"},  # qwen3 has no effort levels
+        {"reasoning_effort": "max", "reasoning_parser": "openai_gptoss"},
+        {"reasoning_parser": "deepseek_r1"},  # not on the allow-list
+        {"reasoning_parser": "openai_gptoss --trust-remote-code"},
+        {"gpu_memory_utilization": 0},
+        {"gpu_memory_utilization": 1.5},
+        {"gpu_memory_utilization": True},
+        {"gpu_memory_utilization": "0.9"},
+        {"max_num_batched_tokens": 0},
+        {"max_num_batched_tokens": True},
+        {"harmony_date": "2026-11-18", "reasoning_parser": "qwen3"},
+        *(
+            {"harmony_date": bad, "reasoning_parser": "openai_gptoss"}
+            for bad in ("2026-02-30", "2026-1-05", "20261118", "2026-11-18T00:00", "2026-W47-3", "")
+        ),
+    ],
+)
+def test_reasoning_and_memory_knobs_are_validated(bad: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):  # noqa: PT011 - Pydantic's own error type
+        ir.Hyperparams.model_validate(bad)
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_reasoning_effort_rides_in_the_request_body(effort: str) -> None:
+    hp = ir.Hyperparams.model_validate(
+        {"reasoning_parser": "openai_gptoss", "reasoning_effort": effort, "top_k": 5}
+    )
+    assert ir._sampling_extras(hp) == {  # pyright: ignore[reportPrivateUsage]
+        "openai_compat": {"extra_body": {"top_k": 5, "reasoning_effort": effort}}
+    }
+
+
+def test_serve_args_carry_the_parser_and_memory_flags() -> None:
+    hp = ir.Hyperparams.model_validate(
+        {
+            "reasoning_parser": "openai_gptoss",
+            "gpu_memory_utilization": 0.95,
+            "max_num_batched_tokens": 1024,
+        }
+    )
+    assert ir._serve_args(hp) == (  # pyright: ignore[reportPrivateUsage]
+        "--load-format",
+        "safetensors",
+        "--reasoning-parser",
+        "openai_gptoss",
+        "--gpu-memory-utilization",
+        "0.95",
+        "--max-num-batched-tokens",
+        "1024",
+    )
+    # Nothing declared, nothing added: an existing run's command line is unchanged.
+    assert ir._serve_args(ir.Hyperparams()) == ("--load-format", "safetensors")  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_rows_keep_reasoning_out_of_the_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeRunner.scripted = [_ok("42", reasoning="The user asks for 6*7."), _ok("plain")]
+    monkeypatch.setattr(ir, "BatchInferenceRunner", _FakeRunner)
+    spec = ir.RunSpec.model_validate_json(_spec_json())
+    prompts, ids = ir._build_requests(spec, [{"question": "a"}, {"question": "b"}])  # pyright: ignore[reportPrivateUsage]
+    out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+        spec,
+        client=cast("LLMClient", object()),
+        prompts=prompts,
+        custom_ids=ids,
+        writer=None,
+        redactor=Redactor(),
+    )
+    assert [(r["output"], r["reasoning"]) for r in out] == [
+        ("42", "The user asks for 6*7."),
+        ("plain", None),
+    ]
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+async def test_the_servers_reasoning_field_reaches_the_reasoning_column_through_the_real_client(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    # vLLM names the field `reasoning` (`reasoning_content` before it renamed it); the whole client
+    # stack down to the transport must keep it apart from the final answer, and send the effort.
+    import litellm
+
+    from strata_forge.llm import LLMClient as RealClient
+    from strata_forge.llm.providers.config import OpenAICompatConfig
+
+    sent: dict[str, Any] = {}
+
+    async def _acompletion(**kwargs: Any) -> Any:
+        sent.update(kwargs)
+        message = {"role": "assistant", "content": "Paris.", field: "France's capital is Paris."}
+        return litellm.ModelResponse(
+            choices=[{"message": message, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12},
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", _acompletion)
+    provider = ir.OpenAICompatProvider(
+        OpenAICompatConfig(base_url="http://127.0.0.1:8000/v1", api_key=ir.SecretStr("x"))
+    )
+    client = RealClient(
+        model="openai/gpt-oss-20b",
+        provider="openai_compat",
+        provider_clients={"openai_compat": provider},
+    )
+    hp = ir.Hyperparams.model_validate(
+        {"reasoning_parser": "openai_gptoss", "reasoning_effort": "low"}
+    )
+    response = await client.complete(
+        messages=[ir.UserMessage(content="Capital of France?")],
+        provider_extras=ir._sampling_extras(hp),  # pyright: ignore[reportPrivateUsage]
+    )
+    assert response.text == "Paris."
+    assert response.reasoning == "France's capital is Paris."
+    assert sent["extra_body"] == {"reasoning_effort": "low"}
+
+
+async def test_a_gpt_oss_run_serves_with_the_harmony_parser_and_records_its_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _gpt_oss_snapshot(tmp_path)
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(
+            model_id="openai/gpt-oss-120b",
+            model_revision=_SHA,
+            hyperparams={
+                "reasoning_parser": "openai_gptoss",
+                "reasoning_effort": "high",
+                "gpu_memory_utilization": 0.95,
+                "max_num_batched_tokens": 1024,
+                "harmony_date": "2026-11-18",
+            },
+        ),
+    )
+    record: dict[str, Any] = {}
+    written: list[list[dict[str, Any]]] = []
+    _mock_main_deps(
+        monkeypatch,
+        tmp_path,
+        _recording_serving(record),
+        scripted=[_ok("FINAL", reasoning="ANALYSIS")],
+        written=written,
+    )
+
+    assert await ir.main() == 0
+    run = record["task"].run
+    assert "--reasoning-parser openai_gptoss" in run
+    assert "--gpu-memory-utilization 0.95" in run
+    assert "--max-num-batched-tokens 1024" in run
+    assert written[0][0]["output"] == "FINAL"
+    assert written[0][0]["reasoning"] == "ANALYSIS"
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    flags = manifest["serving"]["flags"]
+    assert flags[0] == "--host"
+    assert flags[flags.index("--reasoning-parser") + 1] == "openai_gptoss"
+    assert str(tmp_path / "hub-snapshot") not in flags  # a machine path, not a run fact
+    assert manifest["hyperparams"]["reasoning_effort"] == "high"
+    # The requested date pins the system message, and the manifest says which date that was.
+    assert record["task"].env["VLLM_SYSTEM_START_DATE"] == "2026-11-18"
+    assert manifest["serving"]["harmony_date"] == "2026-11-18"
+    assert manifest["model"]["commit"] == _SHA
+    # Row text stays out of the manifest, the reasoning included.
+    assert "ANALYSIS" not in json.dumps(manifest)
+
+
+async def test_a_gpt_oss_model_without_a_parser_is_served_with_the_harmony_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An agent or API launch that names no parser still gets the analysis channel kept out of
+    # `output`: the checkpoint says gpt-oss, so the parser is settled, and recorded.
+    monkeypatch.chdir(tmp_path)
+    _gpt_oss_snapshot(tmp_path)
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(model_id="openai/gpt-oss-20b", hyperparams={"reasoning_effort": "low"}),
+    )
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert "--reasoning-parser openai_gptoss" in record["task"].run
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["serving"]["reasoning_parser"] == "openai_gptoss"
+    assert manifest["hyperparams"]["reasoning_parser"] is None  # what was asked for
+    assert manifest["serving"]["harmony_date"] is not None
+
+
+async def test_a_gpt_oss_model_with_the_qwen3_parser_is_refused_before_any_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    hub_snapshots: list[dict[str, Any]],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _gpt_oss_snapshot(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(hyperparams={"reasoning_parser": "qwen3"}))
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert hub_snapshots == []  # the weights were never downloaded
+    assert "task" not in record
+    assert "served with reasoning_parser='openai_gptoss', not 'qwen3'" in capsys.readouterr().err
+
+
+async def test_the_harmony_parser_on_another_model_is_refused_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    hub_snapshots: list[dict[str, Any]],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "hub-snapshot" / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG", _spec_json(hyperparams={"reasoning_parser": "openai_gptoss"})
+    )
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 1
+    assert hub_snapshots == []
+    assert "task" not in record
+    assert "model_type='qwen3'" in capsys.readouterr().err
+
+
+async def test_an_undated_gpt_oss_run_pins_and_records_the_machines_date(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Left to the model server, the date is read per request: a run crossing midnight would state
+    # two dates. The runner takes it once, pins it, and records it.
+    monkeypatch.chdir(tmp_path)
+    _gpt_oss_snapshot(tmp_path)
+
+    monkeypatch.setattr(ir, "_today", lambda: "2026-11-19")
+    monkeypatch.setenv(
+        "STRATA_RUN_CONFIG",
+        _spec_json(
+            model_id="openai/gpt-oss-20b", hyperparams={"reasoning_parser": "openai_gptoss"}
+        ),
+    )
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert record["task"].env["VLLM_SYSTEM_START_DATE"] == "2026-11-19"
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["serving"]["harmony_date"] == "2026-11-19"
+
+
+async def test_a_model_without_harmony_gets_no_date_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert "VLLM_SYSTEM_START_DATE" not in record["task"].env
+
+
+@pytest.mark.parametrize(
+    ("model_type", "hyperparams", "refusal"),
+    [
+        ("llama", {"reasoning_parser": "qwen3"}, "reasoning_parser='qwen3' is for Qwen3"),
+        ("llama", {"reasoning_effort": "high"}, "reasoning_effort applies only to gpt-oss"),
+        ("qwen3", {"harmony_date": "2026-11-18"}, "harmony_date applies only to gpt-oss"),
+    ],
+)
+async def test_a_setting_that_does_not_fit_the_architecture_is_refused_before_any_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    hub_snapshots: list[dict[str, Any]],
+    model_type: str,
+    hyperparams: dict[str, Any],
+    refusal: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "hub-snapshot" / "config.json").write_text(json.dumps({"model_type": model_type}))
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(hyperparams=hyperparams))
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 1
+    assert hub_snapshots == []
+    assert refusal in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "qwen3_moe"])
+async def test_the_qwen3_parser_serves_a_qwen3_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model_type: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "hub-snapshot" / "config.json").write_text(json.dumps({"model_type": model_type}))
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json(hyperparams={"reasoning_parser": "qwen3"}))
+    record: dict[str, Any] = {}
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving(record))
+
+    assert await ir.main() == 0
+    assert "--reasoning-parser qwen3" in record["task"].run
+
+
+async def test_an_unpinned_run_downloads_the_commit_its_config_was_read_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub_snapshots: list[dict[str, Any]]
+) -> None:
+    # The check and the weights must describe the same revision, even when the branch moves.
+    cached = tmp_path / "models--org--model" / "snapshots" / _SHA
+    cached.mkdir(parents=True)
+    (cached / "config.json").write_text("{}")
+
+    def _config(**kwargs: Any) -> str:
+        del kwargs
+        return str(cached / "config.json")
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", _config)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STRATA_RUN_CONFIG", _spec_json())
+    _mock_main_deps(monkeypatch, tmp_path, _recording_serving({}))
+
+    assert await ir.main() == 0
+    assert hub_snapshots[0]["revision"] == _SHA
+
+
+def test_serve_flags_record_nothing_without_a_host() -> None:
+    assert ir._serve_flags("python -m vllm --model /x --port 1") == []  # pyright: ignore[reportPrivateUsage]
+    assert ir._serve_flags("vllm serve /x --host 127.0.0.1 --port 1") == [  # pyright: ignore[reportPrivateUsage]
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "1",
+    ]
+
+
+def test_reasoning_left_in_provider_specific_fields_is_still_read() -> None:
+    from strata_forge.llm.client import _parse_reasoning  # pyright: ignore[reportPrivateUsage]
+
+    message = types.SimpleNamespace(
+        content="Paris.",
+        reasoning_content=None,
+        provider_specific_fields={"reasoning": "France's capital."},
+    )
+    assert _parse_reasoning(message) == "France's capital."
+    assert _parse_reasoning(types.SimpleNamespace(reasoning_content=None)) is None
+
+
+async def test_the_wire_carries_the_effort_and_the_reply_splits_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A real HTTP server shaped like vLLM's chat endpoint, the real client stack, the real batch
+    # runner: what the model server receives, and what lands in each results row.
+    import http.server
+    import threading
+
+    received: list[dict[str, Any]] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            received.append(json.loads(self.rfile.read(length)))
+            body = json.dumps(
+                {
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "openai/gpt-oss-20b",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "42",
+                                "reasoning": "Six times seven.",
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - the stdlib's name
+            del format, args
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        from strata_forge.llm import LLMClient as RealClient
+        from strata_forge.llm.providers.config import OpenAICompatConfig
+
+        port = server.server_address[1]
+        provider = ir.OpenAICompatProvider(
+            OpenAICompatConfig(
+                base_url=f"http://127.0.0.1:{port}/v1", api_key=ir.SecretStr("EMPTY")
+            )
+        )
+        client = RealClient(
+            model="openai/gpt-oss-20b",
+            provider="openai_compat",
+            provider_clients={"openai_compat": provider},
+        )
+        spec = ir.RunSpec.model_validate_json(
+            _spec_json(
+                model_id="openai/gpt-oss-20b",
+                hyperparams={"reasoning_parser": "openai_gptoss", "reasoning_effort": "high"},
+            )
+        )
+        prompts, ids = ir._build_requests(spec, [{"question": "6*7?"}])  # pyright: ignore[reportPrivateUsage]
+        out = await ir._run_batches(  # pyright: ignore[reportPrivateUsage]
+            spec, client, prompts, ids, writer=None, redactor=Redactor()
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+
+    assert received[0]["reasoning_effort"] == "high"  # top-level in the body, as vLLM reads it
+    assert "extra_body" not in received[0]
+    assert out[0]["output"] == "42"
+    assert out[0]["reasoning"] == "Six times seven."

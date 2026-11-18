@@ -331,6 +331,7 @@ lives in [`messages.py`](../../src/strata_forge/llm/messages.py).
 | Field | Type | Notes |
 |---|---|---|
 | `text` | `str` | The assistant's text reply. Empty when only tool calls were emitted. |
+| `reasoning` | `str \| None` | Plain-text reasoning a chat-completions server returned beside the reply (vLLM's `reasoning`, LiteLLM's `reasoning_content`), never mixed into `text`. `None` when none was returned, and on a Responses API route. |
 | `tool_calls` | `list[ToolCall]` | One per tool call requested. |
 | `finish_reason` | `FinishReason` | `"stop"` / `"tool_use"` / `"length"` / `"content_filter"` / `"error"`. |
 | `usage` | `Usage` | `input_tokens`, `output_tokens`, plus cache read/write counters. |
