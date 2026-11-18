@@ -71,6 +71,7 @@ from strata_forge.pipelines._common import (
     load_config,
     manifest_engine,
     phase_sink,
+    pushed_at,
     require_commit_sha,
     results_dir,
     runner_main,
@@ -1002,7 +1003,7 @@ async def _execute_run(
         try:
             async with ticking_phase(phase, "Uploading the model to the Hub", stage="push"):
                 pushed = await _push_artifact(spec, artifact_dir, cast("str", hf_token))
-            destination = pushed[0]
+            destination = pushed_at(pushed)
         except Exception as exc:
             push_error = exc
             destination = str(artifact_dir)

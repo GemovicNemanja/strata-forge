@@ -116,6 +116,7 @@ __all__ = [
     "model_server_environ",
     "phase_sink",
     "progress_path",
+    "pushed_at",
     "require_commit_sha",
     "results_dir",
     "run_redactor",
@@ -962,6 +963,14 @@ def build_receipt(
         "rows": rows,
         "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},
     }
+
+
+def pushed_at(pushed: tuple[str, str | None]) -> str:
+    """Where a push landed as a run's end message names it: ``repo@commit`` when the push made a
+    commit (the orchestrator reads the run's outputs back at that commit, never at a head another
+    run may have moved), else the repo alone."""
+    repo, commit = pushed
+    return f"{repo}@{commit}" if commit else repo
 
 
 def write_receipt(receipt: dict[str, Any], workdir: Path) -> Path:

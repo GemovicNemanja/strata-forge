@@ -136,6 +136,7 @@ from strata_forge.pipelines._common import (
     manifest_engine,
     model_server_environ,
     phase_sink,
+    pushed_at,
     require_commit_sha,
     results_dir,
     run_redactor,
@@ -1867,7 +1868,7 @@ async def _execute(
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
                 pushed = await _push_results(spec, results_path, hf_token)
-            destination = pushed[0]
+            destination = pushed_at(pushed)
         except Exception as exc:
             push_error = exc
             destination = str(results_path)
@@ -2089,7 +2090,7 @@ async def _execute_scoring(
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
                 await _require_fresh_output(spec, cast("str", hf_token))
                 pushed = await _push_results(spec, results_path, cast("str", hf_token))
-            destination = pushed[0]
+            destination = pushed_at(pushed)
         except Exception as exc:
             push_error = exc
             destination = str(results_path)

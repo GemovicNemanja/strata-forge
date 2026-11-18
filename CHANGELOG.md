@@ -116,6 +116,10 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   run is unpinned), and checks one id rule shared with the control plane (`valid_row_id`: 1-512
   printable characters, not blank). `row_ids` are selected from the rows the run reads, so
   `row_limit` bounds a retry's window, and its id uniqueness check, as it bounded its source run.
+- A pushing chat, scoring or fine-tuning run ends with `repo@commit` (`_common.pushed_at`), as an
+  evaluation run already did, so the orchestrator records the commit the output landed in
+  (`output_commit_sha`) rather than a repo whose head can move; a push the Hub named no commit for
+  ends with the repo alone.
 - The chat receipt names a prompt-build run's builds: `prompt` and `system_prompt`, each
   `{build_id, build_hash}` from the manifest's prompt blocks (null for a template run).
 - Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):

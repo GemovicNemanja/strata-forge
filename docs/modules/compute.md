@@ -412,6 +412,11 @@ with ``complete`` saying whether every failed row is listed. Positional
 names are counted and never listed. It is what a retry of the failed rows
 may name; the ids are the user's data and appear nowhere else.
 
+A run that pushed ends with ``repo@commit`` as its end event's message
+(``_common.pushed_at``; the repo alone when the Hub named no commit), so an
+orchestrator records the commit the output landed in. Chat, scoring,
+fine-tuning and evaluation runs all end this way.
+
 Every other pushing runner writes one too, through
 ``_common.build_receipt(kind, manifest_path, output, rows=...)``: a scoring
 run (``kind`` ``scoring``: ``hf_classify``, ``hf_label_logits``, verifier

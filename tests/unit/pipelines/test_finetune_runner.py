@@ -597,21 +597,22 @@ def _drive(
 
 
 class TestExecute:
-    def test_a_pushed_run_reports_the_repo_id(
+    def test_a_pushed_run_reports_the_repo_at_its_commit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         async def _push(_spec_arg: Any, _dir: Any, _token: str) -> tuple[str, str | None]:
             return "org/out", "c" * 40
 
         destination, events = _drive(monkeypatch, tmp_path, push=_push)
-        assert destination == "org/out"
+        # repo@commit: the orchestrator records the commit the model landed in, never a head.
+        assert destination == "org/out@" + "c" * 40
         # The receipt names the repo and the commit the push made, for the run that reads it next.
         receipt = json.loads((tmp_path / "receipt.json").read_text())
         assert receipt["kind"] == "training"
         assert receipt["output"] == {"repo_id": "org/out", "commit_sha": "c" * 40}
         assert len(receipt["manifest_sha256"]) == 64
         assert events[-1]["kind"] == "end"
-        assert events[-1]["message"] == "org/out"
+        assert events[-1]["message"] == "org/out@" + "c" * 40
 
     def test_the_terminal_event_carries_the_step_count(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

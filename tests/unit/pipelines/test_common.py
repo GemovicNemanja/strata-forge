@@ -1305,3 +1305,11 @@ def test_build_receipt_names_the_pushed_commit_for_any_kind(tmp_path: Path) -> N
     assert unpushed["output"] is None
     assert unpushed["model"]["id"] is None
     _json.dumps(unpushed)
+
+
+def test_a_push_is_named_at_the_commit_it_made() -> None:
+    from strata_forge.pipelines._common import pushed_at
+
+    assert pushed_at(("org/out", "a" * 40)) == "org/out@" + "a" * 40
+    # A push whose commit the Hub did not name is the repo alone, never a guessed head.
+    assert pushed_at(("org/out", None)) == "org/out"
