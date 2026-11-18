@@ -208,7 +208,9 @@ In order:
    `kind: "plugin"`) written, and the copy pushed to the output repository in ONE commit of
    exactly the staged files. The repository must be private (an existing public repository is
    refused). The run reports `<repo>@<commit>` as its destination, so the control plane reads
-   the output back at the commit this run made, never at a head a later push moved. Plugin
+   the output back at the commit this run made, never at a head a later push moved. The runner
+   also leaves `receipt.json` (`build_receipt`, `kind: "plugin"`: the manifest's digest and the
+   repo and commit the push made) in the job's working directory. Plugin
    output lives only there.
 
 The manifest records the plugin (`id`, `repo`, `commit`, the full pin, the entry point, its type

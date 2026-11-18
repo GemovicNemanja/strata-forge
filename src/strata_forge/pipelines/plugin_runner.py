@@ -59,18 +59,23 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from strata_forge.pipelines._common import (
     COMMIT_SHA_RE,
     LEGACY_TOKEN_ENV,
+    MANIFEST_FILENAME,
     MANIFEST_SCHEMA,
     RunError,
     RunSecrets,
+    build_receipt,
+    commit_oid,
     emit,
     load_config,
     manifest_engine,
     phase_sink,
+    pushed_at,
     run_redactor,
     runner_main,
     ticking_phase,
     validate_repo_id,
     write_manifest,
+    write_receipt,
 )
 from strata_forge.plugins.child import (
     STOPPED_LIMIT_SECONDS,
@@ -650,8 +655,14 @@ async def _execute(
                 commit_message=f"strata plugin run ({entry.name})",
             )
         # ``repo@commit`` is the destination the control plane records, so the run's output is
-        # read back at the commit this run made, never at a head a later push has moved.
-        destination = f"{out_repo}@{commit}" if COMMIT_SHA_RE.fullmatch(commit) else out_repo
+        # read back at the commit this run made, never at a head a later push has moved; the
+        # receipt in the job's workdir carries the same commit and the manifest's digest.
+        pushed = (out_repo, commit_oid(commit))
+        receipt = await asyncio.to_thread(
+            build_receipt, "plugin", staged / MANIFEST_FILENAME, pushed
+        )
+        await asyncio.to_thread(write_receipt, receipt, Path.cwd())
+        destination = pushed_at(pushed)
         emit(writer, ProgressEvent(kind="end", stage="push", message=destination))
         return destination
     finally:

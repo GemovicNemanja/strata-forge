@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import sys
 import types
@@ -379,6 +380,11 @@ def test_a_step_scoring_run_end_to_end(
     }
     assert set(manifest["output"]["files"]) == {SCORES_FILENAME}
     assert "diagnostics" not in manifest
+    # The receipt in the job's workdir names the commit the push made and the manifest's digest.
+    receipt = json.loads(Path("receipt.json").read_text())
+    assert receipt["kind"] == "plugin"
+    assert receipt["output"] == {"repo_id": "acme/out", "commit_sha": _FakeHub.commit}
+    assert receipt["manifest_sha256"] == hashlib.sha256(_FakeHub.last["manifest.json"]).hexdigest()
 
 
 def test_opt_in_aggregations_go_to_a_separate_diagnostic_file(
@@ -450,6 +456,7 @@ def test_a_commit_url_is_not_reported_as_a_commit(
     _wire(monkeypatch, plugin_env)
     _FakeHub.commit = "https://huggingface.co/datasets/acme/out/commit/abc"
     assert _execute(_spec(pin)) == "acme/out"
+    assert json.loads(Path("receipt.json").read_text())["output"]["commit_sha"] is None
 
 
 def test_a_git_source_s_build_runs_through_the_sandbox_and_fails_loudly(

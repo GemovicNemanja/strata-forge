@@ -197,6 +197,7 @@ def test_a_whole_run_in_the_real_sandbox(
         entry_points=tuple(plugin_runner.EntryPointDecl.model_validate(e) for e in t.ENTRIES),
     )
     monkeypatch.setenv(ALLOWED_PLUGINS_ENV, json.dumps([allowance.model_dump(mode="json")]))
+    monkeypatch.chdir(tmp_path)  # the receipt lands in the job's workdir
     monkeypatch.setenv("STRATA_PLUGIN_ENVS_DIR", str(Path.home() / ".strata-forge" / "plugin-envs"))
 
     class Hub(t._FakeHub):  # pyright: ignore[reportPrivateUsage]
