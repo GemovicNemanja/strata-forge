@@ -32,7 +32,7 @@ import hashlib
 import json
 import re
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import jinja2.ext
 import jinja2.meta
@@ -53,6 +53,7 @@ __all__ = [
     "kwargs_digest",
     "kwargs_placeholders",
     "kwargs_problem",
+    "nests_deeper_than",
     "render_kwargs",
     "template_digest",
     "template_variables",
@@ -126,18 +127,35 @@ def template_digest(template: str) -> str:
     return hashlib.sha256(template.encode()).hexdigest()
 
 
-def _depth(value: JsonValue) -> int:
-    if isinstance(value, dict):
-        return 1 + max((_depth(item) for item in value.values()), default=0)
-    if isinstance(value, list):
-        return 1 + max((_depth(item) for item in value), default=0)
-    return 0
+def nests_deeper_than(value: object, limit: int) -> bool:
+    """Whether ``value`` holds containers nested more than ``limit`` deep, each object or list one
+    level, found WITHOUT recursion and stopping at the first level past ``limit``.
+
+    Data from the wire can be nested arbitrarily deep, and every recursive walk over it (this
+    module's own, ``json.dumps``, a schema validator) raises ``RecursionError`` past the
+    interpreter's limit, so the depth is bounded first, iteratively.
+    """
+    stack: list[tuple[object, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict | list):
+            if depth + 1 > limit:
+                return True
+            children = (
+                cast("dict[str, object]", item).values()
+                if isinstance(item, dict)
+                else cast("list[object]", item)
+            )
+            stack.extend((child, depth + 1) for child in children)
+    return False
 
 
 def kwargs_problem(kwargs: Mapping[str, JsonValue]) -> str | None:
     """Why ``kwargs`` cannot be a run's chat-template kwargs, or ``None`` when they can."""
     if not kwargs:
         return "chat_template_kwargs is empty; omit it instead"
+    if any(nests_deeper_than(value, _MAX_DEPTH) for value in kwargs.values()):
+        return f"chat_template_kwargs values nest at most {_MAX_DEPTH} levels deep"
     if len(kwargs) > MAX_KWARGS:
         return f"chat_template_kwargs holds at most {MAX_KWARGS} keys"
     bad = sorted(key for key in kwargs if not _KEY_RE.fullmatch(key))
@@ -149,8 +167,6 @@ def kwargs_problem(kwargs: Mapping[str, JsonValue]) -> str | None:
             f"chat_template_kwargs cannot set {reserved}: they control how the template is chosen "
             "or rendered, not what it says"
         )
-    if any(_depth(value) > _MAX_DEPTH for value in kwargs.values()):
-        return f"chat_template_kwargs values nest at most {_MAX_DEPTH} levels deep"
     if len(_canonical_json(kwargs).encode()) > MAX_KWARGS_JSON_BYTES:
         return f"chat_template_kwargs is at most {MAX_KWARGS_JSON_BYTES} bytes of JSON"
     return None

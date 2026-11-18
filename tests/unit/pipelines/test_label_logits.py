@@ -222,6 +222,18 @@ def test_kwargs_problems(kwargs: dict[str, Any], match: str) -> None:
     assert match in problem
 
 
+def test_kwargs_nested_past_the_interpreters_limit_are_refused_not_crashed() -> None:
+    deep: Any = "x"
+    for _ in range(5_000):
+        deep = [deep]
+    problem = ct.kwargs_problem({"documents": deep})
+    assert problem is not None
+    assert "nest at most" in problem
+    assert ct.nests_deeper_than([[1]], 2) is False
+    assert ct.nests_deeper_than([[[1]]], 2) is True
+    assert ct.nests_deeper_than({"a": [{"b": 1}]}, 3) is False
+
+
 def test_documents_is_data_not_a_renderer_option() -> None:
     assert ct.kwargs_problem({"documents": [{"text": "x"}]}) is None
 
