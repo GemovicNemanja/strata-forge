@@ -107,7 +107,7 @@ from strata_forge.core.errors import (
     ProviderTimeoutError,
 )
 from strata_forge.core.errors import ValidationError as ForgeValidationError
-from strata_forge.llm import AssistantMessage, LLMClient, UserMessage
+from strata_forge.llm import AssistantMessage, LLMClient, SystemMessage, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
@@ -627,6 +627,9 @@ class RunSpec(BaseModel):
     # Exactly one of the two; a build renders the chat engine's prompt only.
     template: str = ""
     prompt: PromptSpec | None = None
+    # An optional compiled build rendered per row as the conversation's system message, before
+    # the user message (from ``template`` or ``prompt``). Chat engine only.
+    system_prompt: PromptSpec | None = None
     hyperparams: Hyperparams = Field(default_factory=Hyperparams)
     # Where to push results. The server populates it ONLY when pushing (a write token is present);
     # when absent the runner keeps results on the VM instead of pushing. The VM never guesses ownership.
@@ -682,6 +685,12 @@ class RunSpec(BaseModel):
         if self.prompt is not None and self.template:
             msg = "a run takes a template or a prompt build, not both"
             raise ValueError(msg)
+        if self.system_prompt is not None and self.hyperparams.engine != "vllm_chat":
+            msg = (
+                f"a system prompt build is a chat message; engine {self.hyperparams.engine!r} "
+                "sends no conversation"
+            )
+            raise ValueError(msg)
         if self.prompt is not None and self.hyperparams.engine != "vllm_chat":
             msg = (
                 f"a prompt build renders the chat prompt; engine {self.hyperparams.engine!r} "
@@ -730,6 +739,8 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     """
     if spec.prompt is not None:
         _validate_prompt_bindings(spec.prompt)
+    if spec.system_prompt is not None:
+        _validate_prompt_bindings(spec.system_prompt, role="system ")
     unmapped = sorted(
         template_placeholders(spec.template, spec.hyperparams) - set(spec.column_mapping)
     )
@@ -746,19 +757,19 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     raise RunError(msg)
 
 
-def _validate_prompt_bindings(prompt: PromptSpec) -> None:
+def _validate_prompt_bindings(prompt: PromptSpec, *, role: str = "") -> None:
     """A build's required variables must all be bound, and every binding must name one of its
     variables: a misspelt binding would otherwise leave an optional variable silently empty."""
     declared = {variable.name for variable in prompt.build.variables}
     unknown = sorted(set(prompt.bindings) - declared)
     if unknown:
-        msg = f"bindings name variables the prompt build does not declare: {unknown}"
+        msg = f"bindings name variables the {role}prompt build does not declare: {unknown}"
         raise RunError(msg)
     unbound = sorted(
         v.name for v in prompt.build.variables if v.required and v.name not in prompt.bindings
     )
     if unbound:
-        msg = f"required prompt variables have no binding: {unbound}"
+        msg = f"required {role}prompt variables have no binding: {unbound}"
         raise RunError(msg)
 
 
@@ -803,8 +814,9 @@ def _open_split(spec: RunSpec, token: str | Literal[False]) -> Any:
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
-    if spec.prompt is not None:
-        bound = {b.column for b in spec.prompt.bindings.values() if b.column is not None}
+    builds = [p for p in (spec.prompt, spec.system_prompt) if p is not None]
+    if builds:
+        bound = {b.column for p in builds for b in p.bindings.values() if b.column is not None}
         if bound - columns:
             msg = f"prompt bindings reference columns not in the split: {sorted(bound - columns)}"
             raise RunError(msg)
@@ -894,22 +906,29 @@ def _load_chat_rows(
 
 def _build_requests(
     spec: RunSpec, rows: list[dict[str, Any]], ids: Sequence[str] | None = None
-) -> tuple[list[list[UserMessage]], list[str]]:
-    """One one-message conversation per row, and each row's ``custom_id`` (``ids`` as
-    :func:`select_rows` named them, else the rows' positions)."""
-    prompts: list[list[UserMessage]] = []
+) -> tuple[list[list[AnyMessage]], list[str]]:
+    """One conversation per row (the system build's message first, when there is one), and
+    each row's ``custom_id`` (``ids`` as :func:`select_rows` named them, else the rows'
+    positions)."""
+    prompts: list[list[AnyMessage]] = []
     custom_ids = list(ids) if ids is not None else [f"row-{i}" for i in range(len(rows))]
     failures: list[tuple[int, str]] = []
     for i, row in enumerate(rows):
-        if spec.prompt is not None:
-            try:
+        try:
+            system = (
+                _render_prompt(spec.system_prompt, row) if spec.system_prompt is not None else None
+            )
+            if spec.prompt is not None:
                 rendered = _render_prompt(spec.prompt, row)
-            except PromptRenderError as exc:
-                failures.append((i, str(exc)))
-                continue
-        else:
-            rendered = render_template(spec.template, row, spec.column_mapping)
-        prompts.append([UserMessage(content=rendered)])  # one-message conversation
+            else:
+                rendered = render_template(spec.template, row, spec.column_mapping)
+        except PromptRenderError as exc:
+            failures.append((i, str(exc)))
+            continue
+        conversation: list[AnyMessage] = [UserMessage(content=rendered)]
+        if system is not None:
+            conversation.insert(0, SystemMessage(content=system))
+        prompts.append(conversation)
     if failures:
         first, reason = failures[0]
         msg = (
@@ -958,7 +977,7 @@ def _render_prompt(prompt: PromptSpec, row: Mapping[str, Any]) -> str:
 async def _run_batches(
     spec: RunSpec,
     client: LLMClient,
-    prompts: list[list[UserMessage]],
+    prompts: list[list[AnyMessage]],
     custom_ids: list[str],
     writer: JsonlProgressWriter | None,
     is_alive: Callable[[], Awaitable[bool]] | None = None,
@@ -1668,6 +1687,7 @@ def _build_manifest(
             None if spec.prompt is not None else hashlib.sha256(spec.template.encode()).hexdigest()
         ),
         "prompt": _prompt_manifest(spec.prompt),
+        "system_prompt": _prompt_manifest(spec.system_prompt),
         "chat_template": (
             None
             if hp.chat_template_kwargs is None

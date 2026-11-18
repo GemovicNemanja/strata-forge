@@ -463,6 +463,11 @@ that cannot render (a missing required value, a value of the wrong type, a
 render over 200,000 characters, which is refused rather than cut) fails the
 run before any request is sent, naming how many rows failed and the first.
 
+``system_prompt`` (also a ``PromptSpec``, chat engine only) adds a system
+message before each row's user message, rendered per row from its own pinned
+build and bindings with the same checks; it pairs with either a ``template``
+or a ``prompt``. The manifest records it as ``system_prompt``, like ``prompt``.
+
 ### Samples per row (`n`) and chat-template kwargs
 
 ``Hyperparams.n`` (1-16, default 1) draws ``n`` samples per row, each its
