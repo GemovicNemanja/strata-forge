@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
+from strata_forge.pipelines._chat_template import render_kwargs
 from strata_forge.pipelines._common import MANIFEST_SCHEMA, RunError, manifest_engine
 from strata_forge.training.loading import (
     LoadRefusedError,
@@ -50,6 +51,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from pydantic import JsonValue
+
     from strata_forge.pipelines.inference_runner import RunSpec
 
 __all__ = [
@@ -57,17 +60,21 @@ __all__ = [
     "LABEL_RE",
     "SCORING_DTYPES",
     "Classifier",
+    "ClassifierScorer",
     "ScoringInputs",
     "batch_plan_record",
     "build_inputs",
     "build_manifest",
+    "length_limit",
     "load_classifier",
+    "manifest_frame",
     "plan_batches",
     "render_scoring_text",
     "resolve_labels",
     "result_rows",
     "softmax",
     "tally",
+    "tf32_state",
 ]
 
 #: What an output label may be: it becomes part of a column name (``logit_<label>``).
@@ -115,8 +122,10 @@ def render_scoring_text(
 ) -> str:
     """Render ``template`` like a chat prompt, joining a list-valued column with ``separator``.
 
-    No length cap here: scoring never truncates, so an over-long rendering is dropped and
-    counted by the caller rather than cut.
+    A list's elements must be scalars (a string or a number): a ``list<struct>`` column would
+    otherwise render as Python dict text, and the model would score that text as the premises.
+    A boolean is refused too, since ``True`` is not a premise either. No length cap here: scoring
+    never truncates, so an over-long rendering is dropped and counted by the caller rather than cut.
     """
 
     def _sub(match: re.Match[str]) -> str:
@@ -125,7 +134,16 @@ def render_scoring_text(
             return match.group(0)
         value: object = row[column]
         if isinstance(value, list | tuple):
-            return separator.join(str(item) for item in cast("Sequence[object]", value))
+            items = cast("Sequence[object]", value)
+            for item in items:
+                if isinstance(item, bool) or not isinstance(item, str | int | float):
+                    msg = (
+                        f"column {column!r} is a list of {type(item).__name__} values, which would "
+                        "be scored as their Python text; stage a list<string> column holding the "
+                        "text to score"
+                    )
+                    raise RunError(msg)
+            return separator.join(str(item) for item in items)
         return str(value)
 
     return _PLACEHOLDER_RE.sub(_sub, template)
@@ -185,12 +203,16 @@ def resolve_labels(
 
 @dataclass(frozen=True, slots=True)
 class ScoringInputs:
-    """Every row's rendered pair, plus its stable id and slice when the spec names them."""
+    """Every row's rendered pair, plus its stable id and slice when the spec names them.
+
+    ``chat_kwargs`` holds each row's rendered chat-template kwargs when the spec declares any.
+    """
 
     texts: list[str]
     pairs: list[str]
     item_ids: list[str] | None
     slices: list[str] | None
+    chat_kwargs: list[dict[str, JsonValue]] | None = None
 
 
 def build_inputs(spec: RunSpec, rows: Sequence[Mapping[str, Any]]) -> ScoringInputs:
@@ -212,7 +234,23 @@ def build_inputs(spec: RunSpec, rows: Sequence[Mapping[str, Any]]) -> ScoringInp
     ]
     item_ids = _item_ids(rows, hp.id_column) if hp.id_column is not None else None
     slices = _slices(rows, hp.slice_column) if hp.slice_column is not None else None
-    return ScoringInputs(texts=texts, pairs=pairs, item_ids=item_ids, slices=slices)
+    declared = hp.chat_template_kwargs
+    chat_kwargs = (
+        [
+            render_kwargs(
+                declared,
+                lambda text, row=row: render_scoring_text(
+                    text, row, spec.column_mapping, separator=hp.list_separator
+                ),
+            )
+            for row in rows
+        ]
+        if declared
+        else None
+    )
+    return ScoringInputs(
+        texts=texts, pairs=pairs, item_ids=item_ids, slices=slices, chat_kwargs=chat_kwargs
+    )
 
 
 def _item_ids(rows: Sequence[Mapping[str, Any]], column: str) -> list[str]:
@@ -483,7 +521,7 @@ def load_classifier(
     except ImportError as exc:
         msg = "classifier scoring needs torch and transformers: pip install 'strata-forge[serving]'"
         raise RunError(msg) from exc
-    tf32 = _tf32_state(torch, disable=dtype == "float32")
+    tf32 = tf32_state(torch, disable=dtype == "float32")
     location = str(snapshot)
     try:
         tokenizer: Any = transformers.AutoTokenizer.from_pretrained(
@@ -512,7 +550,7 @@ def load_classifier(
     config: Any = model.config
     names, outputs = resolve_labels(cast("Mapping[Any, Any]", config.id2label), label_alias)
     # Before padding is aligned: the position offset is the CHECKPOINT's padding index.
-    limit, source = _length_limit(config, tokenizer, max_length)
+    limit, source = length_limit(config, tokenizer, max_length)
     pad_token = _align_padding(tokenizer, config)
     device = "cuda" if bool(torch.cuda.is_available()) else "cpu"
     model.to(device)
@@ -533,7 +571,7 @@ def load_classifier(
     )
 
 
-def _tf32_state(torch: Any, *, disable: bool) -> dict[str, bool | None]:
+def tf32_state(torch: Any, *, disable: bool) -> dict[str, bool | None]:
     """Switch TF32 off when ``disable``, and report both switches as they now stand."""
     backends: Any = getattr(torch, "backends", None)
     matmul: Any = getattr(getattr(backends, "cuda", None), "matmul", None)
@@ -573,7 +611,7 @@ def _positive_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
-def _length_limit(config: Any, tokenizer: Any, requested: int | None) -> tuple[int, str]:
+def length_limit(config: Any, tokenizer: Any, requested: int | None) -> tuple[int, str]:
     """The token limit a pair must fit: the model's own, or a smaller requested one.
 
     The model's own is the smallest of its position table (less the slots a padding-offset
@@ -621,20 +659,26 @@ def batch_plan_record(batches: Sequence[Sequence[int]], batch_size: int) -> dict
     }
 
 
-def build_manifest(
+#: Hyperparameters that hold prompt text, recorded in a manifest as digests only.
+_PROMPT_TEXT_KNOBS = frozenset({"pair_template", "assistant_prefill", "chat_template_kwargs"})
+
+
+def manifest_frame(
     spec: RunSpec,
-    classifier: Classifier,
     rows: Sequence[Mapping[str, Any]],
     *,
     model_commit: str | None,
     dataset_commit: str | None,
-    batches: Sequence[Sequence[int]],
+    scoring: dict[str, Any],
 ) -> dict[str, Any]:
-    """The run's manifest (``kind`` ``scoring``): pins, the scoring setup and counts, no row text.
+    """A scoring run's manifest (``kind`` ``scoring``) around one engine's ``scoring`` block.
 
-    Templates are recorded as digests (the pair template is left out of the hyperparameters for
-    the same reason): the control plane stores their text with the spec, and a pushed manifest
-    should not republish it beside the scores.
+    Pins (the commits actually read beside the ones requested), template digests, the mapping,
+    the knobs and the counts, with no row text: templates are recorded as digests, and the knobs
+    that hold prompt text (the pair template, an assistant prefill, chat-template kwargs) are left
+    out of the hyperparameters for the same reason, since the control plane stores their text
+    with the spec and a pushed manifest should not republish it. The engine's ``scoring`` block
+    carries their digests.
     """
     hp = spec.hyperparams
     return {
@@ -653,7 +697,32 @@ def build_manifest(
             "requested_revision": spec.dataset_commit_sha,
             "commit": dataset_commit,
         },
-        "scoring": {
+        "scoring": scoring,
+        "template_sha256": _digest(spec.template),
+        "pair_template_sha256": _digest(hp.pair_template or ""),
+        "column_mapping": spec.column_mapping,
+        "hyperparams": hp.model_dump(exclude=set(_PROMPT_TEXT_KNOBS)),
+        "counts": tally(rows),
+    }
+
+
+def build_manifest(
+    spec: RunSpec,
+    classifier: Classifier,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    model_commit: str | None,
+    dataset_commit: str | None,
+    batches: Sequence[Sequence[int]],
+) -> dict[str, Any]:
+    """A classifier scoring run's manifest: :func:`manifest_frame` with the head's setup."""
+    hp = spec.hyperparams
+    return manifest_frame(
+        spec,
+        rows,
+        model_commit=model_commit,
+        dataset_commit=dataset_commit,
+        scoring={
             "engine": hp.engine,
             "head": "sequence_classification",
             "id2label": {str(index): name for index, name in enumerate(classifier.names)},
@@ -681,12 +750,49 @@ def build_manifest(
             "slice_column": hp.slice_column,
             "unexpected_checkpoint_keys": classifier.unexpected_keys,
         },
-        "template_sha256": _digest(spec.template),
-        "pair_template_sha256": _digest(hp.pair_template or ""),
-        "column_mapping": spec.column_mapping,
-        "hyperparams": hp.model_dump(exclude={"pair_template"}),
-        "counts": tally(rows),
-    }
+    )
+
+
+class ClassifierScorer:
+    """A :class:`Classifier` in the shape the runner drives every scoring engine through."""
+
+    def __init__(self, classifier: Classifier) -> None:
+        self.classifier = classifier
+        self.max_length = classifier.max_length
+
+    def lengths(self, inputs: ScoringInputs) -> list[int | None]:
+        return self.classifier.lengths(inputs.texts, inputs.pairs)
+
+    def score(self, inputs: ScoringInputs, batch: Sequence[int]) -> list[list[float]]:
+        return self.classifier.logits(
+            [inputs.texts[i] for i in batch], [inputs.pairs[i] for i in batch]
+        )
+
+    def result_rows(
+        self,
+        lengths: Sequence[int | None],
+        values: Mapping[int, Sequence[float]],
+        inputs: ScoringInputs,
+    ) -> list[dict[str, Any]]:
+        return result_rows(lengths, values, self.classifier.outputs, inputs)
+
+    def manifest(
+        self,
+        spec: RunSpec,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        model_commit: str | None,
+        dataset_commit: str | None,
+        batches: Sequence[Sequence[int]],
+    ) -> dict[str, Any]:
+        return build_manifest(
+            spec,
+            self.classifier,
+            rows,
+            model_commit=model_commit,
+            dataset_commit=dataset_commit,
+            batches=batches,
+        )
 
 
 def _digest(text: str) -> str:

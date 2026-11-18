@@ -4394,11 +4394,12 @@ wheels = [
 
 [[package]]
 name = "strata-forge"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "litellm" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -4528,6 +4529,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'storage'", specifier = ">=1.0,<2" },
     { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3,<0.4" },
     { name = "jinja2", specifier = ">=3.1.6,<4" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=4.0,<5" },
     { name = "litellm", specifier = ">=1.83,<2" },
     { name = "nltk", marker = "extra == 'evals'", specifier = ">=3.9,<4" },

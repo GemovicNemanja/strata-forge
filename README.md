@@ -20,7 +20,7 @@ Optional extras pull in the heavy dependencies only when you need them:
 ```bash
 pip install "strata-forge[rag]"        # embeddings, vector store, reranking
 pip install "strata-forge[compute]"    # SkyPilot + SSH remote execution
-pip install "strata-forge[serving]"    # vLLM, plus torch + transformers for classifier scoring
+pip install "strata-forge[serving]"    # vLLM, plus torch + transformers for the scoring engines
 pip install "strata-forge[finetuning]" # torch, transformers, trl, peft, bitsandbytes
 pip install "strata-forge[scoring]"    # NumPy for temperature application
 pip install "strata-forge[all]"        # everything

@@ -538,7 +538,14 @@ extra; `LocalBackend`, batch inference, and the serving task
 builders have no extra requirements. The batch-inference runner also
 scores rows with a sequence-classification head (`engine="hf_classify"`):
 raw logits per label, over-long pairs dropped and counted rather than
-truncated. Reference doc:
+truncated; and reads declared single-token label logits from a causal LM
+after its chat template, with an assistant prefill and template kwargs
+(`engine="hf_label_logits"`), reporting the probability mass outside the
+labels. Chat runs can constrain every reply to one JSON Schema
+(`guided_json`, vLLM structured outputs) with a single validated repair
+turn and per-row validity in the results, draw up to 16 seeded samples
+per row keyed by `sample_index`, and pass chat-template kwargs such as
+`enable_thinking`. Reference doc:
 [`docs/modules/compute.md`](modules/compute.md).
 
 `strata_forge.training` ships fine-tuning primitives: `SFTConfig` /
