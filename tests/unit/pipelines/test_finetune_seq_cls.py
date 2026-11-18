@@ -122,9 +122,9 @@ def _drive(
         pushed["files"] = sorted(p.name for p in directory.iterdir())
         pushed["manifest"] = json.loads((directory / "manifest.json").read_text())
 
-    async def _push(_spec: Any, directory: Path, _token: str) -> str:
+    async def _push(_spec: Any, directory: Path, _token: str) -> tuple[str, str | None]:
         await asyncio.to_thread(_record, directory)
-        return "synthetic/out"
+        return "synthetic/out", "d" * 40
 
     def _dir(_run_id: str | None, *, name: str) -> Path:
         return tmp_path / name
@@ -150,7 +150,7 @@ class TestAcceptanceSmoke:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, checkpoint: Path
     ) -> None:
         destination, events, pushed = _drive(monkeypatch, tmp_path, checkpoint, _spec())
-        assert destination == "synthetic/out"
+        assert destination == "synthetic/out@" + "d" * 40
 
         # Every check reported itself before training began, in order.
         checks = [
