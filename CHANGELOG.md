@@ -10,8 +10,6 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Fixed
 
-- `hf_classify` with a `label_alias` that excludes a class other than the last read that
-  class's logit as the next class's; each `logit_<label>` column is now its own class id's logit.
 - `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a
   `list<struct>` premises column, a nested list, a boolean, a null), naming the column and asking for
   a `list<string>` column, instead of scoring each element's Python text.
@@ -66,6 +64,37 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   state, the batch plan, the overflow policy, counts per slice, and the dataset commit actually
   read (an unpinned dataset is resolved once and loaded at that commit). A scoring run pushes only
   to an output repo of its own.
+- `Hyperparams.n` (1-16) draws `n` samples per chat row, one request each; a seeded run seeds sample
+  `k` with `seed + k`, the seed vLLM gives the `k`-th of `n` parallel samples. A run that declares
+  `n` keys its rows by `(custom_id, sample_index)` and records each sample's `seed`; the manifest
+  records `sampling` and the distinct prompt count. `n > 1` below temperature 1e-5 (vLLM's greedy threshold) is refused, and a chunk holds
+  `progress_chunk` requests, so cancel checks and progress keep their spacing at any `n`.
+- `Hyperparams.chat_template_kwargs` also applies to chat runs, fixed for the run and sent as vLLM's
+  `chat_template_kwargs` (`enable_thinking` passes only this way, as a boolean). A kwarg the
+  snapshot's chat template never reads, a model without a template and a gpt-oss model (rendered
+  with harmony, not the template) are refused before the model server starts; the manifest records
+  the template's and the kwargs' sha256.
+- `Hyperparams.guided_json`: one JSON Schema per chat run, sent with every request as vLLM's
+  `structured_outputs.json` constraint and checked against every reply. A reply that fails
+  validation gets one repair turn (the invalid reply plus a fixed message naming the error, under
+  the same constraint). Rows gain `json_valid`, `json_retried` and `json_error`; the manifest
+  records the schema's and the repair prompt's sha256 and counts valid, invalid, retried and
+  repaired rows. A schema over 16 KiB, invalid for its draft, or referencing anything outside
+  itself is refused at spec load, and references are never fetched.
+- `Hyperparams.engine` also takes `hf_label_logits`: a causal LM's next-token logits for DECLARED
+  single-token labels, read after the model's chat template, with no model server. Each row's
+  `template` is one user message; `Hyperparams.chat_template_kwargs` passes the template's own
+  variables (per-row `{name}` placeholders allowed in string values; the template's own
+  parameters, the conversation and special tokens refused; a kwarg the template never reads
+  refused at load), and `Hyperparams.assistant_prefill` is appended after the assistant header.
+  `Hyperparams.label_tokens` lists `{label, token}` in order; a token that is not one distinct
+  token, alone and as the continuation of the first prompt, is refused. Rows carry the raw
+  `logit_<label>`, the softmax over the labels, `pred` and `mass_outside` (the full-vocabulary
+  probability on every other token). It shares `hf_classify`'s frame: drop-and-count overflow,
+  `id_column` / `slice_column`, a required `dtype` (TF32 off in float32), the batch plan, the dataset
+  commit read and a `scoring` manifest, which also records the
+  chat template's, the canonical kwargs' and the prefill's sha256, the prefill's token ids and each
+  label's resolved token id.
 - `strata_forge.training.loading.check_loading_info` refuses a model load that left weights
   uninitialised, mismatched a shape, reported an error or ignored a head tensor, and returns the
   other ignored checkpoint keys for the record.
@@ -104,6 +133,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Changed
 
+- `jsonschema` (`>=4.23,<5`, the range litellm already requires) is a direct dependency: guided
+  JSON validates schemas and replies with it.
 - A model whose response LiteLLM already split into `<think>` reasoning and content (Qwen3 with
   no parser) now has that reasoning in the `reasoning` column instead of losing it.
 - The `[serving]` extra declares `torch` and `transformers` directly (the same ranges as

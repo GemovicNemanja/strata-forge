@@ -15,6 +15,11 @@ It constructs, offline, everything a run constructs before it loads weights:
   the vLLM command line, parsed by the installed vLLM's own entrypoint;
 - the ``hf_classify`` scoring engine on a tiny classifier built from a config and saved to disk,
   against a direct forward pass, and its refusal of a checkpoint saved without its head;
+- the ``hf_label_logits`` engine on a tiny causal LM with a chat template, against a direct
+  forward pass of each rendered prompt, and its refusals (a multi-token label, a kwarg the
+  template never reads);
+- the guided-JSON schema check and reply validator on the installed ``jsonschema``, with a remote
+  reference refused and never fetched;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -328,6 +333,45 @@ def check_scoring() -> None:
         for actual, expected in zip(output[0], (0.25, 0.75), strict=True)
     ):
         raise SmokeError("temperature application changed")
+
+
+def check_guided_json() -> None:
+    """The guided-JSON checks on the installed ``jsonschema``: schema, replies, no fetching."""
+    import urllib.request
+
+    from strata_forge.pipelines import _guided
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"verdict": {"$ref": "#/$defs/verdict"}},
+        "required": ["verdict"],
+        "$defs": {"verdict": {"enum": ["yes", "no"]}},
+    }
+    if _guided.schema_problem(schema) is not None:
+        msg = f"a valid schema was refused: {_guided.schema_problem(schema)}"
+        raise SmokeError(msg)
+    if _guided.schema_problem({"$ref": "https://example.com/s.json"}) is None:
+        msg = "a schema referencing a remote document was accepted"
+        raise SmokeError(msg)
+    validator = _guided.OutputValidator(schema)
+    if (
+        validator.error('{"verdict": "yes"}') is not None
+        or validator.error('{"verdict": 1}') is None
+    ):
+        msg = "the reply validator does not apply the schema"
+        raise SmokeError(msg)
+    opened: list[object] = []
+    real = urllib.request.urlopen
+    urllib.request.urlopen = lambda *a, **k: opened.append(a)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType]
+    try:
+        remote = _guided.OutputValidator({"$ref": "https://example.com/s.json"})
+        with contextlib.suppress(Exception):
+            remote.error("{}")
+    finally:
+        urllib.request.urlopen = real
+    if opened:
+        msg = "validating a reply fetched a remote schema reference"
+        raise SmokeError(msg)
 
 
 def check_cli() -> None:
@@ -667,6 +711,152 @@ def check_hf_classify() -> None:
             raise SmokeError(msg)
 
 
+#: The tiny causal LM's chat template: a user turn, optional documents, a thinking switch.
+_TINY_CHAT_TEMPLATE = (
+    "{%- for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>"
+    "{%- endfor %}"
+    "{%- if documents %}{%- for document in documents %}<|doc|>{{ document['text'] }}<|end|>"
+    "{%- endfor %}{%- endif %}"
+    "{%- if add_generation_prompt %}<|assistant|>"
+    "{%- if enable_thinking is defined and not enable_thinking %}<|nothink|>{%- endif %}"
+    "{%- endif %}"
+)
+
+
+def _tiny_causal_lm(directory: Path) -> Any:
+    """Save a tiny Llama causal LM, a byte-level word tokenizer and a chat template; return the model.
+
+    Built from a config with a fixed seed, so nothing is downloaded. The vocabulary holds each
+    word with and without its leading space (``Ġ``), so ``" True"`` is one token, as it is in the
+    byte-level vocabularies the engine is for, and ``" Maybe so"`` is two.
+    """
+    import torch
+    from tokenizers import AddedToken, Tokenizer, decoders, models, pre_tokenizers
+    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+    words = ["Answer", ":", "all", "cats", "purr", "dogs", "bark", "True", "False", "Maybe", "so"]
+    vocab = {"<unk>": 0}
+    for word in words:
+        for form in (word, "\u0120" + word):
+            vocab.setdefault(form, len(vocab))
+    # Tokenizer markers, not credentials: passed by name so no keyword reads as a hardcoded secret.
+    markers = {"unk_token": "<unk>", "eos_token": "<|end|>"}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token=markers["unk_token"]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
+    backend.decoder = decoders.ByteLevel()
+    specials = ["<|user|>", "<|assistant|>", "<|doc|>", "<|end|>", "<|nothink|>"]
+    backend.add_special_tokens([AddedToken(token, special=True) for token in specials])
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, model_max_length=64, **markers)
+    tokenizer.chat_template = _TINY_CHAT_TEMPLATE
+    config = LlamaConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        tie_word_embeddings=True,
+    )
+    torch.manual_seed(0)
+    model: Any = LlamaForCausalLM(config).eval()
+    model.save_pretrained(str(directory))
+    tokenizer.save_pretrained(str(directory))
+    return model
+
+
+def check_hf_label_logits() -> None:
+    """The ``hf_label_logits`` engine on the installed transformers, against a direct forward pass.
+
+    Covers what a fake cannot: the chat template's rendering with kwargs, the prefill's tokens,
+    right padding with only the last positions projected, the full-vocabulary normalizer, a tied
+    output layer loading cleanly, and the refusals a real tokenizer decides.
+    """
+    import torch
+
+    from strata_forge.pipelines import _label_logits, _scoring
+    from strata_forge.pipelines._common import RunError
+    from strata_forge.pipelines.inference_runner import LabelToken
+
+    # Label tokens are verbalizer text, not credentials: validated from data like a spec's.
+    labels = [
+        LabelToken.model_validate({"label": "yes", "token": " True"}),
+        LabelToken.model_validate({"label": "no", "token": " False"}),
+    ]
+    multi = LabelToken.model_validate({"label": "maybe", "token": " Maybe so"})
+    kwargs: dict[str, Any] = {"enable_thinking": False, "documents": [{"text": "all cats purr"}]}
+    texts = ["cats purr", "all dogs bark so so so so", "dogs"]
+    inputs = _scoring.ScoringInputs(
+        texts=texts,
+        pairs=[""] * len(texts),
+        item_ids=None,
+        slices=None,
+        chat_kwargs=[kwargs] * len(texts),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        reference = _tiny_causal_lm(Path(tmp))
+        reader = _label_logits.load_label_reader(
+            Path(tmp),
+            label_tokens=labels,
+            prefill="Answer:",
+            chat_template_kwargs=kwargs,
+            max_length=None,
+            dtype="float32",
+        )
+        if reader.max_length != 64 or reader.unexpected_keys:
+            msg = f"the load is not the tokenizer's 64 tokens with nothing ignored: {reader.max_length}"
+            raise SmokeError(msg)
+        lengths = reader.lengths(inputs)
+        if reader.prefill_ids is None or len(reader.prefill_ids) != 2:
+            msg = f"the prefill 'Answer:' is not its two tokens: {reader.prefill_ids}"
+            raise SmokeError(msg)
+        got = reader.score(inputs, [1, 0, 2])
+        tokenizer: Any = reader._tokenizer  # pyright: ignore[reportPrivateUsage]
+        for position, index in enumerate((1, 0, 2)):
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": texts[index]}],
+                add_generation_prompt=True,
+                tokenize=False,
+                **kwargs,
+            )
+            ids = tokenizer(prompt + "Answer:", add_special_tokens=False)["input_ids"]
+            if len(ids) != lengths[index] or "<|nothink|>" not in prompt:
+                msg = f"row {index} did not render with its kwargs: {prompt!r}"
+                raise SmokeError(msg)
+            with torch.inference_mode():
+                last = reference(torch.tensor([ids])).logits[0, -1].double()
+            expected = [float(last[i]) for i in reader.token_ids]
+            normalizer = float(torch.logsumexp(last, dim=-1))
+            row = got[position]
+            if any(abs(a - b) > 1e-5 for a, b in zip(row, [*expected, normalizer], strict=True)):
+                msg = f"batched label logits differ from one forward pass: {row} vs {expected}"
+                raise SmokeError(msg)
+            outside = 1.0 - float(torch.softmax(last, dim=-1)[reader.token_ids].sum())
+            if abs(_label_logits.read_out(row[:-1], row[-1]) - outside) > 1e-6:
+                msg = "mass_outside is not the full softmax's mass off the label tokens"
+                raise SmokeError(msg)
+        for bad, needle in (
+            ({"label_tokens": [*labels[:1], multi]}, "2 tokens"),
+            ({"chat_template_kwargs": {"reasoning": True}}, "never reads"),
+        ):
+            setup: dict[str, Any] = {
+                "label_tokens": labels,
+                "prefill": None,
+                "chat_template_kwargs": None,
+                "max_length": None,
+                "dtype": "float32",
+            } | bad
+            try:
+                _label_logits.load_label_reader(Path(tmp), **setup)
+            except RunError as exc:
+                if needle not in str(exc):
+                    msg = f"{bad} was refused for the wrong reason: {exc}"
+                    raise SmokeError(msg) from exc
+            else:
+                msg = f"{bad} was accepted"
+                raise SmokeError(msg)
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -819,6 +1009,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
         ("installed distribution", check_install),
         ("top-level module imports", check_module_imports),
         ("cli --help", check_cli),
+        ("guided json validates replies offline", check_guided_json),
     ]
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))
@@ -832,6 +1023,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
     if {"serving", "hf"} <= extras:
         checks.append(("inference spec, requests and results", check_inference_spec))
         checks.append(("hf_classify scores a saved classifier exactly", check_hf_classify))
+        checks.append(("hf_label_logits reads a saved causal LM exactly", check_hf_label_logits))
     if "serving" in extras:
         checks.append(("vllm accepts the serving command line", check_vllm_command_line))
     return checks

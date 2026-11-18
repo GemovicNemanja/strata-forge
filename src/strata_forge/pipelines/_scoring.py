@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
+from strata_forge.pipelines._chat_template import render_kwargs
 from strata_forge.pipelines._common import MANIFEST_SCHEMA, RunError, manifest_engine
 from strata_forge.training.classifier_heads import (
     HeadLoadError,
@@ -64,6 +65,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from pydantic import JsonValue
+
     from strata_forge.pipelines.inference_runner import RunSpec
 
 __all__ = [
@@ -74,15 +77,19 @@ __all__ = [
     "SCORING_DTYPES",
     "VERIFIER_ARTIFACT",
     "Classifier",
+    "ClassifierScorer",
     "ScoringInputs",
+    "VerifierRunScorer",
     "VerifierScorer",
     "VerifierScores",
     "artifact_template_error",
     "batch_plan_record",
     "build_inputs",
     "build_manifest",
+    "length_limit",
     "load_classifier",
     "load_verifier",
+    "manifest_frame",
     "plan_batches",
     "read_calibration",
     "read_verifier",
@@ -91,6 +98,7 @@ __all__ = [
     "result_rows",
     "softmax",
     "tally",
+    "tf32_state",
     "verifier_result_rows",
 ]
 
@@ -228,12 +236,19 @@ def resolve_labels(
 
 @dataclass(frozen=True, slots=True)
 class ScoringInputs:
-    """Every row's rendered pair, plus its stable id and slice when the spec names them."""
+    """Every row's rendered pair, plus its stable id and slice when the spec names them.
+
+    ``chat_kwargs`` holds each row's rendered chat-template kwargs when the spec declares any.
+    """
 
     texts: list[str]
     pairs: list[str]
     item_ids: list[str] | None
     slices: list[str] | None
+    chat_kwargs: list[dict[str, JsonValue]] | None = None
+    #: Artifact scoring: each row's raw ``(premises, hypothesis)`` cells, which the verifier's
+    #: own rendering turns into text (``texts`` and ``pairs`` are then empty).
+    cells: list[tuple[Any, Any]] | None = None
 
 
 def build_inputs(spec: RunSpec, rows: Sequence[Mapping[str, Any]]) -> ScoringInputs:
@@ -245,10 +260,18 @@ def build_inputs(spec: RunSpec, rows: Sequence[Mapping[str, Any]]) -> ScoringInp
         if column is not None and rows and column not in columns:
             msg = f"{what} {column!r} is not a column of the split; columns: {sorted(columns)}"
             raise RunError(msg)
+    cells: list[tuple[Any, Any]] | None = None
     if hp.artifact is not None:
-        # A trained verifier renders its own rows (`VerifierScorer.render`), from the raw cells.
+        # A trained verifier renders its own rows (`VerifierScorer.render`), from the raw cells
+        # of the columns the two fixed templates name.
         texts: list[str] = []
         pairs: list[str] = []
+        named = [spec.column_mapping.get("premises"), spec.column_mapping.get("hypothesis")]
+        missing = [c for c in named if c is None or (rows and c not in columns)]
+        if missing:
+            msg = f"artifact scoring needs the premises and hypothesis columns; columns: {sorted(columns)}"
+            raise RunError(msg)
+        cells = [(row.get(named[0] or ""), row.get(named[1] or "")) for row in rows]
     else:
         texts = [
             render_scoring_text(
@@ -264,7 +287,28 @@ def build_inputs(spec: RunSpec, rows: Sequence[Mapping[str, Any]]) -> ScoringInp
         ]
     item_ids = _item_ids(rows, hp.id_column) if hp.id_column is not None else None
     slices = _slices(rows, hp.slice_column) if hp.slice_column is not None else None
-    return ScoringInputs(texts=texts, pairs=pairs, item_ids=item_ids, slices=slices)
+    declared = hp.chat_template_kwargs
+    chat_kwargs = (
+        [
+            render_kwargs(
+                declared,
+                lambda text, row=row: render_scoring_text(
+                    text, row, spec.column_mapping, separator=hp.list_separator
+                ),
+            )
+            for row in rows
+        ]
+        if declared
+        else None
+    )
+    return ScoringInputs(
+        texts=texts,
+        pairs=pairs,
+        item_ids=item_ids,
+        slices=slices,
+        chat_kwargs=chat_kwargs,
+        cells=cells,
+    )
 
 
 def _item_ids(rows: Sequence[Mapping[str, Any]], column: str) -> list[str]:
@@ -538,7 +582,7 @@ def load_classifier(
     config: Any = model.config
     names, outputs = resolve_labels(cast("Mapping[Any, Any]", config.id2label), label_alias)
     # Before padding is aligned: the position offset is the CHECKPOINT's padding index.
-    limit, source = _length_limit(config, tokenizer, max_length)
+    limit, source = length_limit(config, tokenizer, max_length)
     pad_token = _align_padding(tokenizer, config)
     device = "cuda" if bool(torch.cuda.is_available()) else "cpu"
     model.to(device)
@@ -570,7 +614,7 @@ def _scoring_modules(dtype: str) -> tuple[Any, Any, dict[str, bool | None]]:
     except ImportError as exc:
         msg = "classifier scoring needs torch and transformers: pip install 'strata-forge[serving]'"
         raise RunError(msg) from exc
-    return torch, transformers, _tf32_state(torch, disable=dtype == "float32")
+    return torch, transformers, tf32_state(torch, disable=dtype == "float32")
 
 
 def _load_model(
@@ -605,7 +649,7 @@ def _load_model(
     return tokenizer, model, unexpected
 
 
-def _tf32_state(torch: Any, *, disable: bool) -> dict[str, bool | None]:
+def tf32_state(torch: Any, *, disable: bool) -> dict[str, bool | None]:
     """Switch TF32 off when ``disable``, and report both switches as they now stand."""
     backends: Any = getattr(torch, "backends", None)
     matmul: Any = getattr(getattr(backends, "cuda", None), "matmul", None)
@@ -645,7 +689,7 @@ def _positive_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
-def _length_limit(config: Any, tokenizer: Any, requested: int | None) -> tuple[int, str]:
+def length_limit(config: Any, tokenizer: Any, requested: int | None) -> tuple[int, str]:
     """The token limit a pair must fit: the model's own, or a smaller requested one.
 
     The model's own is the smallest of its position table (less the slots a padding-offset
@@ -693,6 +737,53 @@ def batch_plan_record(batches: Sequence[Sequence[int]], batch_size: int) -> dict
     }
 
 
+#: Hyperparameters that hold prompt text, recorded in a manifest as digests only.
+_PROMPT_TEXT_KNOBS = frozenset({"pair_template", "assistant_prefill", "chat_template_kwargs"})
+
+
+def manifest_frame(
+    spec: RunSpec,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    model_commit: str | None,
+    dataset_commit: str | None,
+    scoring: dict[str, Any],
+) -> dict[str, Any]:
+    """A scoring run's manifest (``kind`` ``scoring``) around one engine's ``scoring`` block.
+
+    Pins (the commits actually read beside the ones requested), template digests, the mapping,
+    the knobs and the counts, with no row text: templates are recorded as digests, and the knobs
+    that hold prompt text (the pair template, an assistant prefill, chat-template kwargs) are left
+    out of the hyperparameters for the same reason, since the control plane stores their text
+    with the spec and a pushed manifest should not republish it. The engine's ``scoring`` block
+    carries their digests.
+    """
+    hp = spec.hyperparams
+    return {
+        "schema": MANIFEST_SCHEMA,
+        "kind": "scoring",
+        "engine": manifest_engine(spec.engine_version, RECORDED_DISTRIBUTIONS),
+        "model": {
+            "id": spec.model_id,
+            "requested_revision": spec.model_revision,
+            "commit": model_commit,
+        },
+        "dataset": {
+            "id": spec.dataset_id,
+            "config": spec.dataset_config,
+            "split": spec.split,
+            "requested_revision": spec.dataset_commit_sha,
+            "commit": dataset_commit,
+        },
+        "scoring": scoring,
+        "template_sha256": _digest(spec.template),
+        "pair_template_sha256": _digest(hp.pair_template or ""),
+        "column_mapping": spec.column_mapping,
+        "hyperparams": hp.model_dump(exclude=set(_PROMPT_TEXT_KNOBS)),
+        "counts": tally(rows),
+    }
+
+
 def build_manifest(
     spec: RunSpec,
     classifier: Classifier,
@@ -702,11 +793,9 @@ def build_manifest(
     dataset_commit: str | None,
     batches: Sequence[Sequence[int]],
 ) -> dict[str, Any]:
-    """The run's manifest (``kind`` ``scoring``): pins, the scoring setup and counts, no row text.
+    """A classifier scoring run's manifest: :func:`manifest_frame` with the head's setup.
 
-    Templates are recorded as digests (the pair template is left out of the hyperparameters for
-    the same reason): the control plane stores their text with the spec, and a pushed manifest
-    should not republish it beside the scores.
+    A trained verifier (:class:`VerifierScorer`) adds its artifact record and calibration.
     """
     hp = spec.hyperparams
     verifier = classifier if isinstance(classifier, VerifierScorer) else None
@@ -742,23 +831,12 @@ def build_manifest(
             if "support" in verifier.heads
             else None,
         }
-    return {
-        "schema": MANIFEST_SCHEMA,
-        "kind": "scoring",
-        "engine": manifest_engine(spec.engine_version, RECORDED_DISTRIBUTIONS),
-        "model": {
-            "id": spec.model_id,
-            "requested_revision": spec.model_revision,
-            "commit": model_commit,
-        },
-        "dataset": {
-            "id": spec.dataset_id,
-            "config": spec.dataset_config,
-            "split": spec.split,
-            "requested_revision": spec.dataset_commit_sha,
-            "commit": dataset_commit,
-        },
-        "scoring": {
+    return manifest_frame(
+        spec,
+        rows,
+        model_commit=model_commit,
+        dataset_commit=dataset_commit,
+        scoring={
             "engine": hp.engine,
             "head": "sequence_classification",
             "id2label": {str(index): name for index, name in enumerate(classifier.names)},
@@ -788,12 +866,49 @@ def build_manifest(
             "slice_column": hp.slice_column,
             "unexpected_checkpoint_keys": classifier.unexpected_keys,
         },
-        "template_sha256": _digest(spec.template),
-        "pair_template_sha256": _digest(hp.pair_template or ""),
-        "column_mapping": spec.column_mapping,
-        "hyperparams": hp.model_dump(exclude={"pair_template"}),
-        "counts": tally(rows),
-    }
+    )
+
+
+class ClassifierScorer:
+    """A :class:`Classifier` in the shape the runner drives every scoring engine through."""
+
+    def __init__(self, classifier: Classifier) -> None:
+        self.classifier = classifier
+        self.max_length = classifier.max_length
+
+    def lengths(self, inputs: ScoringInputs) -> list[int | None]:
+        return self.classifier.lengths(inputs.texts, inputs.pairs)
+
+    def score(self, inputs: ScoringInputs, batch: Sequence[int]) -> list[list[float]]:
+        return self.classifier.logits(
+            [inputs.texts[i] for i in batch], [inputs.pairs[i] for i in batch]
+        )
+
+    def result_rows(
+        self,
+        lengths: Sequence[int | None],
+        values: Mapping[int, Sequence[float]],
+        inputs: ScoringInputs,
+    ) -> list[dict[str, Any]]:
+        return result_rows(lengths, values, self.classifier.outputs, inputs)
+
+    def manifest(
+        self,
+        spec: RunSpec,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        model_commit: str | None,
+        dataset_commit: str | None,
+        batches: Sequence[Sequence[int]],
+    ) -> dict[str, Any]:
+        return build_manifest(
+            spec,
+            self.classifier,
+            rows,
+            model_commit=model_commit,
+            dataset_commit=dataset_commit,
+            batches=batches,
+        )
 
 
 def _digest(text: str) -> str:
@@ -1056,7 +1171,7 @@ def load_verifier(
     if not rendering.decoder and getattr(config, "classifier_pooling", "cls") != "cls":
         msg = "an encoder verifier must pool at its first token (classifier_pooling 'cls')"
         raise RunError(msg)
-    limit, source = _length_limit(config, tokenizer, max_length or rendering.max_length)
+    limit, source = length_limit(config, tokenizer, max_length or rendering.max_length)
     if max_length is None:
         source = "artifact"
     pad_token = _align_padding(tokenizer, config)
@@ -1143,3 +1258,60 @@ def _sigmoid(value: float) -> float:
         return 1.0 / (1.0 + math.exp(-value))
     exp = math.exp(value)
     return exp / (1.0 + exp)
+
+
+class VerifierRunScorer:
+    """A :class:`VerifierScorer` in the shape the runner drives every scoring engine through.
+
+    The rows are rendered from the raw ``premises`` and ``hypothesis`` cells
+    (``ScoringInputs.cells``) by the artifact's own rendering, once, on the first measure; each
+    batch's auxiliary scores are kept beside the logits the frame collects, for the result rows.
+    """
+
+    def __init__(self, scorer: VerifierScorer) -> None:
+        self.scorer = scorer
+        self.max_length = scorer.max_length
+        self._rendered: list[RenderedRow] | None = None
+        self._scores: dict[int, VerifierScores] = {}
+
+    def _rows(self, inputs: ScoringInputs) -> list[RenderedRow]:
+        if self._rendered is None:
+            cells = inputs.cells or []
+            self._rendered = self.scorer.render([c[0] for c in cells], [c[1] for c in cells])
+        return self._rendered
+
+    def lengths(self, inputs: ScoringInputs) -> list[int | None]:
+        return self.scorer.measure(self._rows(inputs))
+
+    def score(self, inputs: ScoringInputs, batch: Sequence[int]) -> list[list[float]]:
+        rows = self._rows(inputs)
+        values = self.scorer.score([rows[i] for i in batch])
+        self._scores.update(zip(batch, values, strict=True))
+        return [v.logits for v in values]
+
+    def result_rows(
+        self,
+        lengths: Sequence[int | None],
+        values: Mapping[int, Sequence[float]],
+        inputs: ScoringInputs,
+    ) -> list[dict[str, Any]]:
+        del values  # the same logits, held with their auxiliary scores
+        return verifier_result_rows(lengths, self._scores, self.scorer, inputs)
+
+    def manifest(
+        self,
+        spec: RunSpec,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        model_commit: str | None,
+        dataset_commit: str | None,
+        batches: Sequence[Sequence[int]],
+    ) -> dict[str, Any]:
+        return build_manifest(
+            spec,
+            self.scorer,
+            rows,
+            model_commit=model_commit,
+            dataset_commit=dataset_commit,
+            batches=batches,
+        )

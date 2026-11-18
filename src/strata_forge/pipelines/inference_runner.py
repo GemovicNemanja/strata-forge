@@ -12,9 +12,13 @@ progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestra
 
 ``hyperparams.engine = "hf_classify"`` swaps the middle of that for exact classifier scoring: each
 row renders into a text pair, a sequence-classification head is read with no model server, and
-the raw logits are persisted (see :mod:`strata_forge.pipelines._scoring`). The frame around it —
-the spec, the filtered model download, the private output repo and the one-commit push — is the
-same.
+the raw logits are persisted (see :mod:`strata_forge.pipelines._scoring`).
+``hyperparams.engine = "hf_label_logits"`` reads a causal LM instead: each row renders into a user
+message, the model's chat template (with the run's declared kwargs) and an optional assistant
+prefill make the prompt, and the logits of declared single-token labels at its last position are
+persisted (see :mod:`strata_forge.pipelines._label_logits`). The frame around both — the spec, the
+filtered model download, the private output repo, the drop-and-count overflow and the one-commit
+push — is the same.
 
 Security boundary (the VM is where untrusted-but-allow-listed config meets real
 credentials + the network):
@@ -43,7 +47,8 @@ credentials + the network):
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
     repo id; result rows are ``{custom_id, output, reasoning, error, finish_reason, input_tokens,
-    output_tokens}`` (model text and its accounting only), and the ``manifest.json`` beside them
+    output_tokens}`` (model text and its accounting only; a guided-JSON run adds its validity
+    columns, see :mod:`strata_forge.pipelines._guided`), and the ``manifest.json`` beside them
     records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
     column is pushed to the Hub with the results, an exception's text is not under this
@@ -76,12 +81,13 @@ import time
 from collections import Counter, deque
 from pathlib import Path
 from statistics import median
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     SecretStr,
     StrictFloat,
     StrictInt,
@@ -90,13 +96,21 @@ from pydantic import (
 )
 
 from strata_forge.compute import LocalBackend
-from strata_forge.compute.batch import BatchInferenceRunner
+from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
-from strata_forge.llm import LLMClient, UserMessage
+from strata_forge.llm import AssistantMessage, LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
+)
+from strata_forge.pipelines._chat_template import (
+    kwargs_digest,
+    kwargs_placeholders,
+    kwargs_problem,
+    render_kwargs,
+    template_digest,
+    unread_kwargs,
 )
 from strata_forge.pipelines._common import (
     MANIFEST_FILENAME,
@@ -117,33 +131,50 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
+from strata_forge.pipelines._guided import (
+    OutputValidator,
+    repair_message,
+    repair_prompt_digest,
+    schema_digest,
+    schema_problem,
+)
+from strata_forge.pipelines._label_logits import load_label_reader
 from strata_forge.pipelines._scoring import (
     ARTIFACT_PAIR_TEMPLATE,
     LABEL_RE,
     SCORING_DTYPES,
     VERIFIER_ARTIFACT,
-    VerifierScores,
+    ClassifierScorer,
+    VerifierRunScorer,
     artifact_template_error,
     build_inputs,
-    build_manifest,
     load_classifier,
     load_verifier,
     plan_batches,
-    result_rows,
     tally,
-    verifier_result_rows,
 )
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from strata_forge.core.redact import Redactor
+    from strata_forge.llm import LLMResponse
+    from strata_forge.llm.messages import AnyMessage
     from strata_forge.llm.registry import ProviderName
+    from strata_forge.pipelines._scoring import ScoringInputs
 
-__all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
+__all__ = [
+    "SNAPSHOT_IGNORED",
+    "SNAPSHOT_PATTERNS",
+    "LabelToken",
+    "RunSpec",
+    "main",
+    "render_template",
+    "template_placeholders",
+]
 
 # vLLM serves on loopback only — the runner talks to it via localhost, and a multi-tenant
 # / network-reachable VM must not expose the model server.
@@ -228,20 +259,51 @@ _HARMONY_DATE_ENV = "VLLM_SYSTEM_START_DATE"
 _ISO_DATE_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 # The pair template is bounded like the prompt template the control plane accepts.
 _MAX_PAIR_TEMPLATE = 8_192
-# Knobs only a scoring engine reads, and the ones both engines read.
-_SCORING_FIELDS = frozenset(
-    {
-        "pair_template",
-        "label_alias",
-        "id_column",
-        "slice_column",
-        "list_separator",
-        "scoring_batch_size",
-        "artifact",
-        "apply_calibration",
-    }
+# An assistant prefill is a short declared string (a judge's "<score>"), not a second prompt.
+_MAX_PREFILL = 1_024
+_MAX_LABEL_TOKEN = 64
+# The knobs each scoring engine reads on top of the ones every scoring engine reads, and the ones
+# every engine reads. A knob outside an engine's set is refused rather than ignored.
+_CLASSIFY_FIELDS = frozenset({"pair_template", "label_alias", "artifact", "apply_calibration"})
+_LABEL_LOGITS_FIELDS = frozenset({"label_tokens", "assistant_prefill", "chat_template_kwargs"})
+# Knobs a chat run reads that a scoring engine also reads: the template's own variables.
+_CHAT_SHARED_FIELDS = frozenset({"chat_template_kwargs"})
+_SCORING_COMMON_FIELDS = frozenset(
+    {"id_column", "slice_column", "list_separator", "scoring_batch_size"}
 )
 _SHARED_FIELDS = frozenset({"row_limit", "max_model_len", "dtype"})
+_ENGINE_FIELDS: dict[str, frozenset[str]] = {
+    "hf_classify": _CLASSIFY_FIELDS | _SCORING_COMMON_FIELDS | _SHARED_FIELDS,
+    "hf_label_logits": _LABEL_LOGITS_FIELDS | _SCORING_COMMON_FIELDS | _SHARED_FIELDS,
+}
+# Knobs only a scoring engine reads: a chat run refuses them.
+_SCORING_FIELDS = (
+    _CLASSIFY_FIELDS | _LABEL_LOGITS_FIELDS | _SCORING_COMMON_FIELDS
+) - _CHAT_SHARED_FIELDS
+# vLLM samples greedily below this temperature (`vllm/sampling_params.py`, `_SAMPLING_EPS`).
+_GREEDY_TEMPERATURE = 1e-5
+#: The most samples a chat run draws per row.
+MAX_SAMPLES = 16
+_INT64_MAX = 2**63 - 1
+
+
+class LabelToken(BaseModel):
+    """One declared label of a label-logits run and the single token that stands for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The results column suffix (``logit_<label>``): the classifier engine's label grammar.
+    label: str
+    # The token's TEXT, leading space included where the vocabulary has one (``" True"``).
+    token: str = Field(min_length=1, max_length=_MAX_LABEL_TOKEN)
+
+    @field_validator("label")
+    @classmethod
+    def _label_names_a_column(cls, value: str) -> str:
+        if not LABEL_RE.fullmatch(value):
+            msg = "a label is 1-64 of A-Z a-z 0-9 _ . - and starts with a letter or digit"
+            raise ValueError(msg)
+        return value
 
 
 class Hyperparams(BaseModel):
@@ -282,10 +344,18 @@ class Hyperparams(BaseModel):
     # serving machine's date at start-up. Either way the manifest records the date used.
     harmony_date: str | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
+    # Samples drawn per row, each its own request. A seeded run gives sample `k` the seed
+    # `seed + k`, which is how vLLM seeds the k-th of `n` parallel samples itself.
+    n: StrictInt = Field(default=1, ge=1, le=MAX_SAMPLES)
+    # One JSON Schema for every reply: sent as the model server's structured-output constraint,
+    # and every reply is validated against it, with one repair turn for a reply that fails.
+    guided_json: dict[str, JsonValue] | None = None
     # What the run does with each rendered row: generate a reply through the model server
-    # (`vllm_chat`), or read a sequence-classification head's logits for the pair
-    # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`).
-    engine: Literal["vllm_chat", "hf_classify"] = "vllm_chat"
+    # (`vllm_chat`), read a sequence-classification head's logits for the pair
+    # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`), or read
+    # a causal LM's next-token logits for declared label tokens after its chat template
+    # (`hf_label_logits`, see `_label_logits`).
+    engine: Literal["vllm_chat", "hf_classify", "hf_label_logits"] = "vllm_chat"
     pair_template: str | None = Field(default=None, min_length=1, max_length=_MAX_PAIR_TEMPLATE)
     # Required for scoring: every model class -> its output label, or null to exclude it.
     label_alias: dict[str, str | None] | None = Field(default=None, min_length=2, max_length=64)
@@ -299,26 +369,46 @@ class Hyperparams(BaseModel):
     # Artifact scoring only: `auto` applies the artifact's `calibration.json` temperature to the
     # `p_*` columns (the `logit_*` columns stay raw); `off` (the default) applies none.
     apply_calibration: Literal["off", "auto"] = "off"
+    # `hf_label_logits`: the labels, in order, each with the one token whose logit it reads.
+    label_tokens: list[LabelToken] | None = Field(default=None, min_length=2, max_length=64)
+    # Text appended after the chat template's assistant header, before the label position. Not a
+    # template: no placeholder in it is substituted.
+    assistant_prefill: str | None = Field(default=None, min_length=1, max_length=_MAX_PREFILL)
+    # Variables the model's chat template reads (`enable_thinking`, `documents`, a judge's
+    # config). A string anywhere in a value may hold `{name}` placeholders, rendered per row.
+    chat_template_kwargs: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def _fields_match_the_engine(self) -> Hyperparams:
         """Refuse a knob the chosen engine would ignore, so a spec means what it says."""
         given = self.model_fields_set - {"engine"}
+        if self.chat_template_kwargs is not None:
+            problem = kwargs_problem(self.chat_template_kwargs)
+            if problem:
+                raise ValueError(problem)
         if self.engine == "vllm_chat":
             stray = sorted(given & _SCORING_FIELDS)
             if stray:
-                msg = f"{', '.join(stray)} apply only to engine 'hf_classify'"
-                raise ValueError(msg)
+                raise ValueError(_owners(stray))
+            self._check_sampling()
             return self
-        stray = sorted(given - _SCORING_FIELDS - _SHARED_FIELDS)
-        if stray:
-            msg = f"engine 'hf_classify' generates no text and takes no {', '.join(stray)}"
+        accepted = _ENGINE_FIELDS[self.engine]
+        foreign = sorted(given & (_SCORING_FIELDS - accepted))
+        if foreign:
+            msg = f"engine {self.engine!r} takes no {', '.join(foreign)}: " + _owners(foreign)
             raise ValueError(msg)
-        if self.pair_template is None:
-            msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
+        stray = sorted(given - accepted - _SCORING_FIELDS)
+        if stray:
+            msg = f"engine {self.engine!r} generates no text and takes no {', '.join(stray)}"
             raise ValueError(msg)
         if self.dtype not in SCORING_DTYPES:
-            msg = f"engine 'hf_classify' needs dtype, one of {', '.join(SCORING_DTYPES)}"
+            msg = f"engine {self.engine!r} needs dtype, one of {', '.join(SCORING_DTYPES)}"
+            raise ValueError(msg)
+        if self.engine == "hf_label_logits":
+            self._check_label_logits()
+            return self
+        if self.pair_template is None:
+            msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
             raise ValueError(msg)
         if self.artifact is None and "apply_calibration" in given:
             msg = "apply_calibration applies to artifact scoring only (artifact: strata_verifier)"
@@ -357,6 +447,47 @@ class Hyperparams(BaseModel):
             raise ValueError(msg)
         return self
 
+    def _check_label_logits(self) -> None:
+        if self.label_tokens is None:
+            msg = "engine 'hf_label_logits' needs label_tokens, the labels and the token of each"
+            raise ValueError(msg)
+        labels = [entry.label for entry in self.label_tokens]
+        tokens = [entry.token for entry in self.label_tokens]
+        if len(set(labels)) != len(labels) or len(set(tokens)) != len(tokens):
+            msg = "label_tokens needs a distinct label and a distinct token for every entry"
+            raise ValueError(msg)
+
+    def _check_sampling(self) -> None:
+        # Per-row values need a request of their own per row; a chat run sends one set of
+        # template kwargs with every request, so they are fixed for the run.
+        placeholders = sorted(kwargs_placeholders(self.chat_template_kwargs))
+        if placeholders:
+            msg = (
+                f"chat_template_kwargs on engine 'vllm_chat' are fixed for the run; placeholders "
+                f"{placeholders} are rendered per row only by engine 'hf_label_logits'"
+            )
+            raise ValueError(msg)
+        if self.n > 1 and self.temperature is not None and self.temperature < _GREEDY_TEMPERATURE:
+            msg = (
+                f"n > 1 below temperature {_GREEDY_TEMPERATURE} is greedy decoding: the same "
+                "reply n times; raise the temperature"
+            )
+            raise ValueError(msg)
+        if self.seed is not None and self.seed + self.n - 1 > _INT64_MAX:
+            msg = f"seed + n - 1 must fit the model server's int64 seed (at most {_INT64_MAX})"
+            raise ValueError(msg)
+
+    @field_validator("guided_json")
+    @classmethod
+    def _guided_json_is_a_schema(
+        cls, value: dict[str, JsonValue] | None
+    ) -> dict[str, JsonValue] | None:
+        if value is not None:
+            problem = schema_problem(value)
+            if problem:
+                raise ValueError(problem)
+        return value
+
     @field_validator("harmony_date")
     @classmethod
     def _harmony_date_is_a_calendar_date(cls, value: str | None) -> str | None:
@@ -387,6 +518,18 @@ class Hyperparams(BaseModel):
                     )
                     raise ValueError(msg)
         return self
+
+
+def _owners(fields: list[str]) -> str:
+    """Which engines read each of ``fields``, as one sentence per group of fields."""
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for field in fields:
+        engines = tuple(e for e, accepted in _ENGINE_FIELDS.items() if field in accepted)
+        groups.setdefault(engines, []).append(field)
+    return "; ".join(
+        f"{', '.join(names)} apply only to engine {' or '.join(repr(e) for e in engines)}"
+        for engines, names in groups.items()
+    )
 
 
 class RunSpec(BaseModel):
@@ -458,9 +601,9 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
     to survive to the model. That reading is rare, and it is not worth the run this protects.
     """
-    templates = (spec.template, spec.hyperparams.pair_template or "")
-    placeholders = {m.group(1) for t in templates for m in _PLACEHOLDER_RE.finditer(t)}
-    unmapped = sorted(placeholders - set(spec.column_mapping))
+    unmapped = sorted(
+        template_placeholders(spec.template, spec.hyperparams) - set(spec.column_mapping)
+    )
     if not unmapped:
         return
     known = sorted(spec.column_mapping) or ["(none)"]
@@ -472,6 +615,15 @@ def _validate_template_coverage(spec: RunSpec) -> None:
         "an unmapped one would be sent to the model literally, identically for every row."
     )
     raise RunError(msg)
+
+
+def template_placeholders(template: str, hyperparams: Hyperparams) -> set[str]:
+    """Every ``{name}`` a run renders per row: in the template, the pair template and the string
+    values of the chat-template kwargs. A control plane checks the mapping covers them with this.
+    """
+    texts = (template, hyperparams.pair_template or "")
+    found = {m.group(1) for text in texts for m in _PLACEHOLDER_RE.finditer(text)}
+    return found | kwargs_placeholders(hyperparams.chat_template_kwargs)
 
 
 def render_template(template: str, row: dict[str, Any], column_mapping: dict[str, str]) -> str:
@@ -559,6 +711,8 @@ async def _run_batches(
     """
     hp = spec.hyperparams
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
+    validator = OutputValidator(hp.guided_json) if hp.guided_json is not None else None
+    sampled = _samples_declared(hp)
     total = len(prompts)
     out: list[dict[str, Any]] = []
     ok = failed = 0
@@ -573,7 +727,11 @@ async def _run_batches(
     # also the more useful number: it tracks how the run is behaving NOW.
     latencies_ms: deque[float] = deque(maxlen=_LATENCY_WINDOW)
     output_tokens = 0
-    for start in range(0, total, hp.progress_chunk):
+    invalid = retried = 0
+    # A chunk is `progress_chunk` REQUESTS: with n samples per row it holds 1/n as many rows, so
+    # the liveness check and the progress event between chunks keep their spacing.
+    rows_per_chunk = max(1, hp.progress_chunk // hp.n)
+    for start in range(0, total, rows_per_chunk):
         # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
         # the granularity the run already reports at. It bounds the waste at one chunk rather than
         # the whole remaining batch.
@@ -583,60 +741,86 @@ async def _run_batches(
                 "(its log is beside the results on the VM)"
             )
             raise RunError(msg)
-        chunk = prompts[start : start + hp.progress_chunk]
-        ids = custom_ids[start : start + hp.progress_chunk]
-        results = await runner.run(
-            chunk,
-            temperature=hp.temperature,
-            max_tokens=hp.max_tokens,
-            top_p=hp.top_p,
-            provider_extras=_sampling_extras(hp),
-        )
-        for cid, result in zip(ids, results, strict=True):
-            if result.succeeded and result.response is not None:
-                response = result.response
-                out.append(
-                    {
-                        "custom_id": cid,
-                        # The final answer only: the model server's reasoning parser keeps the
-                        # reasoning out of `text`, and it lands in its own column.
-                        "output": response.text,
-                        "reasoning": response.reasoning,
-                        "error": None,
-                        "finish_reason": response.finish_reason,
-                        "input_tokens": response.usage.input_tokens,
-                        "output_tokens": response.usage.output_tokens,
-                    }
+        chunk = prompts[start : start + rows_per_chunk]
+        ids = custom_ids[start : start + rows_per_chunk]
+        # One request per row per sample. Each sample's requests run as one batch, so the model
+        # server sees a full batch and its prefix cache serves the repeated prompts.
+        per_sample: list[tuple[list[BatchInferenceResult], list[dict[str, Any]] | None]] = []
+        for sample in range(hp.n):
+            results = list(
+                await runner.run(
+                    chunk,
+                    temperature=hp.temperature,
+                    max_tokens=hp.max_tokens,
+                    top_p=hp.top_p,
+                    provider_extras=_sampling_extras(hp, sample),
                 )
-                ok += 1
-                # Both already measured per request by the client — a true per-row latency and a
-                # real token count, not an average reconstructed from the chunk's wall time.
-                latencies_ms.append(result.response.latency_ms)
-                output_tokens += result.response.usage.output_tokens
-            else:
-                error = redactor.redact(repr(result.error))
-                out.append(
-                    {
-                        "custom_id": cid,
-                        "output": None,
-                        "reasoning": None,
-                        "error": error,
-                        "finish_reason": None,
-                        "input_tokens": None,
-                        "output_tokens": None,
-                    }
-                )
-                failed += 1
+            )
+            guided = (
+                await _guide(runner, hp, validator, chunk, results, redactor, sample)
+                if validator is not None
+                else None
+            )
+            per_sample.append((results, guided))
+        for index, cid in enumerate(ids):
+            for sample, (results, guided) in enumerate(per_sample):
+                result = results[index]
+                columns = guided[index] if guided is not None else {}
+                if sampled:
+                    columns = {**columns, **_sample_columns(hp, sample)}
+                if result.succeeded and result.response is not None:
+                    response = result.response
+                    out.append(
+                        {
+                            "custom_id": cid,
+                            # The final answer only: the model server's reasoning parser keeps the
+                            # reasoning out of `text`, and it lands in its own column.
+                            "output": response.text,
+                            "reasoning": response.reasoning,
+                            "error": None,
+                            "finish_reason": response.finish_reason,
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            **columns,
+                        }
+                    )
+                    ok += 1
+                    invalid += columns.get("json_valid") is False
+                    retried += bool(columns.get("json_retried"))
+                    # Both already measured per request by the client — a true per-row latency and a
+                    # real token count, not an average reconstructed from the chunk's wall time.
+                    latencies_ms.append(result.response.latency_ms)
+                    output_tokens += result.response.usage.output_tokens
+                else:
+                    error = redactor.redact(repr(result.error))
+                    out.append(
+                        {
+                            "custom_id": cid,
+                            "output": None,
+                            "reasoning": None,
+                            "error": error,
+                            "finish_reason": None,
+                            "input_tokens": None,
+                            "output_tokens": None,
+                            **columns,
+                        }
+                    )
+                    failed += 1
         emit(
             writer,
             ProgressEvent(
                 kind="step",
                 stage="run",
                 step=len(out),
-                total_steps=total,
+                total_steps=total * hp.n,
                 metrics={
                     "succeeded": float(ok),
                     "failed": float(failed),
+                    **(
+                        {"json_invalid": float(invalid), "json_retried": float(retried)}
+                        if validator is not None
+                        else {}
+                    ),
                     **_throughput(started, len(out), output_tokens, latencies_ms),
                     **(gpu.sample() if gpu is not None else {}),
                 },
@@ -645,23 +829,131 @@ async def _run_batches(
     return out
 
 
-def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | None:
+def _samples_declared(hp: Hyperparams) -> bool:
+    """Whether rows carry ``sample_index`` and ``seed``: whenever the run declared ``n``."""
+    return "n" in hp.model_fields_set
+
+
+def _sample_columns(hp: Hyperparams, sample: int) -> dict[str, Any]:
+    """A sample's key beside ``custom_id`` and the seed its request carried (``None`` unseeded)."""
+    return {"sample_index": sample, "seed": None if hp.seed is None else hp.seed + sample}
+
+
+_UNGUIDED: dict[str, Any] = {"json_valid": None, "json_retried": False, "json_error": None}
+
+
+def _with_usage_of(first: LLMResponse, final: LLMResponse) -> LLMResponse:
+    """``final`` accounted as both attempts: tokens and latency are what the row cost."""
+    usage = final.usage.model_copy(
+        update={
+            "input_tokens": first.usage.input_tokens + final.usage.input_tokens,
+            "output_tokens": first.usage.output_tokens + final.usage.output_tokens,
+        }
+    )
+    return final.model_copy(
+        update={"usage": usage, "latency_ms": first.latency_ms + final.latency_ms}
+    )
+
+
+def _reply_problem(validator: OutputValidator, text: str | None) -> str | None:
+    """The reply's validation problem; a validator failure marks the ROW invalid, not the run.
+
+    One row's reply must never end a run whose other rows are good: anything the check raises
+    is recorded as that row's ``json_error``.
+    """
+    try:
+        return validator.error(text)
+    except Exception as exc:  # a per-row check: the row records why it failed
+        return f"the reply could not be validated: {type(exc).__name__}"
+
+
+async def _guide(
+    runner: BatchInferenceRunner,
+    hp: Hyperparams,
+    validator: OutputValidator,
+    chunk: Sequence[Sequence[AnyMessage]],
+    results: list[BatchInferenceResult],
+    redactor: Redactor,
+    sample: int = 0,
+) -> list[dict[str, Any]]:
+    """Validate each reply; give every invalid one its one repair turn, under the same constraint.
+
+    ``results`` is updated in place to each row's FINAL attempt, accounted as both attempts.
+    Returns each row's guided columns: ``json_valid`` (``None`` for a row with no reply),
+    ``json_retried`` and ``json_error`` (the final validation error, redacted like ``error``).
+    """
+    columns = [dict(_UNGUIDED) for _ in results]
+    first_errors: dict[int, str] = {}
+    for index, result in enumerate(results):
+        if result.succeeded and result.response is not None:
+            problem = _reply_problem(validator, result.response.text)
+            if problem is None:
+                columns[index]["json_valid"] = True
+            else:
+                first_errors[index] = problem
+    if not first_errors:
+        return columns
+    order = sorted(first_errors)
+    replies = [cast("LLMResponse", results[index].response) for index in order]
+    conversations: list[list[AnyMessage]] = [
+        [
+            *chunk[index],
+            AssistantMessage(content=reply.text),
+            UserMessage(content=repair_message(first_errors[index])),
+        ]
+        for index, reply in zip(order, replies, strict=True)
+    ]
+    repaired = await runner.run(
+        conversations,
+        temperature=hp.temperature,
+        max_tokens=hp.max_tokens,
+        top_p=hp.top_p,
+        provider_extras=_sampling_extras(hp, sample),
+    )
+    for index, first, second in zip(order, replies, repaired, strict=True):
+        columns[index]["json_retried"] = True
+        if second.succeeded and second.response is not None:
+            problem = _reply_problem(validator, second.response.text)
+            results[index] = BatchInferenceResult(response=_with_usage_of(first, second.response))
+        else:
+            # The first reply stays the row's output; the record says the repair never answered.
+            problem = f"{first_errors[index]}; the repair request failed: {second.error!r}"
+        columns[index]["json_valid"] = problem is None
+        columns[index]["json_error"] = None if problem is None else redactor.redact(problem)
+    return columns
+
+
+def _sampling_extras(hp: Hyperparams, sample: int = 0) -> dict[ProviderName, dict[str, Any]] | None:
     """The sampling settings the chat-completions call has no parameter for.
 
     ``seed`` is an OpenAI-compatible request field. ``top_k`` is not an OpenAI parameter, so it
     rides in ``extra_body``, the transport's explicit channel for server-specific body fields,
     rather than depending on how the transport treats an unrecognised keyword. So does
     ``reasoning_effort``: the transport would otherwise decide per model id whether it supports
-    the field, and an operator's model id is one it has never seen.
+    the field, and an operator's model id is one it has never seen. So does the guided-JSON
+    schema, as vLLM's ``structured_outputs: {"json": schema}`` request field (the shape vLLM has
+    accepted since its ``guided_json`` field was removed in 0.12; see ``vllm/entrypoints/openai/
+    chat_completion/protocol.py`` and ``vllm/sampling_params.py`` ``StructuredOutputsParams``).
+    The chat template's kwargs ride as ``chat_template_kwargs``, the request field vLLM passes to
+    the template renderer, in canonical key order.
+
+    ``sample`` is the sample index: a seeded run's ``k``-th sample is seeded ``seed + k``, which is
+    exactly the seed vLLM gives the ``k``-th child of an ``n``-sample request
+    (``vllm/v1/engine/parallel_sampling.py``, ``_get_child_sampling_params``), so each sample is one
+    reproducible request with its own usage and finish reason.
     """
     extras: dict[str, Any] = {}
     if hp.seed is not None:
-        extras["seed"] = hp.seed
+        extras["seed"] = hp.seed + sample
     body: dict[str, Any] = {}
     if hp.top_k is not None:
         body["top_k"] = hp.top_k
     if hp.reasoning_effort is not None:
         body["reasoning_effort"] = hp.reasoning_effort
+    if hp.guided_json is not None:
+        body["structured_outputs"] = {"json": hp.guided_json}
+    if hp.chat_template_kwargs is not None:
+        body["chat_template_kwargs"] = render_kwargs(hp.chat_template_kwargs, lambda text: text)
     if body:
         extras["extra_body"] = body
     return {"openai_compat": extras} if extras else None
@@ -935,11 +1227,88 @@ def _effective_hyperparams(hp: Hyperparams, config: dict[str, Any]) -> Hyperpara
     return hp
 
 
+def _snapshot_chat_template(snapshot: Path) -> str | None:
+    """The chat template the model server renders with, read from the downloaded snapshot.
+
+    In vLLM's own order of preference (``vllm/renderers/hf.py``, ``resolve_chat_template``): the
+    processor's template first, which a repo ships as ``chat_template.json``; then the
+    tokenizer's, which is ``chat_template.jinja`` when the repo ships one (transformers saves the
+    template there and prefers it), else ``tokenizer_config.json``'s ``chat_template``: a string,
+    or a list of named templates of which ``default`` is the one used. ``None`` when the
+    snapshot has none.
+    """
+    processor = _json_file(snapshot / "chat_template.json")
+    if processor is not None:
+        template: object = processor.get("chat_template")
+        if isinstance(template, str):
+            return template
+    jinja = snapshot / "chat_template.jinja"
+    if jinja.is_file():
+        return jinja.read_text()
+    try:
+        config: Any = json.loads((snapshot / "tokenizer_config.json").read_text())  # pyright: ignore[reportAny] - untyped JSON
+    except OSError, ValueError:
+        return None
+    if not isinstance(config, dict):
+        return None
+    template: object = cast("dict[str, Any]", config).get("chat_template")
+    if isinstance(template, str):
+        return template
+    if isinstance(template, list):
+        for entry in cast("list[object]", template):
+            if isinstance(entry, dict):
+                named = cast("dict[str, object]", entry)
+                if named.get("name") == "default" and isinstance(named.get("template"), str):
+                    return cast("str", named["template"])
+    return None
+
+
+def _json_file(path: Path) -> dict[str, Any] | None:
+    """A JSON object file's content, or ``None`` when it is missing, unreadable or not an object."""
+    try:
+        data: Any = json.loads(path.read_text())  # pyright: ignore[reportAny] - untyped JSON
+    except OSError, ValueError:
+        return None
+    return cast("dict[str, Any]", data) if isinstance(data, dict) else None
+
+
+def _check_chat_template_kwargs(snapshot: Path, hp: Hyperparams) -> str | None:
+    """Refuse template kwargs the model server would drop; return the template's sha256.
+
+    vLLM keeps only the request kwargs its template reads (``vllm/renderers/hf.py``,
+    ``resolve_chat_template_kwargs``) and renders a gpt-oss prompt with openai-harmony, not the
+    template, so in either case a declared kwarg would be a setting the model never saw. ``None``
+    when the run declares no kwargs.
+    """
+    if hp.chat_template_kwargs is None:
+        return None
+    if _checkpoint_config(snapshot).get("model_type") == _HARMONY_MODEL_TYPE:
+        msg = (
+            "a gpt-oss prompt is rendered in the harmony format, not by a chat template, so "
+            "chat_template_kwargs would change nothing; remove them"
+        )
+        raise RunError(msg)
+    template = _snapshot_chat_template(snapshot)
+    if template is None:
+        msg = "the model ships no chat template, so chat_template_kwargs would change nothing"
+        raise RunError(msg)
+    unread = unread_kwargs(hp.chat_template_kwargs, template)
+    if unread:
+        msg = (
+            f"the model's chat template never reads {unread}, so the model server would drop "
+            "them; remove them from chat_template_kwargs"
+        )
+        raise RunError(msg)
+    return template_digest(template)
+
+
 def _build_manifest(
     spec: RunSpec,
     rows: list[dict[str, Any]],
     model_commit: str | None,
     serving: dict[str, Any] | None = None,
+    *,
+    chat_template_sha256: str | None = None,
 ) -> dict[str, Any]:
     """What a run needs to be reproduced and audited, with no row content and no secret.
 
@@ -948,6 +1317,25 @@ def _build_manifest(
     """
     finish = Counter(str(r["finish_reason"]) for r in rows if r["error"] is None)
     ok = sum(1 for r in rows if r["error"] is None)
+    hp = spec.hyperparams
+    guided: dict[str, Any] | None = None
+    guided_counts: dict[str, int] = {}
+    if hp.guided_json is not None:
+        guided = {
+            "kind": "json",
+            "schema_sha256": schema_digest(hp.guided_json),
+            "constraint": "structured_outputs.json",
+            "validator": OutputValidator(hp.guided_json).draft,
+            "max_repairs": 1,
+            "repair_prompt_sha256": repair_prompt_digest(),
+        }
+        answered = [r for r in rows if r["error"] is None]
+        guided_counts = {
+            "json_valid": sum(1 for r in answered if r["json_valid"] is True),
+            "json_invalid": sum(1 for r in answered if r["json_valid"] is False),
+            "json_retried": sum(1 for r in answered if r["json_retried"]),
+            "json_repaired": sum(1 for r in answered if r["json_retried"] and r["json_valid"]),
+        }
     return {
         "schema": MANIFEST_SCHEMA,
         "kind": _MANIFEST_KIND,
@@ -973,6 +1361,20 @@ def _build_manifest(
             "harmony_date": None,
         },
         "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
+        "chat_template": (
+            None
+            if hp.chat_template_kwargs is None
+            else {
+                "sha256": chat_template_sha256,
+                "kwargs_sha256": kwargs_digest(hp.chat_template_kwargs),
+            }
+        ),
+        "sampling": (
+            {"n": hp.n, "seed": hp.seed, "sample_seed": "seed + sample_index"}
+            if _samples_declared(hp)
+            else None
+        ),
+        "guided": guided,
         "column_mapping": spec.column_mapping,
         "hyperparams": spec.hyperparams.model_dump(),
         "counts": {
@@ -982,6 +1384,8 @@ def _build_manifest(
             "finish_reasons": dict(sorted(finish.items())),
             "input_tokens": sum(int(r["input_tokens"] or 0) for r in rows),
             "output_tokens": sum(int(r["output_tokens"] or 0) for r in rows),
+            **guided_counts,
+            **({"prompts": len({r["custom_id"] for r in rows})} if _samples_declared(hp) else {}),
         },
     }
 
@@ -1044,7 +1448,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
-    if spec.hyperparams.engine == "hf_classify":
+    if spec.hyperparams.engine != "vllm_chat":
         return await _execute_scoring(spec, secrets, writer)
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
@@ -1069,7 +1473,10 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.
-    emit(writer, ProgressEvent(kind="start", stage="run", total_steps=len(prompts)))
+    emit(
+        writer,
+        ProgressEvent(kind="start", stage="run", total_steps=len(prompts) * spec.hyperparams.n),
+    )
 
     # Before the server starts, and in this process: the download is the one step that needs the
     # token, and the server that follows is third-party code that must not hold it.
@@ -1077,6 +1484,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         snapshot = await _fetch_model(spec, hub_token, config_commit)
     model_commit = spec.model_revision or snapshot_commit(snapshot)
 
+    # The template ships with the weights, so kwargs it never reads are refused only now, still
+    # before the model server starts.
+    chat_template_sha256 = await asyncio.to_thread(_check_chat_template_kwargs, snapshot, hp)
     harmony_date = _harmony_date(hp)
     task = build_vllm_task(
         str(snapshot),
@@ -1191,7 +1601,9 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         # Beside the results, so the push and the on-VM copy carry it alike.
         await asyncio.to_thread(
             write_manifest,
-            _build_manifest(spec, out, model_commit, serving_facts),
+            _build_manifest(
+                spec, out, model_commit, serving_facts, chat_template_sha256=chat_template_sha256
+            ),
             Path(results_path).parent,
         )
     if hf_token and spec.output_repo_id:
@@ -1208,6 +1620,14 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         destination = str(results_path)
 
     ok = sum(1 for r in out if r["error"] is None)
+    guided_metrics = (
+        {
+            "json_invalid": float(sum(1 for r in out if r.get("json_valid") is False)),
+            "json_retried": float(sum(1 for r in out if r.get("json_retried"))),
+        }
+        if spec.hyperparams.guided_json is not None
+        else {}
+    )
     emit(
         writer,
         ProgressEvent(
@@ -1215,7 +1635,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
             stage="push",
             step=len(out),
             total_steps=len(out),
-            metrics={"succeeded": float(ok), "failed": float(len(out) - ok)},
+            metrics={"succeeded": float(ok), "failed": float(len(out) - ok), **guided_metrics},
             message=destination,  # WHERE results landed: a repo id (pushed) or a VM path (local)
         ),
     )
@@ -1272,12 +1692,14 @@ async def _require_fresh_output(spec: RunSpec, hf_token: str) -> None:
 async def _execute_scoring(
     spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
-    """Score every row with the model's classification head; no model server is started.
+    """Score every row with a scoring engine; no model server is started.
 
     The same frame as a chat run: the output repo is checked before any download, the model comes
     from the same filtered snapshot, and the results and manifest are written outside the workdir
     and pushed in one commit. What differs is the middle: rows over the model's length limit are
     dropped and counted before the first forward pass, and the rest run in length-sorted batches.
+    The engine (a classification head, or a causal LM's label tokens) only measures, scores and
+    describes rows; everything around it is shared.
     """
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
@@ -1306,43 +1728,19 @@ async def _execute_scoring(
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
     model_commit = spec.model_revision or snapshot_commit(snapshot)
-    if hp.artifact is not None:
-        return await _execute_verifier_scoring(
-            spec,
-            requested,
-            rows,
-            inputs,
-            snapshot,
-            model_commit=model_commit,
-            dataset_commit=dataset_commit,
-            phase=phase,
-            writer=writer,
-            gpu=gpu,
-            hf_token=hf_token if pushing else None,
-        )
-    async with ticking_phase(phase, "Loading the classifier", stage="load_model"):
-        classifier = await asyncio.to_thread(
-            load_classifier,
-            snapshot,
-            label_alias=cast("dict[str, str | None]", hp.label_alias),
-            max_length=hp.max_model_len,
-            dtype=cast("str", hp.dtype),
-        )
+    async with ticking_phase(phase, _loading_phase(hp), stage="load_model"):
+        scorer = await asyncio.to_thread(_load_scorer, snapshot, hp)
     async with ticking_phase(phase, "Measuring rows", stage="run"):
-        lengths = await asyncio.to_thread(classifier.lengths, inputs.texts, inputs.pairs)
+        lengths = await asyncio.to_thread(scorer.lengths, inputs)
     batches, overflow = plan_batches(
-        lengths, max_length=classifier.max_length, batch_size=hp.scoring_batch_size
+        lengths, max_length=scorer.max_length, batch_size=hp.scoring_batch_size
     )
 
     logits: dict[int, list[float]] = {}
     started = time.monotonic()
     async with ticking_phase(phase, "Scoring rows", stage="run"):
         for batch in batches:
-            values = await asyncio.to_thread(
-                classifier.logits,
-                [inputs.texts[i] for i in batch],
-                [inputs.pairs[i] for i in batch],
-            )
+            values = await asyncio.to_thread(scorer.score, inputs, batch)
             logits.update(zip(batch, values, strict=True))
             elapsed = time.monotonic() - started
             emit(
@@ -1362,42 +1760,13 @@ async def _execute_scoring(
                 ),
             )
 
-    out = result_rows(lengths, logits, classifier.outputs, inputs)
-    return await _finish_scoring(
-        spec,
-        requested,
-        classifier,
-        out,
-        batches,
-        model_commit=model_commit,
-        dataset_commit=dataset_commit,
-        phase=phase,
-        writer=writer,
-        hf_token=cast("str", hf_token) if pushing else None,
-    )
-
-
-async def _finish_scoring(
-    spec: RunSpec,
-    requested: RunSpec,
-    classifier: Any,
-    out: list[dict[str, Any]],
-    batches: list[list[int]],
-    *,
-    model_commit: str | None,
-    dataset_commit: str | None,
-    phase: Any,
-    writer: JsonlProgressWriter | None,
-    hf_token: str | None,
-) -> str:
-    """Write the results and manifest, push them when the run has a write token, and end."""
+    out = scorer.result_rows(lengths, logits, inputs)
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         await asyncio.to_thread(
             write_manifest,
-            build_manifest(
+            scorer.manifest(
                 requested,
-                classifier,
                 out,
                 model_commit=model_commit,
                 dataset_commit=dataset_commit,
@@ -1405,11 +1774,11 @@ async def _finish_scoring(
             ),
             Path(results_path).parent,
         )
-    if hf_token is not None:
+    if pushing:
         try:
             async with ticking_phase(phase, "Uploading results to the Hub", stage="push"):
-                await _require_fresh_output(spec, hf_token)
-                destination = await _push_results(spec, results_path, hf_token)
+                await _require_fresh_output(spec, cast("str", hf_token))
+                destination = await _push_results(spec, results_path, cast("str", hf_token))
         except Exception as exc:
             msg = f"results are on the VM at {results_path}, but the push failed: {exc}"
             raise RunError(msg) from exc
@@ -1434,95 +1803,76 @@ async def _finish_scoring(
     )
     if not counts["scored"]:
         msg = (
-            f"all {len(out)} rows exceed the model's limit of {classifier.max_length} tokens, so "
+            f"all {len(out)} rows exceed the model's limit of {scorer.max_length} tokens, so "
             "none was scored (nothing is truncated)"
         )
         raise RunError(msg)
     return destination
 
 
-async def _execute_verifier_scoring(
-    spec: RunSpec,
-    requested: RunSpec,
-    rows: list[dict[str, Any]],
-    inputs: Any,
-    snapshot: Path,
-    *,
-    model_commit: str | None,
-    dataset_commit: str | None,
-    phase: Any,
-    writer: JsonlProgressWriter | None,
-    gpu: GpuSampler,
-    hf_token: str | None,
-) -> str:
-    """The middle of a scoring run for a verifier trained by ``seq_cls`` (``artifact``).
+_LOADING_PHASE = {"hf_classify": "Loading the classifier", "hf_label_logits": "Loading the model"}
 
-    The rows are rendered by the artifact's own rendering from the raw ``premises`` and
-    ``hypothesis`` cells (the columns the two fixed templates name); everything else is the pair
-    mode's frame: overflow dropped and counted, length-sorted batches, one pushed commit.
-    """
-    hp = spec.hyperparams
-    async with ticking_phase(phase, "Loading the verifier", stage="load_model"):
-        scorer = await asyncio.to_thread(
-            load_verifier,
+
+def _loading_phase(hp: Hyperparams) -> str:
+    return "Loading the verifier" if hp.artifact is not None else _LOADING_PHASE[hp.engine]
+
+
+class _Scorer(Protocol):
+    """What the scoring frame drives: measure rows, score a batch, describe the results."""
+
+    max_length: int
+
+    def lengths(self, inputs: ScoringInputs) -> list[int | None]: ...
+
+    def score(self, inputs: ScoringInputs, batch: Sequence[int]) -> list[list[float]]: ...
+
+    def result_rows(
+        self,
+        lengths: Sequence[int | None],
+        values: Mapping[int, Sequence[float]],
+        inputs: ScoringInputs,
+    ) -> list[dict[str, Any]]: ...
+
+    def manifest(
+        self,
+        spec: RunSpec,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        model_commit: str | None,
+        dataset_commit: str | None,
+        batches: Sequence[Sequence[int]],
+    ) -> dict[str, Any]: ...
+
+
+def _load_scorer(snapshot: Path, hp: Hyperparams) -> _Scorer:
+    """The run's scoring engine, loaded from the local snapshot."""
+    if hp.artifact is not None:
+        # A verifier trained by `seq_cls`, scored with the rendering its own record holds.
+        return VerifierRunScorer(
+            load_verifier(
+                snapshot,
+                label_alias=hp.label_alias,
+                max_length=hp.max_model_len,
+                dtype=cast("str", hp.dtype),
+                apply_calibration=hp.apply_calibration == "auto",
+            )
+        )
+    if hp.engine == "hf_label_logits":
+        return load_label_reader(
             snapshot,
-            label_alias=hp.label_alias,
+            label_tokens=hp.label_tokens or [],
+            prefill=hp.assistant_prefill,
+            chat_template_kwargs=hp.chat_template_kwargs,
             max_length=hp.max_model_len,
             dtype=cast("str", hp.dtype),
-            apply_calibration=hp.apply_calibration == "auto",
         )
-    premises_column = spec.column_mapping["premises"]
-    hypothesis_column = spec.column_mapping["hypothesis"]
-    for column in (premises_column, hypothesis_column):
-        if column not in rows[0]:
-            msg = f"column {column!r} is not in the split; columns: {sorted(rows[0])}"
-            raise RunError(msg)
-    async with ticking_phase(phase, "Measuring rows", stage="run"):
-        rendered = await asyncio.to_thread(
-            scorer.render,
-            [row.get(premises_column) for row in rows],
-            [row.get(hypothesis_column) for row in rows],
-        )
-        lengths = await asyncio.to_thread(scorer.measure, rendered)
-    batches, overflow = plan_batches(
-        lengths, max_length=scorer.max_length, batch_size=hp.scoring_batch_size
+    classifier = load_classifier(
+        snapshot,
+        label_alias=cast("dict[str, str | None]", hp.label_alias),
+        max_length=hp.max_model_len,
+        dtype=cast("str", hp.dtype),
     )
-    scores: dict[int, VerifierScores] = {}
-    started = time.monotonic()
-    async with ticking_phase(phase, "Scoring rows", stage="run"):
-        for batch in batches:
-            values = await asyncio.to_thread(scorer.score, [rendered[i] for i in batch])
-            scores.update(zip(batch, values, strict=True))
-            elapsed = time.monotonic() - started
-            emit(
-                writer,
-                ProgressEvent(
-                    kind="step",
-                    stage="run",
-                    step=len(scores) + len(overflow),
-                    total_steps=len(rows),
-                    metrics={
-                        "succeeded": float(len(scores)),
-                        "failed": 0.0,
-                        "overflow": float(len(overflow)),
-                        **({"rows_per_s": len(scores) / elapsed} if elapsed > 0 else {}),
-                        **gpu.sample(),
-                    },
-                ),
-            )
-    out = verifier_result_rows(lengths, scores, scorer, inputs)
-    return await _finish_scoring(
-        spec,
-        requested,
-        scorer,
-        out,
-        batches,
-        model_commit=model_commit,
-        dataset_commit=dataset_commit,
-        phase=phase,
-        writer=writer,
-        hf_token=hf_token,
-    )
+    return ClassifierScorer(classifier)
 
 
 async def main() -> int:
