@@ -1297,6 +1297,9 @@ def test_build_receipt_names_the_pushed_commit_for_any_kind(tmp_path: Path) -> N
     assert receipt["kind"] == "scoring"
     assert receipt["manifest_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert receipt["model"]["commit"] == "b" * 40
+    # The commit the split was read at and the template digest, where the manifest records them.
+    assert receipt["dataset"]["commit"] is None
+    assert receipt["template_sha256"] is None
     assert receipt["output"] == {"repo_id": "org/out", "commit_sha": "a" * 40}
     assert receipt["rows"]["total"] == 3
     # A manifest without model or dataset blocks (an evaluation's) still yields a receipt.
@@ -1313,3 +1316,23 @@ def test_a_push_is_named_at_the_commit_it_made() -> None:
     assert pushed_at(("org/out", "a" * 40)) == "org/out@" + "a" * 40
     # A push whose commit the Hub did not name is the repo alone, never a guessed head.
     assert pushed_at(("org/out", None)) == "org/out"
+
+
+def test_build_receipt_carries_the_dataset_commit_and_template_digest(tmp_path: Path) -> None:
+    from strata_forge.pipelines._common import build_receipt, write_manifest
+
+    path = write_manifest(
+        {
+            "dataset": {
+                "id": "org/d",
+                "split": "dev",
+                "requested_revision": None,
+                "commit": "e" * 40,
+            },
+            "template_sha256": "f" * 64,
+        },
+        tmp_path,
+    )
+    receipt = build_receipt("scoring", path, None)
+    assert receipt["dataset"]["commit"] == "e" * 40
+    assert receipt["template_sha256"] == "f" * 64

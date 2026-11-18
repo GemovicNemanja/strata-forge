@@ -8,6 +8,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Changed
+
+- The shared receipt (`build_receipt`) records `dataset.commit` and `template_sha256` where the
+  manifest records them (scoring, evaluation, grading). A grading run writes its own receipt
+  (`kind` `grade`, with the commit its push made), replacing the judge's, ends with `repo@commit`
+  and removes the judge's failed-row record. `commit_oid` accepts only an exact 40-character oid,
+  so a commit URL records no commit rather than one parsed out of it.
+
 ## [0.7.0] - 2026-11-18
 
 ### Added
