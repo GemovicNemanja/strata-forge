@@ -4394,7 +4394,7 @@ wheels = [
 
 [[package]]
 name = "strata-forge"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -4483,6 +4483,8 @@ scoring = [
     { name = "numpy" },
 ]
 serving = [
+    { name = "torch" },
+    { name = "transformers" },
     { name = "vllm" },
 ]
 storage = [
@@ -4547,7 +4549,9 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.4,<27" },
     { name = "tenacity", specifier = ">=9.0,<10" },
     { name = "torch", marker = "extra == 'finetuning'", specifier = ">=2.9,<3" },
+    { name = "torch", marker = "extra == 'serving'", specifier = ">=2.9,<3" },
     { name = "transformers", marker = "extra == 'finetuning'", specifier = ">=5.5.3,<6" },
+    { name = "transformers", marker = "extra == 'serving'", specifier = ">=5.5.3,<6" },
     { name = "trl", marker = "extra == 'finetuning'", specifier = ">=1.0,<2" },
     { name = "typer", specifier = ">=0.15,<1" },
     { name = "vllm", marker = "extra == 'serving'", specifier = ">=0.24,<1" },

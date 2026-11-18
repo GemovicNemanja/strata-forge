@@ -1,6 +1,6 @@
 [project]
 name = "strata-forge"
-version = "0.5.0"
+version = "0.6.0"
 description = "Typed, async-first baseline for AI/LLM experiments across major foundation-model providers."
 requires-python = ">=3.14"
 readme = "README.md"
@@ -74,7 +74,13 @@ compute = ["skypilot>=0.7,<1", "asyncssh>=2.18,<3"]
 # this package calls: 0.24 is the first release on the transformers>=5.5.3 line that `finetuning`
 # also targets, and every vLLM minor pins torch exactly. Keep in lockstep with compute/serving.py's
 # default setup string, which installs vLLM without consulting this file.
-serving = ["vllm>=0.24,<1"]
+serving = [
+    "vllm>=0.24,<1",
+    # The `hf_classify` scoring engine imports these itself rather than through vLLM, so they are
+    # declared here and not left to vLLM's pins. The ranges match `finetuning`, so `[all]` resolves.
+    "torch>=2.9,<3",
+    "transformers>=5.5.3,<6",
+]
 bedrock = ["boto3>=1.35,<2"]
 storage = [
     # Do NOT raise the s3fs/gcsfs floors: `datasets` caps fsspec, and the 2026.7+ line of these two
