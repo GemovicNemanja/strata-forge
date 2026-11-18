@@ -1260,3 +1260,19 @@ class TestModelServerEnviron:
         kept = model_server_environ()
         assert kept["CUDA_VISIBLE_DEVICES"] == "3"
         assert "HF_WRITE_TOKEN" not in kept
+
+
+def test_a_run_error_carries_its_metrics_onto_the_terminal_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    progress = tmp_path / "progress.jsonl"
+    monkeypatch.setenv("FORGE_PROGRESS_PATH", str(progress))
+    monkeypatch.delenv("STRATA_RUN_CONFIG", raising=False)
+
+    async def _refuse(_writer: object, _secrets: object) -> None:
+        raise _common.RunError("refused", metrics={"gpu_seconds": 12.5, "gpu_count": 1.0})
+
+    assert asyncio.run(_common.runner_main(_refuse)) == 1
+    last = json.loads(progress.read_text().splitlines()[-1])
+    assert last["kind"] == "error"
+    assert last["metrics"] == {"gpu_seconds": 12.5, "gpu_count": 1.0}

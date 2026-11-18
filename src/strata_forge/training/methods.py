@@ -1,6 +1,6 @@
 """The registry of fine-tuning methods — one entry per method, read by everything.
 
-Forge ships five trainers across two runner classes, each with its own config shape, its own
+Forge ships six trainers across three runner classes, each with its own config shape, its own
 acceptable dataset formats, and (for GRPO) its own extra requirement. Anything that drives training
 from a declaration rather than from Python — an orchestrator's inert job spec, a CLI flag, a form —
 needs to answer the same three questions about a method it was handed by name: does it exist, what
@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from strata_forge.training.preference import DPOConfig, KTOConfig, ORPOConfig, PreferenceRunner
+from strata_forge.training.seq_cls import SeqClsConfig, SeqClsRunner
 from strata_forge.training.sft import SFTConfig, SFTRunner
 
 if TYPE_CHECKING:
@@ -40,11 +41,11 @@ __all__ = [
 ]
 
 
-type MethodName = Literal["sft", "dpo", "orpo", "kto", "grpo"]
+type MethodName = Literal["sft", "dpo", "orpo", "kto", "grpo", "seq_cls"]
 
-# The head a method trains. Every shipped method is decoder-only today; the field exists because it
-# is the seam a second head (sequence classification, seq2seq) arrives through — a registry entry
-# with a different task_type, rather than a branch threaded through the runners.
+# The head a method trains. The causal-LM methods share TRL's runners; ``seq_cls`` trains a
+# classification head on ``transformers.Trainer``. A further head (seq2seq, token classification)
+# arrives the same way: a registry entry with its own task_type, not a branch through the runners.
 type TaskType = Literal["CAUSAL_LM", "SEQ_CLS", "SEQ_2_SEQ_LM", "TOKEN_CLS"]
 
 
@@ -59,8 +60,8 @@ class MethodSpec:
     name: MethodName
     label: str
     task_type: TaskType
-    config_cls: type[SFTConfig | DPOConfig | ORPOConfig | KTOConfig]
-    runner_cls: type[SFTRunner | PreferenceRunner]
+    config_cls: type[SFTConfig | DPOConfig | ORPOConfig | KTOConfig | SeqClsConfig]
+    runner_cls: type[SFTRunner | PreferenceRunner | SeqClsRunner]
     formats: frozenset[DatasetFormat]
     enabled: bool = True
     # Why a registered method is declined. Surfaced verbatim, so it has to read as an explanation
@@ -72,7 +73,7 @@ class MethodSpec:
 
     def build_runner(
         self, config: Any, *, peft_config: LoRAConfig | QLoRAConfig | None = None
-    ) -> SFTRunner | PreferenceRunner:
+    ) -> SFTRunner | PreferenceRunner | SeqClsRunner:
         """Instantiate this method's runner. Constructs nothing heavy — see the runner classes."""
         return self.runner_cls(config, peft_config=peft_config)
 
@@ -134,6 +135,24 @@ METHODS: dict[str, MethodSpec] = {
         disabled_reason=(
             "GRPO needs a reward function, which cannot be supplied from a job specification. "
             "Use strata_forge.training.PreferenceRunner directly with reward_funcs="
+        ),
+    ),
+    "seq_cls": MethodSpec(
+        name="seq_cls",
+        label="Sequence classification",
+        task_type="SEQ_CLS",
+        config_cls=SeqClsConfig,
+        runner_cls=SeqClsRunner,
+        formats=frozenset({"nli_pair"}),
+        tuning_knobs=(
+            "labels",
+            "label_aliases",
+            "label_index_map",
+            "head_init",
+            "verbalizers",
+            "max_length",
+            "gradient_checkpointing",
+            "brier_weight",
         ),
     ),
 }

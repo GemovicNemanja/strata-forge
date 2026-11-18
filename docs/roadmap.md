@@ -551,6 +551,11 @@ per row keyed by `sample_index`, and pass chat-template kwargs such as
 `strata_forge.training` ships fine-tuning primitives: `SFTConfig` /
 `SFTRunner` over TRL `SFTTrainer`; `DPOConfig` / `ORPOConfig` /
 `KTOConfig` / `GRPOConfig` dispatched through `PreferenceRunner`;
+`SeqClsConfig` / `SeqClsRunner`, a premise/hypothesis classifier on
+`transformers.Trainer` with a strict head-load guard, a decoder head
+built from its own LM head with a step-0 equivalence check, and
+overflow and memory checks before step 0
+([ADR 0021](architecture/adr/0021-sequence-classification-through-the-method-registry.md));
 `LoRAConfig` / `QLoRAConfig` PEFT wrappers with QLoRA's
 bitsandbytes config builder and an up-front
 `require_bitsandbytes` check; chat-template formatting

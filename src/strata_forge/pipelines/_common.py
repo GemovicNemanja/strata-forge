@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
     from strata_forge.storage import HFHubClient
+    from strata_forge.storage.hf_hub import RepoType
     from strata_forge.training.hardware import GpuSampler
     from strata_forge.training.progress import RunStage
 
@@ -99,6 +100,7 @@ __all__ = [
     "emit",
     "engine_version_required",
     "ensure_private_output",
+    "ensure_private_repo",
     "install_termination_handlers",
     "installed_engine_commit",
     "installed_engine_version",
@@ -227,7 +229,15 @@ _CREDENTIAL_NAME_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL", re.IGN
 
 
 class RunError(Exception):
-    """A runner failure whose message is safe to surface (already token-scrubbed)."""
+    """A runner failure whose message is safe to surface (already token-scrubbed).
+
+    ``metrics`` ride the terminal ``error`` event, so a control plane receives a refused run's
+    measurements (its GPU time, the check's numbers) as it does a finished run's.
+    """
+
+    def __init__(self, *args: object, metrics: Mapping[str, float] | None = None) -> None:
+        super().__init__(*args)
+        self.metrics: dict[str, float] = dict(metrics or {})
 
 
 class RunSecrets(BaseModel):
@@ -751,7 +761,18 @@ async def runner_main(
         return 1
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
         detail = redactor.redact(str(exc))
-        emit(writer, ProgressEvent(kind="error", message=detail))
+        # A RunError's measurements, or any exception a runner annotated with them on its way out.
+        raw_metrics: Any = getattr(exc, "metrics", None)
+        metrics = (
+            {
+                str(k): float(v)
+                for k, v in cast("dict[Any, Any]", raw_metrics).items()
+                if isinstance(v, int | float) and not isinstance(v, bool)
+            }
+            if isinstance(raw_metrics, dict)
+            else {}
+        )
+        emit(writer, ProgressEvent(kind="error", message=detail, metrics=metrics))
         # Also to stderr, because that is where the control plane reads a failed run's reason
         # from. Catching the exception here means no traceback is printed, so without this the
         # run's own account of why it failed exists only in the progress file, and the record
@@ -833,6 +854,26 @@ def write_manifest(manifest: dict[str, Any], outdir: Path) -> Path:
     path = outdir / MANIFEST_FILENAME
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return path
+
+
+async def ensure_private_repo(hub: HFHubClient, repo_id: str, *, repo_type: RepoType) -> None:
+    """Create ``repo_id`` private when it is missing, and refuse it when it is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and a
+    run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    try:
+        await hub.create_repo(repo_id, repo_type=repo_type, private=True, exist_ok=True)
+        private = await hub.is_private(repo_id, repo_type=repo_type)
+    except Exception as exc:
+        msg = f"could not prepare the output repo {repo_id}: {exc}"
+        raise RunError(msg) from exc
+    if not private:
+        msg = (
+            f"the output repo {repo_id} is public; a run pushes only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)
 
 
 async def ensure_private_output(hub: HFHubClient, out_repo: str) -> None:

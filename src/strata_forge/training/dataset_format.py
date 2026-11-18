@@ -43,6 +43,7 @@ type DatasetFormat = Literal[
     "conversational",
     "preference",
     "unpaired_preference",
+    "nli_pair",
 ]
 
 
@@ -76,6 +77,17 @@ FORMATS: dict[DatasetFormat, FormatSpec] = {
     "preference": FormatSpec("preference", required=("chosen", "rejected"), optional=("prompt",)),
     "unpaired_preference": FormatSpec(
         "unpaired_preference", required=("prompt", "completion", "label")
+    ),
+    # A premise/hypothesis classification row. ``premises`` is a string, a list of strings or a
+    # list of ``{pid, text}``; ``label`` resolves through the run's declared label order and
+    # aliases. The optional roles are per-row and may be null: ``label_space`` (``3way`` or
+    # ``2way_entail_vs_not``), a soft ``label_dist``, and the auxiliary targets
+    # ``inconsistent_premises`` (a flag) and ``support_set`` (premise ids). The trainer reads and
+    # validates the cells (:mod:`strata_forge.training.seq_cls`).
+    "nli_pair": FormatSpec(
+        "nli_pair",
+        required=("premises", "hypothesis", "label"),
+        optional=("label_space", "label_dist", "inconsistent_premises", "support_set"),
     ),
 }
 
@@ -145,15 +157,15 @@ def validate_mapping(
     return spec
 
 
-def _coerce(role: str, value: Any) -> Any:
+def _coerce(fmt: DatasetFormat, role: str, value: Any) -> Any:
     """Put one cell into the type its role is trained as.
 
-    Only ``label`` needs it, and it needs it badly: KTO reads a boolean, and datasets spell the same
+    Only KTO's ``label`` needs it, and it needs it badly: KTO reads a boolean, and datasets spell the same
     fact as ``1``/``0``, ``"true"``/``"false"`` or ``"yes"``/``"no"``. Left uncoerced, a column of
     non-empty strings is every-row-true, which trains a model on the premise that nothing is bad —
     a silently wrong run rather than a failed one.
     """
-    if role != "label":
+    if fmt != "unpaired_preference" or role != "label":
         return value
     if isinstance(value, bool):
         return value
@@ -193,7 +205,7 @@ def build_training_rows(
             if column not in row:
                 msg = f"row {i} has no column {column!r} (mapped to {role!r})"
                 raise DatasetFormatError(msg)
-            built[role] = _coerce(role, row[column])
+            built[role] = _coerce(spec.name, role, row[column])
         out.append(built)
     if not out:
         msg = f"the split produced no rows for format {spec.name!r}"

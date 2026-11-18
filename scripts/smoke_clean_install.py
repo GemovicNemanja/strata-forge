@@ -91,6 +91,17 @@ _DATASET = "smoke-org/smoke-dataset"
 _OUTPUT = "smoke-org/smoke-output"
 
 _ADAPTERS = ("none", "lora", "qlora")
+# A method that trains full weights only is checked with no adapter; the runner refuses the others.
+_FULL_WEIGHT_TASKS = frozenset({"SEQ_CLS"})
+# Placeholder pins: a classification run refuses an unpinned model or dataset.
+_PIN = "0" * 40
+_SEQ_CLS_HYPERPARAMS = {
+    "labels": ["entailment", "contradiction", "neutral"],
+    "two_way_positive_label": "entailment",
+    "two_way_labels": ["entailed", "not_entailed"],
+    "max_length": 64,
+    "per_device_batch_size": 2,
+}
 
 #: The variables the inference runner sets on the served process beside the command line. vLLM
 #: ignores a variable it does not know, so a rename upstream would silently undo the runner's
@@ -147,8 +158,22 @@ def write_override(path: str, text: str) -> int:
 # --------------------------------------------------------------------------------------------
 
 
-def sample_value(role: str) -> Any:
+def sample_value(role: str, fmt: str = "") -> Any:
     """A cell of the type a dataset-format role is trained as."""
+    if fmt == "nli_pair":
+        nli: dict[str, Any] = {
+            "premises": [
+                {"pid": "p1", "text": "all birds fly"},
+                {"pid": "p2", "text": "tweety is a bird"},
+            ],
+            "hypothesis": "tweety flies",
+            "label": "entailment",
+            "label_space": "3way",
+            "label_dist": [1.0, 0.0, 0.0],
+            "inconsistent_premises": False,
+            "support_set": ["p1", "p2"],
+        }
+        return nli[role]
     if role == "messages":
         return [
             {"role": "user", "content": "What is the capital of France?"},
@@ -167,16 +192,25 @@ def finetune_cases() -> list[tuple[str, str, str]]:
         (method.name, fmt, adapter)
         for method in enabled_methods()
         for fmt in sorted(method.formats)
-        for adapter in _ADAPTERS
+        for adapter in (("none",) if method.task_type in _FULL_WEIGHT_TASKS else _ADAPTERS)
     ]
 
 
 def finetune_spec(method: str, fmt: str, adapter: str) -> dict[str, Any]:
     """The inert spec a control plane would deliver for one case, with every role mapped."""
     from strata_forge.training.dataset_format import pick_format
+    from strata_forge.training.methods import pick_method
 
     roles = pick_format(fmt).roles
+    extra: dict[str, Any] = {}
+    if pick_method(method).task_type == "SEQ_CLS":
+        extra = {
+            "model_revision": _PIN,
+            "dataset_commit_sha": _PIN,
+            "hyperparams": dict(_SEQ_CLS_HYPERPARAMS),
+        }
     return {
+        **extra,
         "method": method,
         "model_id": _MODEL,
         "dataset_id": _DATASET,
@@ -196,7 +230,7 @@ def finetune_rows(fmt: str) -> list[dict[str, Any]]:
     """Two source rows carrying a column for every role of ``fmt``, plus one the trainer ignores."""
     from strata_forge.training.dataset_format import pick_format
 
-    row = {f"col_{role}": sample_value(role) for role in pick_format(fmt).roles}
+    row = {f"col_{role}": sample_value(role, fmt) for role in pick_format(fmt).roles}
     return [{**row, "unrelated": "dropped"}, dict(row)]
 
 
@@ -504,6 +538,9 @@ def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         method, config, peft = build_finetune_config(spec, Path(tmp) / "out")
+        if method.task_type == "SEQ_CLS":
+            check_seq_cls_trainer(method, config, dataset)
+            return
         trainer_cls = trainer_class(method.name)
         if not inspect.isclass(trainer_cls):
             msg = f"{method.name} trainer {trainer_cls!r} is not a class"
@@ -524,6 +561,29 @@ def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
         if isinstance(peft, QLoRAConfig):
             # Passing a model above skipped the quantisation config; a real run builds it.
             peft.to_bnb_config()
+
+
+def check_seq_cls_trainer(method: Any, config: Any, dataset: Any) -> None:
+    """The classifier's ``TrainingArguments`` and ``Trainer`` keywords against the installed stack.
+
+    The runner builds its arguments for real and its trainer subclass up to ``Trainer.__init__``,
+    which binds against the installed signature and stops, so a renamed or removed argument fails
+    here; nothing is loaded or trained.
+    """
+    torch: Any = importlib.import_module("torch")
+    transformers_mod: Any = importlib.import_module("transformers")
+
+    class _Tokenizer:
+        pad_token_id = 0
+
+    runner = method.build_runner(config)
+    with bf16_as_on_a_gpu(), binding_only(transformers_mod.Trainer):
+        try:
+            runner.build_trainer(torch.nn.Linear(1, 1), dataset, dataset, _Tokenizer())
+        except _Constructed:
+            return
+    msg = "seq_cls: the runner built a trainer without calling transformers.Trainer"
+    raise SmokeError(msg)
 
 
 def check_inference_spec() -> None:

@@ -49,24 +49,34 @@ one call :meth:`SFTRunner.train` offers.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import itertools
 import sys
+import time
 from collections.abc import Mapping  # runtime: isinstance below
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from strata_forge.pipelines._common import (
+    MANIFEST_SCHEMA,
     RunError,
     RunSecrets,
     emit,
+    ensure_private_repo,
     load_config,
+    manifest_engine,
     phase_sink,
+    require_commit_sha,
     results_dir,
     runner_main,
+    snapshot_commit,
     ticking_phase,
     validate_repo_id,
+    write_manifest,
 )
+from strata_forge.pipelines.inference_runner import SNAPSHOT_IGNORED, SNAPSHOT_PATTERNS
 from strata_forge.storage import HFHubClient
 from strata_forge.training.dataset_format import (
     DatasetFormatError,
@@ -88,14 +98,13 @@ from strata_forge.training.peft import (
     require_bitsandbytes,
 )
 from strata_forge.training.progress import ProgressEvent, coerce_int, numeric_metrics
+from strata_forge.training.seq_cls import PreflightError, SeqClsConfig, SeqClsRunner
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from strata_forge.training.methods import MethodSpec
     from strata_forge.training.progress import JsonlProgressWriter
 
-__all__ = ["FinetuneSpec", "load_spec", "main"]
+__all__ = ["FinetuneSpec", "check_spec", "load_spec", "main"]
 
 # Where the trained artifact is written on the VM. OUTSIDE the per-run workdir the orchestrator
 # deletes on every terminal state, so a failed upload does not take the weights with it.
@@ -103,6 +112,23 @@ _OUTPUT_DIR_NAME = "strata-finetune-output"
 # The subdirectory of that run directory the trainer saves into, so the run dir can later hold
 # siblings (a merged copy, a metrics dump) without them being uploaded as part of the adapter.
 _ARTIFACT_SUBDIR = "artifact"
+# Intermediate trainer checkpoints, a SIBLING of the artifact so they are never part of a push.
+_CHECKPOINT_SUBDIR = "checkpoints"
+# Never uploaded even when they sit in the artifact directory: TRL writes intermediate checkpoints
+# there for the causal-LM methods.
+_PUSH_IGNORED = ("checkpoint-*",)
+_MANIFEST_KIND = "finetune"
+# What the manifest records the installed versions of: everything that shapes a training run.
+_RECORDED_DISTRIBUTIONS = (
+    "torch",
+    "transformers",
+    "trl",
+    "peft",
+    "accelerate",
+    "datasets",
+    "tokenizers",
+    "safetensors",
+)
 
 
 class LoraSpec(BaseModel):
@@ -129,6 +155,10 @@ class FinetuneSpec(BaseModel):
     engine_version: str | None = None
     method: str
     model_id: str
+    # The base model's full Hub commit id. Set, it is the only revision the run reads (model,
+    # tokenizer, merge); unset, the run reads the default branch and records the commit it got.
+    # ``seq_cls`` requires it, and the dataset pin beside it.
+    model_revision: str | None = None
     dataset_id: str
     dataset_commit_sha: str | None = None
     dataset_config: str | None = None
@@ -136,6 +166,9 @@ class FinetuneSpec(BaseModel):
     # An optional held-out split. Its rows go through the same format projection, so an eval loss
     # appears in the same progress stream as the training loss.
     eval_split: str | None = None
+    # ``seq_cls`` only: the declared in-distribution dev split a temperature is fitted on after
+    # training, written to the artifact's calibration record before anything reads it.
+    calibration_split: str | None = None
     dataset_format: str
     column_mapping: dict[str, str] = Field(default_factory=dict)
     adapter: Literal["none", "lora", "qlora"] = "lora"
@@ -167,10 +200,30 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> FinetuneSpec:
     anywhere later.
     """
     spec = load_config(FinetuneSpec, writer=writer)
+    check_spec(spec)
+    if spec.adapter == "qlora":
+        # Before the dataset download, not at the model load where transformers would find it.
+        try:
+            require_bitsandbytes()
+        except MissingBitsAndBytesError as exc:
+            raise RunError(str(exc)) from exc
+    return spec
+
+
+def check_spec(spec: FinetuneSpec) -> None:
+    """Every check on a spec that needs neither the machine nor the network.
+
+    A control plane runs this at submit, against the engine it bundles, so a spec the runner would
+    refuse is refused before a machine is provisioned; the runner runs it again on the machine.
+    The method's own config validates ``hyperparams`` here as well, with placeholder runner-owned
+    fields, so a bad knob is named at submit rather than after the dataset download.
+    """
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
     if spec.output_repo_id is not None:
         validate_repo_id(spec.output_repo_id, "output repo")
+    require_commit_sha(spec.model_revision, "model_revision")
+    require_commit_sha(spec.dataset_commit_sha, "dataset_commit_sha")
     try:
         method = pick_method(spec.method)
         check_format(method, spec.dataset_format)
@@ -179,13 +232,31 @@ def load_spec(*, writer: JsonlProgressWriter | None = None) -> FinetuneSpec:
     if spec.merge_adapter and spec.adapter == "none":
         msg = "merge_adapter has nothing to merge: the run trains full weights (adapter='none')"
         raise RunError(msg)
-    if spec.adapter == "qlora":
-        # Before the dataset download, not at the model load where transformers would find it.
-        try:
-            require_bitsandbytes()
-        except MissingBitsAndBytesError as exc:
-            raise RunError(str(exc)) from exc
-    return spec
+    if method.task_type == "SEQ_CLS":
+        unpinned = [
+            name
+            for name, value in (
+                ("model_revision", spec.model_revision),
+                ("dataset_commit_sha", spec.dataset_commit_sha),
+            )
+            if value is None
+        ]
+        if unpinned:
+            msg = f"seq_cls needs pinned inputs; set {' and '.join(unpinned)} to a full commit id"
+            raise RunError(msg)
+        if spec.adapter != "none":
+            msg = "seq_cls trains full weights; set adapter to 'none'"
+            raise RunError(msg)
+        if (
+            spec.calibration_split is not None
+            and importlib.util.find_spec("strata_forge.metrics.calibration_fit") is None
+        ):
+            msg = "calibration_split needs an engine with the temperature fit; this one has none"
+            raise RunError(msg)
+    elif spec.calibration_split is not None:
+        msg = f"calibration_split applies to seq_cls only, not {method.name}"
+        raise RunError(msg)
+    _trainer_config(spec, method, Path("/nonexistent/strata-check"))
 
 
 def _peft_config(spec: FinetuneSpec, method: MethodSpec) -> LoRAConfig | QLoRAConfig | None:
@@ -316,10 +387,8 @@ def _trainer_config(spec: FinetuneSpec, method: MethodSpec, output_dir: Path) ->
         raise RunError(msg) from exc
 
 
-def _load_split(
-    spec: FinetuneSpec, split: str, token: str | Literal[False]
-) -> list[dict[str, Any]]:
-    """Materialise one split's rows, projected onto the chosen format's roles."""
+def _open_split(spec: FinetuneSpec, split: str, token: str | Literal[False]) -> Any:
+    """The split as a memory-mapped ``datasets.Dataset``, at the pinned commit when there is one."""
     try:
         # Lazy optional-extra import (forge convention: `Any` so pyright skips the unresolved
         # module); the [finetuning] extra ships `datasets`.
@@ -327,7 +396,7 @@ def _load_split(
     except ImportError as exc:
         msg = "the [finetuning] extra is required to load datasets: pip install 'strata-forge[finetuning]'"
         raise RunError(msg) from exc
-    dataset = datasets_mod.load_dataset(
+    return datasets_mod.load_dataset(
         spec.dataset_id,
         name=spec.dataset_config,
         split=split,
@@ -335,6 +404,13 @@ def _load_split(
         token=token,
         streaming=False,
     )
+
+
+def _load_split(
+    spec: FinetuneSpec, split: str, token: str | Literal[False]
+) -> list[dict[str, Any]]:
+    """Materialise one split's rows, projected onto the chosen format's roles."""
+    dataset = _open_split(spec, split, token)
     try:
         validate_mapping(spec.dataset_format, spec.column_mapping, dataset.column_names or [])
         # Slice DURING iteration (not after): dataset size is not under our control, so row_limit
@@ -349,6 +425,37 @@ def _load_split(
         raise RunError(f"{split}: {exc}") from exc
 
 
+def _load_role_split(spec: FinetuneSpec, split: str, token: str | Literal[False]) -> Any:
+    """One split as a dataset whose columns are the format's roles, never a Python list.
+
+    The classification population runs to hundreds of thousands of rows, so it stays Arrow on
+    disk: projection and tokenisation are ``map`` passes, and ``row_limit`` selects a prefix
+    without reading the rest.
+    """
+    dataset = _open_split(spec, split, token)
+    try:
+        fmt = validate_mapping(spec.dataset_format, spec.column_mapping, dataset.column_names or [])
+    except DatasetFormatError as exc:
+        raise RunError(f"{split}: {exc}") from exc
+    mapped = {
+        role: column
+        for role in fmt.roles
+        if (column := (spec.column_mapping.get(role) or "").strip())
+    }
+    if spec.row_limit is not None and spec.row_limit < len(dataset):
+        dataset = dataset.select(range(spec.row_limit))
+
+    def project(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
+        return {role: batch[column] for role, column in mapped.items()}
+
+    return dataset.map(
+        project,
+        batched=True,
+        remove_columns=list(dataset.column_names),
+        desc=f"Reading {split}",
+    )
+
+
 def _to_dataset(rows: list[dict[str, Any]]) -> Any:
     datasets_mod: Any = __import__("datasets")  # already required by _load_split
     return datasets_mod.Dataset.from_list(rows)
@@ -361,6 +468,8 @@ def _build_trainer(
     train_rows: list[dict[str, Any]],
     eval_rows: list[dict[str, Any]] | None,
     token: str | Literal[False],
+    *,
+    revision: str | None = None,
 ) -> Any:
     """Construct the trainer WITHOUT starting it. Blocking — call it in a worker thread.
 
@@ -369,11 +478,12 @@ def _build_trainer(
     caption, while the loop that follows narrates its own steps. Running them under one caption
     was the bug — see :func:`_train`.
     """
-    runner = method.build_runner(config, peft_config=peft_config)
+    runner: Any = method.build_runner(config, peft_config=peft_config)
     return runner.build_trainer(
         train_dataset=_to_dataset(train_rows),
         eval_dataset=_to_dataset(eval_rows) if eval_rows else None,
         token=token,
+        revision=revision,
     )
 
 
@@ -389,11 +499,19 @@ def _train(trainer: Any, output_dir: Path) -> tuple[dict[str, float], int | None
     return numeric_metrics(output), coerce_int(getattr(output, "global_step", None))
 
 
+def _loaded_commit(trainer: Any) -> str | None:
+    """The base-model commit ``from_pretrained`` resolved, as transformers records it."""
+    config: Any = getattr(getattr(trainer, "model", None), "config", None)
+    commit: Any = getattr(config, "_commit_hash", None)
+    return commit if isinstance(commit, str) and commit else None
+
+
 def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path, token: str | Literal[False]) -> Path:
     """Fold the trained adapter into the base weights, in place.
 
-    Loads the base model and applies the saved adapter, then writes the merged weights over the
-    artifact directory so the push path is identical either way. Blocking — call it in a thread.
+    Loads the base model (at the pinned revision, when there is one) and applies the saved
+    adapter, then writes the merged weights over the artifact directory so the push path is
+    identical either way. Blocking — call it in a thread.
     """
     try:
         transformers_mod: Any = __import__("transformers")
@@ -402,7 +520,7 @@ def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path, token: str | Literal[
         msg = "the [finetuning] extra is required to merge an adapter"
         raise RunError(msg) from exc
     base = transformers_mod.AutoModelForCausalLM.from_pretrained(
-        spec.model_id, **model_load_kwargs(token)
+        spec.model_id, **model_load_kwargs(token, spec.model_revision)
     )
     merged = peft_mod.PeftModel.from_pretrained(
         base, str(artifact_dir), token=token
@@ -411,39 +529,215 @@ def _merge_adapter(spec: FinetuneSpec, artifact_dir: Path, token: str | Literal[
     # The tokenizer rides along: a merged model that cannot be tokenised is not loadable, and the
     # adapter directory does not carry one.
     transformers_mod.AutoTokenizer.from_pretrained(
-        spec.model_id, **tokenizer_load_kwargs(token)
+        spec.model_id, **tokenizer_load_kwargs(token, spec.model_revision)
     ).save_pretrained(str(artifact_dir))
     return artifact_dir
 
 
+async def _fetch_checkpoint(spec: FinetuneSpec, token: str | Literal[False]) -> Path:
+    """Download the base model's loadable files at its pinned commit; return the local snapshot.
+
+    Safetensors, configs and tokenizer files only (never a pickle checkpoint or a repo's own
+    code), and the snapshot's commit must be the pin.
+    """
+    hub = HFHubClient(token=token)  # explicit: never forge settings or the VM's own login
+    try:
+        snapshot = await hub.download_snapshot(
+            spec.model_id,
+            revision=spec.model_revision,
+            allow_patterns=SNAPSHOT_PATTERNS,
+            ignore_patterns=SNAPSHOT_IGNORED,
+        )
+    except Exception as exc:
+        msg = f"could not download the model {spec.model_id}: {exc}"
+        if token is False:
+            msg += " (the run carries no Hugging Face token, so a gated or private model is unreadable)"
+        raise RunError(msg) from exc
+    commit = snapshot_commit(snapshot)
+    if spec.model_revision is not None and commit != spec.model_revision:
+        msg = f"the model download is commit {commit}, not the pinned {spec.model_revision}"
+        raise RunError(msg)
+    return snapshot
+
+
+def _receipt_event(name: str, receipt: Mapping[str, Any]) -> ProgressEvent:
+    """A passed check as a ``phase`` event: a sentence for the monitor, numbers in ``metrics``."""
+    metrics: dict[str, float] = {}
+    if name == "overflow":
+        distribution: dict[str, Any] = dict(receipt.get("length_distribution") or {})
+        message = (
+            f"Length check passed: {receipt['rows']} rows, the longest {receipt['longest']} of "
+            f"{receipt['max_length']} tokens"
+        )
+        metrics = {
+            "check_rows": float(receipt["rows"]),
+            "check_longest_tokens": float(receipt["longest"]),
+            "check_max_length": float(receipt["max_length"]),
+            "check_template_token_overhead": float(receipt["template_token_overhead"]),
+            "check_rows_over_max_length": float(receipt["rows_over_max_length"]),
+            **{f"check_length_{k}": float(v) for k, v in distribution.items()},
+        }
+    elif name == "load":
+        message = "Load check passed: only the declared head keys were missing"
+        metrics = {"check_missing_keys": float(len(receipt.get("missing") or []))}
+    elif name == "step0":
+        message = (
+            f"Step-0 check passed: the label logits match the base model within "
+            f"{receipt['tolerance']:g} (largest difference {receipt['max_abs_logit_diff']:.2e})"
+        )
+        metrics = {
+            "step0_max_abs_logit_diff": float(receipt["max_abs_logit_diff"]),
+            "step0_tolerance": float(receipt["tolerance"]),
+            "step0_rows": float(receipt["rows"]),
+            "step0_argmax_agree": float(receipt["argmax_agree"]),
+        }
+    else:
+        peak = receipt.get("peak_bytes")
+        total = receipt.get("total_bytes")
+        flag = "on" if receipt.get("gradient_checkpointing") else "off"
+        if isinstance(peak, int) and isinstance(total, int):
+            message = (
+                f"Memory check passed: peak {peak / 2**30:.1f} of {total / 2**30:.1f} GiB at the "
+                f"longest batch (activation checkpointing {flag})"
+            )
+            metrics = {"preflight_peak_bytes": float(peak), "preflight_total_bytes": float(total)}
+        else:
+            message = f"Memory check ran without a GPU to measure (activation checkpointing {flag})"
+        metrics["preflight_gradient_checkpointing"] = 1.0 if flag == "on" else 0.0
+        metrics["preflight_batch_max_length"] = float(receipt["batch_max_length"])
+        eval_peak = receipt.get("eval_peak_bytes")
+        if isinstance(eval_peak, int):
+            metrics["preflight_eval_peak_bytes"] = float(eval_peak)
+            message += f"; the in-run eval peaks at {eval_peak / 2**30:.1f} GiB"
+    return ProgressEvent(kind="phase", stage="load_model", message=message, metrics=metrics)
+
+
+def _refused(spec: FinetuneSpec, exc: PreflightError, on_refusal: Any) -> RunError:
+    """A refused check as the run's error: recorded locally, measured on the terminal event."""
+    compute: dict[str, Any] = on_refusal(
+        {"refused": str(exc), "check": exc.check, "receipt": exc.receipt}
+    )
+    detail = f"{exc.check or 'a'} check refused the run: {exc}"
+    if exc.check == "memory":
+        detail += f"; base {spec.model_id}@{spec.model_revision}"
+    metrics = {
+        "gpu_seconds": float(compute["gpu_seconds"]),
+        "gpu_count": float(compute["gpu_count"]),
+    }
+    for key, value in exc.receipt.items():
+        if isinstance(value, int | float) and not isinstance(value, bool) and len(metrics) < 32:
+            metrics[f"refused_{key}"[:64]] = float(value)
+    return RunError(detail, metrics=metrics)
+
+
+def _gpu_facts() -> dict[str, Any]:
+    """The GPUs this process can use, read once: count and device name, or none."""
+    try:
+        torch_mod: Any = __import__("torch")
+    except ImportError:
+        return {"gpu_count": 0, "device": "cpu"}
+    if not torch_mod.cuda.is_available():
+        return {"gpu_count": 0, "device": "cpu"}
+    return {
+        "gpu_count": int(torch_mod.cuda.device_count()),
+        "device": str(torch_mod.cuda.get_device_name(0)),
+    }
+
+
+def _build_manifest(
+    spec: FinetuneSpec,
+    method: MethodSpec,
+    config: Any,
+    *,
+    outcome: Literal["succeeded", "refused"],
+    model_commit: str | None,
+    counts: dict[str, int],
+    result: dict[str, Any],
+    compute: dict[str, Any],
+    checks: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """What a training run needs to be reproduced and audited, with no row content and no secret."""
+    hyperparams: dict[str, Any] = config.model_dump(mode="json", exclude=set(_RUNNER_OWNED))
+    return {
+        "schema": MANIFEST_SCHEMA,
+        "kind": _MANIFEST_KIND,
+        "outcome": outcome,
+        "engine": manifest_engine(spec.engine_version, _RECORDED_DISTRIBUTIONS),
+        "method": {"name": method.name, "task_type": method.task_type},
+        "model": {
+            "id": spec.model_id,
+            "requested_revision": spec.model_revision,
+            "commit": model_commit,
+        },
+        "dataset": {
+            "id": spec.dataset_id,
+            "config": spec.dataset_config,
+            "split": spec.split,
+            "eval_split": spec.eval_split,
+            "calibration_split": spec.calibration_split,
+            "requested_revision": spec.dataset_commit_sha,
+            "format": spec.dataset_format,
+            "column_mapping": spec.column_mapping,
+            "row_limit": spec.row_limit,
+        },
+        "adapter": {
+            "kind": spec.adapter,
+            "lora": spec.lora.model_dump(mode="json") if spec.adapter != "none" else None,
+            "merged": spec.merge_adapter,
+        },
+        "hyperparams": hyperparams,
+        "counts": counts,
+        "result": result,
+        "compute": compute,
+        "checks": checks,
+        "output": {"repo_id": spec.output_repo_id},
+    }
+
+
+def _compute_block(started: float, gpu: dict[str, Any], timing: dict[str, Any]) -> dict[str, Any]:
+    """Measured wall-clock time on this machine, and the GPU-seconds a ledger charges for it.
+
+    ``gpu_seconds`` is the runner's own wall-clock time (from the spec check to the manifest)
+    times the GPUs it used. It excludes provisioning and the engine install, which happen before
+    this process exists and which the control plane measures itself.
+    """
+    wall = round(time.monotonic() - started, 3)
+    return {
+        **gpu,
+        "wall_seconds": wall,
+        "gpu_seconds": round(wall * int(gpu["gpu_count"]), 3),
+        "timing": timing,
+    }
+
+
 async def _push_artifact(spec: FinetuneSpec, artifact_dir: Path, hf_token: str) -> str:
+    """Push the artifact and its manifest in ONE commit to a private repo; never checkpoints."""
     if not spec.output_repo_id:
         msg = "output_repo_id is required to push the trained model"
         raise RunError(msg)
     out_repo = validate_repo_id(spec.output_repo_id, "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
-    await hub.create_repo(out_repo, repo_type="model", private=True, exist_ok=True)
+    # Re-checked at push time: visibility can change during a long run.
+    await ensure_private_repo(hub, out_repo, repo_type="model")
     await hub.upload_folder(
         artifact_dir,
         out_repo,
         repo_type="model",
         commit_message=f"strata fine-tune ({spec.method})",
+        ignore_patterns=_PUSH_IGNORED,
     )
     return out_repo
 
 
-async def _execute(
-    spec: FinetuneSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
-) -> str:
-    hf_token = secrets.hf_token_value()
-    hub_token = secrets.hub_credential()
-    # One sampler for the run: the phase sink folds its counters into every caption, so the
-    # `load_model` and `push` stretches -- where nothing is countable -- still show the box
-    # working. The trainer callback covers `run` with its own.
-    gpu = GpuSampler()
-    phase = phase_sink(writer, hf_token, gpu=gpu)
-    method = pick_method(spec.method)
-
+async def _train_causal_lm(
+    spec: FinetuneSpec,
+    method: MethodSpec,
+    config: Any,
+    phase: Any,
+    artifact_dir: Path,
+    hub_token: str | Literal[False],
+) -> tuple[dict[str, Any], dict[str, int], str | None]:
+    """The TRL methods: rows in memory, a trainer built under a caption, the loop narrating itself."""
     # Downloading a split is unbounded by row_limit (that only slices during iteration) and runs
     # before any countable milestone. to_thread, not a direct call: load_dataset blocks, and a
     # blocked event loop stops the very ticker that says the step is still running.
@@ -454,11 +748,6 @@ async def _execute(
             if spec.eval_split
             else None
         )
-
-    run_dir = results_dir(spec.run_id, name=_OUTPUT_DIR_NAME)
-    artifact_dir = run_dir / _ARTIFACT_SUBDIR
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    config = _trainer_config(spec, method, artifact_dir)
     peft_config = _peft_config(spec, method)
 
     # No `start` event here. The trainer's own callback emits one the moment TRL begins, carrying
@@ -470,8 +759,19 @@ async def _execute(
     # the run, and nothing else reports it.
     async with ticking_phase(phase, "Loading the model onto the GPU", stage="load_model"):
         trainer = await asyncio.to_thread(
-            _build_trainer, method, config, peft_config, train_rows, eval_rows, hub_token
+            _build_trainer,
+            method,
+            config,
+            peft_config,
+            train_rows,
+            eval_rows,
+            hub_token,
+            revision=spec.model_revision,
         )
+    commit = _loaded_commit(trainer)
+    if spec.model_revision is not None and commit not in (None, spec.model_revision):
+        msg = f"the base model loaded at commit {commit}, not the pinned {spec.model_revision}"
+        raise RunError(msg)
 
     # And deliberately NO phase around the loop itself. From here the trainer's own callback
     # reports steps, loss and eval on this same stream, so a caption re-stamped over that would be
@@ -483,11 +783,205 @@ async def _execute(
     if spec.merge_adapter:
         async with ticking_phase(phase, "Merging the adapter into the base model", stage="push"):
             await asyncio.to_thread(_merge_adapter, spec, artifact_dir, hub_token)
+    counts = {"train_rows": len(train_rows), "eval_rows": len(eval_rows or [])}
+    return {"steps": steps, "metrics": metrics}, counts, commit or spec.model_revision
 
-    if hf_token and spec.output_repo_id:
+
+async def _train_seq_cls(
+    spec: FinetuneSpec,
+    config: SeqClsConfig,
+    phase: Any,
+    writer: JsonlProgressWriter | None,
+    run_dir: Path,
+    artifact_dir: Path,
+    hub_token: str | Literal[False],
+    on_refusal: Any,
+) -> tuple[dict[str, Any], dict[str, int], dict[str, Any]]:
+    """The classifier: Arrow splits, a pinned local checkpoint, every check before step 0."""
+    async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
+        train = await asyncio.to_thread(_load_role_split, spec, spec.split, hub_token)
+        evaluation = (
+            await asyncio.to_thread(_load_role_split, spec, spec.eval_split, hub_token)
+            if spec.eval_split
+            else None
+        )
+        calibration = (
+            await asyncio.to_thread(_load_role_split, spec, spec.calibration_split, hub_token)
+            if spec.calibration_split
+            else None
+        )
+    async with ticking_phase(phase, "Downloading the model", stage="load_model"):
+        checkpoint = await _fetch_checkpoint(spec, hub_token)
+
+    loop = asyncio.get_running_loop()
+
+    def on_receipt(name: str, receipt: dict[str, Any]) -> None:
+        # Called from the worker thread; the event is written on the loop's thread, the one the
+        # ticking caption writes from, so two lines never interleave in the progress file.
+        loop.call_soon_threadsafe(emit, writer, _receipt_event(name, receipt))
+
+    runner = SeqClsRunner(config)
+    (run_dir / _CHECKPOINT_SUBDIR).mkdir(parents=True, exist_ok=True)
+    try:
+        async with ticking_phase(phase, "Checking the run before step 0", stage="load_model"):
+            prepared = await asyncio.to_thread(
+                runner.prepare,
+                checkpoint=checkpoint,
+                train_dataset=train,
+                eval_dataset=evaluation,
+                calibration_dataset=calibration,
+                on_receipt=on_receipt,
+            )
+    except PreflightError as exc:
+        raise _refused(spec, exc, on_refusal) from exc
+    # No caption over the loop: the trainer narrates its own steps (see `_train_causal_lm`).
+    try:
+        result = await asyncio.to_thread(
+            runner.finish,
+            prepared,
+            artifact_dir=artifact_dir,
+            public_model_id=spec.model_id,
+            calibration_source={
+                "dataset_id": spec.dataset_id,
+                "config": spec.dataset_config,
+                "split": spec.calibration_split,
+                "commit": spec.dataset_commit_sha,
+            },
+        )
+    except PreflightError as exc:
+        # A saved artifact that does not reload as trained is refused before it is pushed.
+        raise _refused(spec, exc, on_refusal) from exc
+    counts = {"train_rows": prepared.train_rows, "eval_rows": prepared.eval_rows}
+    return {"steps": result.steps, "metrics": result.metrics}, counts, result.receipts
+
+
+async def _execute(
+    spec: FinetuneSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
+) -> str:
+    """Run the fine-tune; every terminal error carries the run's GPU time in its metrics.
+
+    A refusal, a failed push and a crash alike end on an ``error`` event whose metrics hold
+    ``gpu_seconds`` and ``gpu_count`` (``runner_main`` emits an exception's ``metrics``), so the
+    control plane books every attempt's GPU time, not only a finished one's.
+    """
+    started = time.monotonic()
+    facts: dict[str, Any] = {}
+    try:
+        return await _execute_run(spec, secrets, writer, started, facts)
+    except Exception as exc:
+        try:
+            known = facts.get("gpu") or await asyncio.to_thread(_gpu_facts)
+        except Exception:
+            known = {"gpu_count": 0}
+        count = int(known.get("gpu_count") or 0)
+        if pick_method(spec.method).task_type == "SEQ_CLS":
+            count = min(1, count)
+        compute = _compute_block(started, {**known, "gpu_count": count}, {})
+        measured = {
+            "gpu_seconds": float(compute["gpu_seconds"]),
+            "gpu_count": float(compute["gpu_count"]),
+        }
+        previous: Any = getattr(exc, "metrics", None)
+        exc.metrics = {**measured, **(previous if isinstance(previous, dict) else {})}  # pyright: ignore[reportAttributeAccessIssue] - read back by runner_main
+        raise
+
+
+async def _execute_run(
+    spec: FinetuneSpec,
+    secrets: RunSecrets,
+    writer: JsonlProgressWriter | None,
+    started: float,
+    facts: dict[str, Any],
+) -> str:
+    hf_token = secrets.hf_token_value()
+    hub_token = secrets.hub_credential()
+    # One sampler for the run: the phase sink folds its counters into every caption, so the
+    # `load_model` and `push` stretches -- where nothing is countable -- still show the box
+    # working. The trainer callback covers `run` with its own.
+    gpu = GpuSampler()
+    phase = phase_sink(writer, hf_token, gpu=gpu)
+    method = pick_method(spec.method)
+    pushing = bool(hf_token and spec.output_repo_id)
+
+    run_dir = results_dir(spec.run_id, name=_OUTPUT_DIR_NAME)
+    artifact_dir = run_dir / _ARTIFACT_SUBDIR
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    seq_cls = method.task_type == "SEQ_CLS"
+    # A classifier's trainer checkpoints go BESIDE the artifact; TRL's go inside it and are
+    # excluded from the push by name.
+    config = _trainer_config(
+        spec, method, run_dir / _CHECKPOINT_SUBDIR if seq_cls else artifact_dir
+    )
+    if pushing:
+        # Before any GPU time: a public repo is refused now, not after the run.
+        async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
+            await ensure_private_repo(
+                HFHubClient(token=hf_token),
+                validate_repo_id(cast("str", spec.output_repo_id), "output repo"),
+                repo_type="model",
+            )
+
+    gpu_facts = await asyncio.to_thread(_gpu_facts)
+    facts["gpu"] = gpu_facts
+    checks: dict[str, Any] | None = None
+    if seq_cls:
+
+        def on_refusal(refusal: dict[str, Any]) -> dict[str, Any]:
+            compute = _compute_block(
+                started, {**gpu_facts, "gpu_count": min(1, gpu_facts["gpu_count"])}, {}
+            )
+            write_manifest(
+                _build_manifest(
+                    spec,
+                    method,
+                    config,
+                    outcome="refused",
+                    model_commit=spec.model_revision,
+                    counts={},
+                    result={},
+                    compute=compute,
+                    checks=refusal,
+                ),
+                run_dir,
+            )
+            return compute
+
+        result, counts, checks = await _train_seq_cls(
+            spec, config, phase, writer, run_dir, artifact_dir, hub_token, on_refusal
+        )
+        model_commit = spec.model_revision
+        # One device, by the runner's own refusal of more.
+        gpu_facts = {**gpu_facts, "gpu_count": min(1, gpu_facts["gpu_count"])}
+        timing = dict(checks.get("timing") or {})
+    else:
+        result, counts, model_commit = await _train_causal_lm(
+            spec, method, config, phase, artifact_dir, hub_token
+        )
+        timing = {}
+
+    compute = _compute_block(started, gpu_facts, timing)
+    # Inside the artifact directory, so the push carries the weights and their record in ONE
+    # commit, and the copy left on the VM carries it too.
+    await asyncio.to_thread(
+        write_manifest,
+        _build_manifest(
+            spec,
+            method,
+            config,
+            outcome="succeeded",
+            model_commit=model_commit,
+            counts=counts,
+            result=result,
+            compute=compute,
+            checks=checks,
+        ),
+        artifact_dir,
+    )
+
+    if pushing:
         try:
             async with ticking_phase(phase, "Uploading the model to the Hub", stage="push"):
-                destination = await _push_artifact(spec, artifact_dir, hf_token)
+                destination = await _push_artifact(spec, artifact_dir, cast("str", hf_token))
         except Exception as exc:
             # Name WHERE the weights are. The run still fails — the user asked for them on the Hub
             # and they are not there — but at the last step of a run that may have taken hours it
@@ -497,6 +991,7 @@ async def _execute(
     else:
         destination = str(artifact_dir)
 
+    steps = cast("int | None", result.get("steps"))
     # The RUN's end, after the TRAINER's own end (its callback emits one when TRL stops). The step
     # count is carried across deliberately: this event is the last one anybody reads, and without
     # it a finished run's progress reads as unknown rather than as complete.
@@ -506,7 +1001,11 @@ async def _execute(
             kind="end",
             step=steps,
             total_steps=steps,
-            metrics=metrics,
+            metrics={
+                **cast("dict[str, float]", result.get("metrics") or {}),
+                "gpu_seconds": float(compute["gpu_seconds"]),
+                "gpu_count": float(compute["gpu_count"]),
+            },
             message=destination,  # WHERE it landed: a repo id (pushed) or a VM path (local)
         ),
     )

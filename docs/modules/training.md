@@ -1,4 +1,4 @@
-# `strata_forge.training` — SFT, preference tuning, PEFT, chat-template, packing
+# `strata_forge.training` — SFT, preference tuning, sequence classification, PEFT, chat-template, packing
 
 `strata_forge.training` ships fine-tuning primitives: SFT via TRL's
 :class:`SFTTrainer`, preference tuning (DPO, ORPO, KTO, GRPO)
@@ -46,6 +46,7 @@ Source: [`src/strata_forge/training/`](../../src/strata_forge/training/).
 - [Quickstart](#quickstart)
 - [SFT](#sft)
 - [Preference tuning](#preference-tuning)
+- [Sequence classification (`seq_cls`)](#sequence-classification-seq_cls)
 - [PEFT (LoRA / QLoRA)](#peft-lora--qlora)
 - [Chat-template formatting](#chat-template-formatting)
 - [Sequence packing](#sequence-packing)
@@ -142,6 +143,7 @@ explicitly, from :mod:`strata_forge.training.loading`
 | ``trust_remote_code`` | ``False`` | A repo's own Python never runs. |
 | ``use_safetensors`` | ``True`` (models) | A pickle checkpoint (``*.bin`` / ``*.pt``) can execute code when unpickled; a repo that ships only those fails to load instead. |
 | ``token`` | the caller's | ``build_trainer(..., token=...)`` / ``train(..., token=...)``. |
+| ``revision`` | the caller's pin, when given | ``build_trainer(..., revision=...)``: a full commit id reads exactly that commit. |
 
 A load that reads a checkpoint into a model class it must fill
 completely also passes ``output_loading_info=True`` and hands the
@@ -229,6 +231,169 @@ Forwarding rules:
   elsewhere.
 - ``peft_config`` flows into every trainer when set; QLoRA's
   bnb config is applied to ``from_pretrained`` automatically.
+
+## Sequence classification (`seq_cls`)
+
+`SeqClsConfig` + `SeqClsRunner` (`seq_cls.py`) train a premise/hypothesis classifier on
+`transformers.Trainer`: a stock `AutoModelForSequenceClassification` primary head plus optional
+auxiliary heads, from a local safetensors checkpoint directory and a dataset whose columns are the
+`nli_pair` roles. The registry entry is `seq_cls` (`task_type="SEQ_CLS"`, format `nli_pair`); it
+trains full weights only (a LoRA or QLoRA adapter is refused).
+
+```python
+from strata_forge.training import SeqClsConfig, SeqClsRunner
+
+config = SeqClsConfig(
+    model_id="org/base",                     # recorded; the runner loads `checkpoint`
+    output_dir="/data/run/checkpoints",      # intermediate checkpoints only
+    labels=("entailment", "contradiction", "neutral"),
+    two_way_positive_label="entailment",
+    two_way_labels=("entailed", "not_entailed"),
+    head_init="decoder_lm_head",
+    verbalizers={"entailment": " True", "contradiction": " False", "neutral": " Unknown"},
+    brier_weight=0.1,
+)
+result = SeqClsRunner(config).run(
+    checkpoint=local_snapshot, artifact_dir=out, train_dataset=train, eval_dataset=dev,
+    on_receipt=lambda name, receipt: print(name, receipt),
+)
+```
+
+### Rows
+
+| Role | Cell | Null |
+|---|---|---|
+| `premises` | a non-empty list of `{pid, text}` whose pids are `p1`, `p2`, ... in order (a string or a list of strings is refused) | refused |
+| `hypothesis` | a string | refused |
+| `label` | three-way: a declared label, an alias, or an integer through `label_index_map` (integer labels need one, because index orders differ); two-way: exactly one of the declared `two_way_labels` | refused |
+| `label_space` | `3way` or `2way_entail_vs_not` | refused (unmapped: every row is `3way`) |
+| `label_dist` | `len(labels)` non-negative numbers summing to 1 (three-way rows) | the one-hot label |
+| `inconsistent_premises` | a boolean | masked |
+| `support_set` | a list of the row's premise ids | masked |
+
+`premise_format="ids"` renders each premise as the line `"{pid}: {text}"` and marks it at the first
+token overlapping the pid's first character (the support head needs this); `plain` renders the text
+alone. An encoder sees the tokenizer's pair encoding of (premises, hypothesis); a decoder sees
+`decoder_template` (default `"{premises}\n{hypothesis}"`) with the tokenizer's own special tokens,
+and its answer position is the final token. Rows are never truncated.
+
+### Objective
+
+`classifier_loss` (`classifier_loss.py`), vectorised over the batch. A three-way row contributes
+`CE + brier_weight * Brier` against its target distribution (Brier in the sum form). A two-way row
+asks only whether the positive label holds. Both halves are declared, with no default: which label
+the positive is (`two_way_positive_label`) and how a row spells its positive and negative
+(`two_way_labels`, e.g. `("entailed", "not_entailed")`); a split with a two-way row and neither
+declared refuses. The negative is the aggregate of every other label (with three labels,
+P(not_entailed) = P(C) + P(U)), `log(1 - q) = LSE(z_neg) - LSE(z)`, so the negative
+labels are never trained against each other, and its Brier is `2 (q - t)^2`. The primary term is
+the mean over every row. The flag head adds `flag_loss_weight` times the mean BCE over the rows
+whose flag is not null; the support head adds `support_loss_weight` times the mean, over eligible
+rows, of each row's mean BCE over its premises. A term with no eligible row is exactly zero.
+Every mean is over the declared batch, which is why `gradient_accumulation_steps` is refused by
+name: accumulating would change the denominators. There is no label smoothing and no class or
+sample weight. There is no named preset: the weights are plain parameters (research runs use
+`brier_weight=0.1`, `flag_loss_weight=1.0`, `support_loss_weight=1.0`), and each run's manifest
+records the three weights beside `LOSS_FORM`, the objective in words.
+
+### Heads and the load guard
+
+`head_init` declares where the primary head comes from (`classifier_heads.py`):
+
+| `head_init` | Base | Allowed missing keys | Initialisation |
+|---|---|---|---|
+| `new` | encoder (`modernbert`) | exactly `classifier.weight`, `classifier.bias` | stock random classifier |
+| `decoder_lm_head` | decoder (`modernbert-decoder`) | exactly the prediction head's parameters and `classifier.weight` | `lm_head.*` -> `head.*`; classifier rows and bias = the verbalizer rows of `decoder.weight` (or the tied embedding) and `decoder.bias` |
+| `existing` | a checkpoint that already has this classifier (`modernbert` or `modernbert-decoder`) | none; its `id2label` must equal `labels` | as saved; auxiliary heads load strictly; a decoder keeps template rendering and last-token pooling, and a rendering that differs from the saved `strata_verifier.json` (premise format, decoder template) refuses |
+
+Any other missing key, any unexpected key outside the architecture's declared set and any shape
+mismatch refuses the run. The tables are explicit per `model_type`; there is no key-name heuristic
+and no repository code. The stock decoder classifier has no bias, so `decoder_lm_head` rebuilds it
+with one to carry `decoder.bias`; because that architecture's `classifier_bias` also gives the
+prediction head's dense layer a bias, that one is added as zero and frozen, and listed in
+`strata_verifier.json` as a frozen parameter (an `existing` run re-freezes it). The saved model
+then reloads with every key present and computes the same function.
+
+The auxiliary heads exist exactly when their role is mapped. Both read one pooled vector, the first
+token for an encoder and the answer position for a decoder: the flag head is `Linear(hidden, 1)`,
+the support head is `h^T W m_pid + b` over each premise's marker token. They start from
+`normal(0, initializer_range)` with a zero bias and are saved as `strata_aux_heads.safetensors`.
+
+### Checks before step 0
+
+`SeqClsRunner.prepare` runs these in order, calling `on_receipt(name, receipt)` as each passes;
+The logit checks' sample and bound are constants (`CHECK_ROWS` = 8 rows, `CHECK_TOLERANCE` =
+1e-4), never configuration: `step0_rows` and `step0_tolerance` are refused by name, so no spec can
+widen a check until it passes. A failure raises `PreflightError` (or `Step0Error`) carrying its receipt. The two checks that
+compare logits (step 0, and reload parity below) run both sides in float32 with TF32 matmul and
+cuDNN switched off for the comparison, and require the same predicted label on every compared row
+besides the tolerance.
+
+1. **`overflow`**: every row resolves its label (a soft `label_dist` must be finite, non-negative
+   and sum to 1) and tokenises without truncation; a refusal names the row index and the role,
+   never the cell; a row longer than
+   `max_length` refuses the run with the count and the first row indices. The receipt records the
+   row count, the over-cap count, the template's token overhead (special tokens plus template
+   literals), and the per-row token-length distribution (`min`, `p50`, `p95`, `max`, nearest
+   rank, overhead included).
+2. **`load`**: the load guard above.
+3. **`step0`** (`decoder_lm_head`): on the first `CHECK_ROWS` (8) training rows, the classifier's label
+   logits must equal the base model's own causal-LM logits for the verbalizer tokens within
+   `CHECK_TOLERANCE` (1e-4, absolute, float32, TF32 off) with the same predicted label on every row. The
+   receipt records the largest logit and probability differences, the agreeing rows and the
+   resolved verbalizer token ids; every verbalizer must be one token.
+4. **`memory`**: one full optimizer step at the split's longest real batch (the
+   `per_device_batch_size` longest rows, padded together), under the run's precision and
+   activation-checkpointing setting, measured by the CUDA allocator's peak and then undone exactly
+   (weights restored, gradients and optimizer state dropped). With an eval split, the in-run
+   evaluation is measured as well: a forward pass at the eval batch size over the eval split's
+   longest rows while the optimizer state is still allocated, as when the trainer evaluates
+   mid-run. The larger peak above `memory_fraction` of the device, or an out-of-memory error,
+   refuses the run with the measured peaks. Off a GPU the step still runs and the peaks are
+   recorded as unmeasured.
+
+The run also refuses a machine exposing more than one GPU, since the trainer would split the batch.
+
+### Training and the artifact
+
+`bf16` precision is autocast over float32 master weights. `gradient_checkpointing=True` enables
+`torch.utils.checkpoint` with `use_reentrant=False` and `preserve_rng_state=True`; it is off by
+default. Batches are grouped by length (`group_by_length`). An eval split is evaluated each epoch
+(or every `eval_steps`). `save_steps > 0` writes intermediate checkpoints to `output_dir`, never to
+the artifact directory. The artifact holds the stock checkpoint (safetensors, `id2label` in label
+order), the tokenizer, `strata_aux_heads.safetensors`, and `strata_verifier.json`: the label order,
+aliases and index map, the pooling position, the premise and template rendering (and the
+template's SHA-256), `max_length`, the verbalizers and their token ids, the trained outputs and the
+frozen parameters, so an evaluator renders rows exactly as training did.
+
+### After training: reload parity and calibration
+
+`SeqClsRunner.finish` checks the saved artifact before anything else reads it
+(`artifact_checks`). Every parameter held at zero (the decoder's `head.dense.bias`) is asserted
+exactly zero at save and again after reload, and is recorded in `strata_verifier.json`
+(`zero_parameters`). Continuing a classifier (`head_init="existing"`) takes that list from the
+checkpoint's `strata_verifier.json` (or, for a decoder whose record predates it, from its
+config's `classifier_bias`), refuses the run at load when one of them is not exactly zero, and
+keeps them frozen. A reload failure is reported by its exception type only, never the library's
+text, which names paths on the machine. The artifact is reloaded the way a scorer
+loads it: stock `AutoModelForSequenceClassification` from its own safetensors, no remote code,
+float32, under `check_loading_info`. Its logits on a fixed set of rows (the first `CHECK_ROWS` of
+the eval split, else of the training split) must equal the trained classifier's in-memory float32
+logits within `CHECK_TOLERANCE`, with the same predicted label on every row (`reload_parity`
+receipt). A failure raises `ArtifactCheckError`; the run is refused and nothing is pushed. When a
+decoder's classifier has a bias, the load receipt records `classifier_bias: true` (read from the
+model's config) and why.
+
+With a declared calibration split (the run spec's `calibration_split`, an in-distribution dev
+split), one temperature is then fitted on the reloaded model's float32 logits over the split's
+single-label three-way rows (two-way and soft-label rows are excluded and counted) with
+`strata_forge.metrics.calibration_fit.fit_temperature`, the same fit the evaluation runner uses,
+and written to `calibration.json` in the artifact: the fit (temperature, NLL before and after, a
+boundary hit), the split and its dataset commit, the row counts, and `rows_sha256` (SHA-256 over
+one JSON line `[input_ids, label]` per fitted row, in split order). An engine without that fit
+refuses a spec that declares a calibration split, and a fit that refuses its input is an
+`ArtifactCheckError` like any other check. The record's schema is in
+[compute](compute.md#calibrationjson).
 
 ## PEFT (LoRA / QLoRA)
 
@@ -357,7 +522,7 @@ from strata_forge.training import pick_method, check_format, enabled_methods
 
 spec = pick_method("dpo")          # UnsupportedMethodError for an unknown method
 check_format(spec, "preference")   # ...or one the method cannot train on
-[m.name for m in enabled_methods()]  # ["sft", "dpo", "orpo", "kto"]
+[m.name for m in enabled_methods()]  # ["sft", "dpo", "orpo", "kto", "seq_cls"]
 ```
 
 `GRPO` is registered with `enabled=False`. It is fully implemented in
@@ -376,6 +541,7 @@ handed and real datasets never use those names.
 | `conversational` | `messages` | — | sft |
 | `preference` | `chosen`, `rejected` | `prompt` | dpo, orpo |
 | `unpaired_preference` | `prompt`, `completion`, `label` | — | kto |
+| `nli_pair` | `premises`, `hypothesis`, `label` | `label_space`, `label_dist`, `inconsistent_premises`, `support_set` | seq_cls |
 
 ```python
 from strata_forge.training import validate_mapping, build_training_rows
@@ -393,7 +559,8 @@ column** — a leftover `id` or `source` is not inert, it can change the format 
 
 `preference` keeps `prompt` optional because TRL accepts both spellings (an explicit prompt beside
 the two completions, or the prompt embedded in both) and datasets in the wild use each about
-equally. A `label` cell is coerced to a real boolean rather than trusted: a column of non-empty
+equally. A KTO `label` cell is coerced to a real boolean rather than trusted (an `nli_pair` label
+is left as it is; the classifier resolves it through its declared labels): a column of non-empty
 strings would otherwise read as every-row-true, which trains a model on the premise that nothing
 is bad — silently wrong rather than failed.
 
