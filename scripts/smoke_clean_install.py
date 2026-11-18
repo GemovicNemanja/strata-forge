@@ -1382,6 +1382,7 @@ def check_eval_consumes_verifier() -> None:
                 msg = f"the applied read is not the trainer's temperature on raw logits: {applied}"
                 raise SmokeError(msg)
 
+
 def check_benchmark() -> None:
     """The benchmark's ``hf_classify`` timing on a tiny CPU classifier, through its real loop.
 

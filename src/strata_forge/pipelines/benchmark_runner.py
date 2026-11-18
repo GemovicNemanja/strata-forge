@@ -79,6 +79,7 @@ from strata_forge.pipelines._common import (
     RunError,
     RunSecrets,
     emit,
+    ensure_private_output,
     load_config,
     manifest_engine,
     model_server_environ,
@@ -142,7 +143,6 @@ _serve_args = _batch._serve_args  # pyright: ignore[reportPrivateUsage]
 _harmony_date = _batch._harmony_date  # pyright: ignore[reportPrivateUsage]
 _sampling_extras = _batch._sampling_extras  # pyright: ignore[reportPrivateUsage]
 _check_output_repo = _batch._check_output_repo  # pyright: ignore[reportPrivateUsage]
-_ensure_private_output = _batch._ensure_private_output  # pyright: ignore[reportPrivateUsage]
 _require_fresh_output = _batch._require_fresh_output  # pyright: ignore[reportPrivateUsage]
 _served_max_model_len = _batch._served_max_model_len  # pyright: ignore[reportPrivateUsage]
 _served_dtype = _batch._served_dtype  # pyright: ignore[reportPrivateUsage]
@@ -949,7 +949,7 @@ async def _push(spec: BenchmarkSpec, outdir: Path, hf_token: str) -> str:
     """Push the timings, the summary and the manifest in ONE commit to the run's private repo."""
     out_repo = validate_repo_id(cast("str", spec.output_repo_id), "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
-    await _ensure_private_output(hub, out_repo)
+    await ensure_private_output(hub, out_repo)
     await _require_fresh_output(spec.batch_spec(), hf_token)
     await hub.upload_files(
         {
