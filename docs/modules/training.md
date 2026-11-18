@@ -358,13 +358,35 @@ The run also refuses a machine exposing more than one GPU, since the trainer wou
 
 `bf16` precision is autocast over float32 master weights. `gradient_checkpointing=True` enables
 `torch.utils.checkpoint` with `use_reentrant=False` and `preserve_rng_state=True`; it is off by
-default. Batches are grouped by length (`group_by_length`). An eval split is evaluated each epoch
-(or every `eval_steps`). `save_steps > 0` writes intermediate checkpoints to `output_dir`, never to
+default. Batches are grouped by length (`group_by_length`). An eval split is monitored, never used
+to choose: see [In-training monitoring](#in-training-monitoring). `save_steps > 0` writes intermediate checkpoints to `output_dir`, never to
 the artifact directory. The artifact holds the stock checkpoint (safetensors, `id2label` in label
 order), the tokenizer, `strata_aux_heads.safetensors`, and `strata_verifier.json`: the label order,
 aliases and index map, the pooling position, the premise and template rendering (and the
 template's SHA-256), `max_length`, the verbalizers and their token ids, the trained outputs and the
 frozen parameters, so an evaluator renders rows exactly as training did.
+
+### In-training monitoring
+
+The final checkpoint is the model. An eval split (another split of the training dataset, read at the
+same pinned commit; the training split itself is refused) is evaluated every
+`ceil(steps_per_epoch / 4)` optimizer steps (`seq_cls_monitor.monitor_eval_steps`) and once more on
+the final checkpoint, for **monitoring only**: `load_best_model_at_end`, `metric_for_best_model`,
+`greater_is_better`, `early_stopping_patience`, `early_stopping_threshold` and `eval_steps` are
+refused by name, so nothing picks a checkpoint, stops a run or moves the cadence. Each eval reads the
+classifier's argmax, uncalibrated, over rows rendered by the training encoder, and scores them with
+`strata_forge.metrics.classification`. Keys, stable:
+
+| Key | Over |
+|---|---|
+| `eval_loss` | the training objective on the split |
+| `monitor/3way/rows`, `monitor/3way/accuracy`, `monitor/3way/macro_f1`, `monitor/3way/f1/<label>` | three-way rows (gold: the label, or the largest share of a `label_dist`) |
+| `monitor/2way/rows`, `monitor/2way/accuracy`, `monitor/2way/f1_entailed` | two-way rows (predicted positive when the argmax is the declared positive label) |
+
+A group with no row in the split is absent. Each eval is a progress `eval` event whose `message` is
+`monitoring (ID dev, final checkpoint is the model)` (`MONITOR_LABEL`), and the manifest's
+`checks.monitoring` holds every eval (`history`, at most 400), the `final` one, the cadence, the keys
+and that label; it never stands for the model's score.
 
 ### After training: reload parity and calibration
 

@@ -202,6 +202,9 @@ class TestAcceptanceSmoke:
         assert manifest["checks"]["overflow"]["length_distribution"]["max"] <= 64
         assert manifest["checks"]["reload_parity"]["passed"] is True
         assert manifest["checks"]["scoring_parity"]["passed"] is True
+        monitoring = manifest["checks"]["monitoring"]
+        assert monitoring["label"] == "monitoring (ID dev, final checkpoint is the model)"
+        assert monitoring["final"]["eval_loss"] > 0
         assert manifest["checks"]["scoring_parity"]["argmax_agree"] == 8
         assert manifest["checks"]["load"]["classifier_bias"]["value"] is True
         assert set(manifest["checks"]["loss"]) == {
@@ -277,6 +280,12 @@ class TestTerminalErrorsCarryGpuTime:
             _drive(monkeypatch, tmp_path, checkpoint, _spec())
         metrics = cast("dict[str, float]", getattr(exc.value, "metrics", {}))
         assert set(metrics) >= {"gpu_seconds", "gpu_count"}
+
+
+class TestMonitoringSplit:
+    def test_the_eval_split_is_another_split_of_the_training_dataset(self) -> None:
+        with pytest.raises(RunError, match="a different split of the training dataset"):
+            fr.check_spec(_spec(eval_split="train"))
 
 
 class TestPinnedChecks:

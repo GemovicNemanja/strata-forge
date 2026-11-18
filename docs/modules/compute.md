@@ -856,7 +856,7 @@ metrics; the engine and the installed versions of ``torch``,
 ``tokenizers`` and ``safetensors``; for ``seq_cls``, every check's receipt;
 and ``compute``: the device, the GPU count, ``wall_seconds``, per-phase
 ``timing`` and ``gpu_seconds``. A ``seq_cls`` run's ``checks`` also hold the loss form and
-weights, the reload-parity receipt and, with ``calibration_split`` declared, the calibration
+weights, the reload-parity receipt, with an eval split the in-training ``monitoring`` record (every eval, labelled monitoring only; see [training](training.md#in-training-monitoring)) and, with ``calibration_split`` declared, the calibration
 record also written to ``calibration.json``. ``gpu_seconds`` is the runner's own measured
 wall-clock time, from the spec check to the manifest, times the GPUs it used
 (one for ``seq_cls``); provisioning and the engine install happen before the

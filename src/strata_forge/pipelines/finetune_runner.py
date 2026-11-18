@@ -247,6 +247,14 @@ def check_spec(spec: FinetuneSpec) -> None:
         if spec.adapter != "none":
             msg = "seq_cls trains full weights; set adapter to 'none'"
             raise RunError(msg)
+        # The in-training eval monitors on an in-distribution dev split: another split of the
+        # training dataset, read at the same pinned commit (the spec names one repo and commit).
+        if spec.eval_split is not None and spec.eval_split == spec.split:
+            msg = (
+                "seq_cls's eval split must be a different split of the training dataset, not the "
+                "training split itself"
+            )
+            raise RunError(msg)
         if (
             spec.calibration_split is not None
             and importlib.util.find_spec("strata_forge.metrics.calibration_fit") is None

@@ -10,6 +10,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Added
 
+- `seq_cls` monitors its eval split during training, for monitoring only: every
+  `ceil(steps_per_epoch / 4)` steps and on the final checkpoint, macro-F1, accuracy and per-class
+  F1 over three-way rows and accuracy and F1 for `entailed` over two-way rows (`monitor/...` keys,
+  argmax, uncalibrated) beside `eval_loss`, as `eval` events labelled
+  `monitoring (ID dev, final checkpoint is the model)` and in the manifest. The final checkpoint is
+  the model: best-model selection, early stopping and `eval_steps` are refused, and the eval split
+  must be another split of the training dataset.
 - `strata_forge.metrics.cluster_bootstrap` adds `cluster_bootstrap` and
   `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`): seeded percentile intervals
   for accuracy, macro-F1 and invalid rate that resample whole caller-declared clusters with

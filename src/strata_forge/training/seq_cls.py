@@ -73,6 +73,13 @@ from strata_forge.training.loading import (
 )
 from strata_forge.training.progress import attach as _attach_progress
 from strata_forge.training.progress import coerce_int, numeric_metrics
+from strata_forge.training.seq_cls_monitor import (
+    MONITOR_LABEL,
+    MONITOR_PREFIX,
+    monitor_eval_steps,
+    monitor_keys,
+    monitor_metrics,
+)
 from strata_forge.training.verifier_render import (
     RenderedRow,
     Rendering,
@@ -125,6 +132,16 @@ _MAX_REPORTED_ROWS = 5
 CHECK_ROWS = 8
 CHECK_TOLERANCE = 1e-4
 _PINNED_CHECK_KEYS = ("step0_rows", "step0_tolerance")
+# The final checkpoint is the model, and the in-training eval only monitors: nothing may pick a
+# checkpoint by it, stop a run by it, or move its cadence.
+_MONITOR_ONLY_KEYS = (
+    "eval_steps",
+    "load_best_model_at_end",
+    "metric_for_best_model",
+    "greater_is_better",
+    "early_stopping_patience",
+    "early_stopping_threshold",
+)
 
 
 class PreflightError(RuntimeError):
@@ -218,7 +235,6 @@ class SeqClsConfig(BaseModel):
     flag_loss_weight: float = Field(default=1.0, ge=0.0, le=100.0)
     support_loss_weight: float = Field(default=1.0, ge=0.0, le=100.0)
     logging_steps: int = Field(default=10, ge=1)
-    eval_steps: int | None = Field(default=None, ge=1)
     save_steps: int = Field(default=0, ge=0)
     save_total_limit: int = Field(default=2, ge=1, le=100)
     seed: int = 42
@@ -232,6 +248,13 @@ class SeqClsConfig(BaseModel):
             msg = (
                 f"{', '.join(pinned)} cannot be set for seq_cls: the step-0, reload and scoring "
                 f"checks always compare {CHECK_ROWS} rows within {CHECK_TOLERANCE:g}"
+            )
+            raise ValueError(msg)
+        chosen = sorted(set(_MONITOR_ONLY_KEYS) & set(data)) if isinstance(data, Mapping) else []  # pyright: ignore[reportUnknownArgumentType] - raw input
+        if chosen:
+            msg = (
+                f"{', '.join(chosen)} cannot be set for seq_cls: the final checkpoint is the model, "
+                "and the in-training eval only monitors, four times an epoch"
             )
             raise ValueError(msg)
         if isinstance(data, Mapping) and "gradient_accumulation_steps" in data:
@@ -697,6 +720,12 @@ def _classes(torch: Any, transformers: Any) -> tuple[Any, Any]:
             self._parts, self._parts_count = {}, 0
 
         def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
+            # The trainer prefixes every eval metric with `eval_`; the monitoring keys keep their
+            # own stable names (`monitor/...`), beside `eval_loss`.
+            prefixed = f"eval_{MONITOR_PREFIX}"
+            logs = {
+                (k[len("eval_") :] if k.startswith(prefixed) else k): v for k, v in logs.items()
+            }
             if "loss" in logs and self._parts_count:
                 count = self._parts_count
                 logs = {**logs, **{k: v / count for k, v in self._parts.items()}}
@@ -1226,8 +1255,11 @@ class SeqClsRunner:
             weight_decay=cfg.weight_decay,
             max_grad_norm=cfg.max_grad_norm,
             logging_steps=cfg.logging_steps,
-            eval_strategy=("steps" if cfg.eval_steps else "epoch") if has_eval else "no",
-            eval_steps=cfg.eval_steps,
+            # Monitoring only (see `seq_cls_monitor`): four times an epoch, and never choosing a
+            # checkpoint; a final eval on the last checkpoint is run in `finish`.
+            eval_strategy="steps" if has_eval else "no",
+            eval_steps=monitor_eval_steps(len(train), cfg.per_device_batch_size),
+            load_best_model_at_end=False,
             save_strategy="steps" if cfg.save_steps > 0 else "no",
             save_steps=cfg.save_steps if cfg.save_steps > 0 else 500,
             save_total_limit=cfg.save_total_limit,
@@ -1237,8 +1269,8 @@ class SeqClsRunner:
             gradient_checkpointing=False,  # enabled on the classifier itself (see load_model)
             report_to="none",
             remove_unused_columns=False,
-            prediction_loss_only=True,
-            label_names=["target"],
+            prediction_loss_only=not has_eval,
+            label_names=["target", "two_way", "two_way_target"],
             dataloader_num_workers=0,
             use_cpu=not torch.cuda.is_available(),
         )
@@ -1250,9 +1282,27 @@ class SeqClsRunner:
             data_collator=_collate(int(tokenizer.pad_token_id), torch),
             seq_cls=cfg,
             positive_index=cfg.positive_index,
+            compute_metrics=self._compute_monitor if has_eval else None,
         )
-        _attach_progress(trainer, cfg.progress_jsonl)
+        _attach_progress(trainer, cfg.progress_jsonl, eval_message=MONITOR_LABEL)
         return trainer
+
+    def _compute_monitor(self, prediction: Any) -> dict[str, float]:
+        """The trainer's ``compute_metrics``: monitoring metrics from one eval pass."""
+        raw: Any = prediction.predictions
+        logits: Any = cast("Any", raw[0]) if isinstance(raw, tuple) else raw
+        target: Any
+        two_way: Any
+        two_way_target: Any
+        target, two_way, two_way_target = prediction.label_ids
+        return monitor_metrics(
+            logits.tolist(),
+            target.tolist(),
+            two_way.tolist(),
+            two_way_target.tolist(),
+            labels=list(self._config.labels),
+            positive_index=self._config.positive_index,
+        )
 
     def save(
         self,
@@ -1659,9 +1709,21 @@ class SeqClsRunner:
         calibration record.
         """
         started = time.monotonic()
-        output: Any = prepared.trainer.train()
+        trainer: Any = prepared.trainer
+        output: Any = trainer.train()
+        if prepared.eval_rows:
+            last = int(trainer.state.global_step)
+            evaluated = {
+                entry.get("step")
+                for entry in cast("list[dict[str, Any]]", trainer.state.log_history)
+                if "eval_loss" in entry
+            }
+            if last not in evaluated:
+                trainer.evaluate()  # the final checkpoint, once, unless the trainer just did
         trained = time.monotonic()
         receipts = dict(prepared.receipts)
+        if prepared.eval_rows:
+            receipts["monitoring"] = _monitoring_record(trainer, self._config.labels)
         receipts["verifier"] = self.save(
             prepared.module,
             prepared.tokenizer,
@@ -1752,6 +1814,32 @@ def _exact_fp32(torch: Any) -> Generator[None]:
         for switch, value in zip(switches, saved, strict=True):
             if switch is not None and isinstance(value, bool):
                 switch.allow_tf32 = value
+
+
+#: The most eval records a manifest keeps (a long run evaluates four times an epoch).
+_MAX_MONITOR_RECORDS = 400
+
+
+def _monitoring_record(trainer: Any, labels: Sequence[str]) -> dict[str, Any]:
+    """Every in-training eval from the trainer's log history, labelled as monitoring only."""
+    history: list[dict[str, Any]] = []
+    for entry in cast("list[dict[str, Any]]", trainer.state.log_history):
+        if "eval_loss" not in entry:
+            continue
+        record = {"step": entry.get("step"), "eval_loss": entry["eval_loss"]}
+        record.update({k: v for k, v in entry.items() if k.startswith(MONITOR_PREFIX)})
+        history.append(record)
+    return {
+        "label": MONITOR_LABEL,
+        "role": "monitoring",
+        "selects_checkpoint": False,
+        "final_checkpoint_is_the_model": True,
+        "cadence": {"eval_steps": int(trainer.args.eval_steps), "final_eval": True},
+        "predictions": "argmax, uncalibrated",
+        "keys": ["eval_loss", *monitor_keys(labels)],
+        "history": history[-_MAX_MONITOR_RECORDS:],
+        "final": history[-1] if history else None,
+    }
 
 
 def _zero_parameters(receipt: LoadReceipt) -> list[str]:
