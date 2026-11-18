@@ -48,4 +48,8 @@ cross-fits it by cluster so every row is scored with a temperature its own clust
 influence (`cross_fit_temperature`), and computes top-label expected calibration error over
 equal-mass or equal-width bins (`expected_calibration_error`). NumPy from `[scoring]`.
 
+`metrics.judge_agreement` reads an LLM judge's scores against gold scores of the same outputs:
+the contingency table, exact agreement, Cohen's kappa, and for an integer scale the mean absolute
+error and the linearly and quadratically weighted kappas, each null with a reason when undefined.
+
 Reference: [metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).

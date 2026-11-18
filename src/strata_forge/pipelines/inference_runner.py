@@ -1428,9 +1428,22 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     return out_repo
 
 
-async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
+async def _execute(
+    spec: RunSpec,
+    secrets: RunSecrets,
+    writer: JsonlProgressWriter | None,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+) -> str:
+    """Run one batch. ``rows``, when given, replaces the split's rows (a chat run only): the LLM
+    grader hands the judge its cases this way, each already joined from pinned files, and the
+    run is otherwise exactly a chat run."""
     if spec.hyperparams.engine != "vllm_chat":
+        if rows is not None:
+            msg = "only a vllm_chat run takes prepared rows"
+            raise RunError(msg)
         return await _execute_scoring(spec, secrets, writer)
+    given = rows
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
     # One sampler for the run: the phase sink folds its counters into every caption, and the
@@ -1450,7 +1463,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     config, config_commit = await _read_model_config(spec, hub_token)
     hp = _effective_hyperparams(spec.hyperparams, config)
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
-        rows = await asyncio.to_thread(_load_rows, spec, hub_token)
+        rows = await asyncio.to_thread(_load_rows, spec, hub_token) if given is None else given
     prompts, custom_ids = _build_requests(spec, rows)
     # `start` stays exactly here: it is the documented milestone that says inference is about
     # to happen, and the orchestrator reads it as such. Phases fill the silence around it.

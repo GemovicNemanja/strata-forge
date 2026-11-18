@@ -29,6 +29,10 @@ This is a pure deterministic numerical leaf. Read
   fold 0. A fitted
   temperature is never used to select a model, threshold or reference. Do not introduce
   thresholds, other interval definitions, or pooling implicitly.
+- `judge_agreement.py` (`judge-gold-agreement-v1`) owns an LLM judge's agreement with gold
+  scores: exact Fractions, null with a reason when undefined, point values only. It draws no
+  resamples (intervals are the caller's `cluster_mean_bootstrap` of a per-case value) and is
+  kept apart from the two-human-rater statistics: a judge is not a human rater.
 - `comparison.py` owns Wilson binomial intervals, exact conditional McNemar, and explicit
   named-family Holm adjustment. Keep all-pair effect denominators distinct from discordant
   test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
