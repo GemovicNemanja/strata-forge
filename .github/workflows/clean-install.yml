@@ -112,6 +112,7 @@ jobs:
           - "serving,storage,hf"  # batch-inference machine
           - "finetuning,storage"  # fine-tuning machine
           - "scoring,storage,hf"  # evaluation machine
+          - "serving,scoring,storage,hf"  # graded-evaluation machine (LLM grader)
           - "all"
     steps:
       - uses: actions/checkout@v4

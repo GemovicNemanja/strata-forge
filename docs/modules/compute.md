@@ -815,6 +815,69 @@ population, the fold rule, each system's per-fold temperatures and its own
 temperature. No temperature selects a system, a reference or a threshold. The
 ``end`` event adds the candidate's raw ``brier`` and its bounds.
 
+### LLM grader (graded evaluation)
+
+``python -m strata_forge.pipelines.grade_runner`` grades each system's OUTPUTS with
+a pinned judge model against a rubric. Its spec (``GradeSpec``) pins the gold split
+(``dataset_id``, a 40-hex ``dataset_commit_sha``, ``dataset_config``, ``split``) and
+carries ``grading`` (``GradeSettings``):
+
+- ``rubric`` (``strata_forge.pipelines._grading.Rubric``): a ``name``, one prompt
+  ``template`` and 1-8 ``criteria``. A criterion is ``pass_fail`` or ``ordinal``
+  (integer ``min``/``max`` within [0, 10], optional ``pass_at``), with an optional
+  ``gold_column`` naming a human score of the same output in the output file. The
+  template must contain ``{output}`` and ``{criteria}`` (the numbered criteria
+  list); every other ``{name}`` is a gold column, mapped by ``column_mapping``,
+  which must map exactly those placeholders.
+- ``judge_model_id`` and ``judge_revision`` (a full commit), and
+  ``judge_hyperparams``: the judge's chat-run settings (``max_tokens``,
+  ``temperature``, serving knobs). The grader owns ``engine`` (``vllm_chat``),
+  ``guided_json`` (the rubric's answer schema), ``n`` (one answer), ``row_limit``
+  and every scoring knob; temperature is 0 unless set.
+- ``outputs``: the candidate first, then up to three baselines, each a parquet at a
+  pinned commit with its ``output_column`` (default ``output``) and
+  ``error_column`` (default ``error``). With a gold ``id_column`` every output
+  names its own ``id_column``; without one every output joins by position
+  (``custom_id`` = ``row-<i>``, a batch run's results), which is admitted only when
+  the output file's ``manifest.json`` names this dataset, config, split and commit.
+  A file with several samples per row is refused, and repeated ids are refused.
+- ``cluster_column`` (each case its own cluster when null), up to eight
+  ``slice_columns``, ``seed``, ``resamples`` (default 10,000) and
+  ``min_slice_rows`` (diagnostic below it).
+
+The judge is the batch-inference runner's ``vllm_chat`` path, run in-process with
+prepared rows: one request per (case, system with an output), the rubric rendered
+by the same non-executing substitution, under the rubric's guided-JSON schema
+(``rationale`` first, then exactly one bounded score per criterion) with the one
+repair turn. Each (case, system) is ``graded`` or unscored with a reason:
+``output_missing`` (no row, an empty output or a generation error),
+``judge_error`` or ``judge_invalid`` (not a complete answer after the repair,
+re-read by ``parse_grade``). Unscored cases stay visible, are counted per reason
+and in coverage, and never pass. Tier rules are not applied: a grader touches no
+research gate tier.
+
+``metrics.json`` (``strata.eval.grades/v1``) records the rubric (with its SHA-256
+and the answer schema's), the judge (requested revision, the commit served, its
+settings and serving facts), each output's pins, join and counts, and per slice
+(overall first): per system ``n``, ``graded``, ``coverage``, ``gate`` (``resolved``
+only at full coverage), unscored counts, and per criterion the cluster-bootstrap
+``mean`` (the pass rate on a pass/fail scale) and, with ``pass_at``, ``pass_rate``;
+per baseline the paired candidate-minus-baseline ``delta`` on the cases both had
+graded (``excludes_zero``, ``unresolved`` without bounds), with ``coverage``,
+``gate`` and pass/fail ``transitions``. ``agreement`` holds, per system and
+criterion with a ``gold_column``, ``judge_agreement`` over the cases with both a
+gold and a judge score, plus ``n_gold``, ``coverage`` and cluster-bootstrap
+intervals of exact agreement and (ordinal) absolute error. ``items.parquet``
+holds one row per case: ``item_id``, ``cluster``, ``slice__<column>`` and per
+system ``status__<s>``, ``score__<criterion>__<s>``, ``gold__<criterion>__<s>``,
+``rationale__<s>`` and ``judge_retried__<s>``; never the input or the output
+text. With the manifest and a card they are pushed in one commit to a private
+output repo; the ``end`` event's message is ``<repo>@<commit>`` and its metrics
+(at most 64) are ``cases``, ``graded``, ``coverage``, each criterion's candidate
+mean (bounds only at full coverage), ``delta_<criterion>__<baseline>`` and
+``agreement_<criterion>``. The machine needs
+``strata-forge[serving,scoring,storage,hf]`` and a GPU for the judge.
+
 ### Fine-tuning pins, checks and manifest
 
 ``FinetuneSpec.model_revision`` pins the base model to a full 40-character

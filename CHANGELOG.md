@@ -14,6 +14,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   judge's scores against gold scores of the same outputs, per criterion (contingency table, exact
   agreement, Cohen's kappa, and for an integer scale the mean absolute error and the
   linearly and quadratically weighted kappas).
+- `strata_forge.pipelines.grade_runner`: the LLM grader. A pinned judge model (the `vllm_chat`
+  engine with the rubric's guided-JSON answer schema) grades each system's pinned outputs on a
+  pinned gold split; per-case statuses and scores go to `items.parquet`, the judge's capped
+  rationales to `rationales.parquet`, and cluster-bootstrap means, paired deltas, transitions and
+  judge agreement to `metrics.json` (`strata.eval.grades/v1`). The inference runner's chat path
+  takes prepared rows for it.
 - `strata_forge.pipelines._grading`: the LLM grader's rubric (`Rubric`, `Criterion`: pass/fail
   or a bounded integer scale), the judge's guided-JSON answer schema (`rubric_schema`, rationale
   first), its digest and `parse_grade`, which reads a reply as unscored unless it is complete.
