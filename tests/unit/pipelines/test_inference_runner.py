@@ -2482,6 +2482,8 @@ async def test_a_run_leaves_its_execution_receipt_in_the_workdir(
     failed = json.loads((workdir / ir.FAILED_ROWS_FILENAME).read_text())
     assert (failed["row_ids"], failed["count"], failed["complete"]) == (["t-3"], 1, True)
     assert receipt["template_sha256"] == manifest["template_sha256"]
+    # A template run names no prompt build.
+    assert (receipt["prompt"], receipt["system_prompt"]) == (None, None)
     assert receipt["engine_version"] == manifest["engine"]["version"]
     assert receipt["id_column"] == "ticket"
     assert receipt["row_ids"]["count"] == 2
@@ -2521,3 +2523,24 @@ def test_a_hub_commit_answer_names_its_commit() -> None:
     assert commit_oid(_SHA) == _SHA
     assert commit_oid("https://huggingface.co/datasets/o/r") is None
     assert commit_oid(None) is None
+
+
+def test_a_prompt_build_runs_receipt_names_its_builds() -> None:
+    manifest = {
+        "template_sha256": None,
+        "prompt": {
+            "build_id": "b-1",
+            "build_hash": "a" * 64,
+            "compiler_version": "1",
+            "bindings": {},
+        },
+        "system_prompt": {
+            "build_id": "s-1",
+            "build_hash": "b" * 64,
+            "bindings": {"tone": {"fixed": True}},
+        },
+    }
+    receipt = ir._build_receipt(manifest, b"{}", [], None)  # pyright: ignore[reportPrivateUsage]
+    assert receipt["template_sha256"] is None
+    assert receipt["prompt"] == {"build_id": "b-1", "build_hash": "a" * 64}
+    assert receipt["system_prompt"] == {"build_id": "s-1", "build_hash": "b" * 64}

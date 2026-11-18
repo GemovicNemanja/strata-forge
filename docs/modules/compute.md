@@ -394,7 +394,9 @@ orchestrator compares with what it admitted: ``model`` (``id``,
 ``requested_revision``, ``commit``), ``dataset`` (``id``, ``config``,
 ``split``, ``requested_revision`` and the ``commit`` the split was read at:
 an unpinned run resolves the head to a commit before the load and loads at
-it, so this names the rows read), ``template_sha256``,
+it, so this names the rows read), ``template_sha256`` (null on a run that
+rendered a pinned prompt build), ``prompt`` and ``system_prompt`` (each
+``{build_id, build_hash}`` from the manifest's prompt blocks, or ``None``),
 ``engine_version``, ``id_column``, ``row_ids`` (``{count, sha256}`` or
 ``None``), ``rows`` (``total``, ``succeeded``, ``failed``) and ``output``
 (``repo_id`` and the ``commit_sha`` of the Hub commit the push made, or

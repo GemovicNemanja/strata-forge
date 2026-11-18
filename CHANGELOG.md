@@ -116,6 +116,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   run is unpinned), and checks one id rule shared with the control plane (`valid_row_id`: 1-512
   printable characters, not blank). `row_ids` are selected from the rows the run reads, so
   `row_limit` bounds a retry's window, and its id uniqueness check, as it bounded its source run.
+- The chat receipt names a prompt-build run's builds: `prompt` and `system_prompt`, each
+  `{build_id, build_hash}` from the manifest's prompt blocks (null for a template run).
 - Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):
   scoring (`hf_classify`, `hf_label_logits`, verifier artifacts), fine-tuning (incl. `seq_cls`) and
   evaluation runs write `_common.build_receipt`'s shape (manifest digest, the model, dataset and

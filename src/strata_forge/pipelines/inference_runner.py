@@ -1626,6 +1626,14 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> tup
     return out_repo, commit_oid(commit)
 
 
+def _prompt_ref(block: Any) -> dict[str, Any] | None:
+    """A manifest's prompt block as a receipt names it: the build's id and hash, nothing else."""
+    if not isinstance(block, dict):
+        return None
+    data = cast("dict[str, Any]", block)
+    return {"build_id": data.get("build_id"), "build_hash": data.get("build_hash")}
+
+
 def _build_receipt(
     manifest: dict[str, Any],
     manifest_bytes: bytes,
@@ -1654,7 +1662,11 @@ def _build_receipt(
             "requested_revision": dataset.get("requested_revision"),
             "commit": dataset.get("commit"),
         },
+        # A prompt-build run has no template digest: it rendered a pinned build, named here by its
+        # id and hash (the system prompt's too), as its manifest records them.
         "template_sha256": manifest.get("template_sha256"),
+        "prompt": _prompt_ref(manifest.get("prompt")),
+        "system_prompt": _prompt_ref(manifest.get("system_prompt")),
         "engine_version": engine.get("version"),
         "id_column": manifest.get("id_column"),
         "row_ids": manifest.get("row_ids"),
