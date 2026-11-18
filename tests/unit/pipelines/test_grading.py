@@ -103,6 +103,10 @@ def test_parse_grade_reads_a_complete_answer_only() -> None:
         json.dumps({"rationale": "x", "scores": {"policy": True, "helpfulness": True}}),
         json.dumps({"rationale": "x", "scores": {"policy": True, "helpfulness": 0}}),
         json.dumps({"rationale": "x", "scores": {"policy": True, "helpfulness": 3, "x": 1}}),
+        json.dumps({"rationale": "   ", "scores": {"policy": True, "helpfulness": 3}}),
+        json.dumps({"rationale": "x", "scores": {"policy": True, "helpfulness": 3}, "extra": 1}),
+        '{"rationale": "x", "scores": {"policy": true, "policy": false, "helpfulness": 3}}',
+        '{"rationale": "x", "rationale": "y", "scores": {"policy": true, "helpfulness": 3}}',
     ):
         assert parse_grade(bad, rubric) is None, bad
 
@@ -118,6 +122,17 @@ def test_scales_passes_and_the_criteria_text() -> None:
         "1. policy (true if it passes, false if it fails): Follows the refund policy.\n"
         "2. helpfulness (an integer from 1 to 5): How helpful the answer is."
     )
+
+
+def test_rationales_are_bounded() -> None:
+    with pytest.raises(ValidationError):
+        _rubric(rationale_max_chars=2001)
+    rubric = _rubric(rationale_max_chars=5)
+    grade = parse_grade(
+        json.dumps({"rationale": "abcdefgh", "scores": {"policy": True, "helpfulness": 3}}), rubric
+    )
+    assert grade is not None
+    assert grade.rationale == "abcde"
 
 
 def test_the_digest_pins_the_rubric() -> None:

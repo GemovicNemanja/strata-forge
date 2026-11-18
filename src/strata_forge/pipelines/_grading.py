@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 __all__ = [
     "CRITERIA_PLACEHOLDER",
     "GRADE_SCHEMA_VERSION",
+    "MAX_RATIONALE_CHARS",
     "OUTPUT_PLACEHOLDER",
     "Criterion",
     "Grade",
@@ -49,6 +50,8 @@ _MAX_TEMPLATE_CHARS = 32 * 1024
 _MAX_CRITERIA = 8
 #: Integer scales stay small: a judge's 1-100 score is not a measurement this report can defend.
 _MAX_SCALE = 10
+#: The longest rationale a rubric may allow (and the cap every stored rationale is cut to).
+MAX_RATIONALE_CHARS = 2000
 
 
 class Criterion(BaseModel):
@@ -117,7 +120,8 @@ class Rubric(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     template: str = Field(min_length=1, max_length=_MAX_TEMPLATE_CHARS)
     criteria: tuple[Criterion, ...] = Field(min_length=1, max_length=_MAX_CRITERIA)
-    rationale_max_chars: int = Field(default=1500, ge=1, le=4000)
+    #: At most 2,000 characters: a rationale may quote the output it grades, so it is bounded.
+    rationale_max_chars: int = Field(default=1500, ge=1, le=MAX_RATIONALE_CHARS)
 
     @model_validator(mode="after")
     def _well_formed(self) -> Rubric:
@@ -210,25 +214,41 @@ class Grade(BaseModel):
     rationale: str
 
 
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """A JSON object's members, refusing a repeated key: which value a reader keeps is not
+    something a score may depend on."""
+    out: dict[str, object] = {}
+    for key, value in pairs:
+        if key in out:
+            msg = f"repeated key {key!r}"
+            raise ValueError(msg)
+        out[key] = value
+    return out
+
+
 def parse_grade(text: str | None, rubric: Rubric) -> Grade | None:
     """The judge's reply read against the rubric, or None when it is not a complete answer.
 
     The run validated the reply against :func:`rubric_schema` already; this re-checks what the
-    report relies on (every criterion present, in range, of the right type), so a grammar backend
-    that enforced less than the schema can never put an out-of-scale score into an aggregate.
+    report relies on (exactly ``rationale`` and ``scores``, no repeated key, a rationale with text,
+    every criterion present, in range, of the right type), so a grammar backend that enforced less
+    than the schema can never put an out-of-scale score into an aggregate. The rationale is kept,
+    cut to the rubric's limit; it may quote the graded output.
     """
     if not text:
         return None
     try:
-        loaded: object = json.loads(text)
+        loaded: object = json.loads(text, object_pairs_hook=_unique_keys)
     except ValueError:
         return None
     if not isinstance(loaded, dict):
         return None
     reply = cast("dict[str, object]", loaded)
-    rationale = reply.get("rationale")
-    raw = reply.get("scores")
-    if not isinstance(rationale, str) or not rationale or not isinstance(raw, dict):
+    if set(reply) != {"rationale", "scores"}:
+        return None
+    rationale = reply["rationale"]
+    raw = reply["scores"]
+    if not isinstance(rationale, str) or not rationale.strip() or not isinstance(raw, dict):
         return None
     given = cast("dict[str, object]", raw)
     if set(given) != {criterion.id for criterion in rubric.criteria}:

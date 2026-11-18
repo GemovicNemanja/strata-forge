@@ -13,9 +13,14 @@ def test_pass_fail_known_values() -> None:
     assert got.percent_agreement == 0.75
     # chance = (2*3 + 2*1) / 16 = 1/2, so kappa = (3/4 - 1/2) / (1/2)
     assert got.cohen_kappa == 0.5
-    assert got.mean_absolute_error is None
+    assert (got.mean_absolute_error, got.mean_absolute_error_undefined) == (
+        None,
+        "not_an_integer_scale",
+    )
     assert got.quadratic_weighted_kappa is None
-    assert got.quadratic_weighted_kappa_undefined is None
+    assert got.quadratic_weighted_kappa_undefined == "not_an_integer_scale"
+    assert got.linear_weighted_kappa_undefined == "not_an_integer_scale"
+    assert got.percent_agreement_undefined is None
 
 
 def test_ordinal_known_values() -> None:
@@ -24,6 +29,9 @@ def test_ordinal_known_values() -> None:
     assert got.percent_agreement == pytest.approx(2 / 3)
     # observed weighted disagreement 1/12 over expected 5/12
     assert got.quadratic_weighted_kappa == pytest.approx(0.8)
+    # linear weights |g - j| / 2: observed 1/6 over expected 1/2
+    assert got.linear_weighted_kappa == pytest.approx(2 / 3)
+    assert got.mean_absolute_error_undefined is None
 
 
 def test_undefined_values_are_null_with_a_reason() -> None:
@@ -33,12 +41,16 @@ def test_undefined_values_are_null_with_a_reason() -> None:
     empty = judge_agreement([], [], values=[1, 2, 3], scale="ordinal")
     assert empty.n == 0
     assert (empty.percent_agreement, empty.mean_absolute_error) == (None, None)
+    assert empty.percent_agreement_undefined == "empty"
+    assert empty.mean_absolute_error_undefined == "empty"
+    assert empty.linear_weighted_kappa_undefined == "empty"
     assert (empty.cohen_kappa_undefined, empty.quadratic_weighted_kappa_undefined) == (
         "empty",
         "empty",
     )
     flat = judge_agreement([2, 2], [2, 2], values=[1, 2, 3], scale="ordinal")
     assert flat.quadratic_weighted_kappa_undefined == "chance_agreement_one"
+    assert flat.linear_weighted_kappa_undefined == "chance_agreement_one"
 
 
 def test_refusals() -> None:

@@ -563,10 +563,11 @@ assert (read.percent_agreement, read.cohen_kappa) == (0.75, 0.5)
 ```
 
 It reports the contingency table, the exact-agreement share and Cohen's kappa, and for an
-ordinal scale the mean absolute error and the quadratically weighted kappa
-(weights `(g - j)^2 / (k - 1)^2`). Every value is computed exactly and reported as a float, or
-as null with a reason: `empty` (no cases) or `chance_agreement_one` (the expected agreement is
-one, so a kappa divides by zero). These are point values: an interval over the agreement share
+ordinal scale the mean absolute error and the linearly and quadratically weighted kappas
+(weights `|g - j| / (k - 1)` and `(g - j)^2 / (k - 1)^2`). Every value is computed exactly and
+reported as a float, or as null with its reason in `<name>_undefined`: `empty` (no cases),
+`chance_agreement_one` (the expected agreement is one, so a kappa divides by zero) or
+`not_an_integer_scale` (the absolute error and the weighted kappas on a pass/fail scale). These are point values: an interval over the agreement share
 or the absolute error is a cluster bootstrap of the per-case value
 (`cluster_mean_bootstrap`), which the caller computes because only it knows the clusters. It
 refuses mismatched lengths (`judge_agreement_population_mismatch`), a score outside `values` or

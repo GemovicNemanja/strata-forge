@@ -13,7 +13,7 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `strata_forge.metrics.judge_agreement.judge_agreement` (`judge-gold-agreement-v1`): an LLM
   judge's scores against gold scores of the same outputs, per criterion (contingency table, exact
   agreement, Cohen's kappa, and for an integer scale the mean absolute error and the
-  quadratically weighted kappa).
+  linearly and quadratically weighted kappas).
 - `strata_forge.pipelines._grading`: the LLM grader's rubric (`Rubric`, `Criterion`: pass/fail
   or a bounded integer scale), the judge's guided-JSON answer schema (`rubric_schema`, rationale
   first), its digest and `parse_grade`, which reads a reply as unscored unless it is complete.

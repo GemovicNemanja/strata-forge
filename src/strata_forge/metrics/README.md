@@ -50,6 +50,6 @@ equal-mass or equal-width bins (`expected_calibration_error`). NumPy from `[scor
 
 `metrics.judge_agreement` reads an LLM judge's scores against gold scores of the same outputs:
 the contingency table, exact agreement, Cohen's kappa, and for an integer scale the mean absolute
-error and the quadratically weighted kappa, each null with a reason when undefined.
+error and the linearly and quadratically weighted kappas, each null with a reason when undefined.
 
 Reference: [metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).
