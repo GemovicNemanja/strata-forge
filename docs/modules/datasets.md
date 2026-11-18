@@ -37,6 +37,7 @@ Source: [`src/strata_forge/datasets/`](../../src/strata_forge/datasets/).
 - [Stores](#stores)
 - [The Hugging Face bridge](#the-hugging-face-bridge)
 - [Synthetic-data primitives](#synthetic-data-primitives)
+- [Dataset recipes](#dataset-recipes)
 - [Lazy-import contract](#lazy-import-contract)
 - [Troubleshooting](#troubleshooting)
 
@@ -314,6 +315,50 @@ labeled = await distill(
 ```
 
 ---
+
+## Dataset recipes
+
+`strata_forge.datasets.recipe` is a declarative, versioned record that turns pinned source
+datasets into a new one (`schema` `strata.dataset_recipe/v1`). A `Recipe` names its `sources`
+(each a Hub dataset repo at a full 40-character `revision`, one `config` and one `split`, an
+optional column list, and optionally the project dataset version it came from) and an ordered list
+of `steps` over one working table:
+
+| Step | What it does |
+|---|---|
+| `load` | Starts the table from a source. Always the first step, and only the first. |
+| `concat` | Appends another source's rows; columns are the union, a missing one is null. |
+| `join` | Matches another source's rows on key columns (`inner` or `left`, SQL semantics: a null key matches nothing, one row per match). Right-side columns that clash take `suffix`. |
+| `filter` | Keeps rows meeting `all` or `any` of its conditions (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `in`, `not_in`, `contains`, `is_null`, `not_null`). A null meets only `is_null`; a boolean equals only a boolean. |
+| `map_columns` | Derives columns (`templates` filling `{column}` from the same row, `constants`), then `select`s, then `rename`s. |
+| `dedupe` | Keeps the first row of each key (`exact`, or `casefold_whitespace` for text). |
+| `split` | Assigns output splits: a `seed`ed shuffle cut by `ratios` (largest-remainder, so the counts are exact), per stratum when `stratify_by` names a column. The last step when present; otherwise the output is one split, `default_split` (`train`). |
+| `synthesize` | Generates candidates from the first `max_seed_rows` rows with a pinned model (`model_id` + 40-character `model_revision`): `n` requests per row, request `j` of row `i` seeded `seed + i*n + j`, the `prompt_template` filled from the row, and the output held to `output_schema` (sent as guided JSON). `output_columns` maps its keys to columns and `keep_columns` copies seed columns; `replace` (default) or `append`. |
+
+**Row ids and exclusions.** A source row's id is `<source>:<index>` in its pinned split, a joined
+row's `<left>+<right>`, a generated row's `gen:<seed row id>:<sample>`. Every row a step drops is an
+`Exclusion` (`filtered`, `no_join_match`, `duplicate_of:<kept row id>`, `generation_failed`,
+`invalid_output`) and every step a `StepCount` (rows in and out, excluded, generated), so a
+materialized version states what it left out. Output records carry the recipe's columns and three
+engine columns: `_row_id`, `_synthetic` (true for every generated row) and `_seed_row_id`.
+
+**Rules the engine enforces.** A `synthesize` step refuses rows from a held-out split (one whose
+name starts with `validation`, `valid`, `val`, `dev`, `test`, `eval`, `holdout` or `heldout`):
+generation reads training data only. A table past `row_cap` rows is refused, never truncated.
+Column errors name the step, never row content.
+
+**Execution.** `execute(recipe, read, generate=None, row_cap=1_000_000)`: `read(source)` returns
+the pinned split's rows (the caller reads the commit), and `generate(step, requests)` runs a
+synthesize step's `GenerationRequest`s in order, one `GenerationResult` each. The module loads no
+model and opens no file.
+
+**Review.** `profile_table` (per column rows, nulls, distinct, numeric min / mean / max, top values)
+and `diff_tables` (rows added, removed and changed by row id, columns added and removed).
+
+**Revisions.** `recipe_sha256(recipe)` hashes the canonical JSON (`recipe.canonical()`), so a
+control plane can record exactly which recipe produced a version. The golden fixture
+`tests/unit/datasets/recipe_golden.json` is the contract the app's browser preview is tested
+against: a semantic change regenerates it (`STRATA_WRITE_GOLDEN=1`) in the same change.
 
 ## Lazy-import contract
 

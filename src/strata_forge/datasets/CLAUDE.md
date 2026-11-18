@@ -24,7 +24,7 @@ shape every other piece converts into and out of.
 
 ## Boundaries
 
-- **Owns:** `schema.py`, `store.py`, `versioning.py`, `stores/`,
+- **Owns:** `schema.py`, `store.py`, `versioning.py`, `recipe.py`, `stores/`,
   `hf_bridge.py` (2.3.2), `synthetic/` (2.3.3).
 - **Imports from inside `forge`:** `strata_forge.core` (errors, content_hash)
   and `strata_forge.llm` (for the synthetic primitives). Does NOT import
@@ -42,6 +42,11 @@ The module's `__init__.py` re-exports the supported surface:
 - Store interface + error: `DatasetStore`, `DatasetNotFoundError`.
 - Backends: `InMemoryDatasetStore`, `LangfuseDatasetStore`.
 - HF bridge: `to_hf_dataset`, `from_hf_dataset`.
+- Dataset recipes: `Recipe`, `RecipeError`, `execute`, `recipe_sha256` (the rest of the recipe
+  surface, the step models, `profile_table` and `diff_tables`, from `strata_forge.datasets.recipe`).
+  Pure: rows come from the caller's reader and generation from an injected `Generator`, so the
+  module loads no model and opens no file. Its golden fixture (`tests/unit/datasets/recipe_golden.json`)
+  is the app's browser-preview contract: change the semantics and regenerate it in the same change.
 - Synthetic-data primitives land alongside the rest of the synthetic
   helpers (see roadmap).
 
