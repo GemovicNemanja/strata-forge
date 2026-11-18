@@ -766,7 +766,12 @@ shared rows. Every file must carry ``<logit_prefix><label>`` (default ``logit_``
 for each declared label; an overflowed, refused or non-finite row has none. Three
 reads are reported apart, per system and slice, each with ``n``, ``coverage``,
 sum-form Brier (Σ_k (p_k − y_k)² on [0, 2]) with a cluster interval, NLL and
-top-label ECE (``ece_bins``, default 15, equal mass, ties by item id):
+top-label ECE (``ece_bins``, default 15, equal mass, ties by item id) and that
+ECE's own bins, ``reliability_bins``: one object per bin in confidence order,
+empty ones included, each ``{lo, hi, n, mean_confidence, accuracy}`` (``lo`` /
+``hi`` the smallest and largest confidence in the bin; an empty bin has ``n`` 0
+and null for the rest). Their ``n``-weighted mean of
+``|accuracy - mean_confidence|`` is the block's ``ece``:
 
 - ``raw``: the logits' softmax.
 - ``cross_fit``: ``cross_fit_temperature`` over the fit population (the scored

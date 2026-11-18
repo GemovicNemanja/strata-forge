@@ -24,7 +24,8 @@ This is a pure deterministic numerical leaf. Read
   sorted cluster keys permuted by `Generator(PCG64(seed))`, dealt into contiguous folds, each
   fold scored with the temperature fitted on the others) and `expected_calibration_error`
   (`top-label-ece-v1`, 15 bins, equal-mass by stable confidence sort with ties by item id and
-  `array_split` sizes, or equal-width). Two folds put the first ceil(C/2) permuted clusters in
+  `array_split` sizes, or equal-width), computed from `reliability_bins` so the reported bins and
+  the ECE never disagree. Two folds put the first ceil(C/2) permuted clusters in
   fold 0. A fitted
   temperature is never used to select a model, threshold or reference. Do not introduce
   thresholds, other interval definitions, or pooling implicitly.

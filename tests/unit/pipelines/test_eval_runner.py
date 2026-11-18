@@ -906,6 +906,20 @@ async def test_calibration_reports_raw_cross_fit_and_applied_reads_apart(
     assert overall["systems"]["baseline"]["applied"] is None
     # The cross-fit read covers only the named fit slice (the 45 "easy" rows).
     assert entry["cross_fit"]["n"] == 45
+    # Every read carries the ECE's own bins: they cover its rows and weigh up to its ECE.
+    for read in ("raw", "cross_fit", "applied"):
+        block = entry[read]
+        bins = block["reliability_bins"]
+        assert len(bins) == calibration["ece_bins"]
+        assert sum(b["n"] for b in bins) == block["n"]
+        weighted = (
+            sum(b["n"] * abs(b["accuracy"] - b["mean_confidence"]) for b in bins if b["n"])
+            / block["n"]
+        )
+        assert block["ece"] == pytest.approx(weighted, abs=1e-12)
+        filled = [b for b in bins if b["n"]]
+        assert all(b["lo"] <= b["mean_confidence"] <= b["hi"] for b in filled)
+        assert [b["lo"] for b in filled] == sorted(b["lo"] for b in filled)
     hard = next(s for s in report["slices"] if s["value"] == "hard")
     assert hard["systems"]["candidate"]["cross_fit"] is None
     (comparison,) = overall["comparisons"]

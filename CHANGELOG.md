@@ -18,6 +18,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   the model: best-model selection, early stopping and `eval_steps` are refused, and the eval split
   must share no row with the training split (overlapping or undecidable split specs, such as
   `train[:80%]` with `train[70%:]`, are refused).
+- `strata_forge.metrics.calibration_fit.reliability_bins` returns the bins the top-label ECE
+  weighs (`ReliabilityBin`: `lo`, `hi`, `n`, `mean_confidence`, `accuracy`), and the evaluation
+  report carries them as `reliability_bins` in every raw, cross-fit and applied probability read.
 - `strata_forge.metrics.cluster_bootstrap` adds `cluster_bootstrap` and
   `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`): seeded percentile intervals
   for accuracy, macro-F1 and invalid rate that resample whole caller-declared clusters with
