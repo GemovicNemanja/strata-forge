@@ -378,12 +378,12 @@ schema of its own:
 |---|---|
 | ``pair_template`` | Required. The second text of each pair (the hypothesis); ``template`` renders the first (the premises). Its placeholders need ``column_mapping`` entries like the template's. |
 | ``list_separator`` | Joins a list-valued column (a row's premises) when it fills a placeholder. Default ``"\n"``. |
-| ``label_alias`` | Optional. Renames the model's classes; when given it must name every ``id2label`` entry exactly. A model with generic ``LABEL_<n>`` names needs one. |
+| ``label_alias`` | Required. Names every ``id2label`` class exactly, no missing and no extra key: each maps to its output label, or to ``null`` to EXCLUDE it (no columns; the softmax and argmax run over the included classes). Two classes mapping to one label are refused (no combine rule exists); at least two classes stay included. |
 | ``id_column`` | Optional. A column whose value becomes each row's ``item_id``: a string or an integer, unique, at most 256 characters. |
-| ``slice_column`` | Optional. A column (at most 256 distinct values) the counts are kept per value of, for per-tier receipts. |
+| ``slice_column`` | Optional. A column (at most 256 distinct values) the counts are kept per value of, for per-tier receipts. A missing value counts under ``(null)``; a value spelled ``(null)``, one over 64 characters, or one spelling held by two types (``1`` and ``"1"``) is refused rather than merged. |
 | ``scoring_batch_size`` | Rows per forward pass, 1-1024. Default 16. |
-| ``max_model_len`` | Optional token limit. Unset, the model's own (the smaller of ``max_position_embeddings`` and the tokenizer's ``model_max_length``); a larger one is refused. |
-| ``dtype`` | ``bfloat16`` (the default), ``float16``, ``float32`` or ``auto`` (the checkpoint's). |
+| ``max_model_len`` | Optional token limit. Unset, the model's own: the smaller of the position table (less ``pad_token_id + 1`` slots on padding-offset architectures such as RoBERTa, whose position ids start after the padding index, so 514 slots fit 512 tokens) and the tokenizer's ``model_max_length``. A larger one is refused. |
+| ``dtype`` | Required, no default: ``float32`` or ``bfloat16``. In ``float32`` the TF32 matmul and cuDNN paths are switched off (``torch.backends.cuda.matmul.allow_tf32`` / ``cudnn.allow_tf32``) before the model loads. In ``bfloat16`` a row's logits can depend on which rows share its batch; in ``float32`` the difference is at rounding level. |
 | ``row_limit`` | As for chat. |
 
 Every other knob generates text, so it is refused with this engine, and the
@@ -407,19 +407,25 @@ overflowed fails after writing its results.
 
 Each results row is ``{custom_id, item_id?, slice?, input_tokens, overflow,
 pred, logit_<label>..., p_<label>...}``: the raw head logits, their plain
-softmax (temperature 1; no calibration is applied) and the argmax label (the
-lowest class id on a tie). The ``end`` event's metrics are ``succeeded``
+softmax over the included classes (temperature 1; no calibration is applied)
+and the argmax label over them (the lowest class id on a tie). The ``end`` event's metrics are ``succeeded``
 (scored rows), ``failed`` (0) and ``overflow``.
 
-The manifest beside the results has ``kind`` ``scoring``. Beside the model
-and dataset pins, engine versions (``transformers``, ``torch``,
-``tokenizers``, ``safetensors``, ``datasets``, ``huggingface-hub``), the
-template digests, the column mapping and the hyperparameters, its
-``scoring`` block records the model's class names and the output labels,
-the alias map, the length limit and where it came from, the overflow
-policy (``drop_and_count``), ``calibration: null``, the padding side and
-pad token, the loaded dtype, the device, and the ignored checkpoint keys;
-``counts`` holds rows, scored and overflow, overall and ``by_slice``.
+The manifest beside the results has ``kind`` ``scoring``. It records the
+model's requested revision and loaded commit, and the dataset's requested
+revision and the commit actually read: an unpinned dataset is resolved to
+its default branch's head once, before the load, and loaded at that commit.
+Beside the engine versions (``transformers``, ``torch``, ``tokenizers``,
+``safetensors``, ``datasets``, ``huggingface-hub``), the template and pair
+template digests (the hyperparameters are recorded without the pair
+template's text), and the column mapping, its ``scoring`` block records the
+model's ``id2label``, the ``label_alias`` used, the included labels and the
+excluded classes, the length limit and where it came from, the overflow
+policy (``drop_and_count``), ``calibration: null``, the padding side and pad
+token, the loaded dtype, the TF32 switches as they stood, the device, the
+batch plan (``order`` ``token_length_desc_then_row_index``, ``batch_size``,
+the number of batches and a SHA-256 of the plan), and the ignored checkpoint
+keys; ``counts`` holds rows, scored and overflow, overall and ``by_slice``.
 
 A scoring run pushes only to an output repo of its own: one holding any
 file but ``.gitattributes`` is refused before the dataset loads and again at

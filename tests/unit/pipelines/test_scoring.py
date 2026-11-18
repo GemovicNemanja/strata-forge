@@ -25,10 +25,20 @@ if TYPE_CHECKING:
 
 _TOKEN = "hf_secretwritetoken1234567890"
 _SHA = "0123456789abcdef0123456789abcdef01234567"
+_DATA_SHA = "89abcdef0123456789abcdef0123456789abcdef"
+
+
+_ALIAS = {"ENTAILMENT": "entailed", "NOT_ENTAILMENT": "not_entailed"}
+_SCORING: dict[str, Any] = {
+    "engine": "hf_classify",
+    "pair_template": "{h}",
+    "dtype": "float32",
+    "label_alias": _ALIAS,
+}
 
 
 def _hp(**overrides: Any) -> ir.Hyperparams:
-    base: dict[str, Any] = {"engine": "hf_classify", "pair_template": "{h}"}
+    base: dict[str, Any] = dict(_SCORING)
     return ir.Hyperparams.model_validate(base | overrides)
 
 
@@ -41,7 +51,7 @@ def _spec_dict(**hyperparams: Any) -> dict[str, Any]:
         "split": "test",
         "column_mapping": {"p": "premises", "h": "hypothesis"},
         "template": "{p}",
-        "hyperparams": {"engine": "hf_classify", "pair_template": "{h}"} | hyperparams,
+        "hyperparams": _SCORING | hyperparams,
         "output_repo_id": "org/scores",
         "progress_path": "progress.jsonl",
         "run_id": "run1",
@@ -62,40 +72,51 @@ def test_softmax_matches_its_closed_form() -> None:
     assert sum(sc.softmax([2.0, -1.0, 0.5])) == pytest.approx(1.0, abs=1e-15)
 
 
+_NLI3 = {2: "neutral", 0: "contradiction", 1: "entailment"}
+_IDENTITY3 = {"contradiction": "contradiction", "entailment": "entailment", "neutral": "neutral"}
+
+
 def test_labels_are_read_by_class_id_not_dictionary_order() -> None:
-    names, labels = sc.resolve_labels({2: "neutral", 0: "contradiction", 1: "entailment"}, None)
+    names, outputs = sc.resolve_labels(_NLI3, _IDENTITY3)
     # The cross-encoder order: a dictionary walk would have put neutral first.
-    assert names == labels == ["contradiction", "entailment", "neutral"]
+    assert names == outputs == ["contradiction", "entailment", "neutral"]
 
 
 def test_string_class_ids_are_accepted() -> None:
-    assert sc.resolve_labels({"1": "b", "0": "a"}, None) == (["a", "b"], ["a", "b"])
+    assert sc.resolve_labels({"1": "b", "0": "a"}, {"a": "a", "b": "b"}) == (
+        ["a", "b"],
+        ["a", "b"],
+    )
 
 
 def test_an_alias_renames_every_class_in_class_id_order() -> None:
-    names, labels = sc.resolve_labels(
+    names, outputs = sc.resolve_labels(
         {0: "LABEL_0", 1: "LABEL_1"}, {"LABEL_1": "not_entailed", "LABEL_0": "entailed"}
     )
     assert names == ["LABEL_0", "LABEL_1"]
-    assert labels == ["entailed", "not_entailed"]
+    assert outputs == ["entailed", "not_entailed"]
 
 
-def test_generic_labels_need_an_alias() -> None:
-    with pytest.raises(RunError, match="generic names"):
-        sc.resolve_labels({0: "LABEL_0", 1: "LABEL_1"}, None)
+def test_null_excludes_a_class() -> None:
+    alias = {"contradiction": "contradicted", "entailment": "entailed", "neutral": None}
+    assert sc.resolve_labels(_NLI3, alias)[1] == ["contradicted", "entailed", None]
 
 
 @pytest.mark.parametrize(
-    "alias",
+    ("alias", "match"),
     [
-        {"entailment": "e"},  # partial
-        {"entailment": "e", "neutral": "n", "contradiction": "c", "other": "o"},  # unknown name
+        ({"entailment": "e", "neutral": "n"}, "missing: \\['contradiction'\\]"),
+        ({**_IDENTITY3, "other": "o"}, "not in the model: \\['other'\\]"),
+        ({"contradiction": "x", "entailment": "x", "neutral": "n"}, "combining classes"),
+        ({"contradiction": "c", "entailment": None, "neutral": None}, "at least two"),
+        ({"contradiction": "c d", "entailment": "e", "neutral": "n"}, "cannot name a column"),
     ],
 )
-def test_an_alias_must_rename_exactly_the_models_classes(alias: dict[str, str]) -> None:
-    id2label = {0: "entailment", 1: "neutral", 2: "contradiction"}
-    with pytest.raises(RunError, match="rename exactly"):
-        sc.resolve_labels(id2label, alias)
+def test_an_alias_must_name_exactly_the_models_classes(
+    alias: dict[str, str | None], match: str
+) -> None:
+    with pytest.raises(RunError, match=match):
+        sc.resolve_labels(_NLI3, alias)
 
 
 @pytest.mark.parametrize(
@@ -106,12 +127,11 @@ def test_an_alias_must_rename_exactly_the_models_classes(alias: dict[str, str]) 
         ({0: "a", 1: "a"}, "repeats"),
         ({0: "a", True: "b"}, "integer class id"),
         ({0: "a", 1: 7}, "integer class id"),
-        ({0: "not entailed", 1: "entailed"}, "cannot name a column"),
     ],
 )
 def test_an_unusable_id2label_is_refused(id2label: dict[Any, Any], match: str) -> None:
     with pytest.raises(RunError, match=match):
-        sc.resolve_labels(id2label, None)
+        sc.resolve_labels(id2label, {"a": "a", "b": "b"})
 
 
 def test_a_list_column_is_joined_and_nothing_is_truncated() -> None:
@@ -154,6 +174,55 @@ def test_results_rows_carry_raw_logits_probabilities_and_the_argmax() -> None:
     # A tie goes to the lowest class id, deterministically.
     assert rows[2]["pred"] == "no"
     assert all(list(row) == list(rows[0]) for row in rows)
+
+
+def test_an_excluded_class_leaves_the_softmax_and_the_argmax() -> None:
+    inputs = sc.ScoringInputs(texts=["a"], pairs=["x"], item_ids=None, slices=None)
+    # neutral would win the argmax; excluded, the softmax runs over the other two alone.
+    (row,) = sc.result_rows([4], {0: [0.0, 9.0, math.log(3)]}, ["no", None, "yes"], inputs)
+    assert "logit_None" not in row
+    assert sorted(k for k in row if k.startswith(("logit_", "p_"))) == [
+        "logit_no",
+        "logit_yes",
+        "p_no",
+        "p_yes",
+    ]
+    assert row["pred"] == "yes"
+    assert row["p_yes"] == pytest.approx(0.75, abs=1e-15)
+    assert row["logit_yes"] == math.log(3)
+
+
+class _Cfg:
+    def __init__(self, **fields: Any) -> None:
+        self.__dict__.update(fields)
+
+
+def test_a_padding_offset_model_loses_the_offset_positions() -> None:
+    # RoBERTa-style: 514 position slots, ids start after pad_token_id=1, so 512 tokens fit.
+    config = _Cfg(model_type="roberta", max_position_embeddings=514, pad_token_id=1)
+    no_tokenizer_limit = _Cfg(model_max_length=int(1e30))
+    assert sc._length_limit(config, no_tokenizer_limit, None) == (512, "model")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(RunError, match="own limit of 512"):
+        sc._length_limit(config, no_tokenizer_limit, 514)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_other_models_keep_their_position_table() -> None:
+    bert = _Cfg(model_type="bert", max_position_embeddings=512, pad_token_id=0)
+    assert sc._length_limit(bert, _Cfg(), None) == (512, "model")  # pyright: ignore[reportPrivateUsage]
+    # The tokenizer's declared limit wins when it is smaller.
+    assert sc._length_limit(bert, _Cfg(model_max_length=256), None) == (256, "model")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(RunError, match=r"set hyperparams\.max_model_len"):
+        sc._length_limit(_Cfg(), _Cfg(), None)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_batch_plan_record_is_deterministic() -> None:
+    record = sc.batch_plan_record([[3, 1], [2]], 2)
+    assert record == {
+        "order": "token_length_desc_then_row_index",
+        "batch_size": 2,
+        "batches": 2,
+        "sha256": sc.hashlib.sha256(b"[[3,1],[2]]").hexdigest(),
+    }
 
 
 def test_counts_are_kept_per_slice() -> None:
@@ -213,6 +282,20 @@ def test_a_missing_id_or_slice_column_is_named() -> None:
         sc.build_inputs(_spec(slice_column="tier"), rows)
 
 
+@pytest.mark.parametrize(
+    ("values", "match"),
+    [
+        ([1, "1"], "both int and str"),
+        (["(null)"], "the key for a missing value"),
+        (["x" * 65], "over 64 characters"),
+    ],
+)
+def test_slice_values_that_would_merge_are_refused(values: list[Any], match: str) -> None:
+    rows = [{"premises": "p", "hypothesis": "h", "tier": v} for v in values]
+    with pytest.raises(RunError, match=match):
+        sc.build_inputs(_spec(slice_column="tier"), rows)
+
+
 def test_too_many_slices_are_refused() -> None:
     rows = [{"premises": "p", "hypothesis": "h", "tier": i} for i in range(300)]
     with pytest.raises(RunError, match="300 distinct values"):
@@ -233,6 +316,18 @@ def test_a_scoring_spec_validates() -> None:
         row_limit=10,
     )
     assert hp.engine == "hf_classify"
+
+
+def test_null_in_the_alias_excludes_a_class() -> None:
+    alias = {"contradiction": "contradicted", "entailment": "entailed", "neutral": None}
+    assert _hp(label_alias=alias).label_alias == alias
+
+
+@pytest.mark.parametrize("missing", ["dtype", "label_alias"])
+def test_dtype_and_the_alias_are_required(missing: str) -> None:
+    body = {k: v for k, v in _SCORING.items() if k != missing}
+    with pytest.raises(ValueError, match=f"needs {missing}"):
+        ir.Hyperparams.model_validate(body)
 
 
 def test_the_chat_engine_stays_the_default() -> None:
@@ -266,9 +361,13 @@ def test_generation_knobs_are_refused_on_the_scoring_engine(field: dict[str, Any
     ("field", "match"),
     [
         ({"pair_template": None}, "needs pair_template"),
-        ({"dtype": "int8"}, "loads in one of"),
+        ({"dtype": None}, "needs dtype, one of float32, bfloat16"),
+        ({"dtype": "float16"}, "needs dtype"),
+        ({"dtype": "auto"}, "needs dtype"),
+        ({"label_alias": None}, "needs label_alias"),
         ({"label_alias": {"a": "x y", "b": "z"}}, "distinct label"),
-        ({"label_alias": {"a": "x", "b": "x"}}, "distinct label"),
+        ({"label_alias": {"a": "x", "b": "x"}}, "cannot share a label"),
+        ({"label_alias": {"a": "x", "b": None}}, "at least two classes included"),
         ({"scoring_batch_size": 0}, "greater than or equal to 1"),
     ],
 )
@@ -295,10 +394,12 @@ class _FakeClassifier:
 
     def __init__(self) -> None:
         self.names = ["ENTAILMENT", "NOT_ENTAILMENT"]
+        self.outputs: list[str | None] = ["entailed", "not_entailed"]
         self.labels = ["entailed", "not_entailed"]
         self.max_length = 8
         self.max_length_source = "model"
-        self.dtype = "bfloat16"
+        self.dtype = "float32"
+        self.tf32 = {"matmul": False, "cudnn": False}
         self.device = "cpu"
         self.pad_token = "tokenizer"
         self.unexpected_keys = ["deberta.embeddings.position_ids"]
@@ -359,7 +460,11 @@ def scoring_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, An
 
     def _rows(spec: Any, token: Any) -> list[dict[str, Any]]:
         record["token"] = token
+        record["loaded_at"] = spec.dataset_commit_sha
         return record["rows"]
+
+    async def _commit(spec: Any, token: Any) -> str:
+        return spec.dataset_commit_sha or _DATA_SHA
 
     async def _fetch(spec: Any, token: Any) -> Path:
         snapshot = tmp_path / "models--org--nli" / "snapshots" / _SHA
@@ -381,6 +486,7 @@ def scoring_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, An
         raise AssertionError("a scoring run starts no model server")
 
     monkeypatch.setattr(ir, "_load_rows", _rows)
+    monkeypatch.setattr(ir, "_dataset_commit", _commit)
     monkeypatch.setattr(ir, "_fetch_model", _fetch)
     monkeypatch.setattr(ir, "load_classifier", _load)
     monkeypatch.setattr(ir, "_write_results", _write)
@@ -429,9 +535,11 @@ async def test_a_scoring_run_drops_overflow_counts_it_and_pushes_one_commit(
     assert scoring_run["load"] == {
         "label_alias": {"ENTAILMENT": "entailed", "NOT_ENTAILMENT": "not_entailed"},
         "max_length": None,
-        "dtype": None,
+        "dtype": "float32",
     }
     assert scoring_run["token"] == _TOKEN
+    # Unpinned: the head is resolved once, then the split is loaded at exactly that commit.
+    assert scoring_run["loaded_at"] == _DATA_SHA
 
     events = _events(scoring_run)
     end = next(e for e in events if e["kind"] == "end")
@@ -454,11 +562,23 @@ async def test_a_scoring_run_drops_overflow_counts_it_and_pushes_one_commit(
     manifest = json.loads(raw)
     assert manifest["kind"] == "scoring"
     assert manifest["model"] == {"id": "org/nli", "requested_revision": _SHA, "commit": _SHA}
+    assert manifest["dataset"]["requested_revision"] is None
+    assert manifest["dataset"]["commit"] == _DATA_SHA
     assert manifest["scoring"]["labels"] == ["entailed", "not_entailed"]
-    assert manifest["scoring"]["model_labels"] == ["ENTAILMENT", "NOT_ENTAILMENT"]
+    assert manifest["scoring"]["id2label"] == {"0": "ENTAILMENT", "1": "NOT_ENTAILMENT"}
+    assert manifest["scoring"]["label_alias"] == _ALIAS
+    assert manifest["scoring"]["excluded"] == []
     assert manifest["scoring"]["overflow_policy"] == "drop_and_count"
     assert manifest["scoring"]["calibration"] is None
-    assert manifest["scoring"]["dtype"] == "bfloat16"
+    assert manifest["scoring"]["dtype"] == "float32"
+    assert manifest["scoring"]["tf32"] == {"matmul": False, "cudnn": False}
+    plan = manifest["scoring"]["batch_plan"]
+    assert plan["order"] == "token_length_desc_then_row_index"
+    assert plan["batch_size"] == 1
+    assert plan["batches"] == 2
+    assert plan["sha256"] == sc.hashlib.sha256(b"[[0],[2]]").hexdigest()
+    # The hypothesis template is a digest only, never text in the pushed manifest.
+    assert "pair_template" not in manifest["hyperparams"]
     assert manifest["scoring"]["unexpected_checkpoint_keys"] == ["deberta.embeddings.position_ids"]
     assert manifest["counts"] == {
         "rows": 3,

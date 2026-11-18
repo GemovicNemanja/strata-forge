@@ -5,15 +5,18 @@ into a ``(text, text_pair)`` pair — the spec's ``template`` and ``hyperparams.
 the same non-executing ``{name}`` substitution as a chat prompt, with a list-valued column (a
 row's premises) joined by ``hyperparams.list_separator`` — and one forward pass of an
 ``AutoModelForSequenceClassification`` gives a logit per class. The runner persists the RAW
-logits (``logit_<label>``), their plain softmax (``p_<label>``, temperature 1: no calibration is
-applied here) and the argmax label (``pred``).
+logits (``logit_<label>``), their plain softmax over the included classes (``p_<label>``,
+temperature 1: no calibration is applied here) and the argmax label (``pred``).
 
 The rules that make the numbers trustworthy:
 
-- **Labels come from the model, by class id.** ``config.id2label`` is read in class-id order, and
-  a declared ``label_alias`` must rename every one of its names: a partial map would leave the
-  reader guessing which names it meant. A generic ``LABEL_<n>`` name cannot pass unaliased, since
-  nothing about it says what the class is.
+- **Labels are declared, by class id.** ``config.id2label`` is read in class-id order, and the
+  run's REQUIRED ``label_alias`` must name every one of its classes and nothing else. Each class
+  maps to an output label, or to ``null``, which EXCLUDES it: an excluded class gets no column,
+  and the softmax and argmax run over the included classes only. Two classes mapping to one label
+  are refused; no combine rule is supported. At least two classes stay included.
+- **Precision is declared.** ``dtype`` is required (``float32`` or ``bfloat16``). In float32 the
+  TF32 matmul and cuDNN paths are switched off, so a GPU computes in true float32.
 - **Nothing is truncated.** A pair longer than the model's limit (special tokens included) is
   dropped before the forward pass, counted, and written as a row with ``overflow`` true and no
   score: truncating the premises would score a different question than the one asked.
@@ -28,6 +31,7 @@ else here is pure, so it is tested without them.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -49,11 +53,12 @@ if TYPE_CHECKING:
     from strata_forge.pipelines.inference_runner import RunSpec
 
 __all__ = [
-    "DEFAULT_DTYPE",
+    "BATCH_ORDER",
     "LABEL_RE",
     "SCORING_DTYPES",
     "Classifier",
     "ScoringInputs",
+    "batch_plan_record",
     "build_inputs",
     "build_manifest",
     "load_classifier",
@@ -67,13 +72,12 @@ __all__ = [
 
 #: What an output label may be: it becomes part of a column name (``logit_<label>``).
 LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-#: The dtypes a classifier may load in. ``auto`` keeps the checkpoint's own.
-SCORING_DTYPES = ("auto", "bfloat16", "float16", "float32")
-#: The dtype a scoring run loads in when the spec names none.
-DEFAULT_DTYPE = "bfloat16"
+#: The dtypes a scoring run may declare. There is no default: the spec must name one.
+SCORING_DTYPES = ("float32", "bfloat16")
+#: How :func:`plan_batches` orders rows, as recorded in the manifest.
+BATCH_ORDER = "token_length_desc_then_row_index"
 # The same placeholder grammar as the chat prompt's `render_template`: a bare `{name}`, nothing else.
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
-_GENERIC_LABEL_RE = re.compile(r"LABEL_\d+", re.IGNORECASE)
 # A rendered side longer than this is over any model's limit without tokenizing it.
 _MAX_RENDERED_CHARS = 200_000
 # Checkpoint tensors that belong to a classification head across the architectures transformers
@@ -82,7 +86,16 @@ _MAX_RENDERED_CHARS = 200_000
 _HEAD_PREFIXES = ("classifier.", "score.", "head.")
 # transformers reports "no limit" as a huge sentinel `model_max_length`.
 _NO_TOKENIZER_LIMIT = 1_000_000
+# Architectures whose learned absolute positions start after the padding index (fairseq's
+# convention): position ids run from `pad_token_id + 1`, so `pad_token_id + 1` of the
+# `max_position_embeddings` slots are never usable by a token.
+_PADDING_OFFSET_POSITIONS = frozenset(
+    {"roberta", "xlm-roberta", "camembert", "data2vec-text", "roberta-prelayernorm", "xmod"}
+)
 _MAX_SLICES = 256
+_MAX_SLICE_CHARS = 64
+# The slice key a missing value is counted under; a real value spelled the same is refused.
+_NULL_SLICE = "(null)"
 _MAX_ITEM_ID_CHARS = 256
 # Rows tokenized per call when measuring lengths: the fast tokenizer batches internally.
 _MEASURE_CHUNK = 512
@@ -119,13 +132,14 @@ def render_scoring_text(
 
 
 def resolve_labels(
-    id2label: Mapping[Any, Any], label_alias: Mapping[str, str] | None
-) -> tuple[list[str], list[str]]:
-    """The model's class names and the output labels, both in class-id order.
+    id2label: Mapping[Any, Any], label_alias: Mapping[str, str | None]
+) -> tuple[list[str], list[str | None]]:
+    """The model's class names and each class's output label (``None`` = excluded), by class id.
 
     Refuses an ``id2label`` that is not a contiguous ``0..n-1`` map of at least two distinct
-    names, an alias map that does not rename exactly the model's names, and an output label that
-    is generic, repeated, or not a :data:`LABEL_RE` token.
+    names; an alias that does not name exactly the model's classes; an output label that is not a
+    :data:`LABEL_RE` token; two classes mapped to one label (many-to-one has no combine rule); and
+    an alias that leaves fewer than two classes included.
     """
     by_id: dict[int, str] = {}
     for key, value in id2label.items():
@@ -143,36 +157,30 @@ def resolve_labels(
     if len(set(names)) != len(names):
         msg = f"the model's id2label repeats a class name: {names}"
         raise RunError(msg)
-    if label_alias is not None:
-        unknown = sorted(set(label_alias) - set(names))
-        unaliased = sorted(set(names) - set(label_alias))
-        if unknown or unaliased:
-            msg = (
-                f"label_alias must rename exactly the model's classes {names}; "
-                f"not in the model: {unknown or 'none'}; missing: {unaliased or 'none'}"
-            )
-            raise RunError(msg)
-        labels = [label_alias[name] for name in names]
-    else:
-        generic = [name for name in names if _GENERIC_LABEL_RE.fullmatch(name)]
-        if generic:
-            msg = (
-                f"the model's classes have generic names {names}, which say nothing about what "
-                "each class means; declare label_alias naming every one"
-            )
-            raise RunError(msg)
-        labels = names
-    bad = [label for label in labels if not LABEL_RE.fullmatch(label)]
-    if bad:
+    unknown = sorted(set(label_alias) - set(names))
+    unaliased = [name for name in names if name not in label_alias]
+    if unknown or unaliased:
         msg = (
-            f"labels {bad} cannot name a column: a label is 1-64 letters, digits, '_', '.' or "
-            "'-'; declare label_alias to rename them"
+            f"label_alias must name exactly the model's classes {names} (a label, or null to "
+            f"exclude one); not in the model: {unknown or 'none'}; missing: {unaliased or 'none'}"
         )
         raise RunError(msg)
-    if len(set(labels)) != len(labels):
-        msg = f"the output labels must be distinct: {labels}"
+    outputs = [label_alias[name] for name in names]
+    included = [label for label in outputs if label is not None]
+    bad = [label for label in included if not LABEL_RE.fullmatch(label)]
+    if bad:
+        msg = f"labels {bad} cannot name a column: a label is 1-64 letters, digits, '_', '.' or '-'"
         raise RunError(msg)
-    return names, labels
+    if len(set(included)) != len(included):
+        msg = (
+            f"label_alias maps two classes to one label ({outputs}); combining classes is not "
+            "supported, so give each its own label or exclude one with null"
+        )
+        raise RunError(msg)
+    if len(included) < 2:
+        msg = "label_alias must leave at least two classes included (not null)"
+        raise RunError(msg)
+    return names, outputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +241,34 @@ def _item_ids(rows: Sequence[Mapping[str, Any]], column: str) -> list[str]:
 
 
 def _slices(rows: Sequence[Mapping[str, Any]], column: str) -> list[str]:
-    values = ["(null)" if row.get(column) is None else str(row.get(column))[:64] for row in rows]
+    """Each row's slice key, refusing what would silently merge two slices into one count.
+
+    A missing value counts under ``(null)``, so a real value spelled ``(null)`` is refused, as is
+    one over 64 characters (cutting it could merge two values) and two values of different types
+    with one spelling (``1`` and ``"1"``).
+    """
+    values: list[str] = []
+    types: dict[str, str] = {}
+    for index, row in enumerate(rows):
+        raw: object = row.get(column)
+        if raw is None:
+            values.append(_NULL_SLICE)
+            continue
+        text = str(raw)
+        if text == _NULL_SLICE:
+            msg = f"slice_column {column!r}: row {index} holds {_NULL_SLICE!r}, the key for a missing value"
+            raise RunError(msg)
+        if len(text) > _MAX_SLICE_CHARS:
+            msg = f"slice_column {column!r}: row {index} has a value over {_MAX_SLICE_CHARS} characters"
+            raise RunError(msg)
+        kind = type(raw).__name__
+        if types.setdefault(text, kind) != kind:
+            msg = (
+                f"slice_column {column!r} holds {text!r} as both {types[text]} and {kind}; "
+                "they would be counted as one slice"
+            )
+            raise RunError(msg)
+        values.append(text)
     distinct = len(set(values))
     if distinct > _MAX_SLICES:
         msg = (
@@ -276,21 +311,26 @@ def softmax(values: Sequence[float]) -> list[float]:
 def result_rows(
     lengths: Sequence[int | None],
     logits: Mapping[int, Sequence[float]],
-    labels: Sequence[str],
+    outputs: Sequence[str | None],
     inputs: ScoringInputs,
 ) -> list[dict[str, Any]]:
     """One results row per input row, in input order; an unscored row carries no score.
 
-    Every row has every column, so a refused first row cannot drop a column from the file.
+    ``outputs`` is each class's label by class id, ``None`` for an excluded class: its logit is
+    dropped before the softmax and the argmax, so both run over the included classes only. Every
+    row has every column, so a refused first row cannot drop a column from the file.
     """
+    kept = [index for index, label in enumerate(outputs) if label is not None]
+    labels = [cast("str", outputs[index]) for index in kept]
     out: list[dict[str, Any]] = []
     for index, length in enumerate(lengths):
+        full = logits.get(index)
+        values = None if full is None else [full[k] for k in kept]
         row: dict[str, Any] = {"custom_id": f"row-{index}"}
         if inputs.item_ids is not None:
             row["item_id"] = inputs.item_ids[index]
         if inputs.slices is not None:
             row["slice"] = inputs.slices[index]
-        values = logits.get(index)
         row["input_tokens"] = length
         row["overflow"] = values is None
         if values is None:
@@ -342,10 +382,11 @@ class Classifier:
         tokenizer: Any,  # a transformers tokenizer; untyped third-party object
         torch: Any,  # the torch module, imported lazily
         names: list[str],
-        labels: list[str],
+        outputs: list[str | None],
         max_length: int,
         max_length_source: str,
         dtype: str,
+        tf32: dict[str, bool | None],
         device: str,
         pad_token: str,
         unexpected_keys: list[str],
@@ -354,13 +395,19 @@ class Classifier:
         self._tokenizer = tokenizer
         self._torch = torch
         self.names = names
-        self.labels = labels
+        self.outputs = outputs
         self.max_length = max_length
         self.max_length_source = max_length_source
         self.dtype = dtype
+        self.tf32 = tf32
         self.device = device
         self.pad_token = pad_token
         self.unexpected_keys = unexpected_keys
+
+    @property
+    def labels(self) -> list[str]:
+        """The included output labels, in class-id order."""
+        return [label for label in self.outputs if label is not None]
 
     def lengths(self, texts: Sequence[str], pairs: Sequence[str]) -> list[int | None]:
         """Each pair's full token count with special tokens, untruncated; ``None`` past the cap."""
@@ -387,7 +434,7 @@ class Classifier:
         return out
 
     def logits(self, texts: Sequence[str], pairs: Sequence[str]) -> list[list[float]]:
-        """Raw head logits for one batch of pairs, right-padded, never truncated."""
+        """Raw head logits for one batch of pairs (every class), right-padded, never truncated."""
         torch = self._torch
         features: Any = self._tokenizer(
             list(texts),
@@ -405,8 +452,8 @@ class Classifier:
             )
         raw: Any = output.logits.float().cpu().tolist()
         values = cast("list[list[float]]", raw)
-        if len(values) != len(texts) or any(len(row) != len(self.labels) for row in values):
-            msg = f"the model returned logits of an unexpected shape for {len(self.labels)} classes"
+        if len(values) != len(texts) or any(len(row) != len(self.names) for row in values):
+            msg = f"the model returned logits of an unexpected shape for {len(self.names)} classes"
             raise RunError(msg)
         if any(not math.isfinite(value) for row in values for value in row):
             msg = "the model returned a non-finite logit"
@@ -417,21 +464,26 @@ class Classifier:
 def load_classifier(
     snapshot: Path,
     *,
-    label_alias: Mapping[str, str] | None,
+    label_alias: Mapping[str, str | None],
     max_length: int | None,
-    dtype: str | None,
+    dtype: str,
 ) -> Classifier:
     """Load the snapshot's tokenizer and sequence-classification model, refusing a partial load.
 
     Reads only the local snapshot the runner downloaded (``local_files_only``), so no credential
-    is involved and nothing else is fetched.
+    is involved and nothing else is fetched. In ``float32`` the TF32 matmul and cuDNN paths are
+    switched off first, so a GPU does not silently compute at reduced precision.
     """
+    if dtype not in SCORING_DTYPES:
+        msg = f"dtype must be one of {', '.join(SCORING_DTYPES)}"
+        raise RunError(msg)
     try:
         torch: Any = import_module("torch")
         transformers: Any = import_module("transformers")
     except ImportError as exc:
         msg = "classifier scoring needs torch and transformers: pip install 'strata-forge[serving]'"
         raise RunError(msg) from exc
+    tf32 = _tf32_state(torch, disable=dtype == "float32")
     location = str(snapshot)
     try:
         tokenizer: Any = transformers.AutoTokenizer.from_pretrained(
@@ -440,13 +492,12 @@ def load_classifier(
     except (OSError, ValueError) as exc:
         msg = f"could not load the model's tokenizer: {exc}"
         raise RunError(msg) from exc
-    name = dtype or DEFAULT_DTYPE
     try:
         model, info = transformers.AutoModelForSequenceClassification.from_pretrained(
             location,
             local_files_only=True,
             output_loading_info=True,
-            dtype=name if name == "auto" else getattr(torch, name),
+            dtype=getattr(torch, dtype),
             **model_load_kwargs(False),
         )
     except (OSError, ValueError, RuntimeError) as exc:
@@ -459,9 +510,10 @@ def load_classifier(
     except LoadRefusedError as exc:
         raise RunError(str(exc)) from exc
     config: Any = model.config
-    names, labels = resolve_labels(cast("Mapping[Any, Any]", config.id2label), label_alias)
-    pad_token = _align_padding(tokenizer, config)
+    names, outputs = resolve_labels(cast("Mapping[Any, Any]", config.id2label), label_alias)
+    # Before padding is aligned: the position offset is the CHECKPOINT's padding index.
     limit, source = _length_limit(config, tokenizer, max_length)
+    pad_token = _align_padding(tokenizer, config)
     device = "cuda" if bool(torch.cuda.is_available()) else "cpu"
     model.to(device)
     model.eval()
@@ -470,14 +522,32 @@ def load_classifier(
         tokenizer=tokenizer,
         torch=torch,
         names=names,
-        labels=labels,
+        outputs=outputs,
         max_length=limit,
         max_length_source=source,
         dtype=str(model.dtype).removeprefix("torch."),
+        tf32=tf32,
         device=device,
         pad_token=pad_token,
         unexpected_keys=unexpected,
     )
+
+
+def _tf32_state(torch: Any, *, disable: bool) -> dict[str, bool | None]:
+    """Switch TF32 off when ``disable``, and report both switches as they now stand."""
+    backends: Any = getattr(torch, "backends", None)
+    matmul: Any = getattr(getattr(backends, "cuda", None), "matmul", None)
+    cudnn: Any = getattr(backends, "cudnn", None)
+    if disable:
+        if matmul is not None:
+            matmul.allow_tf32 = False
+        if cudnn is not None:
+            cudnn.allow_tf32 = False
+    state: dict[str, bool | None] = {}
+    for name, switch in (("matmul", matmul), ("cudnn", cudnn)):
+        value: object = getattr(switch, "allow_tf32", None)
+        state[name] = value if isinstance(value, bool) else None
+    return state
 
 
 def _align_padding(tokenizer: Any, config: Any) -> str:
@@ -499,18 +569,30 @@ def _align_padding(tokenizer: Any, config: Any) -> str:
     return source
 
 
+def _positive_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def _length_limit(config: Any, tokenizer: Any, requested: int | None) -> tuple[int, str]:
-    """The token limit a pair must fit: the model's own, or a smaller requested one."""
+    """The token limit a pair must fit: the model's own, or a smaller requested one.
+
+    The model's own is the smallest of its position table (less the slots a padding-offset
+    architecture such as RoBERTa never gives a token: ``pad_token_id + 1``) and the tokenizer's
+    declared ``model_max_length``.
+    """
     limits: list[int] = []
-    positions: object = getattr(config, "max_position_embeddings", None)
-    if isinstance(positions, int) and not isinstance(positions, bool) and positions > 0:
-        limits.append(positions)
-    declared: object = getattr(tokenizer, "model_max_length", None)
-    if (
-        isinstance(declared, int)
-        and not isinstance(declared, bool)
-        and 0 < declared < _NO_TOKENIZER_LIMIT
-    ):
+    positions = _positive_int(getattr(config, "max_position_embeddings", None))
+    if positions is not None:
+        if getattr(config, "model_type", None) in _PADDING_OFFSET_POSITIONS:
+            pad: object = getattr(config, "pad_token_id", None)
+            offset = (
+                pad + 1 if isinstance(pad, int) and not isinstance(pad, bool) and pad >= 0 else 2
+            )
+            positions -= offset
+        if positions > 0:
+            limits.append(positions)
+    declared = _positive_int(getattr(tokenizer, "model_max_length", None))
+    if declared is not None and declared < _NO_TOKENIZER_LIMIT:
         limits.append(declared)
     model_limit = min(limits) if limits else None
     if requested is None:
@@ -524,16 +606,35 @@ def _length_limit(config: Any, tokenizer: Any, requested: int | None) -> tuple[i
     return requested, "requested"
 
 
+def batch_plan_record(batches: Sequence[Sequence[int]], batch_size: int) -> dict[str, Any]:
+    """How the scored rows were batched: the ordering rule, the size, and a digest of the plan.
+
+    In reduced precision a row's logits can depend on which rows share its batch (padding
+    changes the kernels' reduction shapes), so the plan is part of what a run computed. The full
+    plan is reproducible from the rule and the dataset; the digest lets two runs prove they match.
+    """
+    return {
+        "order": BATCH_ORDER,
+        "batch_size": batch_size,
+        "batches": len(batches),
+        "sha256": _digest(json.dumps([list(batch) for batch in batches], separators=(",", ":"))),
+    }
+
+
 def build_manifest(
     spec: RunSpec,
     classifier: Classifier,
     rows: Sequence[Mapping[str, Any]],
+    *,
     model_commit: str | None,
+    dataset_commit: str | None,
+    batches: Sequence[Sequence[int]],
 ) -> dict[str, Any]:
     """The run's manifest (``kind`` ``scoring``): pins, the scoring setup and counts, no row text.
 
-    Templates are recorded as digests: the control plane stores their text with the spec, and a
-    pushed manifest should not republish it beside the scores.
+    Templates are recorded as digests (the pair template is left out of the hyperparameters for
+    the same reason): the control plane stores their text with the spec, and a pushed manifest
+    should not republish it beside the scores.
     """
     hp = spec.hyperparams
     return {
@@ -550,14 +651,20 @@ def build_manifest(
             "config": spec.dataset_config,
             "split": spec.split,
             "requested_revision": spec.dataset_commit_sha,
+            "commit": dataset_commit,
         },
         "scoring": {
             "engine": hp.engine,
             "head": "sequence_classification",
-            "model_labels": classifier.names,
-            "labels": classifier.labels,
+            "id2label": {str(index): name for index, name in enumerate(classifier.names)},
             "label_alias": hp.label_alias,
-            "outputs": ["logit", "p_softmax_t1", "pred_argmax"],
+            "labels": classifier.labels,
+            "excluded": [
+                name
+                for name, label in zip(classifier.names, classifier.outputs, strict=True)
+                if label is None
+            ],
+            "outputs": ["logit", "p_softmax_t1_over_included", "pred_argmax_over_included"],
             "calibration": None,
             "max_length": classifier.max_length,
             "max_length_source": classifier.max_length_source,
@@ -566,8 +673,9 @@ def build_manifest(
             "padding_side": "right",
             "pad_token": classifier.pad_token,
             "dtype": classifier.dtype,
+            "tf32": classifier.tf32,
             "device": classifier.device,
-            "batch_size": hp.scoring_batch_size,
+            "batch_plan": batch_plan_record(batches, hp.scoring_batch_size),
             "list_separator": hp.list_separator,
             "id_column": hp.id_column,
             "slice_column": hp.slice_column,
@@ -576,7 +684,7 @@ def build_manifest(
         "template_sha256": _digest(spec.template),
         "pair_template_sha256": _digest(hp.pair_template or ""),
         "column_mapping": spec.column_mapping,
-        "hyperparams": hp.model_dump(),
+        "hyperparams": hp.model_dump(exclude={"pair_template"}),
         "counts": tally(rows),
     }
 

@@ -555,15 +555,19 @@ def check_hf_classify() -> None:
     from strata_forge.pipelines import _scoring
     from strata_forge.pipelines._common import RunError
 
+    identity = {name: name for name in ("entailment", "neutral", "contradiction")}
     texts = ["all cats are animals", "some dogs bark", "so so so so so so so so so"]
     pairs = ["cats are animals", "all dogs bark", "dogs bark"]
     with tempfile.TemporaryDirectory() as tmp:
         reference = _tiny_classifier(Path(tmp), with_head=True)
         classifier = _scoring.load_classifier(
-            Path(tmp), label_alias=None, max_length=None, dtype="float32"
+            Path(tmp), label_alias=identity, max_length=None, dtype="float32"
         )
         if classifier.labels != ["entailment", "neutral", "contradiction"]:
             msg = f"labels were not read by class id: {classifier.labels}"
+            raise SmokeError(msg)
+        if classifier.tf32 != {"matmul": False, "cudnn": False}:
+            msg = f"float32 scoring left TF32 on: {classifier.tf32}"
             raise SmokeError(msg)
         if (classifier.max_length, classifier.max_length_source) != (12, "model"):
             msg = f"the length limit is not the tokenizer's 12: {classifier.max_length}"
@@ -591,7 +595,9 @@ def check_hf_classify() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         _tiny_classifier(Path(tmp), with_head=False)
         try:
-            _scoring.load_classifier(Path(tmp), label_alias=None, max_length=None, dtype=None)
+            _scoring.load_classifier(
+                Path(tmp), label_alias=identity, max_length=None, dtype="bfloat16"
+            )
         except RunError as exc:
             if "classifier.weight" not in str(exc):
                 msg = f"a headless checkpoint was refused for the wrong reason: {exc}"

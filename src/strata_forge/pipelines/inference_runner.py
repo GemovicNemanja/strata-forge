@@ -279,7 +279,8 @@ class Hyperparams(BaseModel):
     # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`).
     engine: Literal["vllm_chat", "hf_classify"] = "vllm_chat"
     pair_template: str | None = Field(default=None, min_length=1, max_length=_MAX_PAIR_TEMPLATE)
-    label_alias: dict[str, str] | None = Field(default=None, min_length=2, max_length=64)
+    # Required for scoring: every model class -> its output label, or null to exclude it.
+    label_alias: dict[str, str | None] | None = Field(default=None, min_length=2, max_length=64)
     id_column: str | None = Field(default=None, min_length=1, max_length=255)
     slice_column: str | None = Field(default=None, min_length=1, max_length=255)
     list_separator: str = Field(default="\n", max_length=16)
@@ -302,18 +303,28 @@ class Hyperparams(BaseModel):
         if self.pair_template is None:
             msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
             raise ValueError(msg)
-        if self.dtype is not None and self.dtype not in SCORING_DTYPES:
-            msg = f"engine 'hf_classify' loads in one of {', '.join(SCORING_DTYPES)}"
+        if self.dtype not in SCORING_DTYPES:
+            msg = f"engine 'hf_classify' needs dtype, one of {', '.join(SCORING_DTYPES)}"
             raise ValueError(msg)
-        if self.label_alias is not None:
-            bad = [
-                k
-                for k, v in self.label_alias.items()
-                if not (0 < len(k) <= 256 and LABEL_RE.fullmatch(v))
-            ]
-            if bad or len(set(self.label_alias.values())) != len(self.label_alias):
-                msg = "label_alias maps each model class name to a distinct label (1-64 of A-Z a-z 0-9 _ . -)"
-                raise ValueError(msg)
+        if self.label_alias is None:
+            msg = (
+                "engine 'hf_classify' needs label_alias: every model class mapped to an output "
+                "label, or to null to exclude it"
+            )
+            raise ValueError(msg)
+        included = [v for v in self.label_alias.values() if v is not None]
+        bad = [
+            k
+            for k, v in self.label_alias.items()
+            if not (0 < len(k) <= 256 and (v is None or LABEL_RE.fullmatch(v)))
+        ]
+        if bad or len(set(included)) != len(included) or len(included) < 2:
+            msg = (
+                "label_alias maps each model class name to a distinct label (1-64 of A-Z a-z "
+                "0-9 _ . -) or to null to exclude it, leaving at least two classes included; "
+                "two classes cannot share a label"
+            )
+            raise ValueError(msg)
         return self
 
     @field_validator("harmony_date")
@@ -1178,6 +1189,27 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
     return destination
 
 
+async def _dataset_commit(spec: RunSpec, token: str | Literal[False]) -> str:
+    """The dataset commit a scoring run reads: its pin, or the default branch's head resolved now.
+
+    Resolved once, before the load, and then loaded at that commit, so the manifest names the
+    exact rows scored even when the spec carried no pin.
+    """
+    if spec.dataset_commit_sha:
+        return spec.dataset_commit_sha
+    try:
+        hf_mod: Any = __import__("huggingface_hub")  # the [storage] extra
+        info: Any = await asyncio.to_thread(
+            hf_mod.HfApi().dataset_info, spec.dataset_id, token=token
+        )
+        sha = str(info.sha)
+    except Exception as exc:
+        msg = f"could not resolve the dataset {spec.dataset_id} to a commit: {exc}"
+        raise RunError(msg) from exc
+    require_commit_sha(sha, "the resolved dataset commit")
+    return sha
+
+
 async def _require_fresh_output(spec: RunSpec, hf_token: str) -> None:
     """Refuse an output repo that already holds files: one scoring run, one repo.
 
@@ -1216,12 +1248,17 @@ async def _execute_scoring(
     gpu = GpuSampler()
     phase = phase_sink(writer, hf_token, gpu=gpu)
     pushing = bool(hf_token and spec.output_repo_id)
+    # What the user asked for, kept for the manifest beside the commits actually read.
+    requested = spec
 
     if pushing:
         async with ticking_phase(phase, "Checking the output repo", stage="load_model"):
             await _check_output_repo(spec, hf_token)
             await _require_fresh_output(spec, cast("str", hf_token))
     async with ticking_phase(phase, "Loading the dataset", stage="load_model"):
+        # Loaded at the commit that is recorded: the requested pin, or the head resolved now.
+        dataset_commit = await _dataset_commit(spec, hub_token)
+        spec = spec.model_copy(update={"dataset_commit_sha": dataset_commit})
         rows = await asyncio.to_thread(_load_rows, spec, hub_token)
     if not rows:
         msg = "the run produced no rows: the dataset split was empty"
@@ -1236,9 +1273,9 @@ async def _execute_scoring(
         classifier = await asyncio.to_thread(
             load_classifier,
             snapshot,
-            label_alias=hp.label_alias,
+            label_alias=cast("dict[str, str | None]", hp.label_alias),
             max_length=hp.max_model_len,
-            dtype=hp.dtype,
+            dtype=cast("str", hp.dtype),
         )
     async with ticking_phase(phase, "Measuring rows", stage="run"):
         lengths = await asyncio.to_thread(classifier.lengths, inputs.texts, inputs.pairs)
@@ -1279,7 +1316,14 @@ async def _execute_scoring(
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         await asyncio.to_thread(
             write_manifest,
-            build_manifest(spec, classifier, out, model_commit),
+            build_manifest(
+                requested,
+                classifier,
+                out,
+                model_commit=model_commit,
+                dataset_commit=dataset_commit,
+                batches=batches,
+            ),
             Path(results_path).parent,
         )
     if pushing:
