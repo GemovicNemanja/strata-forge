@@ -632,7 +632,7 @@ async def test_an_undefined_macro_f1_leaves_its_bounds_out_of_the_end_event(
     assert "macro_f1_lower" not in metrics
     assert metrics["macro_f1_undefined"] == 1.0
     assert metrics["delta_macro_f1_undefined__baseline"] == 1.0
-    assert metrics["macro_f1_undefined_resamples"] == 200
+    assert metrics["macro_f1_undefined_share"] == 1.0
     report = json.loads((_outdir(env) / "metrics.json").read_text())
     overall = report["slices"][0]
     assert overall["absent_classes"] == ["neutral"]

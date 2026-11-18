@@ -1033,7 +1033,9 @@ def _headline(report: dict[str, Any], settings: EvalSettings) -> dict[str, float
     for name in ("accuracy", "macro_f1", "invalid_rate"):
         _put_interval(metrics, name, candidate[name])
     # Only macro-F1 can be undefined in a resample; its count rides beside the bounds.
-    metrics["macro_f1_undefined_resamples"] = float(candidate["macro_f1"]["undefined_resamples"])
+    # Its share (undefined over all resamples) rides beside it, so a reader of the event alone can
+    # tell an unstable interval (over ``unstable_threshold``) from a defined one.
+    metrics["macro_f1_undefined_share"] = float(candidate["macro_f1"]["undefined_share"])
     for comparison in overall["comparisons"]:
         for name in ("accuracy", "macro_f1"):
             delta = comparison["delta"][name]

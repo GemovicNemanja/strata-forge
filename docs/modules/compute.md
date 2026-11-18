@@ -655,7 +655,7 @@ macro-F1 and every paired macro-F1 delta have NO value: ``point``, ``lower`` and
 ``upper`` are null with ``reason: "absent_gold_class:<label>[,<label>…]"`` and
 ``absent_classes`` (null by rule, not unstable; never a mean with a zero in it).
 The slice's ``absent_classes`` and every system's are the same list, both read
-from the shared rows' gold. The ``end`` event carries ``macro_f1_undefined: 1``
+from the shared rows' gold. The ``end`` event carries ``macro_f1_undefined_share`` always, and ``macro_f1_undefined: 1``
 (and ``delta_macro_f1_undefined__<baseline>``) in place of the value. Beside it,
 ``macro_f1_present_classes`` averages the classes the gold has (listed in
 ``classes``, the same set for every system); it is a diagnostic with
