@@ -169,7 +169,15 @@ from strata_forge.pipelines._scoring import (
     plan_batches,
     tally,
 )
-from strata_forge.prompts.compiled import render_braces
+from strata_forge.prompts.compiled import (
+    Binding,
+    PromptBuild,
+    PromptBuildError,
+    PromptRenderError,
+    bind_row,
+    render_braces,
+    render_build,
+)
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
@@ -191,6 +199,7 @@ __all__ = [
     "SNAPSHOT_IGNORED",
     "SNAPSHOT_PATTERNS",
     "LabelToken",
+    "PromptSpec",
     "RunSpec",
     "failed_rows_record",
     "main",
@@ -580,6 +589,21 @@ def valid_row_id(text: str) -> bool:
 type RowErrorKind = Literal["timeout", "rate_limited", "model_error", "invalid_output", "other"]
 
 
+class PromptSpec(BaseModel):
+    """A pinned compiled prompt (:class:`~strata_forge.prompts.PromptBuild`) and the binding of
+    each of its variables, rendered once per row with the same renderer a control plane previews
+    with. The build re-checks its own hash when the spec is parsed, so a build that was altered
+    after compilation never runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The control plane's id for the build; recorded in the manifest, never interpreted.
+    build_id: str | None = Field(default=None, max_length=64)
+    build: PromptBuild
+    # Variable name -> a dataset column or one fixed value. Every required variable is bound.
+    bindings: dict[str, Binding] = Field(default_factory=dict)
+
+
 class RunSpec(BaseModel):
     """The inert run spec the server delivers in ``STRATA_RUN_CONFIG`` (no secrets)."""
 
@@ -599,7 +623,10 @@ class RunSpec(BaseModel):
     dataset_config: str | None = None
     split: str
     column_mapping: dict[str, str] = Field(default_factory=dict)
-    template: str
+    # The row prompt: a legacy ``{name}`` template, or (``prompt``) a compiled build plus bindings.
+    # Exactly one of the two; a build renders the chat engine's prompt only.
+    template: str = ""
+    prompt: PromptSpec | None = None
     hyperparams: Hyperparams = Field(default_factory=Hyperparams)
     # Where to push results. The server populates it ONLY when pushing (a write token is present);
     # when absent the runner keeps results on the VM instead of pushing. The VM never guesses ownership.
@@ -647,9 +674,29 @@ class RunSpec(BaseModel):
             raise ValueError(error)
         return self
 
+    @model_validator(mode="after")
+    def _one_prompt_source(self) -> RunSpec:
+        if self.prompt is None and not self.template:
+            msg = "a run needs a template or a prompt build"
+            raise ValueError(msg)
+        if self.prompt is not None and self.template:
+            msg = "a run takes a template or a prompt build, not both"
+            raise ValueError(msg)
+        if self.prompt is not None and self.hyperparams.engine != "vllm_chat":
+            msg = (
+                f"a prompt build renders the chat prompt; engine {self.hyperparams.engine!r} "
+                "reads a {name} template"
+            )
+            raise ValueError(msg)
+        return self
+
 
 def load_spec(*, writer: JsonlProgressWriter | None = None) -> RunSpec:
-    spec = load_config(RunSpec, writer=writer)
+    try:
+        spec = load_config(RunSpec, writer=writer)
+    except PromptBuildError as exc:
+        # The build failed its own integrity check while the spec was parsed.
+        raise RunError(str(exc)) from None
     validate_repo_id(spec.model_id, "model")
     validate_repo_id(spec.dataset_id, "dataset")
     require_commit_sha(spec.model_revision, "model_revision")
@@ -681,6 +728,8 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
     to survive to the model. That reading is rare, and it is not worth the run this protects.
     """
+    if spec.prompt is not None:
+        _validate_prompt_bindings(spec.prompt)
     unmapped = sorted(
         template_placeholders(spec.template, spec.hyperparams) - set(spec.column_mapping)
     )
@@ -695,6 +744,22 @@ def _validate_template_coverage(spec: RunSpec) -> None:
         "an unmapped one would be sent to the model literally, identically for every row."
     )
     raise RunError(msg)
+
+
+def _validate_prompt_bindings(prompt: PromptSpec) -> None:
+    """A build's required variables must all be bound, and every binding must name one of its
+    variables: a misspelt binding would otherwise leave an optional variable silently empty."""
+    declared = {variable.name for variable in prompt.build.variables}
+    unknown = sorted(set(prompt.bindings) - declared)
+    if unknown:
+        msg = f"bindings name variables the prompt build does not declare: {unknown}"
+        raise RunError(msg)
+    unbound = sorted(
+        v.name for v in prompt.build.variables if v.required and v.name not in prompt.bindings
+    )
+    if unbound:
+        msg = f"required prompt variables have no binding: {unbound}"
+        raise RunError(msg)
 
 
 def template_placeholders(template: str, hyperparams: Hyperparams) -> set[str]:
@@ -738,6 +803,11 @@ def _open_split(spec: RunSpec, token: str | Literal[False]) -> Any:
     if missing:
         msg = f"column_mapping references columns not in the split: {sorted(missing)}"
         raise RunError(msg)
+    if spec.prompt is not None:
+        bound = {b.column for b in spec.prompt.bindings.values() if b.column is not None}
+        if bound - columns:
+            msg = f"prompt bindings reference columns not in the split: {sorted(bound - columns)}"
+            raise RunError(msg)
     if spec.id_column is not None and spec.id_column not in columns:
         msg = f"id_column {spec.id_column!r} is not a column of the split"
         raise RunError(msg)
@@ -828,10 +898,25 @@ def _build_requests(
     """One one-message conversation per row, and each row's ``custom_id`` (``ids`` as
     :func:`select_rows` named them, else the rows' positions)."""
     prompts: list[list[UserMessage]] = []
-    for row in rows:
-        rendered = render_template(spec.template, row, spec.column_mapping)
-        prompts.append([UserMessage(content=rendered)])  # one-message conversation
     custom_ids = list(ids) if ids is not None else [f"row-{i}" for i in range(len(rows))]
+    failures: list[tuple[int, str]] = []
+    for i, row in enumerate(rows):
+        if spec.prompt is not None:
+            try:
+                rendered = _render_prompt(spec.prompt, row)
+            except PromptRenderError as exc:
+                failures.append((i, str(exc)))
+                continue
+        else:
+            rendered = render_template(spec.template, row, spec.column_mapping)
+        prompts.append([UserMessage(content=rendered)])  # one-message conversation
+    if failures:
+        first, reason = failures[0]
+        msg = (
+            f"the prompt build did not render {len(failures)} of {len(rows)} rows "
+            f"(first: row {first}, {reason}); nothing was sent to the model"
+        )
+        raise RunError(msg)
     return prompts, custom_ids
 
 
@@ -858,6 +943,16 @@ def row_error_kind(error: BaseException | None) -> RowErrorKind:
     if isinstance(error, ProviderError):
         return "model_error"
     return "other"
+
+
+def _render_prompt(prompt: PromptSpec, row: Mapping[str, Any]) -> str:
+    """One row's prompt from the pinned build. Refused, never truncated, over the render cap: a
+    cut prompt is a different prompt from the build the run names."""
+    rendered = render_build(prompt.build, bind_row(prompt.build, prompt.bindings, row))
+    if len(rendered) > _MAX_RENDERED_CHARS:
+        msg = f"the rendered prompt is longer than {_MAX_RENDERED_CHARS:,} characters"
+        raise PromptRenderError(msg)
+    return rendered
 
 
 async def _run_batches(
@@ -1485,6 +1580,28 @@ def _check_chat_template_kwargs(snapshot: Path, hp: Hyperparams) -> str | None:
     return template_digest(template)
 
 
+def _prompt_manifest(prompt: PromptSpec | None) -> dict[str, Any] | None:
+    """The pinned build a run rendered with: its hash and how each variable was bound.
+
+    A column binding is recorded by name. A fixed value is recorded only as fixed: a digest of a
+    short value (a style, a language, a yes/no) is trivially guessable, so it would republish the
+    value beside the outputs; the spec that holds it stays with the control plane.
+    """
+    if prompt is None:
+        return None
+    bindings: dict[str, dict[str, Any]] = {}
+    for name, binding in sorted(prompt.bindings.items()):
+        bindings[name] = (
+            {"column": binding.column} if binding.column is not None else {"fixed": True}
+        )
+    return {
+        "build_id": prompt.build_id,
+        "build_hash": prompt.build.hash,
+        "compiler_version": prompt.build.compiler_version,
+        "bindings": bindings,
+    }
+
+
 def _build_manifest(
     spec: RunSpec,
     rows: list[dict[str, Any]],
@@ -1547,7 +1664,10 @@ def _build_manifest(
             "reasoning_parser": None,
             "harmony_date": None,
         },
-        "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
+        "template_sha256": (
+            None if spec.prompt is not None else hashlib.sha256(spec.template.encode()).hexdigest()
+        ),
+        "prompt": _prompt_manifest(spec.prompt),
         "chat_template": (
             None
             if hp.chat_template_kwargs is None

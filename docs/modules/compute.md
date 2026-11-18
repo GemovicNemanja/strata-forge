@@ -377,7 +377,10 @@ the machine. It records:
   and the local snapshot path are left out), and the ``harmony_date`` a
   gpt-oss system message stated;
 - a SHA-256 of the template (never its text), the column mapping and the
-  hyperparameters;
+  hyperparameters; for a run that renders a compiled prompt build, ``prompt``
+  records the build's id, hash and compiler version and how each variable was
+  bound (a column name, or only that a fixed value was bound: a digest of a short value would be guessable) and
+  ``template_sha256`` is ``None``;
 - the ``id_column`` the rows were named by (``None`` for positions) and,
   for a run given ``row_ids``, their ``count`` and a ``sha256`` of the ids
   sorted and joined by newlines (never the ids themselves), else ``None``;
@@ -441,6 +444,24 @@ the manifest go up in one Hub commit of exactly those two files, so a repo
 never holds one run's results beside another run's manifest. The check
 creates a missing repo private, so a run that fails afterwards can leave an
 empty private repo behind.
+
+### Compiled prompt builds (`RunSpec.prompt`)
+
+A chat run's row prompt is either the legacy ``template`` (bare ``{name}``
+placeholders mapped by ``column_mapping``) or ``prompt``: a
+``PromptSpec`` holding a pinned :class:`strata_forge.prompts.PromptBuild`
+(see [`prompts.md`](prompts.md#compiled-builds)), the control plane's
+``build_id`` for it, and ``bindings`` (variable name -> ``{"column": ...}`` or
+``{"value": ...}``). Exactly one of the two is set, and a build renders the
+``vllm_chat`` prompt only (the scoring engines keep their ``{name}``
+templates). The build re-checks its own hash while the spec is parsed, so an
+altered build is refused before anything is downloaded. Every required
+variable must be bound and every binding must name a declared variable, and
+bound columns must exist in the split. Each row renders with
+``render_build``, the same function a control plane previews with; a row
+that cannot render (a missing required value, a value of the wrong type, a
+render over 200,000 characters, which is refused rather than cut) fails the
+run before any request is sent, naming how many rows failed and the first.
 
 ### Samples per row (`n`) and chat-template kwargs
 

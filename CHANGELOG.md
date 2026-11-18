@@ -20,6 +20,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   refused). A `braces` build is the legacy runner template byte for byte and renders through
   `render_braces`, which the runner's `render_template` now calls too. Shared vectors for ports
   live in `tests/fixtures/prompt_build_vectors.json`.
+- `RunSpec.prompt` (`PromptSpec`: a pinned `PromptBuild`, its `build_id` and per-variable
+  `bindings` to a column or a fixed value) renders a chat run's row prompt from a compiled build
+  with the same renderer a control plane previews with; `template` becomes optional and exactly
+  one of the two is set. An altered build, an unbound required variable, a binding to an unknown
+  variable or a missing column, and any row that cannot render fail the run before a request is
+  sent. The manifest records the build id, hash, compiler version and bindings as `prompt`.
 
 ## [0.8.0] - 2026-11-18
 
