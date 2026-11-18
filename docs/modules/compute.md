@@ -897,6 +897,88 @@ never uploads ``checkpoint-*``: a ``seq_cls`` run writes its intermediate
 checkpoints beside the artifact, and the causal-LM methods' are excluded from
 the upload by name.
 
+### Latency benchmark (`benchmark_runner`)
+
+``python -m strata_forge.pipelines.benchmark_runner`` measures one pinned
+model on one pinned workload split. It is a bounded measurement job, not a
+serving deployment: nothing it reports is an online-serving latency or a
+production target. The spec (``BenchmarkSpec``) has the batch spec's shape
+with both pins required (``model_revision`` and ``dataset_commit_sha``, full
+40-character commits) and ``hyperparams`` a ``BenchmarkHyperparams``:
+
+| Field | Meaning |
+|---|---|
+| ``engine_settings`` | Required. A batch run's own ``Hyperparams``, whose ``engine`` picks the engine: ``hf_classify`` (with its required ``pair_template``, ``dtype`` and ``label_alias``) or ``vllm_chat`` (``max_tokens`` required: a generation's length decides its latency). The grid owns ``row_limit``, ``concurrency``, ``progress_chunk``, ``scoring_batch_size``, ``id_column`` and ``slice_column``, so they are refused here. |
+| ``boundaries`` | Required: ``model_only`` and/or ``end_to_end``, reported separately. ``vllm_chat`` measures ``end_to_end`` only. |
+| ``batch_sizes`` / ``concurrency`` | The grid; their product is the configurations, at most 32. ``hf_classify`` runs one request stream (``concurrency`` ``[1]``); ``vllm_chat`` sends one request per iteration (``batch_sizes`` ``[1]``). |
+| ``warmup`` | Iterations run and discarded before EVERY timed pass, from the start of that pass's own arrival order. Default 50, at least 1. |
+| ``passes`` | Timed passes per configuration, each over the whole sample in a fresh shuffle seeded with ``seed + pass_index``, never length-sorted. Default 5. |
+| ``sample_size`` / ``seed`` | ``random.Random(seed).sample`` of the eligible rows, in row order; unset, every eligible row. A sample larger than the eligible rows is refused, never padded. |
+| ``wall_clock_cap_s`` | A hard stop on measuring, checked before each iteration starts. Reaching it marks the results incomplete and every unstarted configuration ``not_measured``. Default 1800, at most 6 hours. |
+| ``max_input_tokens`` / ``item_count_column`` / ``max_items`` | Exclusions, counted by reason (``unmeasurable``, ``over_model_limit``, ``over_max_input_tokens``, ``over_max_items``) and never timed. Lengths are the model's own tokens: the pair with special tokens for ``hf_classify``, the prompt after the chat template for ``vllm_chat``, whose model limit is ``max_model_len`` when one is set. ``item_count_column`` is a list column whose length is a row's item count (its premises). |
+| ``length_buckets`` / ``item_buckets`` | Inclusive ascending upper edges (``[512, 2048, 4096, 8192]`` gives ``0-512``, ``513-2048``, ...). At a batch size of one each bucket gets its own percentiles. |
+| ``bootstrap_resamples`` | Optional. Percentile-bootstrap intervals for the pooled percentiles (``metrics.latency_bootstrap``, seeded with ``seed``). Unset, none are estimated. |
+| ``require_gpu`` | Optional. Refuse to measure unless every visible GPU's reported name contains it (``H100``). |
+
+**Timing boundaries.** Every interval is read from ``time.perf_counter_ns``.
+With ``hf_classify`` the classifier loads exactly as a scoring run loads it
+and each request is timed in this process: **end to end** runs from the text
+pair in memory through tokenization, the host-to-device copy, the forward
+pass and a softmax over every class to the probabilities copied back to the
+host, and stops after ``torch.cuda.synchronize()``; **model only** is the
+forward pass alone, with a synchronization immediately before and after it.
+Both are measured in the same iteration, so the model-only time is a
+sub-interval of the end-to-end time. A batch above one is the consecutive
+rows of the arrival order, padded to its longest pair; the trailing rows that
+do not fill a last batch are counted, not timed as a smaller batch. With
+``vllm_chat`` the model is served on loopback exactly as a batch run serves
+it, and **end to end** is one chat request from this process: the HTTP
+request, the server's templating, tokenization, queueing, prefill and decode,
+and the response. The client has no cache and makes one attempt, so a cached
+or retried request is never reported as one measurement. An iteration that
+raises stops its configuration, which is then reported as not clean, with its
+exception text redacted like every surfaced message. No GPU
+counter is sampled while iterations are timed (sampling shells out to
+``nvidia-smi``).
+
+**Statistics.** Per configuration and boundary: per-pass p50/p95/p99
+(Hyndman-Fan type 7, equal to ``numpy.percentile``'s default), their median
+across passes with min and max, and the pooled percentiles; throughput is
+items (and input and output tokens) per second over the union of the
+measured intervals. Latency is per request at a batch size of one and per
+batch above it (``latency_unit``).
+
+**Outputs.** ``timings.parquet`` (one row per measured iteration: the
+configuration, pass and iteration, the row indices, token and item counts,
+buckets, ``end_to_end_ms``, ``model_only_ms`` and output tokens; never row
+text), ``summary.json`` (``BenchmarkSummary``, ``format``
+``strata.benchmark.summary/v1``: completeness and its reason, the sample and
+exclusion counts, the cold start, a short GPU receipt and every
+configuration's result) and ``manifest.json`` (``kind`` ``benchmark``: both
+pins and commits, the protocol in words, the engine facts, the full
+environment receipt, the counts and ``compute``). They are written outside the
+workdir under ``~/strata-benchmark-results/<run_id>`` and pushed in ONE commit
+to a private output repo that holds nothing else, refused before anything
+loads and again at push time; with no write token they stay on the machine.
+A copy of the summary is left in the workdir as ``benchmark-summary.json``
+for the orchestrator to read.
+
+**The environment receipt** is what the machine reports, never what the run
+asked for: per GPU from ``nvidia-smi`` (index, name, total memory, driver,
+persistence mode, current and maximum SM clock, power limit, PCI bus id) and
+how many compute processes held a GPU before the model loaded; from torch,
+its version, CUDA runtime, cuDNN, and the device it computes on; the
+installed versions of torch, transformers, tokenizers, safetensors, vLLM,
+NumPy, datasets and huggingface-hub; and ``CUDA_VISIBLE_DEVICES``. A field
+the machine could not report is ``null``. The cold start is recorded
+separately from every percentile: the model load (or the model server's
+start) in seconds and the first warmup iteration in milliseconds.
+
+The ``end`` event's metrics are ``iterations_measured``,
+``configurations_measured``, ``configurations``, ``complete`` (1 or 0),
+``gpu_count`` and ``gpu_seconds`` (this process's wall time times the GPUs it
+saw). A run that measured no iteration at all fails after writing its files.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a

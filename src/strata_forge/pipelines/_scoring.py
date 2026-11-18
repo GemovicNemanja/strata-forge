@@ -62,7 +62,7 @@ from strata_forge.training.verifier_render import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from pydantic import JsonValue
@@ -562,6 +562,58 @@ class Classifier:
             msg = "the model returned a non-finite logit"
             raise RunError(msg)
         return [[float(value) for value in row] for row in values]
+
+    @property
+    def attention(self) -> str | None:
+        """The attention implementation the loaded model runs (``sdpa``, ``eager``, ...)."""
+        value: object = getattr(self._model.config, "_attn_implementation", None)
+        return value if isinstance(value, str) else None
+
+    def synchronize(self) -> None:
+        """Wait for the device's queued work, so a clock read after it has seen that work end."""
+        if self.device == "cuda":
+            self._torch.cuda.synchronize()
+
+    def timed_forward(
+        self,
+        texts: Sequence[str],
+        pairs: Sequence[str],
+        *,
+        clock: Callable[[], int],
+        model_only: bool,
+    ) -> tuple[int, int, int | None]:
+        """One request timed end to end, and its forward pass alone when ``model_only``.
+
+        End to end runs from the text pairs in memory, through tokenization, the host-to-device
+        copy, the forward pass and a softmax over every class, to the probabilities copied back
+        to the host, and stops after the device is synchronized. The model-only interval brackets
+        the forward pass with a synchronization on each side. Returns ``(start, end, model)`` in
+        the clock's nanoseconds; ``model`` is ``None`` when it was not measured.
+        """
+        torch = self._torch
+        start = clock()
+        features: Any = self._tokenizer(
+            list(texts), list(pairs), padding=True, truncation=False, return_tensors="pt"
+        )
+        if int(features["input_ids"].shape[1]) > self.max_length:
+            msg = "a batch exceeded the model's length limit after planning; nothing was timed"
+            raise RunError(msg)
+        moved = {key: value.to(self.device) for key, value in features.items()}
+        model_ns: int | None = None
+        forward_start = 0
+        with torch.inference_mode():
+            if model_only:
+                self.synchronize()
+                forward_start = clock()
+            output: Any = self._model(**moved)
+            if model_only:
+                self.synchronize()
+                model_ns = clock() - forward_start
+            probabilities: Any = torch.softmax(output.logits.float(), dim=-1).cpu()
+        self.synchronize()
+        end = clock()
+        del probabilities
+        return start, end, model_ns
 
 
 def load_classifier(

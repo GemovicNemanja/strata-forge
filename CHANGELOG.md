@@ -47,11 +47,33 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   (raw, a temperature cross-fitted by cluster over the split or a named slice of it, and the
   system's own pinned `calibration.json` temperature) with sum-form Brier and its interval, NLL and
   ECE, plus a paired Brier delta and the SD of the per-item Brier differences per baseline.
+- A latency benchmark runner, `strata_forge.pipelines.benchmark_runner`, measuring one pinned
+  model (`model_revision` required) on one pinned workload split (`dataset_commit_sha` required)
+  over a grid of batch sizes and concurrent request streams. Its engines are the batch runner's:
+  `hf_classify` times end to end (tokenization, host-to-device copy, forward pass, softmax, copy
+  back, then `torch.cuda.synchronize()`) and model only (the forward pass between two
+  synchronizations) in one iteration; `vllm_chat` serves the model as a batch run does and times
+  each chat request end to end, with no client cache and one attempt. Warmup iterations run and
+  are discarded before every timed pass, passes are seeded shuffles (`seed + pass_index`),
+  exclusions are counted by reason, a wall-clock cap marks the results incomplete, and a failed
+  iteration stops its configuration. `timings.parquet` (one row per measured iteration, no row
+  text), `summary.json` (`BenchmarkSummary`) and `manifest.json` (`kind` `benchmark`, with the
+  protocol, the environment receipt and the cold start) are pushed in one commit to a private
+  output repo of the run's own. `require_gpu` refuses a machine whose GPUs are not named as
+  required. The `end` event carries `gpu_count` and `gpu_seconds`.
+- `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
+  NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
+  and the pooled percentiles) and the opt-in `latency_bootstrap` interval.
+- `Classifier.timed_forward`, `Classifier.synchronize` and `Classifier.attention` on the scoring
+  engine's loaded classifier.
+- The clean-install matrix gains the benchmark machine's extras, `serving,storage,hf,scoring`,
+  and the smoke script a `check_benchmark` on the tiny classifier.
 
 ### Changed
 
 - `pipelines._common.ensure_private_output` is the one private-output-repo check, shared by the
   inference and evaluation runners.
+
 ### Fixed
 
 - `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a
