@@ -288,3 +288,106 @@ class TestVectors:
     @pytest.mark.parametrize("case", vectors["numbers"], ids=lambda c: repr(c["value"]))
     def test_number_text(self, case: dict[str, Any]) -> None:
         assert value_text(VariableSpec(name="n", type="number"), case["value"]) == case["text"]
+
+
+class TestBracesMatchTheLegacyRunner:
+    """A braces build renders through the legacy runner's own substitution, byte for byte."""
+
+    TEMPLATES = (
+        "Café {q}\r\nnext {n}\n\n",
+        "{{q}} {q}{q} {missing_brace {n}",
+        "trailing newline {q}\n",
+        "é {n} {q}",
+    )
+    VALUES = (
+        "plain",
+        "Café",
+        "line\r\nbreak",
+        1.0,
+        1e-07,
+        True,
+        None,
+        [1, "a", None],
+        {"k": 1.5, "z": [True]},
+        12345678901234567890,
+    )
+
+    @pytest.mark.parametrize("template", TEMPLATES)
+    @pytest.mark.parametrize("value", VALUES, ids=repr)
+    def test_differential(self, template: str, value: object) -> None:
+        from strata_forge.pipelines.inference_runner import render_template
+
+        result = compile_prompt(
+            [_self(template, dialect="braces")], [VariableSpec(name="q"), VariableSpec(name="n")]
+        )
+        build = result.build
+        assert build is not None, result.issues
+        assert build.template == template
+        row = {"question": value, "number": value}
+        mapping = {"q": "question", "n": "number"}
+        bound = bind_row(
+            build, {"q": Binding(column="question"), "n": Binding(column="number")}, row
+        )
+        assert render_build(build, bound) == render_template(template, row, mapping)
+
+    def test_braces_text_is_not_normalized(self) -> None:
+        a = compile_prompt([_self("Café {q}\r\n", dialect="braces")], [VariableSpec(name="q")])
+        b = compile_prompt([_self("Café {q}\n", dialect="braces")], [VariableSpec(name="q")])
+        assert a.build is not None
+        assert b.build is not None
+        assert a.build.hash != b.build.hash
+        assert a.build.value_text == "python_str"
+
+    def test_braces_stand_alone(self) -> None:
+        result = compile_prompt(
+            [_self("{q}", dialect="braces"), _self("more")], [VariableSpec(name="q")]
+        )
+        assert [i.code for i in result.issues] == ["mixed_dialect"]
+
+    def test_braces_variables_are_required_strings(self) -> None:
+        result = compile_prompt(
+            [_self("{q}", dialect="braces")], [VariableSpec(name="q", type="number")]
+        )
+        assert [i.code for i in result.issues] == ["invalid_declaration"]
+
+    def test_a_missing_value_is_refused(self) -> None:
+        build = compile_prompt([_self("{q}", dialect="braces")], [VariableSpec(name="q")]).build
+        assert build is not None
+        with pytest.raises(PromptRenderError):
+            render_build(build, {})
+        assert render_build(build, {"q": None}) == "None"
+
+
+class TestHardening:
+    def test_a_lone_surrogate_is_an_issue(self) -> None:
+        result = compile_prompt([_self("bad \ud800 text")])
+        assert [i.code for i in result.issues] == ["invalid_text"]
+
+    def test_hashing_a_surrogate_raises_a_build_error(self) -> None:
+        with pytest.raises(PromptBuildError):
+            compile_prompt(
+                [_self("{{ x }}")],
+                [VariableSpec(name="x", type="enum", values=("\ud800",))],
+            )
+
+    def test_large_integers_are_refused(self) -> None:
+        number = VariableSpec(name="n", type="number")
+        assert value_text(number, 2**53 - 1) == "9007199254740991"
+        with pytest.raises(PromptRenderError, match="2\\^53"):
+            value_text(number, 2**53)
+        with pytest.raises(PromptRenderError):
+            value_text(VariableSpec(name="j", type="json"), {"big": 10**22})
+
+    def test_a_source_map_past_the_template_is_refused(self) -> None:
+        data: dict[str, Any] = _build("one\ntwo").model_dump(mode="json")
+        data["source_map"][0]["line_end"] = 9
+        with pytest.raises(PromptBuildError, match="source map"):
+            PromptBuild.model_validate(data)
+
+    def test_value_text_is_hashed(self) -> None:
+        build = compile_prompt([_self("{q}", dialect="braces")], [VariableSpec(name="q")]).build
+        assert build is not None
+        data: dict[str, Any] = build.model_dump(mode="json")
+        data["value_text"] = "canonical"
+        with pytest.raises(PromptBuildError, match="altered"):
+            PromptBuild.model_validate(data)

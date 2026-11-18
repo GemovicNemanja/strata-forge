@@ -25,6 +25,7 @@ from strata_forge.prompts.compiled import (
     bind_row,
     compile_prompt,
     parse_part,
+    render_braces,
     render_build,
     value_text,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "is_stable_too_short",
     "parse_part",
     "render",
+    "render_braces",
     "render_build",
     "validate_template_variables",
     "value_text",

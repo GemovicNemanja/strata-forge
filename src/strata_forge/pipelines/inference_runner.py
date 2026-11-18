@@ -169,6 +169,7 @@ from strata_forge.pipelines._scoring import (
     plan_batches,
     tally,
 )
+from strata_forge.prompts.compiled import render_braces
 from strata_forge.storage import HFHubClient
 from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
@@ -709,18 +710,10 @@ def render_template(template: str, row: dict[str, Any], column_mapping: dict[str
     """Render ``template`` by replacing each ``{name}`` whose ``column_mapping[name]`` is a
     column present in ``row`` with ``str(row[col])``. Unknown placeholders stay literal.
 
-    Executes nothing: a regex substitution, deliberately NOT ``str.format`` (which reaches
-    attributes/indices + the format mini-language) and NOT a template engine. Capped.
+    Executes nothing: :func:`strata_forge.prompts.render_braces`, the one implementation of this
+    substitution, which a ``braces`` prompt build also renders through. Capped.
     """
-
-    def _sub(match: re.Match[str]) -> str:
-        col = column_mapping.get(match.group(1))
-        if col is None or col not in row:
-            return match.group(0)  # leave an unmapped/missing placeholder literal
-        return str(row[col])
-
-    rendered = _PLACEHOLDER_RE.sub(_sub, template)
-    return rendered[:_MAX_RENDERED_CHARS]
+    return render_braces(template, row, column_mapping)[:_MAX_RENDERED_CHARS]
 
 
 def _open_split(spec: RunSpec, token: str | Literal[False]) -> Any:

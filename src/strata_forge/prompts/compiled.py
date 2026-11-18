@@ -39,7 +39,7 @@ import math
 import re
 import unicodedata
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -66,6 +66,7 @@ __all__ = [
     "bind_row",
     "compile_prompt",
     "parse_part",
+    "render_braces",
     "render_build",
     "value_text",
 ]
@@ -77,6 +78,10 @@ COMPILER_VERSION = "1.0.0"
 BUILD_FORMAT = "strata.prompt-build/1"
 
 Dialect = Literal["strata", "braces"]
+#: How a build turns a value into text. ``canonical`` (the ``strata`` dialect): typed, host
+#: independent. ``python_str`` (a ``braces`` build): Python's ``str()`` of whatever the row holds,
+#: exactly as the legacy batch runner substitutes it.
+ValueText = Literal["canonical", "python_str"]
 VariableType = Literal["string", "number", "boolean", "enum", "json"]
 
 # Variable names: the legacy runner accepted `[A-Za-z0-9_]+`, so a leading digit stays legal.
@@ -211,6 +216,8 @@ class CompileIssue(BaseModel):
         "invalid_declaration",
         "too_large",
         "empty_prompt",
+        "mixed_dialect",
+        "invalid_text",
     ]
     message: str
     # The part index the issue is in, with its 1-based line and column; None for a declaration.
@@ -226,7 +233,20 @@ def _canonical_text(text: str) -> str:
 
 
 def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        msg = "text holds a lone surrogate, which has no UTF-8 form"
+        raise PromptBuildError(msg) from None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _encodable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _line_col(text: str, offset: int) -> tuple[int, int]:
@@ -343,12 +363,15 @@ def _merged(segments: list[TextSegment | VariableSegment]) -> list[TextSegment |
 
 
 def _content_hash(
-    segments: Sequence[TextSegment | VariableSegment], variables: Sequence[VariableSpec]
+    segments: Sequence[TextSegment | VariableSegment],
+    variables: Sequence[VariableSpec],
+    value_text: ValueText = "canonical",
 ) -> str:
     content = {
         "format": BUILD_FORMAT,
         "segments": [segment.model_dump(mode="json") for segment in segments],
         "variables": [variable.model_dump(mode="json") for variable in variables],
+        "value_text": value_text,
     }
     return _sha256(_canonical_json(content))
 
@@ -360,6 +383,7 @@ class PromptBuild(BaseModel):
 
     format: Literal["strata.prompt-build/1"] = BUILD_FORMAT
     compiler_version: str
+    value_text: ValueText = "canonical"
     segments: tuple[Segment, ...]
     # The declarations the segments use, in name order. A render reads values for these only.
     variables: tuple[VariableSpec, ...]
@@ -377,14 +401,36 @@ class PromptBuild(BaseModel):
         if used != set(names):
             msg = "build variables must be exactly the variables its segments use"
             raise PromptBuildError(msg)
-        if _content_hash(self.segments, self.variables) != self.hash:
+        if _content_hash(self.segments, self.variables, self.value_text) != self.hash:
             msg = "prompt build hash does not match its content: the build was altered"
             raise PromptBuildError(msg)
+        # Provenance (`parts`, `source_map`, `compiler_version`) is deliberately outside the
+        # hash: the hash names WHAT renders, and the same text composed differently is the same
+        # prompt. It cannot change a render, but it must still describe this build, so a source
+        # map that points past the parts or the template's lines is refused as altered.
+        lines = self.template.count("\n") + 1
+        previous = 0
+        for span in self.source_map:
+            if not (
+                0 <= span.part < len(self.parts)
+                and previous < span.line_start <= span.line_end <= lines
+                and span.part_line_start >= 1
+            ):
+                msg = (
+                    "prompt build source map does not describe its template: the build was altered"
+                )
+                raise PromptBuildError(msg)
+            previous = span.line_end
         return self
 
     @property
     def template(self) -> str:
-        """The build as text, every variable shown as ``{{ name }}`` (a display form)."""
+        """The build as text in its own dialect: ``{{ name }}``, or ``{name}`` for a braces build
+        (whose template is then exactly the text it was compiled from)."""
+        if self.value_text == "python_str":
+            return "".join(
+                s.text if isinstance(s, TextSegment) else f"{{{s.name}}}" for s in self.segments
+            )
         return "".join(
             s.text if isinstance(s, TextSegment) else f"{{{{ {s.name} }}}}" for s in self.segments
         )
@@ -409,13 +455,18 @@ def compile_prompt(
 ) -> CompileResult:
     """Compile an ordered composition into a :class:`PromptBuild`, or report why it cannot be.
 
-    Parts are canonicalized (NFC, ``\\n`` line endings), stripped of trailing newlines, and joined
-    with one blank line; an empty part contributes nothing. Every referenced variable must be
-    declared exactly once; a declaration no part uses is left out of the build.
+    ``strata`` parts are canonicalized (NFC, ``\\n`` line endings), stripped of trailing newlines,
+    and joined with one blank line; an empty part contributes nothing. A ``braces`` part is the
+    legacy runner's template and is taken exactly as written (no normalization of any kind), on
+    its own: it cannot be composed with other parts, and its variables are plain required
+    strings, because the legacy runner substitutes ``str()`` of whatever a row holds. Every
+    referenced variable must be declared exactly once; a declaration no part uses is left out.
     """
     if len(parts) > _MAX_PARTS or len(variables) > _MAX_VARIABLES:
         msg = f"a prompt holds at most {_MAX_PARTS} parts and {_MAX_VARIABLES} variables"
         raise PromptBuildError(msg)
+    if any(part.dialect == "braces" for part in parts):
+        return _compile_braces(parts, variables)
     issues: list[CompileIssue] = []
     declared: dict[str, VariableSpec] = {}
     for variable in variables:
@@ -434,6 +485,15 @@ def compile_prompt(
     referenced: dict[str, None] = {}
     line = 1
     for index, part in enumerate(parts):
+        if not _encodable(part.text):
+            issues.append(
+                CompileIssue(
+                    code="invalid_text",
+                    message=f"{part.name} holds a lone surrogate, which has no UTF-8 form",
+                    part=index,
+                )
+            )
+            continue
         text = _canonical_text(part.text).rstrip("\n")
         digests.append(
             PartDigest(
@@ -503,6 +563,120 @@ def compile_prompt(
     )
 
 
+def _compile_braces(
+    parts: Sequence[PromptPart], variables: Sequence[VariableSpec]
+) -> CompileResult:
+    """A legacy ``{name}`` template, byte for byte: one part, no normalization, string values."""
+    if len(parts) != 1:
+        issue = CompileIssue(
+            code="mixed_dialect",
+            message="a braces template stands alone; compose prompts in the strata dialect",
+        )
+        return CompileResult(build=None, issues=(issue,))
+    part = parts[0]
+    if not _encodable(part.text):
+        issue = CompileIssue(
+            code="invalid_text",
+            message=f"{part.name} holds a lone surrogate, which has no UTF-8 form",
+            part=0,
+        )
+        return CompileResult(build=None, issues=(issue,))
+    text = part.text
+    if len(text) > _MAX_PART_CHARS:
+        issue = CompileIssue(
+            code="too_large",
+            message=f"{part.name} is longer than {_MAX_PART_CHARS:,} characters",
+            part=0,
+        )
+        return CompileResult(build=None, issues=(issue,))
+    segments, _ = parse_part(text, "braces", part=0)
+    referenced = tuple(dict.fromkeys(s.name for s in segments if isinstance(s, VariableSegment)))
+    issues: list[CompileIssue] = []
+    declared: dict[str, VariableSpec] = {}
+    for variable in variables:
+        if variable.name in declared:
+            issues.append(
+                CompileIssue(
+                    code="duplicate_variable",
+                    message=f"variable {variable.name!r} is declared more than once",
+                    variable=variable.name,
+                )
+            )
+        declared[variable.name] = variable
+    for name in referenced:
+        spec = declared.get(name)
+        if spec is None:
+            at_line, at_col = _line_col(text, _first_use(text, "braces", name))
+            issues.append(
+                CompileIssue(
+                    code="undeclared_variable",
+                    message=f"{name} is used but not declared",
+                    part=0,
+                    line=at_line,
+                    column=at_col,
+                    variable=name,
+                )
+            )
+        elif spec.type != "string" or not spec.required:
+            issues.append(
+                CompileIssue(
+                    code="invalid_declaration",
+                    message=(
+                        f"{name} is a braces placeholder: the legacy runner substitutes str() "
+                        "of the row's value, so it is a required string"
+                    ),
+                    variable=name,
+                )
+            )
+    if not text:
+        issues.append(CompileIssue(code="empty_prompt", message="the prompt has no text"))
+    if issues:
+        return CompileResult(build=None, issues=tuple(issues), referenced=referenced)
+    build_variables = tuple(declared[name] for name in sorted(referenced))
+    merged = _merged(segments)
+    return CompileResult(
+        build=PromptBuild(
+            compiler_version=COMPILER_VERSION,
+            value_text="python_str",
+            segments=tuple(merged),
+            variables=build_variables,
+            parts=(
+                PartDigest(
+                    kind=part.kind,
+                    name=part.name,
+                    ref=part.ref,
+                    label=part.label,
+                    dialect="braces",
+                    sha256=_sha256(text),
+                ),
+            ),
+            source_map=(
+                SourceSpan(part=0, line_start=1, line_end=text.count("\n") + 1, part_line_start=1),
+            ),
+            hash=_content_hash(merged, build_variables, "python_str"),
+        ),
+        referenced=referenced,
+    )
+
+
+def render_braces(template: str, row: Mapping[str, Any], column_mapping: Mapping[str, str]) -> str:
+    """The legacy batch runner's substitution, the single implementation of it.
+
+    Each ``{name}`` whose ``column_mapping[name]`` is a column present in ``row`` becomes
+    ``str(row[col])``; anything else stays literal. A regex substitution, deliberately not
+    ``str.format`` (which reaches attributes and the format mini-language) and not a template
+    engine. Uncapped: the runner applies its own cap.
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        col = column_mapping.get(match.group(1))
+        if col is None or col not in row:
+            return match.group(0)
+        return str(row[col])
+
+    return _BRACES_RE.sub(_sub, template)
+
+
 # --- rendering -------------------------------------------------------------------------------
 
 
@@ -536,6 +710,19 @@ def _es_number(value: float) -> str:
     return sign + body
 
 
+#: The largest integer every host represents exactly (an IEEE double's 53-bit significand).
+MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _es_int(value: int) -> str:
+    """An integer's text, refused beyond +/-(2^53 - 1): past that a double-only host (ECMAScript)
+    cannot hold the value exactly, so no text form would be the same on every host."""
+    if abs(value) > MAX_SAFE_INTEGER:
+        msg = "integers beyond +/-(2^53 - 1) have no host-independent text; pass a string"
+        raise PromptRenderError(msg)
+    return str(value)
+
+
 def _canonical_json(value: object) -> str:
     """Compact JSON with sorted keys and ECMAScript number text: one form for every host."""
     if value is None:
@@ -543,7 +730,7 @@ def _canonical_json(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
-        return str(value)
+        return _es_int(value)
     if isinstance(value, float):
         return _es_number(value)
     if isinstance(value, str):
@@ -588,7 +775,7 @@ def value_text(variable: VariableSpec, value: object) -> str:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             msg = f"{variable.name} must be a number"
             raise PromptRenderError(msg)
-        return str(value) if isinstance(value, int) else _es_number(value)
+        return _es_int(value) if isinstance(value, int) else _es_number(value)
     if kind == "enum":
         if not isinstance(value, str) or value not in (variable.values or ()):
             msg = f"{variable.name} must be one of its declared values"
@@ -605,6 +792,14 @@ def render_build(build: PromptBuild, values: Mapping[str, object]) -> str:
     A variable with no value (absent or ``None``) is refused when required; an optional one
     renders its default, or nothing. Values for names the build does not declare are ignored.
     """
+    if build.value_text == "python_str":
+        missing = [v.name for v in build.variables if v.name not in values]
+        if missing:
+            msg = f"required variable {missing[0]} has no value"
+            raise PromptRenderError(msg)
+        # The legacy runner's own function, so a braces build renders exactly as it always did
+        # (a null cell is "None", a float "1e-07", a list its Python repr).
+        return render_braces(build.template, values, {v.name: v.name for v in build.variables})
     rendered: dict[str, str] = {}
     for variable in build.variables:
         value = values.get(variable.name)

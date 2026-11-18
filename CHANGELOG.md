@@ -15,9 +15,11 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   instructions; `strata` `{{ name }}` or legacy `braces` `{name}` dialect) plus typed variable
   declarations into a `PromptBuild` with a SHA-256 content hash, a source map and compiler errors
   (unsupported expressions, unclosed or block tags, undeclared or duplicate variables); a build
-  re-checks its hash when constructed. `render_build` and `bind_row` render a build with typed,
-  host-independent value text. Shared vectors for ports live in
-  `tests/fixtures/prompt_build_vectors.json`.
+  re-checks its hash (and that its source map describes it) when constructed. `render_build` and
+  `bind_row` render a build with typed, host-independent value text (integers beyond 2^53 are
+  refused). A `braces` build is the legacy runner template byte for byte and renders through
+  `render_braces`, which the runner's `render_template` now calls too. Shared vectors for ports
+  live in `tests/fixtures/prompt_build_vectors.json`.
 
 ## [0.8.0] - 2026-11-18
 

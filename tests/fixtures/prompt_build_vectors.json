@@ -40,6 +40,7 @@
    "build": {
     "format": "strata.prompt-build/1",
     "compiler_version": "1.0.0",
+    "value_text": "canonical",
     "segments": [
      {
       "kind": "text",
@@ -115,7 +116,7 @@
       "part_line_start": 1
      }
     ],
-    "hash": "759f0ebb2fdb4e21720dfc3e8c8911dd423ce920804a558502e9bafd59a4b060"
+    "hash": "a44d95da8dfb6092a37d41e75db669d53028beb4088138932d5648d6bd231658"
    },
    "template": "Be {{ tone }}.\nUse {x} braces.\n\nQ: {{ question }}\nA:",
    "renders": [
@@ -170,6 +171,7 @@
    "build": {
     "format": "strata.prompt-build/1",
     "compiler_version": "1.0.0",
+    "value_text": "python_str",
     "segments": [
      {
       "kind": "text",
@@ -240,9 +242,9 @@
       "part_line_start": 1
      }
     ],
-    "hash": "f47ef5d1da93795fa3b54c4c4a6426428f936b932e65cd5680dcd61fed8720ca"
+    "hash": "2e726132e3702436ec1eaa23358df0dace154d335665bf7754d95ebb09a420c3"
    },
-   "template": "{{{ question }}} -> {{ 0 }}, {not valid} {{ a_b }}",
+   "template": "{{question}} -> {0}, {not valid} {a_b}",
    "renders": [
     {
      "values": {
@@ -300,6 +302,7 @@
    "build": {
     "format": "strata.prompt-build/1",
     "compiler_version": "1.0.0",
+    "value_text": "canonical",
     "segments": [
      {
       "kind": "text",
@@ -418,7 +421,7 @@
       "part_line_start": 1
      }
     ],
-    "hash": "2a044fde05aeb602c78c56e16207c9d328c666bff85949609930b4672685e051"
+    "hash": "8c8f3ee51abe93ed9f6d6ac05502f04386f072923b808a9fb2755779d045c83a"
    },
    "template": "n={{ n }} f={{ f }} b={{ b }} j={{ j }} s={{ s }} o={{ o }}",
    "renders": [
@@ -497,6 +500,7 @@
    "build": {
     "format": "strata.prompt-build/1",
     "compiler_version": "1.0.0",
+    "value_text": "canonical",
     "segments": [
      {
       "kind": "text",
@@ -535,7 +539,7 @@
       "part_line_start": 1
      }
     ],
-    "hash": "475b6d97aa5610245cd4723a68b85cef5075272d2d2e8aa1f84c8e056524d057"
+    "hash": "f15f7506ddfa3741cb392a84be2ff4093e1d2eee2ad5f2c2f8957c763c2e22d6"
    },
    "template": "Café {{ x }}",
    "renders": [
@@ -612,6 +616,7 @@
    "build": {
     "format": "strata.prompt-build/1",
     "compiler_version": "1.0.0",
+    "value_text": "canonical",
     "segments": [
      {
       "kind": "text",
@@ -658,7 +663,7 @@
       "part_line_start": 1
      }
     ],
-    "hash": "8761f162cfbabf1e0d53a5a1cfbc665058f29ee40e916f68d0d6afe01811ca27"
+    "hash": "441891c49bf2bdd1a4859690a4ce678fb7e268c9f9448d0115511fc9ea1aaad0"
    },
    "template": "only {{ x }}",
    "renders": [
