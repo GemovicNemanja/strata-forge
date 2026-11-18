@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import sys
+import types
+from typing import Any, ClassVar
 
 import pytest
 
@@ -145,3 +147,77 @@ def test_a_legacy_template_run_records_no_build(monkeypatch: pytest.MonkeyPatch)
     manifest = ir._build_manifest(_load(monkeypatch, spec), [], None)  # pyright: ignore[reportPrivateUsage]
     assert manifest["prompt"] is None
     assert manifest["template_sha256"] is not None
+
+
+_SYSTEM = _build(
+    "You are a {{ persona }} assistant.",
+    VariableSpec(name="persona", type="enum", values=("support",)),
+)
+
+
+def _with_system(**overrides: Any) -> dict[str, Any]:
+    spec = _spec(**overrides)
+    spec["system_prompt"] = {
+        "build_id": "s1",
+        "build": _SYSTEM.model_dump(mode="json"),
+        "bindings": {"persona": {"value": "support"}},
+    }
+    return spec
+
+
+def test_a_system_build_leads_the_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = _load(monkeypatch, _with_system())
+    prompts, _ = ir._build_requests(spec, [{"q": "why?"}])  # pyright: ignore[reportPrivateUsage]
+    assert [m.role for m in prompts[0]] == ["system", "user"]
+    assert prompts[0][0].content == "You are a support assistant."
+    assert prompts[0][1].content == "Answer why? in a brief way."
+
+
+def test_a_system_build_beside_a_legacy_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = _with_system(template="Answer {q}", column_mapping={"q": "q"})
+    del spec["prompt"]
+    prompts, _ = ir._build_requests(_load(monkeypatch, spec), [{"q": "x"}])  # pyright: ignore[reportPrivateUsage]
+    assert [m.content for m in prompts[0]] == ["You are a support assistant.", "Answer x"]
+
+
+def test_system_bindings_are_checked_like_the_user_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = _with_system()
+    spec["system_prompt"]["bindings"] = {}
+    with pytest.raises(RunError, match=r"required system prompt variables have no binding"):
+        _load(monkeypatch, spec)
+    spec = _with_system()
+    spec["system_prompt"]["bindings"]["persona"] = {"column": "missing"}
+    with pytest.raises(RunError, match="not in the split"):
+        _check_columns(monkeypatch, _load(monkeypatch, spec))
+
+
+def _check_columns(monkeypatch: pytest.MonkeyPatch, spec: ir.RunSpec) -> None:
+    class _Dataset:
+        column_names: ClassVar[list[str]] = ["q"]
+
+        def __iter__(self) -> Any:
+            return iter([{"q": "x"}])
+
+    def load_dataset(*_a: object, **_k: object) -> _Dataset:
+        return _Dataset()
+
+    fake = types.SimpleNamespace(load_dataset=load_dataset)
+    monkeypatch.setitem(sys.modules, "datasets", fake)
+    ir._load_rows(spec, False)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_system_build_needs_the_chat_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = _with_system(
+        template="{h}",
+        column_mapping={"h": "h"},
+        hyperparams={"engine": "hf_classify", "pair_template": "{h}", "label_alias": {"a": "a"}},
+    )
+    del spec["prompt"]
+    with pytest.raises(RunError):
+        _load(monkeypatch, spec)
+
+
+def test_the_manifest_records_the_system_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest = ir._build_manifest(_load(monkeypatch, _with_system()), [], None)  # pyright: ignore[reportPrivateUsage]
+    assert manifest["system_prompt"]["build_hash"] == _SYSTEM.hash
+    assert manifest["system_prompt"]["bindings"]["persona"] == {"fixed": True}

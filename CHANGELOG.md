@@ -26,6 +26,9 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   one of the two is set. An altered build, an unbound required variable, a binding to an unknown
   variable or a missing column, and any row that cannot render fail the run before a request is
   sent. The manifest records the build id, hash, compiler version and bindings as `prompt`.
+- `RunSpec.system_prompt` (a `PromptSpec`, chat engine only) renders a system message per row from
+  its own pinned build, sent before the user message from `template` or `prompt`; checked and
+  recorded in the manifest (`system_prompt`) the same way.
 
 ## [0.8.0] - 2026-11-18
 
