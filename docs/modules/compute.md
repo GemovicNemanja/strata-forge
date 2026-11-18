@@ -365,6 +365,49 @@ never holds one run's results beside another run's manifest. The check
 creates a missing repo private, so a run that fails afterwards can leave an
 empty private repo behind.
 
+### Guided JSON (`guided_json`)
+
+``Hyperparams.guided_json`` is ONE JSON Schema for every reply of a chat
+run. It is sent with every request as vLLM's structured-output constraint,
+``extra_body: {"structured_outputs": {"json": <schema>}}`` (the request
+field vLLM has taken since it removed ``guided_json`` in 0.12; the locked
+0.27.1's ``ChatCompletionRequest.structured_outputs`` /
+``StructuredOutputsParams.json``), so decoding can only produce text the
+schema's grammar admits. Every reply is still validated, because the
+constraint is not the whole schema: a reply cut off at ``max_tokens`` is
+not JSON at all, and a grammar backend does not enforce every keyword.
+
+At spec load the schema must be a non-empty JSON object nested at most 32
+levels deep (found iteratively, before anything recursive walks it, so a
+deeper schema is a spec error rather than a ``RecursionError``), of at most
+16 KiB (canonical UTF-8 JSON), a valid schema for the draft its ``$schema`` names
+(2020-12 when it names none), and every ``$ref`` / ``$dynamicRef`` /
+``$recursiveRef`` in it must point inside it (``#…``). ``jsonschema`` still
+retrieves a remote reference by default, so the validator is also built
+with an empty ``referencing.Registry`` and fetches nothing either way.
+
+A reply that fails validation (not JSON, ``NaN``/``Infinity``, or a schema
+violation) gets exactly ONE repair turn: the original conversation, the
+invalid reply as the assistant turn, and the fixed message
+``Your previous reply does not satisfy the required JSON schema: {error}``
+``Reply again with only the corrected JSON.``, under the same constraint
+and sampling settings. The repaired reply becomes ``output``; tokens and
+latency are the sum of both attempts; a repair request that fails keeps
+the first reply. A row whose request failed is not repaired. A reply nested more than 64 levels deep is
+recorded invalid without being validated, and anything the validator raises
+on one reply marks only that row invalid: one reply never ends the run.
+
+Guided rows add ``json_valid`` (``None`` for a row with no reply),
+``json_retried`` and ``json_error`` (the final validation error, at most
+300 characters plus its JSON pointer, scrubbed like ``error``). Progress
+and ``end`` metrics add ``json_invalid`` and ``json_retried``. The manifest
+gains a ``guided`` block (``kind: json``, ``schema_sha256`` over canonical
+JSON, ``constraint: structured_outputs.json``, the ``validator`` draft
+class, ``max_repairs: 1``, ``repair_prompt_sha256``) and ``counts`` gains
+``json_valid``, ``json_invalid``, ``json_retried`` and ``json_repaired``.
+An unguided run's manifest has ``guided: null`` and its rows have none of
+these columns.
+
 ### Classifier scoring (`hf_classify`)
 
 ``Hyperparams.engine`` chooses what an inference run does with each row:

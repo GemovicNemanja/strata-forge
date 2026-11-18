@@ -18,6 +18,8 @@ It constructs, offline, everything a run constructs before it loads weights:
 - the ``hf_label_logits`` engine on a tiny causal LM with a chat template, against a direct
   forward pass of each rendered prompt, and its refusals (a multi-token label, a kwarg the
   template never reads);
+- the guided-JSON schema check and reply validator on the installed ``jsonschema``, with a remote
+  reference refused and never fetched;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -297,6 +299,45 @@ def check_scoring() -> None:
         for actual, expected in zip(output[0], (0.25, 0.75), strict=True)
     ):
         raise SmokeError("temperature application changed")
+
+
+def check_guided_json() -> None:
+    """The guided-JSON checks on the installed ``jsonschema``: schema, replies, no fetching."""
+    import urllib.request
+
+    from strata_forge.pipelines import _guided
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"verdict": {"$ref": "#/$defs/verdict"}},
+        "required": ["verdict"],
+        "$defs": {"verdict": {"enum": ["yes", "no"]}},
+    }
+    if _guided.schema_problem(schema) is not None:
+        msg = f"a valid schema was refused: {_guided.schema_problem(schema)}"
+        raise SmokeError(msg)
+    if _guided.schema_problem({"$ref": "https://example.com/s.json"}) is None:
+        msg = "a schema referencing a remote document was accepted"
+        raise SmokeError(msg)
+    validator = _guided.OutputValidator(schema)
+    if (
+        validator.error('{"verdict": "yes"}') is not None
+        or validator.error('{"verdict": 1}') is None
+    ):
+        msg = "the reply validator does not apply the schema"
+        raise SmokeError(msg)
+    opened: list[object] = []
+    real = urllib.request.urlopen
+    urllib.request.urlopen = lambda *a, **k: opened.append(a)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType]
+    try:
+        remote = _guided.OutputValidator({"$ref": "https://example.com/s.json"})
+        with contextlib.suppress(Exception):
+            remote.error("{}")
+    finally:
+        urllib.request.urlopen = real
+    if opened:
+        msg = "validating a reply fetched a remote schema reference"
+        raise SmokeError(msg)
 
 
 def check_cli() -> None:
@@ -908,6 +949,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
         ("installed distribution", check_install),
         ("top-level module imports", check_module_imports),
         ("cli --help", check_cli),
+        ("guided json validates replies offline", check_guided_json),
     ]
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))

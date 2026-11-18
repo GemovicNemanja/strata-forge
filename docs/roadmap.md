@@ -541,7 +541,9 @@ raw logits per label, over-long pairs dropped and counted rather than
 truncated; and reads declared single-token label logits from a causal LM
 after its chat template, with an assistant prefill and template kwargs
 (`engine="hf_label_logits"`), reporting the probability mass outside the
-labels. Reference doc:
+labels. Chat runs can constrain every reply to one JSON Schema
+(`guided_json`, vLLM structured outputs) with a single validated repair
+turn and per-row validity in the results. Reference doc:
 [`docs/modules/compute.md`](modules/compute.md).
 
 `strata_forge.training` ships fine-tuning primitives: `SFTConfig` /
