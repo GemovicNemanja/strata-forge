@@ -261,9 +261,15 @@ It needs NumPy from `[scoring]`, imported only when a function runs.
   (bool refused); `resamples` is at least one and at most 1,000,000, default 10,000.
 - **Arithmetic.** Each cluster's confusion cells are counted once; a block of resamples multiplies
   its cluster multiplicities by that table in float64, exact for integer counts below 2**53 in any
-  summation order. Each resample's metrics use `classification_report`'s definitions (absent
-  classes contribute F1 zero) in float64, equal to the point arithmetic within `1e-12`. Every
-  resample has at least one row, so no resample is undefined.
+  summation order. Each resample's metrics use `classification_report`'s definitions in float64,
+  equal to the point arithmetic within `1e-12`, with one exception: a resample in which a
+  declared class has neither gold rows nor predictions has NO macro-F1. It is counted in the
+  interval's `undefined_resamples`, never dropped silently and never scored as zero, and the
+  quantiles are taken over the defined resamples; when none is defined the bounds are null with
+  `reason="all_resamples_undefined"`. A paired delta is undefined where either side is. Accuracy
+  and invalid rate are always defined (every resample has rows). The point value keeps
+  `classification_report`'s convention; the evaluation runner lists a slice's absent classes.
+- **One-sided bounds.** A one-sided 97.5% bound is the matching end of the two-sided 95% interval.
 - **Pairing.** `paired_cluster_bootstrap` scores both systems on every resample and differences
   them per resample (candidate minus baseline) before taking quantiles, so the delta interval
   reflects the pairing. Its per-system intervals equal `cluster_bootstrap`'s for the same seed.

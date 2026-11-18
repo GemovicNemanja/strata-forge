@@ -15,6 +15,7 @@ from strata_forge.metrics.cluster_bootstrap import (
     CLUSTER_BOOTSTRAP_RESAMPLES,
     CLUSTER_BOOTSTRAP_VERSION,
     ClusterBootstrap,
+    MetricInterval,
     PairedClusterBootstrap,
     cluster_bootstrap,
     paired_cluster_bootstrap,
@@ -47,6 +48,12 @@ def _population(
             base.append(label if b_ok else (None if rng.random() < 0.1 else wrong))
             cand.append(label if (b_ok or rng.random() < 0.4) else wrong)
     return gold, base, cand, keys
+
+
+def _bounds(interval: MetricInterval) -> tuple[float, float]:
+    assert interval.lower is not None
+    assert interval.upper is not None
+    return interval.lower, interval.upper
 
 
 def _type7(values: Sequence[float], probability: Fraction) -> float:
@@ -176,7 +183,7 @@ def test_clustering_widens_the_interval_for_correlated_rows() -> None:
     )
 
     def width(result: ClusterBootstrap) -> float:
-        return result.intervals.accuracy.upper - result.intervals.accuracy.lower
+        return _bounds(result.intervals.accuracy)[1] - _bounds(result.intervals.accuracy)[0]
 
     assert width(clustered) > 1.5 * width(items)
 
@@ -192,11 +199,12 @@ def test_paired_delta_is_narrower_than_marginal_differences() -> None:
     assert delta.point == pytest.approx(
         paired.candidate.accuracy.point - paired.baseline.accuracy.point
     )
-    marginal = (paired.candidate.accuracy.upper - paired.baseline.accuracy.lower) - (
-        paired.candidate.accuracy.lower - paired.baseline.accuracy.upper
-    )
-    assert delta.upper - delta.lower < marginal / 2
-    assert delta.lower > 0  # the candidate only ever fixes baseline errors
+    cand_lo, cand_hi = _bounds(paired.candidate.accuracy)
+    base_lo, base_hi = _bounds(paired.baseline.accuracy)
+    delta_lo, delta_hi = _bounds(delta)
+    marginal = (cand_hi - base_lo) - (cand_lo - base_hi)
+    assert delta_hi - delta_lo < marginal / 2
+    assert delta_lo > 0  # the candidate only ever fixes baseline errors
     assert PairedClusterBootstrap.model_validate_json(paired.model_dump_json()) == paired
 
 
@@ -209,16 +217,40 @@ def test_identical_systems_have_a_zero_delta() -> None:
         assert (interval.point, interval.lower, interval.upper) == (0.0, 0.0, 0.0)
 
 
-def test_absent_class_contributes_zero_f1_in_every_resample() -> None:
+def test_a_class_absent_from_both_sides_leaves_macro_f1_undefined() -> None:
     gold = ["E", "E", "C", "C"]
     pred = ["E", "E", "C", "C"]
     result = cluster_bootstrap(
         gold, pred, labels=LABELS, clusters=["a", "a", "b", "b"], seed=1, resamples=50
     )
-    # U is declared but absent: every resample scores at most two of three classes perfect.
-    assert result.intervals.macro_f1.point == pytest.approx(2 / 3)
-    assert result.intervals.macro_f1.upper == pytest.approx(2 / 3)
-    assert result.intervals.macro_f1.lower == pytest.approx(1 / 3)
+    # U is declared but absent everywhere: no resample has a macro-F1, and none is scored zero.
+    macro = result.intervals.macro_f1
+    assert (macro.lower, macro.upper, macro.reason) == (None, None, "all_resamples_undefined")
+    assert macro.undefined_resamples == 50
+    assert result.intervals.accuracy.undefined_resamples == 0
+
+
+def test_undefined_resamples_are_counted_not_zeroed() -> None:
+    gold = ["E", "C", "U", "U"]
+    pred = ["E", "C", "U", "E"]
+    keys = ["a", "b", "c", "d"]
+    resamples = 400
+    result = cluster_bootstrap(
+        gold, pred, labels=LABELS, clusters=keys, seed=SEED, resamples=resamples
+    )
+    draws = np.random.Generator(np.random.PCG64(SEED)).integers(0, 4, size=(resamples, 4)).tolist()
+    expected_undefined = 0
+    defined: list[float] = []
+    for row in draws:
+        g = [gold[i] for i in row]
+        p = [pred[i] for i in row]
+        if any(label not in g and label not in p for label in LABELS):
+            expected_undefined += 1
+        else:
+            defined.append(classification_report(g, p, labels=LABELS).macro_f1.value or 0.0)
+    macro = result.intervals.macro_f1
+    assert macro.undefined_resamples == expected_undefined > 0
+    assert macro.lower == pytest.approx(_type7(defined, Fraction(1, 40)), abs=1e-12)
 
 
 @pytest.mark.parametrize(
@@ -266,8 +298,10 @@ def test_golden_bounds_pin_the_numpy_stream() -> None:
         gold, base, cand, labels=LABELS, clusters=keys, seed=SEED, resamples=1000
     )
     assert result.baseline.macro_f1.lower == 0.42735042735042733
-    assert result.baseline.macro_f1.upper == 0.8681746031746033
-    assert result.delta.macro_f1.lower == -0.16718915343915342
-    assert result.delta.macro_f1.upper == 0.4446296296296297
+    assert result.baseline.macro_f1.upper == 0.8690740740740741
+    assert result.baseline.macro_f1.undefined_resamples == 2
+    assert result.delta.macro_f1.lower == -0.1662037037037037
+    assert result.delta.macro_f1.upper == 0.4453703703703704
+    assert result.delta.macro_f1.undefined_resamples == 4
     assert result.delta.accuracy.lower == -0.16666666666666674
     assert result.delta.accuracy.upper == 0.41666666666666663

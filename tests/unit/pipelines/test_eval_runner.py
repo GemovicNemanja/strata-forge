@@ -265,12 +265,25 @@ async def test_missing_overflow_and_unknown_predictions_count_as_wrong(
     report = json.loads((_outdir(env) / "metrics.json").read_text())
     counts = report["systems"][0]["counts"]
     assert counts == {"scored": 60, "missing": 1, "invalid": 2, "overflow": 1, "unmatched": 1}
-    overall = report["slices"][0]["systems"]["candidate"]
-    assert overall["accuracy"]["point"] == pytest.approx(56 / 60)
-    assert overall["invalid_rate"]["point"] == pytest.approx(4 / 60)
+    slice0 = report["slices"][0]
+    # The overflowed row leaves the SHARED population; missing and failed rows never leave it.
+    assert (slice0["n"], slice0["n_tier"], slice0["overflow_excluded"]) == (59, 60, 1)
+    assert slice0["overflow_share"] == pytest.approx(1 / 60)
+    overall = slice0["systems"]["candidate"]
+    assert overall["accuracy"]["point"] == pytest.approx(56 / 59)
+    assert overall["invalid_rate"]["point"] == pytest.approx(3 / 59)
+    # The full-tier secondary read counts the system's own overflow as invalid.
+    assert overall["full_tier"]["accuracy"]["point"] == pytest.approx(56 / 60)
+    assert overall["full_tier"]["invalid_rate"]["point"] == pytest.approx(4 / 60)
     items = pq.read_table(str(_outdir(env) / "items.parquet")).to_pylist()
     assert items[0]["pred__candidate"] is None
     assert items[0]["correct__candidate"] is False
+    assert [items[i]["status__candidate"] for i in range(4)] == [
+        "missing",
+        "missing",
+        "overflow",
+        "missing",
+    ]
     assert "premises" not in items[0]
 
 
@@ -385,6 +398,14 @@ async def test_malformed_inputs_refuse(
         ({"evaluation": _settings(gold_aliases={"x": "maybe"})}, "undeclared labels"),
         ({"evaluation": _settings(labels=["a", "a"])}, "unique"),
         ({"evaluation": _settings(seed=-1)}, "seed"),
+        (
+            {"evaluation": _settings(tier_rule={"default": {"max_premises": 20}})},
+            "needs a premises_column",
+        ),
+        (
+            {"evaluation": _settings(tier_rule={"default": {"max_tokens": 9}})},
+            "needs a token_column",
+        ),
         ({"evaluation": {**_settings(), "sealed": True}}, "sealed"),
     ],
 )
@@ -434,3 +455,79 @@ async def test_public_output_repo_refuses_before_reading(
     assert code == 1
     assert "is public" in events[-1]["message"]
     assert env["load_calls"] == []
+
+
+async def test_a_tier_rule_refuses_rows_for_every_system(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["premises"] = [["p"] * (25 if i < 5 else 3) for i in range(60)]
+    env["gold"]["tokens"] = [3000 if i == 10 else 100 for i in range(60)]
+    rule = {
+        "tier_column": "tier",
+        "limits": {"hard": {"max_premises": 20}},
+        "default": {"max_premises": 20, "max_tokens": 2048},
+        "token_column": "tokens",
+    }
+    spec = _spec(evaluation=_settings(premises_column="premises", tier_rule=rule))
+    code, events = await _run(monkeypatch, env, spec)
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["population"]["tier_refused"] == 6
+    assert report["slices"][0]["n_tier"] == 54
+    assert all(system["counts"]["scored"] == 54 for system in report["systems"])
+    items = pq.read_table(str(_outdir(env) / "items.parquet")).to_pylist()
+    assert items[0]["status__baseline"] == "tier_refused"
+    assert items[0]["correct__candidate"] is None
+
+
+async def test_rows_without_a_cluster_cluster_on_their_premises(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["base_problem_id"] = [None] * 60
+    env["gold"]["premises"] = [
+        [{"pid": "p1", "text": f"fact  {i // 4}"}, {"pid": "p2", "text": "rule"}] for i in range(60)
+    ]
+    spec = _spec(evaluation=_settings(premises_column="premises"))
+    code, _ = await _run(monkeypatch, env, spec)
+    assert code == 0
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    assert report["slices"][0]["clusters"] == 15
+    items = pq.read_table(str(_outdir(env) / "items.parquet")).to_pylist()
+    assert items[0]["cluster"] == er.premise_cluster_key(["rule", "fact 0"])
+
+
+def test_the_premise_key_normalises_order_spacing_and_form() -> None:
+    import hashlib
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFD", "café")
+    key = er.premise_cluster_key([{"pid": "p2", "text": f"  {decomposed}\n"}, "a  b"])
+    assert key == er.premise_cluster_key(["a b", "café"])
+    expected = hashlib.sha256('["a b","café"]'.encode()).hexdigest()
+    assert key == f"premises:sha256:{expected}"
+    assert er.premise_cluster_key(["A"]) != er.premise_cluster_key(["a"])
+
+
+async def test_comparisons_report_the_paired_discordance_rate(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    (comparison,) = report["slices"][0]["comparisons"]
+    gold, cand, base = env["gold"]["label"], env["cand"]["pred"], env["base"]["pred"]
+    b = sum(1 for g, c, x in zip(gold, cand, base, strict=True) if x == g and c != g)
+    c = sum(1 for g, cc, x in zip(gold, cand, base, strict=True) if cc == g and x != g)
+    assert comparison["discordance"] == {
+        "n": 60,
+        "baseline_only_correct": b,
+        "candidate_only_correct": c,
+        "p_d": (b + c) / 60,
+    }
+    manifest = json.loads((_outdir(env) / "manifest.json").read_text())
+    bootstrap = manifest["bootstrap"]
+    assert bootstrap["bootstrap_version"] == "cluster-percentile-bootstrap-v1"
+    assert bootstrap["clusters"] == 20
+    assert bootstrap["numpy_version"]
+    macro = report["slices"][0]["systems"]["candidate"]["macro_f1"]
+    assert "undefined_resamples" in macro

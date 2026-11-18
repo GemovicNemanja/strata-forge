@@ -613,25 +613,53 @@ submission with):
   ``seed``, ``resamples`` (default 10,000) and ``min_slice_rows`` (default 500).
 
 Every read is pinned, so a run reads only data it was explicitly pointed at,
-and only the declared gold columns are materialised. A gold item with no
-prediction, a null or unmapped prediction, or an overflowed row is an invalid
-prediction (wrong, and in the gold class's support); a prediction id with no
-gold item is counted and ignored; a repeated id refuses. Rows the gold split
-flags in ``exclude_column`` leave every system's population, so paired systems
-always share one.
+and only the declared gold columns are materialised. Every row has a status per
+system (``status__<name>`` in ``items.parquet``):
+
+- ``tier_refused``: over the ``tier_rule`` limit for its tier
+  (``limits[<tier_column value>]``, else ``default``; ``max_premises`` counts the
+  ``premises_column`` list, ``max_tokens`` reads the gold ``token_column``), and
+  ``excluded``: flagged in ``exclude_column``. Both are common to every system,
+  left out of every population and counted in ``population``.
+- ``overflow``: the system's ``overflow_column`` is true.
+- ``missing``: no prediction, a null one, or a value outside the label space. A
+  missing row is always invalid (a false negative for its gold class, no false
+  positive) and is never excluded.
+- ``ok`` otherwise. A prediction id with no gold item is counted and ignored; a
+  repeated id refuses.
+
+The primary read is over the **shared** population, the rows no system
+overflowed, so every system and comparison is read on the same rows; each slice
+reports ``n`` (shared), ``n_tier``, ``overflow_excluded`` and ``overflow_share``.
+Each system also gets a ``full_tier`` secondary read over every non-refused row,
+its own overflow counted as invalid. A slice lists ``absent_classes`` (declared
+labels with no gold row and no prediction in it).
+
+The cluster is ``cluster_column``. A row without one (or every row, when only
+``premises_column`` is declared) clusters on ``premise_cluster_key`` of its
+premises: each premise text (a string, or the ``text`` of a ``{pid, text}``
+object) NFC-normalised with whitespace runs collapsed and ends stripped, the
+texts sorted, encoded as a compact UTF-8 JSON array, and hashed with SHA-256
+(``premises:sha256:<hex>``); case is kept. Without either, each item is its own
+cluster. A slice resamples only the clusters present in it.
 
 The overall population and each slice get accuracy, macro-F1 and invalid rate
 per system with the [cluster percentile
 bootstrap](metrics.md#cluster-percentile-bootstrap), and a paired
-candidate-minus-baseline delta per baseline. A slice under ``min_slice_rows``
-rows is reported with ``diagnostic: true``. The outputs are ``items.parquet``
+candidate-minus-baseline delta per baseline with its paired discordance rate
+(``discordance``: ``baseline_only_correct``, ``candidate_only_correct``,
+``p_d`` = their sum over ``n``). A slice whose shared population is under
+``min_slice_rows`` rows is reported with ``diagnostic: true``. An interval
+records ``undefined_resamples`` (see the metrics reference); a one-sided bound is
+the matching end of the two-sided interval. The outputs are ``items.parquet``
 (per gold item: id, gold, cluster, ``excluded``, ``slice__<column>``, and per
 system ``pred__<name>`` and ``correct__<name>``), ``metrics.json`` (schema
 ``strata.eval.report/v1``: the systems with their join counts, the population,
 and one entry per slice with ``n``, ``clusters``, ``diagnostic``, per-system
 intervals, the overall per-class scores and confusion, and the comparisons),
 ``manifest.json`` (``kind`` ``evaluation``: the pinned inputs, settings,
-engine and counts) and a dataset card whose ``configs:`` points the Hub viewer
+engine, counts, and the overall read's ``bootstrap`` contract id, NumPy version,
+seed, resamples and cluster count) and a dataset card whose ``configs:`` points the Hub viewer
 at ``items.parquet``. They are pushed in one commit to a private output dataset
 repo, refused when public, or kept on the machine under
 ``~/strata-eval-results/<run_id>``. The ``end`` event carries the candidate's

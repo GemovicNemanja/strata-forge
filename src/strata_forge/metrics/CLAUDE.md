@@ -36,7 +36,9 @@ This is a pure deterministic numerical leaf. Read
   research pre-registration's metric engine, relayed by the platform coordinator on 2026-11-18):
   whole caller-declared clusters resampled with replacement, clusters ordered by sorted string key,
   `Generator(PCG64(seed))` with the stream of one C-order `(resamples, C)` draw in consecutive row
-  blocks, caller-supplied count (default 10,000), classification_report definitions per resample,
+  blocks, caller-supplied count (default 10,000), classification_report definitions per resample
+  (a resample with a declared class absent from gold and predictions has no macro-F1: counted in
+  `undefined_resamples`, never dropped silently or zeroed),
   paired systems scored on the same resample and differenced before the quantiles, Hyndman-Fan
   type 7 quantiles at exact rational positions, confidence fixed at 0.95. The same versioning
   rule applies. No other bootstrap, and no inference of independence from cluster-repeated

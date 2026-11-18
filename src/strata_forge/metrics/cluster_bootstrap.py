@@ -75,15 +75,26 @@ class ClusterBootstrapSettings(_Frozen):
 
 
 class MetricInterval(_Frozen):
-    """A full-sample point value and its percentile bounds over the resamples."""
+    """A full-sample point value and its percentile bounds over the defined resamples.
+
+    A resample whose metric is undefined (macro-F1 when a declared class has neither gold rows
+    nor predictions in it) is counted in ``undefined_resamples`` and left out of the quantiles;
+    it is never dropped silently or scored as zero. When every resample is undefined the bounds
+    are null with a reason. A one-sided 97.5% bound is the matching end of this interval.
+    """
 
     point: float = Field(allow_inf_nan=False)
-    lower: float = Field(allow_inf_nan=False)
-    upper: float = Field(allow_inf_nan=False)
+    lower: float | None = Field(allow_inf_nan=False)
+    upper: float | None = Field(allow_inf_nan=False)
+    undefined_resamples: int = Field(default=0, ge=0)
+    reason: Literal["all_resamples_undefined"] | None = None
 
     @model_validator(mode="after")
     def _ordered(self) -> MetricInterval:
-        if self.lower > self.upper:
+        if self.lower is None or self.upper is None:
+            if self.lower is not None or self.upper is not None or self.reason is None:
+                raise ValueError("cluster_bootstrap_invalid")
+        elif self.lower > self.upper or self.reason is not None:
             raise ValueError("cluster_bootstrap_invalid")
         return self
 
@@ -189,8 +200,9 @@ def _metrics(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Accuracy, macro-F1 and invalid rate per resample, from ``(R, K*K + K)`` cell counts.
 
-    The definitions of ``classification_report``: invalid outputs stay in gold support, and a
-    class with no support and no predictions contributes F1 zero.
+    The definitions of ``classification_report`` (invalid outputs stay in gold support), except
+    that a resample in which a declared class has neither support nor predictions has no
+    macro-F1: it is NaN here and counted as undefined, never scored as zero.
     """
     import numpy as np
 
@@ -200,7 +212,8 @@ def _metrics(
     tp = np.diagonal(matrix, axis1=1, axis2=2)
     denominator = matrix.sum(axis=2) + invalid + matrix.sum(axis=1)
     f1 = np.divide(2 * tp, denominator, out=np.zeros_like(tp), where=denominator > 0)
-    return tp.sum(axis=1) / n, f1.sum(axis=1) / size, invalid.sum(axis=1) / n
+    macro = np.where((denominator > 0).all(axis=1), f1.sum(axis=1) / size, np.nan)
+    return tp.sum(axis=1) / n, macro, invalid.sum(axis=1) / n
 
 
 def _resampled(
@@ -233,10 +246,22 @@ def _percentile(values: Sequence[float], probability: Fraction) -> float:
 
 
 def _interval(point: float, values: list[float]) -> MetricInterval:
-    ordered = sorted(values)
+    ordered = sorted(value for value in values if not math.isnan(value))
+    undefined = len(values) - len(ordered)
+    if not ordered:
+        return MetricInterval(
+            point=point,
+            lower=None,
+            upper=None,
+            undefined_resamples=undefined,
+            reason="all_resamples_undefined",
+        )
     tail = (1 - Fraction(str(CLUSTER_BOOTSTRAP_CONFIDENCE))) / 2
     return MetricInterval(
-        point=point, lower=_percentile(ordered, tail), upper=_percentile(ordered, 1 - tail)
+        point=point,
+        lower=_percentile(ordered, tail),
+        upper=_percentile(ordered, 1 - tail),
+        undefined_resamples=undefined,
     )
 
 

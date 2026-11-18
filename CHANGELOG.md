@@ -21,6 +21,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   deltas, marks slices under `min_slice_rows` diagnostic, and pushes `items.parquet`,
   `metrics.json`, `manifest.json` and a dataset card to a private repo in one commit (or keeps
   them on the machine). `EvalSpec` / `EvalSettings` / `PredictionSource` are its spec models.
+  Every row has a status (`ok` / `tier_refused` / `excluded` / `overflow` / `missing`): a
+  declared `tier_rule` refuses rows for every system, the primary read is over the rows no system
+  overflowed with each system's full-tier read beside it, missing rows are always invalid,
+  comparisons report the paired discordance rate `p_d`, rows without a cluster cluster on the
+  SHA-256 of their normalised premises, and the manifest records the bootstrap contract.
+  Resamples where macro-F1 is undefined are counted, never zeroed.
 - The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
 
 ### Changed

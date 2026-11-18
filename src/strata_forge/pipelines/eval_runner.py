@@ -15,14 +15,21 @@ The rules the report follows:
 - Every read is pinned. The gold split and every prediction file name a full commit id; a branch
   or tag is refused because what it names can change, so a run cannot read data it was not
   explicitly pointed at.
-- A gold item with no prediction, a null prediction, a value outside the label space, or a row
-  its source flags as overflowed counts as an INVALID prediction: wrong, and in the gold class's
-  support. A prediction id with no gold item is counted and ignored. Duplicate ids refuse.
-- Rows the gold split itself flags in ``exclude_column`` are excluded from every system and
-  counted, so paired systems always share one population.
+- Every row gets a status per system: ``ok``; ``tier_refused`` (over the declared tier rule's
+  premise or token cap) or ``excluded`` (flagged in ``exclude_column``), both common to every
+  system and left out of every population; ``overflow`` (the system could not score it); or
+  ``missing`` (no prediction, a null one, or a value outside the label space). A missing row is
+  always INVALID: wrong, a false negative for its gold class and no false positive; it is never
+  excluded. A prediction id with no gold item is counted and ignored. Duplicate ids refuse.
+- The primary read is over the SHARED population: the rows no system overflowed. Its size and
+  the overflow-excluded count and share are reported, and each system also gets a full-tier
+  secondary read over every non-refused row, its own overflow counted as invalid.
 - Slices are the values of declared columns (a list value puts the row in each listed slice).
-  A slice with fewer than ``min_slice_rows`` rows is reported and marked diagnostic.
-- Whole clusters (``cluster_column``, else each item) are resampled within each slice.
+  A slice whose shared population has fewer than ``min_slice_rows`` rows is marked diagnostic.
+- Whole clusters are resampled within each slice, so only the clusters present in it are drawn.
+  The cluster is ``cluster_column``; a row without one, or every row when only
+  ``premises_column`` is declared, clusters on :func:`premise_cluster_key`; else each item is its
+  own cluster.
 
 The report carries no item text: ids, gold labels, mapped predictions and slice values only.
 """
@@ -30,10 +37,12 @@ The report carries no item text: ids, gold labels, mapped predictions and slice 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
 import sys
+import unicodedata
 from collections import Counter
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -80,7 +89,10 @@ __all__ = [
     "EvalSettings",
     "EvalSpec",
     "PredictionSource",
+    "TierLimit",
+    "TierRule",
     "main",
+    "premise_cluster_key",
 ]
 
 REPORT_SCHEMA = "strata.eval.report/v1"
@@ -174,6 +186,60 @@ class PredictionSource(BaseModel):
         return _bounded_aliases(value)
 
 
+class TierLimit(BaseModel):
+    """The most premises and tokens a row of one tier may have before it is refused."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_premises: int | None = Field(default=None, ge=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+
+
+class TierRule(BaseModel):
+    """A declared refusal rule: a row over its tier's limit is ``tier_refused`` for every system.
+
+    The limit is ``limits[<tier_column value>]``, else ``default``. Premises are counted from the
+    settings' ``premises_column``; tokens are read from ``token_column``, a per-row count the
+    gold split declares.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tier_column: str | None = None
+    limits: dict[str, TierLimit] = Field(default_factory=dict[str, TierLimit])
+    default: TierLimit | None = None
+    token_column: str | None = None
+
+    @field_validator("tier_column", "token_column")
+    @classmethod
+    def _column(cls, value: str | None) -> str | None:
+        return None if value is None else _bounded_text(value, "a column name")
+
+    @field_validator("limits")
+    @classmethod
+    def _bounded(cls, value: dict[str, TierLimit]) -> dict[str, TierLimit]:
+        if len(value) > _MAX_SLICE_VALUES:
+            msg = f"at most {_MAX_SLICE_VALUES} tier limits"
+            raise ValueError(msg)
+        for key in value:
+            _bounded_text(key, "a tier")
+        return value
+
+    @model_validator(mode="after")
+    def _complete(self) -> TierRule:
+        if self.limits and self.tier_column is None:
+            msg = "per-tier limits need a tier_column"
+            raise ValueError(msg)
+        tokens = [lim.max_tokens for lim in (*self.limits.values(), self.default) if lim]
+        if any(tokens) and self.token_column is None:
+            msg = "a max_tokens limit needs a token_column"
+            raise ValueError(msg)
+        return self
+
+    def limit(self, tier: str | None) -> TierLimit | None:
+        return self.limits.get(tier, self.default) if tier is not None else self.default
+
+
 class EvalSettings(BaseModel):
     """What to evaluate and how; validated identically by the control plane and the runner."""
 
@@ -188,6 +254,10 @@ class EvalSettings(BaseModel):
     cluster_column: str | None = None
     slice_columns: tuple[str, ...] = Field(default=(), max_length=_MAX_SLICE_COLUMNS)
     exclude_column: str | None = None
+    # A list of premises (strings, or {pid, text} objects) per row: the cluster of a row with no
+    # cluster value, and what a tier rule counts.
+    premises_column: str | None = None
+    tier_rule: TierRule | None = None
     seed: int = Field(ge=0, le=MAX_CLUSTER_BOOTSTRAP_SEED)
     resamples: int = Field(
         default=CLUSTER_BOOTSTRAP_RESAMPLES, ge=1, le=MAX_CLUSTER_BOOTSTRAP_RESAMPLES
@@ -202,7 +272,9 @@ class EvalSettings(BaseModel):
             raise ValueError(msg)
         return tuple(_bounded_text(label, "a label") for label in value)
 
-    @field_validator("id_column", "gold_column", "cluster_column", "exclude_column")
+    @field_validator(
+        "id_column", "gold_column", "cluster_column", "exclude_column", "premises_column"
+    )
     @classmethod
     def _column(cls, value: str | None) -> str | None:
         return None if value is None else _bounded_text(value, "a column name")
@@ -232,6 +304,11 @@ class EvalSettings(BaseModel):
         unknown = sorted({target for target in targets if target not in self.labels})
         if unknown:
             msg = f"label aliases map to undeclared labels: {unknown}"
+            raise ValueError(msg)
+        rule = self.tier_rule
+        limits = [*rule.limits.values(), rule.default] if rule else []
+        if any(lim and lim.max_premises for lim in limits) and self.premises_column is None:
+            msg = "a max_premises limit needs a premises_column"
             raise ValueError(msg)
         return self
 
@@ -282,9 +359,42 @@ def _item_id(value: object) -> str | None:
     return text if text else None
 
 
+def premise_cluster_key(value: object) -> str:
+    """The cluster key of a row identified by its premises: ``premises:sha256:<hex>``.
+
+    Normalisation, so that the same problem restated (reordered, re-spaced) is one cluster: each
+    premise's text (a string, or the ``text`` of a ``{pid, text}`` object) is Unicode NFC
+    normalised, its runs of whitespace collapsed to one space and its ends stripped; the texts
+    are sorted by code point and encoded as a compact JSON array (UTF-8, no ASCII escaping), and
+    the key is the SHA-256 of that encoding. Case is kept.
+    """
+    if not isinstance(value, list):
+        msg = "a premises value must be a list"
+        raise RunError(msg)
+    texts: list[str] = []
+    for premise in cast("list[object]", value):
+        text: object = premise
+        if isinstance(premise, dict):
+            text = cast("dict[str, object]", premise).get("text")
+        if not isinstance(text, str):
+            msg = "each premise must be a string or a {pid, text} object"
+            raise RunError(msg)
+        texts.append(" ".join(unicodedata.normalize("NFC", text).split()))
+    encoded = json.dumps(sorted(texts), ensure_ascii=False, separators=(",", ":"))
+    return "premises:sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _gold_columns(settings: EvalSettings) -> list[str]:
     columns = [settings.id_column, settings.gold_column, *settings.slice_columns]
-    for extra in (settings.cluster_column, settings.exclude_column):
+    rule = settings.tier_rule
+    extras = (
+        settings.cluster_column,
+        settings.exclude_column,
+        settings.premises_column,
+        rule.tier_column if rule else None,
+        rule.token_column if rule else None,
+    )
+    for extra in extras:
         if extra is not None:
             columns.append(extra)
     return list(dict.fromkeys(columns))
@@ -364,6 +474,13 @@ class _Gold(BaseModel):
     clusters: list[str]
     slices: dict[str, list[list[str]]]
     excluded: list[bool]
+    refused: list[bool]
+
+    def common_out(self, row: int) -> bool:
+        return self.excluded[row] or self.refused[row]
+
+
+type _Status = Literal["ok", "tier_refused", "excluded", "overflow", "missing"]
 
 
 class _System(BaseModel):
@@ -372,6 +489,7 @@ class _System(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     predictions: list[str | None]
+    status: list[_Status]
     counts: dict[str, int]
 
 
@@ -412,15 +530,7 @@ def _prepare_gold(columns: dict[str, list[Any]], settings: EvalSettings) -> _Gol
             )
             raise RunError(msg)
         labels.append(mapped)
-    clusters: list[str] = ids
-    if settings.cluster_column is not None:
-        clusters = []
-        for value in columns[settings.cluster_column]:
-            cluster = _item_id(value)
-            if cluster is None:
-                msg = f"every gold row needs a string or integer {settings.cluster_column!r}"
-                raise RunError(msg)
-            clusters.append(cluster)
+    clusters = _clusters(columns, settings, ids)
     excluded = [False] * len(ids)
     if settings.exclude_column is not None:
         flags = columns[settings.exclude_column]
@@ -436,7 +546,59 @@ def _prepare_gold(columns: dict[str, list[Any]], settings: EvalSettings) -> _Gol
             msg = f"slice column {column!r} has more than {_MAX_SLICE_VALUES} distinct values"
             raise RunError(msg)
         slices[column] = values
-    return _Gold(ids=ids, labels=labels, clusters=clusters, slices=slices, excluded=excluded)
+    return _Gold(
+        ids=ids,
+        labels=labels,
+        clusters=clusters,
+        slices=slices,
+        excluded=excluded,
+        refused=_refused(columns, settings, len(ids)),
+    )
+
+
+def _clusters(columns: dict[str, list[Any]], settings: EvalSettings, ids: list[str]) -> list[str]:
+    premises = columns[settings.premises_column] if settings.premises_column else None
+    given = columns[settings.cluster_column] if settings.cluster_column else [None] * len(ids)
+    if settings.cluster_column is None and premises is None:
+        return list(ids)
+    out: list[str] = []
+    for row, value in enumerate(given):
+        cluster = _item_id(value)
+        if cluster is None:
+            if premises is None:
+                msg = f"every gold row needs a string or integer {settings.cluster_column!r}"
+                raise RunError(msg)
+            cluster = premise_cluster_key(premises[row])
+        out.append(cluster)
+    return out
+
+
+def _refused(columns: dict[str, list[Any]], settings: EvalSettings, n: int) -> list[bool]:
+    rule = settings.tier_rule
+    if rule is None:
+        return [False] * n
+    tiers = columns[rule.tier_column] if rule.tier_column else [None] * n
+    premises = columns[settings.premises_column] if settings.premises_column else None
+    tokens = columns[rule.token_column] if rule.token_column else None
+    out: list[bool] = []
+    for row in range(n):
+        tier = None if tiers[row] is None else str(tiers[row])
+        limit = rule.limit(tier)
+        over = False
+        if limit is not None and limit.max_premises is not None and premises is not None:
+            value = premises[row]
+            if not isinstance(value, list):
+                msg = f"premises column {settings.premises_column!r} must hold lists"
+                raise RunError(msg)
+            over = len(cast("list[object]", value)) > limit.max_premises
+        if limit is not None and limit.max_tokens is not None and tokens is not None:
+            count = tokens[row]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                msg = f"token column {rule.token_column!r} must hold non-negative integers"
+                raise RunError(msg)
+            over = over or count > limit.max_tokens
+        out.append(over)
+    return out
 
 
 def _align(
@@ -462,25 +624,33 @@ def _align(
     known = set(gold.ids)
     counts: Counter[str] = Counter(unmatched=sum(1 for item in by_id if item not in known))
     predictions: list[str | None] = []
-    for item, excluded in zip(gold.ids, gold.excluded, strict=True):
+    status: list[_Status] = []
+    for row, item in enumerate(gold.ids):
         found = by_id.get(item)
-        if excluded:
-            predictions.append(None)
-            continue
-        if found is None:
+        mapped: str | None = None
+        state: _Status = "ok"
+        if gold.refused[row]:
+            state = "tier_refused"
+        elif gold.excluded[row]:
+            state = "excluded"
+        elif found is None:
             counts["missing"] += 1
-            predictions.append(None)
-            continue
-        value, overflow = found
-        mapped = None if overflow else _label(value, source.label_aliases, labels)
-        if overflow:
+            state = "missing"
+        elif found[1]:
             counts["overflow"] += 1
-        elif mapped is None:
-            counts["invalid"] += 1
+            state = "overflow"
+        else:
+            mapped = _label(found[0], source.label_aliases, labels)
+            if mapped is None:
+                counts["invalid"] += 1
+                state = "missing"
         predictions.append(mapped)
-    counts["scored"] = sum(1 for flag in gold.excluded if not flag)
+        status.append(state)
+    counts["scored"] = sum(1 for row in range(len(gold.ids)) if not gold.common_out(row))
     keys = ("scored", "missing", "invalid", "overflow", "unmatched")
-    return _System(predictions=predictions, counts={key: counts[key] for key in keys})
+    return _System(
+        predictions=predictions, status=status, counts={key: counts[key] for key in keys}
+    )
 
 
 # ------------------------------------------------------------------ scoring
@@ -488,7 +658,7 @@ def _align(
 
 def _populations(gold: _Gold) -> list[tuple[str | None, str | None, _Population]]:
     """``(column, value, rows)`` for the whole population, then each slice, excluded rows out."""
-    scored = [i for i, flag in enumerate(gold.excluded) if not flag]
+    scored = [i for i in range(len(gold.ids)) if not gold.common_out(i)]
     out: list[tuple[str | None, str | None, _Population]] = [(None, None, scored)]
     for column, values in gold.slices.items():
         members: dict[str, list[int]] = {}
@@ -510,6 +680,50 @@ def _intervals(intervals: SystemIntervals) -> dict[str, dict[str, float]]:
     }
 
 
+def _system_read(
+    rows: _Population, gold: _Gold, system: _System, settings: EvalSettings, *, detail: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    actual = [gold.labels[i] for i in rows]
+    predictions = [system.predictions[i] for i in rows]
+    result = cluster_bootstrap(
+        actual,
+        predictions,
+        labels=settings.labels,
+        clusters=[gold.clusters[i] for i in rows],
+        seed=settings.seed,
+        resamples=settings.resamples,
+    )
+    entry: dict[str, Any] = _intervals(result.intervals)
+    if detail:
+        report = classification_report(actual, predictions, labels=settings.labels)
+        entry["per_class"] = [score.model_dump() for score in report.per_class]
+        entry["confusion"] = {
+            "counts": [list(row) for row in report.confusion.counts],
+            "invalid_by_gold": list(report.confusion.invalid_by_gold),
+        }
+    return entry, result.settings.model_dump()
+
+
+def _discordance(rows: _Population, gold: _Gold, base: _System, cand: _System) -> dict[str, Any]:
+    """The paired discordance rate p_d: the share of rows exactly one of the two got right."""
+    base_only = sum(
+        1
+        for i in rows
+        if base.predictions[i] == gold.labels[i] and cand.predictions[i] != gold.labels[i]
+    )
+    cand_only = sum(
+        1
+        for i in rows
+        if cand.predictions[i] == gold.labels[i] and base.predictions[i] != gold.labels[i]
+    )
+    return {
+        "n": len(rows),
+        "baseline_only_correct": base_only,
+        "candidate_only_correct": cand_only,
+        "p_d": (base_only + cand_only) / len(rows),
+    }
+
+
 def _score_population(
     rows: _Population,
     gold: _Gold,
@@ -518,56 +732,65 @@ def _score_population(
     *,
     detail: bool,
 ) -> dict[str, Any]:
-    actual = [gold.labels[i] for i in rows]
-    clusters = [gold.clusters[i] for i in rows]
+    """The primary read over the shared (no-overflow) rows, and each system's full-tier read."""
+    shared = [i for i in rows if all(s.status[i] != "overflow" for s in systems.values())]
+    clusters = [gold.clusters[i] for i in shared]
+    present = {gold.labels[i] for i in shared} | {
+        s.predictions[i] for s in systems.values() for i in shared
+    }
     out: dict[str, Any] = {
-        "n": len(rows),
+        "n": len(shared),
+        "n_tier": len(rows),
+        "overflow_excluded": len(rows) - len(shared),
+        "overflow_share": (len(rows) - len(shared)) / len(rows),
         "clusters": len(set(clusters)),
-        "diagnostic": len(rows) < settings.min_slice_rows,
+        "diagnostic": len(shared) < settings.min_slice_rows,
+        "absent_classes": [label for label in settings.labels if label not in present],
         "systems": {},
         "comparisons": [],
     }
     for name, system in systems.items():
-        predictions = [system.predictions[i] for i in rows]
-        result = cluster_bootstrap(
-            actual,
-            predictions,
-            labels=settings.labels,
-            clusters=clusters,
-            seed=settings.seed,
-            resamples=settings.resamples,
-        )
-        entry: dict[str, Any] = _intervals(result.intervals)
-        if detail:
-            report = classification_report(actual, predictions, labels=settings.labels)
-            entry["per_class"] = [score.model_dump() for score in report.per_class]
-            entry["confusion"] = {
-                "counts": [list(row) for row in report.confusion.counts],
-                "invalid_by_gold": list(report.confusion.invalid_by_gold),
-            }
-        out["systems"][name] = entry
-        out["bootstrap"] = result.settings.model_dump()
+        entry: dict[str, Any] = {}
+        if shared:
+            entry, out["bootstrap"] = _system_read(shared, gold, system, settings, detail=detail)
+        full_tier = entry
+        if len(shared) != len(rows):
+            full_tier, _ = _system_read(rows, gold, system, settings, detail=False)
+        out["systems"][name] = {**entry, "full_tier": _metric_only(full_tier)}
     candidate = settings.predictions.name
-    for baseline in settings.compare_to:
+    for baseline in settings.compare_to if shared else ():
         paired = paired_cluster_bootstrap(
-            actual,
-            [systems[baseline.name].predictions[i] for i in rows],
-            [systems[candidate].predictions[i] for i in rows],
+            [gold.labels[i] for i in shared],
+            [systems[baseline.name].predictions[i] for i in shared],
+            [systems[candidate].predictions[i] for i in shared],
             labels=settings.labels,
             clusters=clusters,
             seed=settings.seed,
             resamples=settings.resamples,
         )
         out["comparisons"].append(
-            {"baseline": baseline.name, "candidate": candidate, "delta": _intervals(paired.delta)}
+            {
+                "baseline": baseline.name,
+                "candidate": candidate,
+                "delta": _intervals(paired.delta),
+                "discordance": _discordance(
+                    shared, gold, systems[baseline.name], systems[candidate]
+                ),
+            }
         )
     return out
+
+
+def _metric_only(entry: dict[str, Any]) -> dict[str, Any]:
+    return {key: entry[key] for key in ("accuracy", "macro_f1", "invalid_rate") if key in entry}
 
 
 def _headline(report: dict[str, Any], settings: EvalSettings) -> dict[str, float]:
     """The overall figures the ``end`` event carries (well under its 64-key cap)."""
     overall = report["slices"][0]
     candidate = overall["systems"][settings.predictions.name]
+    if "accuracy" not in candidate:
+        return {"rows": 0.0, "clusters": 0.0}
     metrics: dict[str, float] = {
         "rows": float(overall["n"]),
         "clusters": float(overall["clusters"]),
@@ -596,13 +819,15 @@ def _items_rows(gold: _Gold, systems: dict[str, _System]) -> list[dict[str, Any]
             "gold": gold.labels[i],
             "cluster": gold.clusters[i],
             "excluded": gold.excluded[i],
+            "tier_refused": gold.refused[i],
         }
         for column, values in gold.slices.items():
             row[f"slice__{column}"] = values[i]
         for name, system in systems.items():
             prediction = system.predictions[i]
             row[f"pred__{name}"] = prediction
-            row[f"correct__{name}"] = None if gold.excluded[i] else prediction == gold.labels[i]
+            row[f"status__{name}"] = system.status[i]
+            row[f"correct__{name}"] = None if gold.common_out(i) else prediction == gold.labels[i]
         rows.append(row)
     return rows
 
@@ -641,7 +866,8 @@ def _write_outputs(
     items = _write_items(_items_rows(gold, systems), outdir)
     (outdir / REPORT_FILENAME).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     (outdir / _CARD_FILENAME).write_text(_CARD)
-    write_manifest(_build_manifest(spec, gold, systems), outdir)
+    overall = report["slices"][0]
+    write_manifest(_build_manifest(spec, gold, systems, overall.get("bootstrap")), outdir)
     return {
         ITEMS_FILENAME: items,
         REPORT_FILENAME: outdir / REPORT_FILENAME,
@@ -650,7 +876,13 @@ def _write_outputs(
     }
 
 
-def _build_manifest(spec: EvalSpec, gold: _Gold, systems: dict[str, _System]) -> dict[str, Any]:
+def _build_manifest(
+    spec: EvalSpec,
+    gold: _Gold,
+    systems: dict[str, _System],
+    bootstrap: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Provenance; ``bootstrap`` is the overall read's contract, NumPy version and cluster count."""
     return {
         "schema": MANIFEST_SCHEMA,
         "kind": _MANIFEST_KIND,
@@ -670,8 +902,10 @@ def _build_manifest(spec: EvalSpec, gold: _Gold, systems: dict[str, _System]) ->
         "counts": {
             "rows": len(gold.ids),
             "excluded": sum(gold.excluded),
+            "tier_refused": sum(gold.refused),
             "systems": {name: system.counts for name, system in systems.items()},
         },
+        "bootstrap": bootstrap,
     }
 
 
@@ -707,6 +941,7 @@ def _report(
         "population": {
             "rows": len(gold.ids),
             "excluded": sum(gold.excluded),
+            "tier_refused": sum(gold.refused),
             "cluster_column": settings.cluster_column,
             "min_slice_rows": settings.min_slice_rows,
         },
