@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from strata_forge.pipelines import inference_runner
+from strata_forge.pipelines import eval_runner, inference_runner
 from strata_forge.training.dataset_format import (
     FORMATS,
     build_training_rows,
@@ -102,6 +102,21 @@ class TestInference:
         # Both optional flags are switched on, so vLLM's parser sees everything the runner emits.
         assert argv[argv.index("--max-model-len") + 1] == "4096"
         assert argv[argv.index("--dtype") + 1] == "bfloat16"
+
+
+class TestEvaluation:
+    def test_spec_passes_the_runner(self) -> None:
+        with smoke.run_config(smoke.eval_spec()):
+            spec = eval_runner.load_spec()
+        assert [source.name for source in spec.evaluation.systems] == ["candidate", "baseline"]
+
+    def test_check_runs_offline(self) -> None:
+        smoke.check_eval_spec()
+
+    def test_eval_leg_checks_evaluation_and_no_serving(self) -> None:
+        names = [name for name, _ in smoke.plan(smoke.selected_extras("scoring,storage,hf"))]
+        assert "evaluation spec, predictions, bootstrap and items" in names
+        assert not any(name.startswith("finetune ") or "vllm" in name for name in names)
 
 
 class TestRunConfig:

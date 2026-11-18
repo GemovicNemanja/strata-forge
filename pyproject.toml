@@ -170,6 +170,8 @@ dev = [
     # users to install them in production.
     "pillow>=11.0",
     "numpy>=2.4,<3",
+    # The evaluation runner reads and writes parquet; `datasets` brings it on a run's machine.
+    "pyarrow>=21,<25",
 ]
 
 # ----------------------------- ruff -----------------------------

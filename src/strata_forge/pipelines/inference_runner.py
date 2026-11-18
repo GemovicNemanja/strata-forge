@@ -118,6 +118,7 @@ from strata_forge.pipelines._common import (
     RunError,
     RunSecrets,
     emit,
+    ensure_private_output,
     load_config,
     manifest_engine,
     model_server_environ,
@@ -1390,26 +1391,6 @@ def _build_manifest(
     }
 
 
-async def _ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
-    """Create the output repo private if it is missing, and refuse one that is public.
-
-    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and
-    a run's outputs and manifest name the model and dataset it read, which may be private.
-    """
-    try:
-        await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
-        private = await hub.is_private(out_repo, repo_type="dataset")
-    except Exception as exc:
-        msg = f"could not prepare the output repo {out_repo}: {exc}"
-        raise RunError(msg) from exc
-    if not private:
-        msg = (
-            f"the output repo {out_repo} is public; results are pushed only to a private repo. "
-            "Make it private or choose another output repo"
-        )
-        raise RunError(msg)
-
-
 async def _check_output_repo(spec: RunSpec, hf_token: str | None) -> None:
     """Refuse a public output repo before any GPU time is spent, not after the run.
 
@@ -1419,7 +1400,7 @@ async def _check_output_repo(spec: RunSpec, hf_token: str | None) -> None:
     if not (hf_token and spec.output_repo_id):
         return
     out_repo = validate_repo_id(spec.output_repo_id, "output repo")
-    await _ensure_private_output(HFHubClient(token=hf_token), out_repo)
+    await ensure_private_output(HFHubClient(token=hf_token), out_repo)
 
 
 async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str:
@@ -1434,7 +1415,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
     out_repo = validate_repo_id(spec.output_repo_id, "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     # Re-checked at push time: visibility can change during a long run.
-    await _ensure_private_output(hub, out_repo)
+    await ensure_private_output(hub, out_repo)
     await hub.upload_files(
         {
             _RESULTS_FILENAME: results_path,
