@@ -288,7 +288,7 @@ sample weight. The research preset is `brier_weight=0.1`, `flag_loss_weight=1.0`
 |---|---|---|---|
 | `new` | encoder (`modernbert`) | exactly `classifier.weight`, `classifier.bias` | stock random classifier |
 | `decoder_lm_head` | decoder (`modernbert-decoder`) | exactly the prediction head's parameters and `classifier.weight` | `lm_head.*` -> `head.*`; classifier rows and bias = the verbalizer rows of `decoder.weight` (or the tied embedding) and `decoder.bias` |
-| `existing` | a checkpoint that already has this classifier | none; its `id2label` must equal `labels` | as saved; auxiliary heads load strictly |
+| `existing` | a checkpoint that already has this classifier (`modernbert` or `modernbert-decoder`) | none; its `id2label` must equal `labels` | as saved; auxiliary heads load strictly; a decoder keeps template rendering and last-token pooling, and a rendering that differs from the saved `strata_verifier.json` (premise format, decoder template) refuses |
 
 Any other missing key, any unexpected key outside the architecture's declared set and any shape
 mismatch refuses the run. The tables are explicit per `model_type`; there is no key-name heuristic
@@ -308,7 +308,9 @@ the support head is `h^T W m_pid + b` over each premise's marker token. They sta
 `SeqClsRunner.prepare` runs these in order, calling `on_receipt(name, receipt)` as each passes;
 a failure raises `PreflightError` (or `Step0Error`) carrying its receipt.
 
-1. **`overflow`**: every row resolves its label and tokenises without truncation; a row longer than
+1. **`overflow`**: every row resolves its label (a soft `label_dist` must be finite, non-negative
+   and sum to 1) and tokenises without truncation; a refusal names the row index and the role,
+   never the cell; a row longer than
    `max_length` refuses the run with the count and the first row indices. The receipt records the
    row count, the longest row and the template's token overhead (special tokens plus template
    literals).

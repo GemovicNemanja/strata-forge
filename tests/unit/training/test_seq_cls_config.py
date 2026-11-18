@@ -72,7 +72,7 @@ class TestConfig:
         with pytest.raises(ValidationError, match="verbalizer for every label"):
             _config(head_init="decoder_lm_head", verbalizers={"entailment": " True"})
         verbalizers = {"entailment": " True", "contradiction": " False", "neutral": " Unknown"}
-        assert _config(head_init="decoder_lm_head", verbalizers=verbalizers).is_decoder
+        assert _config(head_init="decoder_lm_head", verbalizers=verbalizers).from_lm_head
 
     def test_verbalizers_belong_to_the_decoder_head_only(self) -> None:
         with pytest.raises(ValidationError, match="only to head_init"):

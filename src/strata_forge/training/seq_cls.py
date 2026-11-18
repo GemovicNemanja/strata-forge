@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -48,6 +49,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from strata_forge.training.classifier_heads import (
     AUX_HEADS_FILENAME,
+    DECODER_LM_HEAD,
+    ENCODER_NEW_HEAD,
     HeadLoadError,
     LoadReceipt,
     build_aux_heads,
@@ -252,7 +255,8 @@ class SeqClsConfig(BaseModel):
         )
 
     @property
-    def is_decoder(self) -> bool:
+    def from_lm_head(self) -> bool:
+        """Whether the classifier is initialised from the base's LM head (and step 0 checked)."""
         return self.head_init == "decoder_lm_head"
 
 
@@ -373,6 +377,7 @@ class _Encoder:
     config: SeqClsConfig
     tokenizer: Any
     roles: frozenset[str]
+    decoder: bool
 
     def _label(self, raw: Any, row: int) -> str:
         if isinstance(raw, bool) or raw is None:
@@ -382,7 +387,7 @@ class _Encoder:
             mapping = self.config.label_index_map
             if mapping is None or str(raw) not in mapping:
                 msg = (
-                    f"row {row}: integer label {raw} has no label_index_map entry; integer "
+                    f"row {row}: an integer label has no label_index_map entry; integer "
                     "labels need an explicit index map"
                 )
                 raise DatasetFormatError(msg)
@@ -418,12 +423,25 @@ class _Encoder:
         if dist is None:
             target[labels.index(canonical)] = 1.0
         else:
-            if not isinstance(dist, Sequence) or len(dist) != len(labels):  # pyright: ignore[reportUnknownArgumentType]
+            shaped = (
+                isinstance(dist, Sequence)
+                and not isinstance(dist, str | bytes)
+                and len(dist) == len(labels)  # pyright: ignore[reportUnknownArgumentType]
+                and all(
+                    isinstance(x, int | float) and not isinstance(x, bool)
+                    for x in dist  # pyright: ignore[reportUnknownVariableType]
+                )
+            )
+            if not shaped:
                 msg = f"row {row}: label_dist must hold {len(labels)} numbers"
                 raise DatasetFormatError(msg)
             values = [float(x) for x in dist]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
-            if min(values) < 0 or abs(sum(values) - 1.0) > 1e-6:
-                msg = f"row {row}: label_dist must be non-negative and sum to 1"
+            if (
+                not all(math.isfinite(v) for v in values)
+                or min(values) < 0
+                or abs(sum(values) - 1.0) > 1e-6
+            ):
+                msg = f"row {row}: label_dist must be finite, non-negative and sum to 1"
                 raise DatasetFormatError(msg)
             target = values
         return {"target": target, "two_way": 0, "two_way_target": 0.0}
@@ -464,7 +482,7 @@ class _Encoder:
             if not isinstance(hypothesis, str):
                 msg = f"row {indices[i]}: hypothesis must be a string"
                 raise DatasetFormatError(msg)
-            if self.config.is_decoder:
+            if self.decoder:
                 text, start = _decoder_text(self.config.decoder_template, premises, hypothesis)
                 texts.append(text)
                 marker_sets.append([(pid, start + off) for pid, off in markers])
@@ -646,6 +664,7 @@ def _classes(torch: Any, transformers: Any) -> tuple[Any, Any]:
             self._seq_cls = seq_cls
             self._positive_index = positive_index
             self._parts: dict[str, float] = {}
+            self._parts_count = 0
 
         def compute_loss(
             self,
@@ -676,18 +695,23 @@ def _classes(torch: Any, transformers: Any) -> tuple[Any, Any]:
                 support_row=inputs["support_row"],
             )
             if model.training:
-                self._parts = {
-                    "loss_primary": float(terms.primary),
-                    "loss_flag": float(terms.flag),
-                    "loss_support": float(terms.support),
-                }
+                # Summed over the logging window and averaged when logged, like `loss` itself.
+                for key, value in (
+                    ("loss_primary", terms.primary),
+                    ("loss_flag", terms.flag),
+                    ("loss_support", terms.support),
+                ):
+                    self._parts[key] = self._parts.get(key, 0.0) + float(value)
+                self._parts_count += 1
             if return_outputs:
                 return terms.total, {"logits": out["logits"]}
             return terms.total
 
         def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
-            if "loss" in logs and self._parts:
-                logs = {**logs, **self._parts}
+            if "loss" in logs and self._parts_count:
+                count = self._parts_count
+                logs = {**logs, **{k: v / count for k, v in self._parts.items()}}
+                self._parts, self._parts_count = {}, 0
             super().log(logs, *args, **kwargs)  # pyright: ignore[reportUnknownMemberType]
 
         def _get_train_sampler(self, train_dataset: Any = None) -> Any:
@@ -696,7 +720,7 @@ def _classes(torch: Any, transformers: Any) -> tuple[Any, Any]:
                 return super()._get_train_sampler(train_dataset)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             pt_utils: Any = __import__("transformers.trainer_pt_utils", fromlist=["_"])
             return pt_utils.LengthGroupedSampler(
-                self.args.train_batch_size, dataset=dataset, lengths=dataset["length"]
+                self.args.train_batch_size, dataset=dataset, lengths=list(dataset["length"])
             )
 
     return SeqClsModule, SeqClsTrainer
@@ -723,6 +747,9 @@ class SeqClsRunner:
             raise ValueError(msg)
         self._config = config
         self._probe = memory_probe
+        # Whether the base is a decoder (template rendering, last-token pooling), read from the
+        # checkpoint by `load_tokenizer`.
+        self._decoder: bool | None = None
 
     @property
     def config(self) -> SeqClsConfig:
@@ -741,7 +768,61 @@ class SeqClsRunner:
         if tokenizer.pad_token_id is None:
             msg = "the tokenizer defines no padding token"
             raise PreflightError(msg, {})
+        self._decoder = self._is_decoder(checkpoint)
         return tokenizer
+
+    @property
+    def decoder(self) -> bool:
+        if self._decoder is None:
+            msg = "load_tokenizer must run first: it reads the checkpoint's architecture"
+            raise RuntimeError(msg)
+        return self._decoder
+
+    def _is_decoder(self, checkpoint: Path) -> bool:
+        """The base's kind, from its own config; an ``existing`` decoder keeps its rendering.
+
+        A run continuing a classifier must render and pool rows exactly as the run that trained
+        it did, so the saved rendering must equal the declared one.
+        """
+        cfg = self._config
+        try:
+            config: Any = json.loads((checkpoint / "config.json").read_text())
+        except (OSError, ValueError) as exc:
+            msg = "the checkpoint has no readable config.json"
+            raise PreflightError(msg, {}) from exc
+        model_type = (
+            str(cast("dict[str, Any]", config).get("model_type", ""))
+            if isinstance(config, dict)
+            else ""
+        )
+        if cfg.head_init == "decoder_lm_head":
+            return True
+        if cfg.head_init == "new":
+            return False
+        if model_type not in DECODER_LM_HEAD and model_type not in ENCODER_NEW_HEAD:
+            msg = (
+                f"head_init 'existing' has no declared architecture for model type "
+                f"{model_type!r}; supported: "
+                f"{', '.join(sorted({*DECODER_LM_HEAD, *ENCODER_NEW_HEAD}))}"
+            )
+            raise PreflightError(msg, {})
+        decoder = model_type in DECODER_LM_HEAD
+        saved = _read_verifier(checkpoint)
+        rendering = saved.get("input") if saved else None
+        if isinstance(rendering, dict):
+            declared = {
+                "premise_format": cfg.premise_format,
+                "decoder_template": cfg.decoder_template if decoder else None,
+            }
+            stored = cast("dict[str, Any]", rendering)
+            changed = sorted(k for k, v in declared.items() if stored.get(k) != v)
+            if changed:
+                msg = (
+                    f"the existing classifier was trained with a different {', '.join(changed)}; "
+                    "a continued run renders rows exactly as the first one did"
+                )
+                raise PreflightError(msg, {})
+        return decoder
 
     def verbalizer_ids(self, tokenizer: Any) -> dict[str, int]:
         """Each label's verbalizer as its single token id; a multi-token or shared one refuses."""
@@ -777,7 +858,7 @@ class SeqClsRunner:
         if rows == 0 or rows > MAX_SEQ_CLS_ROWS:
             msg = f"{split}: {rows} rows; a seq_cls split holds 1 to {MAX_SEQ_CLS_ROWS} rows"
             raise PreflightError(msg, {"rows": rows})
-        encoder = _Encoder(self._config, tokenizer, roles)
+        encoder = _Encoder(self._config, tokenizer, roles, self.decoder)
         try:
             encoded: Any = dataset.map(
                 encoder.encode,
@@ -788,6 +869,11 @@ class SeqClsRunner:
             )
         except DatasetFormatError as exc:
             raise PreflightError(f"{split}: {exc}", {"rows": rows}) from exc
+        except (TypeError, ValueError, KeyError, IndexError) as exc:
+            # A cell of an unexpected type; the library's own message can quote the cell, and
+            # this one reaches a browser, so it names only the split.
+            msg = f"{split}: a row could not be encoded (a cell has an unexpected type)"
+            raise PreflightError(msg, {"rows": rows}) from exc
         lengths: list[int] = list(encoded["length"])
         over = [i for i, n in enumerate(lengths) if n > self._config.max_length]
         receipt: dict[str, Any] = {
@@ -804,7 +890,7 @@ class SeqClsRunner:
                 "rows are never truncated"
             )
             raise PreflightError(msg, receipt)
-        if self._config.is_decoder:
+        if self.decoder:
             ends_on_pad = sum(
                 1 for ids in encoded["input_ids"] if ids and ids[-1] == tokenizer.pad_token_id
             )
@@ -818,7 +904,7 @@ class SeqClsRunner:
 
     def _overhead(self, tokenizer: Any) -> int:
         """Tokens the rendering adds around the fields: special tokens plus template literals."""
-        if self._config.is_decoder:
+        if self.decoder:
             literal, _ = _decoder_text(self._config.decoder_template, "", "")
             literal_tokens = len(tokenizer(literal, add_special_tokens=False)["input_ids"])
             return int(tokenizer.num_special_tokens_to_add(pair=False)) + literal_tokens
@@ -844,7 +930,7 @@ class SeqClsRunner:
         )
         try:
             receipt = check_load(model, info, cfg.head_init)
-            if cfg.is_decoder:
+            if cfg.from_lm_head:
                 ids = self.verbalizer_ids(tokenizer)
                 init_decoder_head(
                     model, checkpoint, receipt, verbalizer_ids=[ids[k] for k in labels]
@@ -855,6 +941,10 @@ class SeqClsRunner:
         model.config.pad_token_id = tokenizer.pad_token_id
         frozen = self._frozen_parameters(checkpoint, receipt)
         params = dict(model.named_parameters())
+        unknown = [name for name in frozen if name not in params]
+        if unknown:
+            msg = f"{VERIFIER_CONFIG_FILENAME} lists frozen parameters the model does not have: {unknown}"
+            raise PreflightError(msg, {})
         for name in frozen:
             params[name].requires_grad_(False)
         aux = build_aux_heads(
@@ -875,7 +965,7 @@ class SeqClsRunner:
         if hasattr(model.config, "use_cache"):
             model.config.use_cache = False
         module_cls, _ = _classes(torch, transformers)
-        return module_cls(model, aux, last_token=cfg.is_decoder), receipt, frozen
+        return module_cls(model, aux, last_token=self.decoder), receipt, frozen
 
     def _check_existing_labels(self, checkpoint: Path) -> None:
         try:
@@ -901,15 +991,7 @@ class SeqClsRunner:
     def _frozen_parameters(self, checkpoint: Path, receipt: LoadReceipt) -> list[str]:
         frozen = [p.split(" ")[0] for p in receipt.added_parameters if "frozen" in p]
         if self._config.head_init == "existing":
-            try:
-                saved: Any = json.loads((checkpoint / VERIFIER_CONFIG_FILENAME).read_text())
-            except OSError, ValueError:
-                saved = {}
-            listed: Any = (
-                cast("dict[str, Any]", saved).get("frozen_parameters")
-                if isinstance(saved, dict)
-                else None
-            )
+            listed: Any = (_read_verifier(checkpoint) or {}).get("frozen_parameters")
             if isinstance(listed, list):
                 frozen += [str(p) for p in listed]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
         return sorted(set(frozen))
@@ -998,7 +1080,10 @@ class SeqClsRunner:
             optimizer: Any = trainer.create_optimizer()
             optimizer.step()
             receipt["peak_bytes"] = probe.peak_bytes()
-        except torch.OutOfMemoryError as exc:
+        except (torch.OutOfMemoryError, RuntimeError) as exc:
+            # cuBLAS / cuDNN allocation failures surface as a RuntimeError, not as the OOM type.
+            if not isinstance(exc, torch.OutOfMemoryError) and not _is_allocation_failure(exc):
+                raise
             receipt["peak_bytes"] = probe.peak_bytes()
             receipt["out_of_memory"] = True
             msg = f"memory preflight ran out of memory at the longest batch ({_gib(receipt)})"
@@ -1104,16 +1189,14 @@ class SeqClsRunner:
             "two_way_positive_label": cfg.positive_label,
             "head_init": cfg.head_init,
             "model_type": receipt.model_type,
-            "pooling": "last_token" if cfg.is_decoder else "first_token",
+            "pooling": "last_token" if self.decoder else "first_token",
             "input": {
-                "encoding": "template" if cfg.is_decoder else "pair",
+                "encoding": "template" if self.decoder else "pair",
                 "premise_format": cfg.premise_format,
                 "premise_line": "{pid}: {text}" if cfg.premise_format == "ids" else "{text}",
                 "premise_separator": _PREMISE_SEPARATOR,
-                "decoder_template": cfg.decoder_template if cfg.is_decoder else None,
-                "decoder_template_sha256": _sha256(cfg.decoder_template)
-                if cfg.is_decoder
-                else None,
+                "decoder_template": cfg.decoder_template if self.decoder else None,
+                "decoder_template_sha256": _sha256(cfg.decoder_template) if self.decoder else None,
                 "special_tokens": True,
                 "max_length": cfg.max_length,
                 "overflow": "error",
@@ -1183,7 +1266,7 @@ class SeqClsRunner:
         report("load", receipts["load"])
         if visible:
             module.to("cuda")
-        if cfg.is_decoder:
+        if cfg.from_lm_head:
             receipts["step0"] = self.step0_check(module, checkpoint, train, load_receipt)
             report("step0", receipts["step0"])
         _stamp("load_s")
@@ -1267,6 +1350,20 @@ class PreparedRun:
     train_rows: int
     eval_rows: int
     on_gpu: bool
+
+
+def _is_allocation_failure(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "out of memory" in text or "alloc_failed" in text
+
+
+def _read_verifier(checkpoint: Path) -> dict[str, Any] | None:
+    """The saved rendering config of a checkpoint this method wrote, or ``None``."""
+    try:
+        saved: Any = json.loads((checkpoint / VERIFIER_CONFIG_FILENAME).read_text())
+    except OSError, ValueError:
+        return None
+    return cast("dict[str, Any]", saved) if isinstance(saved, dict) else None
 
 
 def _ignore_receipt(_name: str, _receipt: dict[str, Any]) -> None:

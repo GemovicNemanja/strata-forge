@@ -150,7 +150,9 @@ class TestEncode:
         with pytest.raises(PreflightError, match="explicit index map"):
             runner.encode(datasets.Dataset.from_list(rows), tokenizer, split="t")
         mapped = SeqClsRunner(_config(tmp_path, label_index_map={"2": "neutral"}))
-        encoded, _ = mapped.encode(datasets.Dataset.from_list(rows), tokenizer, split="t")
+        encoded, _ = mapped.encode(
+            datasets.Dataset.from_list(rows), mapped.load_tokenizer(encoder_dir), split="t"
+        )
         assert encoded[0]["target"] == [0.0, 0.0, 1.0]
 
     def test_an_unknown_label_is_named_by_row(self, tmp_path: Path, encoder_dir: Path) -> None:
@@ -177,6 +179,32 @@ class TestEncode:
         bad = [{**rows[0], "label_dist": [0.5, 0.5, 0.5]}]
         with pytest.raises(PreflightError, match="sum to 1"):
             runner.encode(datasets.Dataset.from_list(bad), tokenizer, split="t")
+
+    @pytest.mark.parametrize(
+        "dist", [[float("nan"), 0.5, 0.5], [float("inf"), 0.0, 0.0], "abc", ["S", "x", "y"]]
+    )
+    def test_a_malformed_label_distribution_refuses_without_echoing_it(
+        self, tmp_path: Path, encoder_dir: Path, dist: Any
+    ) -> None:
+        rows = [{"premises": "w1", "hypothesis": "w2", "label": "neutral", "label_dist": dist}]
+        runner = SeqClsRunner(_config(tmp_path))
+        tokenizer = runner.load_tokenizer(encoder_dir)
+        with pytest.raises(PreflightError) as exc:
+            runner.encode(datasets.Dataset.from_list(rows), tokenizer, split="t")
+        assert "label_dist" in str(exc.value) or "could not be encoded" in str(exc.value)
+        assert "abc" not in str(exc.value)
+        assert "'S'" not in str(exc.value)
+
+    def test_an_integer_label_refusal_does_not_echo_the_value(
+        self, tmp_path: Path, encoder_dir: Path
+    ) -> None:
+        rows = [{"premises": "w1", "hypothesis": "w3", "label": 987654}]
+        runner = SeqClsRunner(_config(tmp_path))
+        with pytest.raises(PreflightError) as exc:
+            runner.encode(
+                datasets.Dataset.from_list(rows), runner.load_tokenizer(encoder_dir), split="t"
+            )
+        assert "987654" not in str(exc.value)
 
     def test_a_support_set_naming_an_unknown_premise_refuses(
         self, tmp_path: Path, encoder_dir: Path
@@ -450,6 +478,33 @@ class TestAcceptanceSmoke:
         config = _config(tmp_path / "second", head_init="existing", labels=reordered)
         with pytest.raises(PreflightError, match="label order"):
             _smoke(tmp_path / "second", artifact, config)
+
+    def test_existing_decoder_keeps_its_template_and_last_token_pooling(
+        self, tmp_path: Path, decoder_dir: Path
+    ) -> None:
+        _, _, artifact = _smoke(
+            tmp_path / "first", decoder_dir, _decoder_config(tmp_path / "first")
+        )
+        runner = SeqClsRunner(_config(tmp_path / "second", head_init="existing"))
+        runner.load_tokenizer(artifact)
+        assert runner.decoder is True
+        result, _, second = _smoke(
+            tmp_path / "second", artifact, _config(tmp_path / "second", head_init="existing")
+        )
+        verifier = json.loads((second / VERIFIER_CONFIG_FILENAME).read_text())
+        assert verifier["pooling"] == "last_token"
+        assert verifier["input"]["encoding"] == "template"
+        assert result.receipts["overflow"]["template_token_overhead"] == 2
+
+    def test_existing_refuses_a_changed_rendering(self, tmp_path: Path, decoder_dir: Path) -> None:
+        _, _, artifact = _smoke(
+            tmp_path / "first", decoder_dir, _decoder_config(tmp_path / "first")
+        )
+        config = _config(
+            tmp_path / "second", head_init="existing", decoder_template="{hypothesis}\n{premises}"
+        )
+        with pytest.raises(PreflightError, match="different decoder_template"):
+            SeqClsRunner(config).load_tokenizer(artifact)
 
     def test_existing_refuses_missing_aux_heads(self, tmp_path: Path, encoder_dir: Path) -> None:
         _, _, artifact = _smoke(tmp_path / "first", encoder_dir, _config(tmp_path / "first"))
