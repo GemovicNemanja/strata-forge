@@ -300,11 +300,14 @@ class _FakeHub:
     async def is_private(self, repo_id: str, **_: Any) -> bool:
         return self.private
 
-    async def upload_folder(self, folder: Path, repo_id: str, *, repo_type: str, **_: Any) -> str:
-        files = sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())  # noqa: ASYNC240
-        _FakeHub.pushed.append((repo_id, repo_type, files))
-        _FakeHub.last = {p: (folder / p).read_bytes() for p in files}
-        return "ok"
+    commit: ClassVar[str] = "c" * 40
+
+    async def upload_files(
+        self, files: dict[str, Path], repo_id: str, *, repo_type: str, **_: Any
+    ) -> str:
+        _FakeHub.pushed.append((repo_id, repo_type, sorted(files)))
+        _FakeHub.last = {name: path.read_bytes() for name, path in files.items()}
+        return self.commit
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, plugin_env: Path) -> None:
@@ -342,6 +345,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, plugin_env: Path) -> None:
     _FakeHub.pushed = []
     _FakeHub.last = {}
     _FakeHub.private = True
+    _FakeHub.commit = "c" * 40
 
 
 def _execute(spec: plugin_runner.PluginRunSpec, *, from_environment: bool = False) -> str:
@@ -354,7 +358,7 @@ def test_a_step_scoring_run_end_to_end(
 ) -> None:
     _allow(monkeypatch, pin)
     _wire(monkeypatch, plugin_env)
-    assert _execute(_spec(pin)) == "acme/out"
+    assert _execute(_spec(pin)) == f"acme/out@{_FakeHub.commit}"
     ((repo, kind, files),) = _FakeHub.pushed
     assert (repo, kind) == ("acme/out", "dataset")
     assert files == ["manifest.json", SCORES_FILENAME]
@@ -436,3 +440,12 @@ def test_a_failing_plugin_pushes_nothing(
     with pytest.raises(RunError, match="exited with code 1"):
         _execute(_spec(pin, entry=entry))
     assert _FakeHub.pushed == []
+
+
+def test_a_commit_url_is_not_reported_as_a_commit(
+    monkeypatch: pytest.MonkeyPatch, plugin_env: Path, pin: PluginPin
+) -> None:
+    _allow(monkeypatch, pin)
+    _wire(monkeypatch, plugin_env)
+    _FakeHub.commit = "https://huggingface.co/datasets/acme/out/commit/abc"
+    assert _execute(_spec(pin)) == "acme/out"

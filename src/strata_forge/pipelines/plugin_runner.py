@@ -576,14 +576,23 @@ async def _execute(
                     "privately"
                 )
                 raise RunError(msg)
-            await hub.upload_folder(
-                staged,
+            # Exactly the staged files, in ONE commit: what the manifest attests is what lands.
+            files = {
+                str(path.relative_to(staged)): path
+                for path in sorted(staged.rglob("*"))
+                if path.is_file()
+            }
+            commit = await hub.upload_files(
+                files,
                 out_repo,
                 repo_type=repo_type,
                 commit_message=f"strata plugin run ({entry.name})",
             )
-        emit(writer, ProgressEvent(kind="end", message=f"pushed to {out_repo}"))
-        return out_repo
+        # ``repo@commit`` is the destination the control plane records, so the run's output is
+        # read back at the commit this run made, never at a head a later push has moved.
+        destination = f"{out_repo}@{commit}" if COMMIT_SHA_RE.fullmatch(commit) else out_repo
+        emit(writer, ProgressEvent(kind="end", stage="push", message=destination))
+        return destination
     finally:
         _remove(workdir, sandbox)
 

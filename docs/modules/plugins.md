@@ -169,8 +169,11 @@ In order:
    is copied into a fresh directory the runner owns and its copy's SHA-256 checked. From then on
    only the copy is read: a step scorer's scores are checked against the input
    (`check_scores_file`), the diagnostics written, `manifest.json` (`strata.run.manifest/v1`,
-   `kind: "plugin"`) written, and the copy pushed to the output repository, which must be
-   private (an existing public repository is refused). Plugin output lives only there.
+   `kind: "plugin"`) written, and the copy pushed to the output repository in ONE commit of
+   exactly the staged files. The repository must be private (an existing public repository is
+   refused). The run reports `<repo>@<commit>` as its destination, so the control plane reads
+   the output back at the commit this run made, never at a head a later push moved. Plugin
+   output lives only there.
 
 The manifest records the plugin (`id`, `repo`, `commit`, the full pin, the entry point, its type
 and `score_kind`), the environment (key, requirements, resolved packages), the sandbox
