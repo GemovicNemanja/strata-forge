@@ -32,6 +32,7 @@ def _linux(
     scope: int | None = 1,
 ) -> None:
     monkeypatch.setattr(sb.sys, "platform", "linux")
+
     def which(name: str) -> str | None:
         return f"/usr/bin/{name}" if name in tools else None
 
