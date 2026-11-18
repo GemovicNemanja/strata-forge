@@ -279,7 +279,9 @@ class JsonlProgressWriter:
         self.close()
 
 
-def trainer_callback(writer: JsonlProgressWriter, *, gpu: GpuSampler | None = None) -> Any:
+def trainer_callback(
+    writer: JsonlProgressWriter, *, gpu: GpuSampler | None = None, eval_message: str | None = None
+) -> Any:
     """Build a ``transformers.TrainerCallback`` that forwards events to ``writer``.
 
     ``transformers`` is imported lazily here, so importing
@@ -288,6 +290,7 @@ def trainer_callback(writer: JsonlProgressWriter, *, gpu: GpuSampler | None = No
 
     ``gpu`` is injectable so a caller can share one sampler with its phase sink — and so a test
     can supply a stub instead of probing whatever hardware the test machine happens to have.
+    ``eval_message`` labels every ``eval`` event (what its numbers are, and are not).
     """
     try:
         transformers_mod: Any = __import__("transformers")
@@ -347,6 +350,7 @@ def trainer_callback(writer: JsonlProgressWriter, *, gpu: GpuSampler | None = No
                     # `pace` yields nothing for a key the trainer already reported, so a real
                     # `train_tokens_per_second` from the trainer is never overwritten by an estimate.
                     metrics={**_numeric_extras(data), **pace.tick(step, data), **sampler.sample()},
+                    message=(eval_message or "") if is_eval else "",
                 )
             )
 
@@ -379,7 +383,9 @@ def trainer_callback(writer: JsonlProgressWriter, *, gpu: GpuSampler | None = No
     return _JsonlCallback()
 
 
-def attach(trainer: Any, path: str | Path | None) -> JsonlProgressWriter | None:
+def attach(
+    trainer: Any, path: str | Path | None, *, eval_message: str | None = None
+) -> JsonlProgressWriter | None:
     """Attach a JSONL progress callback to ``trainer`` when a path is configured.
 
     ``path`` wins; otherwise the ``FORGE_PROGRESS_PATH`` env var is used. Returns
@@ -390,5 +396,5 @@ def attach(trainer: Any, path: str | Path | None) -> JsonlProgressWriter | None:
     if not resolved:
         return None
     writer = JsonlProgressWriter(resolved)
-    trainer.add_callback(trainer_callback(writer))
+    trainer.add_callback(trainer_callback(writer, eval_message=eval_message))
     return writer

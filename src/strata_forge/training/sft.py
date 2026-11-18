@@ -206,6 +206,7 @@ class SFTRunner:
         tokenizer: Any = None,
         model: Any = None,
         token: HubToken = None,
+        revision: str | None = None,
     ) -> Any:
         """Construct the TRL ``SFTTrainer`` without starting it.
 
@@ -216,11 +217,12 @@ class SFTRunner:
         this method downloads (see
         :mod:`strata_forge.training.loading`). It is an argument of the
         load only and is never stored on the config, so it cannot
-        reach TRL's arguments or the files TRL saves.
+        reach TRL's arguments or the files TRL saves. ``revision`` pins
+        the commit both loads read.
         """
         transformers_mod, trl_mod, _ = self._load_modules()
         if model is None:
-            load_kwargs = model_load_kwargs(token)
+            load_kwargs = model_load_kwargs(token, revision)
             if self._peft_config is not None and hasattr(self._peft_config, "to_bnb_config"):
                 # QLoRA branch: pass the bnb config.
                 load_kwargs["quantization_config"] = self._peft_config.to_bnb_config()  # type: ignore[union-attr]
@@ -229,7 +231,7 @@ class SFTRunner:
             )
         if tokenizer is None:
             tokenizer = transformers_mod.AutoTokenizer.from_pretrained(
-                self._config.model_id, **tokenizer_load_kwargs(token)
+                self._config.model_id, **tokenizer_load_kwargs(token, revision)
             )
         trl_config = trl_mod.SFTConfig(**self._config.to_trl_kwargs())
         trainer_kwargs: dict[str, Any] = {
@@ -254,6 +256,7 @@ class SFTRunner:
         tokenizer: Any = None,
         model: Any = None,
         token: HubToken = None,
+        revision: str | None = None,
     ) -> SFTRunResult:
         """Run the SFT loop end to end.
 
@@ -268,6 +271,7 @@ class SFTRunner:
             tokenizer=tokenizer,
             model=model,
             token=token,
+            revision=revision,
         )
         train_output: Any = trainer.train()
         trainer.save_model(self._config.output_dir)

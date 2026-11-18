@@ -15,6 +15,21 @@ It constructs, offline, everything a run constructs before it loads weights:
   the vLLM command line, parsed by the installed vLLM's own entrypoint;
 - the ``hf_classify`` scoring engine on a tiny classifier built from a config and saved to disk,
   against a direct forward pass, and its refusal of a checkpoint saved without its head;
+- the ``hf_label_logits`` engine on a tiny causal LM with a chat template, against a direct
+  forward pass of each rendered prompt, and its refusals (a multi-token label, a kwarg the
+  template never reads);
+- the guided-JSON schema check and reply validator on the installed ``jsonschema``, with a remote
+  reference refused and never fetched;
+- the evaluation spec, a prediction file read back through the runner's own reader, a paired
+  cluster bootstrap and the report's items parquet;
+- an evaluation run over an ``hf_classify`` scoring run's own output: the scorer runs on a tiny
+  classifier, writes its results parquet as a pushed run does, and the evaluation reads that file
+  as its predictions with no reshaping (its id, prediction, overflow and logit columns as written);
+- an evaluation over a ``seq_cls`` verifier's own files: a tiny verifier trained on CPU with a
+  calibration split, scored with ``artifact: strata_verifier``, then evaluated with that results
+  parquet as its predictions and the trainer's ``calibration.json`` as its ``calibration_ref``;
+- the benchmark's timed forward pass and measurement loop on that classifier, its summary and its
+  timings parquet;
 - every top-level module import and the CLI's ``--help``.
 
 Usage::
@@ -57,7 +72,7 @@ import tempfile
 import traceback
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -84,6 +99,17 @@ _DATASET = "smoke-org/smoke-dataset"
 _OUTPUT = "smoke-org/smoke-output"
 
 _ADAPTERS = ("none", "lora", "qlora")
+# A method that trains full weights only is checked with no adapter; the runner refuses the others.
+_FULL_WEIGHT_TASKS = frozenset({"SEQ_CLS"})
+# Placeholder pins: a classification run refuses an unpinned model or dataset.
+_PIN = "0" * 40
+_SEQ_CLS_HYPERPARAMS = {
+    "labels": ["entailment", "contradiction", "neutral"],
+    "two_way_positive_label": "entailment",
+    "two_way_labels": ["entailed", "not_entailed"],
+    "max_length": 64,
+    "per_device_batch_size": 2,
+}
 
 #: The variables the inference runner sets on the served process beside the command line. vLLM
 #: ignores a variable it does not know, so a rename upstream would silently undo the runner's
@@ -140,8 +166,22 @@ def write_override(path: str, text: str) -> int:
 # --------------------------------------------------------------------------------------------
 
 
-def sample_value(role: str) -> Any:
+def sample_value(role: str, fmt: str = "") -> Any:
     """A cell of the type a dataset-format role is trained as."""
+    if fmt == "nli_pair":
+        nli: dict[str, Any] = {
+            "premises": [
+                {"pid": "p1", "text": "all birds fly"},
+                {"pid": "p2", "text": "tweety is a bird"},
+            ],
+            "hypothesis": "tweety flies",
+            "label": "entailment",
+            "label_space": "3way",
+            "label_dist": [1.0, 0.0, 0.0],
+            "inconsistent_premises": False,
+            "support_set": ["p1", "p2"],
+        }
+        return nli[role]
     if role == "messages":
         return [
             {"role": "user", "content": "What is the capital of France?"},
@@ -160,16 +200,25 @@ def finetune_cases() -> list[tuple[str, str, str]]:
         (method.name, fmt, adapter)
         for method in enabled_methods()
         for fmt in sorted(method.formats)
-        for adapter in _ADAPTERS
+        for adapter in (("none",) if method.task_type in _FULL_WEIGHT_TASKS else _ADAPTERS)
     ]
 
 
 def finetune_spec(method: str, fmt: str, adapter: str) -> dict[str, Any]:
     """The inert spec a control plane would deliver for one case, with every role mapped."""
     from strata_forge.training.dataset_format import pick_format
+    from strata_forge.training.methods import pick_method
 
     roles = pick_format(fmt).roles
+    extra: dict[str, Any] = {}
+    if pick_method(method).task_type == "SEQ_CLS":
+        extra = {
+            "model_revision": _PIN,
+            "dataset_commit_sha": _PIN,
+            "hyperparams": dict(_SEQ_CLS_HYPERPARAMS),
+        }
     return {
+        **extra,
         "method": method,
         "model_id": _MODEL,
         "dataset_id": _DATASET,
@@ -189,7 +238,7 @@ def finetune_rows(fmt: str) -> list[dict[str, Any]]:
     """Two source rows carrying a column for every role of ``fmt``, plus one the trainer ignores."""
     from strata_forge.training.dataset_format import pick_format
 
-    row = {f"col_{role}": sample_value(role) for role in pick_format(fmt).roles}
+    row = {f"col_{role}": sample_value(role, fmt) for role in pick_format(fmt).roles}
     return [{**row, "unrelated": "dropped"}, dict(row)]
 
 
@@ -208,6 +257,31 @@ def inference_spec() -> dict[str, Any]:
             "max_model_len": 4096,
             "dtype": "bfloat16",
             "row_limit": 8,
+        },
+        "output_repo_id": _OUTPUT,
+        "run_id": "smoke",
+    }
+
+
+_SHA = "0" * 40
+
+
+def eval_spec() -> dict[str, Any]:
+    """The inert evaluation spec, with a baseline, slices, clusters and an output repo."""
+    return {
+        "model_id": _MODEL,
+        "dataset_id": _DATASET,
+        "dataset_commit_sha": _SHA,
+        "split": "test",
+        "evaluation": {
+            "labels": ["yes", "no"],
+            "predictions": {"name": "candidate", "repo_id": _OUTPUT, "commit_sha": _SHA},
+            "compare_to": [{"name": "baseline", "repo_id": _OUTPUT, "commit_sha": _SHA}],
+            "gold_column": "label",
+            "cluster_column": "base",
+            "slice_columns": ["tier"],
+            "seed": 1,
+            "resamples": 20,
         },
         "output_repo_id": _OUTPUT,
         "run_id": "smoke",
@@ -294,6 +368,52 @@ def check_scoring() -> None:
         for actual, expected in zip(output[0], (0.25, 0.75), strict=True)
     ):
         raise SmokeError("temperature application changed")
+
+    from strata_forge.metrics.calibration_fit import fit_temperature
+
+    # Every row says "yes" at 3:1 and 60% are: the NLL optimum is T = log 3 / log 1.5.
+    fit = fit_temperature([[0.0, math.log(3)]] * 10, ["yes"] * 6 + ["no"] * 4, labels=("no", "yes"))
+    if not math.isclose(fit.temperature, math.log(3) / math.log(1.5), rel_tol=1e-9):
+        raise SmokeError("temperature fitting changed")
+
+
+def check_guided_json() -> None:
+    """The guided-JSON checks on the installed ``jsonschema``: schema, replies, no fetching."""
+    import urllib.request
+
+    from strata_forge.pipelines import _guided
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"verdict": {"$ref": "#/$defs/verdict"}},
+        "required": ["verdict"],
+        "$defs": {"verdict": {"enum": ["yes", "no"]}},
+    }
+    if _guided.schema_problem(schema) is not None:
+        msg = f"a valid schema was refused: {_guided.schema_problem(schema)}"
+        raise SmokeError(msg)
+    if _guided.schema_problem({"$ref": "https://example.com/s.json"}) is None:
+        msg = "a schema referencing a remote document was accepted"
+        raise SmokeError(msg)
+    validator = _guided.OutputValidator(schema)
+    if (
+        validator.error('{"verdict": "yes"}') is not None
+        or validator.error('{"verdict": 1}') is None
+    ):
+        msg = "the reply validator does not apply the schema"
+        raise SmokeError(msg)
+    opened: list[object] = []
+    real = urllib.request.urlopen
+    urllib.request.urlopen = lambda *a, **k: opened.append(a)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType]
+    try:
+        remote = _guided.OutputValidator({"$ref": "https://example.com/s.json"})
+        with contextlib.suppress(Exception):
+            remote.error("{}")
+    finally:
+        urllib.request.urlopen = real
+    if opened:
+        msg = "validating a reply fetched a remote schema reference"
+        raise SmokeError(msg)
 
 
 def check_cli() -> None:
@@ -426,6 +546,9 @@ def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         method, config, peft = build_finetune_config(spec, Path(tmp) / "out")
+        if method.task_type == "SEQ_CLS":
+            check_seq_cls_trainer(method, config, dataset)
+            return
         trainer_cls = trainer_class(method.name)
         if not inspect.isclass(trainer_cls):
             msg = f"{method.name} trainer {trainer_cls!r} is not a class"
@@ -446,6 +569,29 @@ def check_finetune_case(method_name: str, fmt: str, adapter: str) -> None:
         if isinstance(peft, QLoRAConfig):
             # Passing a model above skipped the quantisation config; a real run builds it.
             peft.to_bnb_config()
+
+
+def check_seq_cls_trainer(method: Any, config: Any, dataset: Any) -> None:
+    """The classifier's ``TrainingArguments`` and ``Trainer`` keywords against the installed stack.
+
+    The runner builds its arguments for real and its trainer subclass up to ``Trainer.__init__``,
+    which binds against the installed signature and stops, so a renamed or removed argument fails
+    here; nothing is loaded or trained.
+    """
+    torch: Any = importlib.import_module("torch")
+    transformers_mod: Any = importlib.import_module("transformers")
+
+    class _Tokenizer:
+        pad_token_id = 0
+
+    runner = method.build_runner(config)
+    with bf16_as_on_a_gpu(), binding_only(transformers_mod.Trainer):
+        try:
+            runner.build_trainer(torch.nn.Linear(1, 1), dataset, dataset, _Tokenizer())
+        except _Constructed:
+            return
+    msg = "seq_cls: the runner built a trainer without calling transformers.Trainer"
+    raise SmokeError(msg)
 
 
 def check_inference_spec() -> None:
@@ -607,6 +753,740 @@ def check_hf_classify() -> None:
             raise SmokeError(msg)
 
 
+#: The tiny causal LM's chat template: a user turn, optional documents, a thinking switch.
+_TINY_CHAT_TEMPLATE = (
+    "{%- for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>"
+    "{%- endfor %}"
+    "{%- if documents %}{%- for document in documents %}<|doc|>{{ document['text'] }}<|end|>"
+    "{%- endfor %}{%- endif %}"
+    "{%- if add_generation_prompt %}<|assistant|>"
+    "{%- if enable_thinking is defined and not enable_thinking %}<|nothink|>{%- endif %}"
+    "{%- endif %}"
+)
+
+
+def _tiny_causal_lm(directory: Path) -> Any:
+    """Save a tiny Llama causal LM, a byte-level word tokenizer and a chat template; return the model.
+
+    Built from a config with a fixed seed, so nothing is downloaded. The vocabulary holds each
+    word with and without its leading space (``Ġ``), so ``" True"`` is one token, as it is in the
+    byte-level vocabularies the engine is for, and ``" Maybe so"`` is two.
+    """
+    import torch
+    from tokenizers import AddedToken, Tokenizer, decoders, models, pre_tokenizers
+    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+    words = ["Answer", ":", "all", "cats", "purr", "dogs", "bark", "True", "False", "Maybe", "so"]
+    vocab = {"<unk>": 0}
+    for word in words:
+        for form in (word, "\u0120" + word):
+            vocab.setdefault(form, len(vocab))
+    # Tokenizer markers, not credentials: passed by name so no keyword reads as a hardcoded secret.
+    markers = {"unk_token": "<unk>", "eos_token": "<|end|>"}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token=markers["unk_token"]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
+    backend.decoder = decoders.ByteLevel()
+    specials = ["<|user|>", "<|assistant|>", "<|doc|>", "<|end|>", "<|nothink|>"]
+    backend.add_special_tokens([AddedToken(token, special=True) for token in specials])
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, model_max_length=64, **markers)
+    tokenizer.chat_template = _TINY_CHAT_TEMPLATE
+    config = LlamaConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        tie_word_embeddings=True,
+    )
+    torch.manual_seed(0)
+    model: Any = LlamaForCausalLM(config).eval()
+    model.save_pretrained(str(directory))
+    tokenizer.save_pretrained(str(directory))
+    return model
+
+
+def check_hf_label_logits() -> None:
+    """The ``hf_label_logits`` engine on the installed transformers, against a direct forward pass.
+
+    Covers what a fake cannot: the chat template's rendering with kwargs, the prefill's tokens,
+    right padding with only the last positions projected, the full-vocabulary normalizer, a tied
+    output layer loading cleanly, and the refusals a real tokenizer decides.
+    """
+    import torch
+
+    from strata_forge.pipelines import _label_logits, _scoring
+    from strata_forge.pipelines._common import RunError
+    from strata_forge.pipelines.inference_runner import LabelToken
+
+    # Label tokens are verbalizer text, not credentials: validated from data like a spec's.
+    labels = [
+        LabelToken.model_validate({"label": "yes", "token": " True"}),
+        LabelToken.model_validate({"label": "no", "token": " False"}),
+    ]
+    multi = LabelToken.model_validate({"label": "maybe", "token": " Maybe so"})
+    kwargs: dict[str, Any] = {"enable_thinking": False, "documents": [{"text": "all cats purr"}]}
+    texts = ["cats purr", "all dogs bark so so so so", "dogs"]
+    inputs = _scoring.ScoringInputs(
+        texts=texts,
+        pairs=[""] * len(texts),
+        item_ids=None,
+        slices=None,
+        chat_kwargs=[kwargs] * len(texts),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        reference = _tiny_causal_lm(Path(tmp))
+        reader = _label_logits.load_label_reader(
+            Path(tmp),
+            label_tokens=labels,
+            prefill="Answer:",
+            chat_template_kwargs=kwargs,
+            max_length=None,
+            dtype="float32",
+        )
+        if reader.max_length != 64 or reader.unexpected_keys:
+            msg = f"the load is not the tokenizer's 64 tokens with nothing ignored: {reader.max_length}"
+            raise SmokeError(msg)
+        lengths = reader.lengths(inputs)
+        if reader.prefill_ids is None or len(reader.prefill_ids) != 2:
+            msg = f"the prefill 'Answer:' is not its two tokens: {reader.prefill_ids}"
+            raise SmokeError(msg)
+        got = reader.score(inputs, [1, 0, 2])
+        tokenizer: Any = reader._tokenizer  # pyright: ignore[reportPrivateUsage]
+        for position, index in enumerate((1, 0, 2)):
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": texts[index]}],
+                add_generation_prompt=True,
+                tokenize=False,
+                **kwargs,
+            )
+            ids = tokenizer(prompt + "Answer:", add_special_tokens=False)["input_ids"]
+            if len(ids) != lengths[index] or "<|nothink|>" not in prompt:
+                msg = f"row {index} did not render with its kwargs: {prompt!r}"
+                raise SmokeError(msg)
+            with torch.inference_mode():
+                last = reference(torch.tensor([ids])).logits[0, -1].double()
+            expected = [float(last[i]) for i in reader.token_ids]
+            normalizer = float(torch.logsumexp(last, dim=-1))
+            row = got[position]
+            if any(abs(a - b) > 1e-5 for a, b in zip(row, [*expected, normalizer], strict=True)):
+                msg = f"batched label logits differ from one forward pass: {row} vs {expected}"
+                raise SmokeError(msg)
+            outside = 1.0 - float(torch.softmax(last, dim=-1)[reader.token_ids].sum())
+            if abs(_label_logits.read_out(row[:-1], row[-1]) - outside) > 1e-6:
+                msg = "mass_outside is not the full softmax's mass off the label tokens"
+                raise SmokeError(msg)
+        for bad, needle in (
+            ({"label_tokens": [*labels[:1], multi]}, "2 tokens"),
+            ({"chat_template_kwargs": {"reasoning": True}}, "never reads"),
+        ):
+            setup: dict[str, Any] = {
+                "label_tokens": labels,
+                "prefill": None,
+                "chat_template_kwargs": None,
+                "max_length": None,
+                "dtype": "float32",
+            } | bad
+            try:
+                _label_logits.load_label_reader(Path(tmp), **setup)
+            except RunError as exc:
+                if needle not in str(exc):
+                    msg = f"{bad} was refused for the wrong reason: {exc}"
+                    raise SmokeError(msg) from exc
+            else:
+                msg = f"{bad} was accepted"
+                raise SmokeError(msg)
+
+
+def check_eval_spec() -> None:
+    """The evaluation spec, a prediction file, the bootstrap and the items file, offline."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from strata_forge.metrics.cluster_bootstrap import paired_cluster_bootstrap
+    from strata_forge.pipelines import eval_runner
+
+    with run_config(eval_spec()):
+        spec = eval_runner.load_spec()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "results.parquet"
+        pq.write_table(pa.Table.from_pydict({"item_id": ["a", "b"], "pred": ["yes", None]}), path)
+        columns = eval_runner._read_parquet(path, ["item_id", "pred"])  # pyright: ignore[reportPrivateUsage]
+        if columns["pred"] != ["yes", None]:
+            msg = f"the prediction file read back as {columns!r}"
+            raise SmokeError(msg)
+        paired = paired_cluster_bootstrap(
+            ["yes", "no"],
+            ["yes", "yes"],
+            columns["pred"],
+            labels=spec.evaluation.labels,
+            clusters=["c1", "c2"],
+            seed=spec.evaluation.seed,
+            resamples=spec.evaluation.resamples,
+        )
+        if paired.settings.resamples != spec.evaluation.resamples:
+            raise SmokeError("the bootstrap did not run the requested resamples")
+        items = eval_runner._write_items([{"item_id": "a", "slice__tier": ["x"]}], Path(tmp))  # pyright: ignore[reportPrivateUsage]
+        if not items.is_file() or items.stat().st_size == 0:
+            msg = f"no items parquet at {items}"
+            raise SmokeError(msg)
+
+
+#: The commits the integration check pins its synthetic gold split and scoring output to.
+_SCORING_SHA = "1" * 40
+_GOLD_SHA = "2" * 40
+
+
+@contextlib.contextmanager
+def _patched(module: Any, **replacements: Any) -> Any:
+    """Swap module attributes for the duration of a check, restoring them after."""
+    saved = {name: getattr(module, name) for name in replacements}
+    for name, value in replacements.items():
+        setattr(module, name, value)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            setattr(module, name, value)
+
+
+@contextlib.contextmanager
+def _home(path: Path) -> Any:
+    """Point ``Path.home()`` (where runners keep their results) at ``path``."""
+    saved = os.environ.get("HOME")
+    os.environ["HOME"] = str(path)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved
+
+
+def _score_tiny_split(tmp: Path, rows: list[dict[str, Any]]) -> Path:
+    """Run the ``hf_classify`` scoring runner end to end on a tiny classifier; return its parquet.
+
+    Only the Hub is stood in for (the split's rows, its commit and the model snapshot); the
+    classifier load, the length plan, the forward passes, the result rows and the parquet writer
+    are the runner's own.
+    """
+    from strata_forge.pipelines import inference_runner
+    from strata_forge.pipelines._common import RunSecrets
+
+    snapshot = tmp / "model"
+    snapshot.mkdir()
+    _tiny_classifier(snapshot, with_head=True)
+    spec = inference_runner.RunSpec.model_validate(
+        {
+            "model_id": "org/tiny-nli",
+            "model_revision": _SCORING_SHA,
+            "dataset_id": "org/tiny-gold",
+            "dataset_commit_sha": _GOLD_SHA,
+            "split": "test",
+            "template": "{p}",
+            "column_mapping": {"p": "premise", "h": "hypothesis"},
+            "hyperparams": {
+                "engine": "hf_classify",
+                "pair_template": "{h}",
+                "dtype": "float32",
+                "label_alias": {name: name for name in ("entailment", "neutral", "contradiction")},
+                "id_column": "uid",
+                "slice_column": "tier",
+            },
+            "run_id": "scoring-run",
+        }
+    )
+
+    async def commit(_spec: Any, _token: Any) -> str:
+        return _GOLD_SHA
+
+    async def fetch(_spec: Any, _token: Any) -> Path:
+        return snapshot
+
+    def load_rows(_spec: Any, _token: Any) -> list[dict[str, Any]]:
+        return rows
+
+    with (
+        _home(tmp),
+        _patched(
+            inference_runner,
+            _dataset_commit=commit,
+            _load_rows=load_rows,
+            _fetch_model=fetch,
+        ),
+    ):
+        asyncio.run(inference_runner._execute_scoring(spec, RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
+    return tmp / "strata-inference-results" / "scoring-run" / "results.parquet"
+
+
+class _LocalHub:
+    """The Hub as the evaluation runner reads it: pinned files served from disk."""
+
+    files: ClassVar[dict[tuple[str, str, str], Path]] = {}
+
+    def __init__(self, token: Any = None) -> None:
+        del token
+
+    async def download_file(self, repo_id: str, path: str, **kwargs: Any) -> Path:
+        return _LocalHub.files[(repo_id, kwargs["revision"], path)]
+
+
+def check_eval_consumes_scoring_output() -> None:
+    """An evaluation reads an ``hf_classify`` run's results parquet exactly as the scorer wrote it.
+
+    The scorer runs for real on CPU; its file is then the evaluation's ``predictions`` under the
+    scorer's own column names (``item_id``, ``pred``, ``overflow``, ``logit_<label>``), with
+    calibration reading the raw logits. Any reshaping the evaluation needed would fail here.
+    """
+    import pyarrow.parquet as pq
+
+    from strata_forge.metrics.classification import classification_report
+    from strata_forge.pipelines import eval_runner
+    from strata_forge.pipelines._common import RunSecrets
+
+    labels = ["entailment", "neutral", "contradiction"]
+    premises = [
+        "all cats are animals",
+        "some dogs bark",
+        "cats are animals",
+        "dogs bark",
+        "all dogs",
+    ]
+    hypotheses = ["cats are animals", "all dogs bark", "some cats", "so bark", "dogs are animals"]
+    rows: list[dict[str, Any]] = [
+        {
+            "uid": f"u{i}",
+            "premise": premises[i % 5],
+            "hypothesis": hypotheses[(i * 2) % 5],
+            "label": labels[i % 3],
+            "tier": "easy" if i % 2 else "hard",
+            "base": f"b{i // 2}",
+        }
+        for i in range(12)
+    ]
+    # One pair over the tokenizer's 12-token limit: the scorer drops it as overflow, unscored.
+    rows.append(
+        {
+            "uid": "u-long",
+            "premise": "so so so so so so so so so",
+            "hypothesis": "dogs bark",
+            "label": "neutral",
+            "tier": "hard",
+            "base": "b-long",
+        }
+    )
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        results = _score_tiny_split(tmp, rows)
+        written = pq.read_table(str(results)).to_pylist()
+        expected_columns = {
+            "custom_id",
+            "item_id",
+            "slice",
+            "input_tokens",
+            "overflow",
+            "pred",
+            *(f"logit_{label}" for label in labels),
+            *(f"p_{label}" for label in labels),
+        }
+        if set(written[0]) != expected_columns:
+            msg = f"the scorer wrote {sorted(written[0])}, not {sorted(expected_columns)}"
+            raise SmokeError(msg)
+        if [row["overflow"] for row in written].count(True) != 1:
+            raise SmokeError("the over-long pair was not written as one overflow row")
+
+        _LocalHub.files = {("org/scores", _SCORING_SHA, "results.parquet"): results}
+        gold = {key: [row[key] for row in rows] for key in ("uid", "label", "tier", "base")}
+
+        def load_gold(_spec: Any, _token: Any) -> dict[str, list[Any]]:
+            return gold
+
+        spec = eval_runner.EvalSpec.model_validate(
+            {
+                "model_id": "org/tiny-nli",
+                "dataset_id": "org/tiny-gold",
+                "dataset_commit_sha": _GOLD_SHA,
+                "split": "test",
+                "run_id": "eval-run",
+                "evaluation": {
+                    "labels": labels,
+                    # Exactly the scorer's columns: nothing renamed, nothing reshaped.
+                    "predictions": {
+                        "name": "scorer",
+                        "repo_id": "org/scores",
+                        "commit_sha": _SCORING_SHA,
+                        "path": "results.parquet",
+                        "id_column": "item_id",
+                        "prediction_column": "pred",
+                        "overflow_column": "overflow",
+                    },
+                    "id_column": "uid",
+                    "gold_column": "label",
+                    "cluster_column": "base",
+                    "slice_columns": ["tier"],
+                    "seed": 20261104,
+                    "resamples": 200,
+                    "min_slice_rows": 1,
+                    "calibration": {"logit_prefix": "logit_"},
+                },
+            }
+        )
+        with (
+            _home(tmp),
+            _patched(eval_runner, HFHubClient=_LocalHub, _load_gold=load_gold),
+        ):
+            asyncio.run(eval_runner._execute(spec, RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
+        report = json.loads((tmp / "strata-eval-results" / "eval-run" / "metrics.json").read_text())
+
+    counts = report["systems"][0]["counts"]
+    if counts != {"scored": 13, "missing": 0, "invalid": 0, "overflow": 1, "unmatched": 0}:
+        msg = f"the evaluation joined the scorer's file as {counts}"
+        raise SmokeError(msg)
+    overall = report["slices"][0]
+    if (overall["n"], overall["overflow_excluded"]) != (12, 1):
+        msg = f"the overflow row did not leave the shared population: {overall['n']}"
+        raise SmokeError(msg)
+    by_id = {row["item_id"]: row["pred"] for row in written}
+    scored = [row for row in rows if row["uid"] != "u-long"]
+    point = classification_report(
+        [row["label"] for row in scored], [by_id[row["uid"]] for row in scored], labels=labels
+    )
+    accuracy = overall["systems"]["scorer"]["accuracy"]["point"]
+    if abs(accuracy - (point.accuracy.value or 0.0)) > 1e-12:
+        msg = f"accuracy {accuracy} is not the scorer's predictions scored directly"
+        raise SmokeError(msg)
+    raw = overall["systems"]["scorer"]["raw"]
+    if raw is None or raw["n"] != 12 or raw["coverage"] != 1.0:
+        msg = f"the raw logits did not feed every shared row's probabilities: {raw}"
+        raise SmokeError(msg)
+
+
+#: The commits the verifier check pins its synthetic model, gold split and scores to.
+_VERIFIER_SHA = "a" * 40
+_VERIFIER_SCORES_SHA = "c" * 40
+
+
+@contextlib.contextmanager
+def _repo_tests() -> Any:
+    """Make this checkout's ``tests`` package importable, for its synthetic checkpoint builders.
+
+    Only the repository root is added, which holds no ``strata_forge`` (the package is under
+    ``src/``), so the installed distribution is still the one under test.
+    """
+    root = str(Path(__file__).resolve().parents[1])
+    sys.path.insert(0, root)
+    try:
+        yield
+    finally:
+        sys.path.remove(root)
+
+
+class _MemoryProbe:
+    """A device-memory probe for a CPU run: fixed numbers, so the memory check reports and passes."""
+
+    def reset(self) -> None:
+        return None
+
+    def peak_bytes(self) -> int | None:
+        return 10
+
+    def total_bytes(self) -> int | None:
+        return 1000
+
+
+def _train_tiny_verifier(root: Path, tiny: Any) -> Path:
+    """Train a tiny ``seq_cls`` encoder verifier with a calibration split; return its artifact."""
+    import datasets
+
+    from strata_forge.training.seq_cls import SeqClsConfig, SeqClsRunner
+
+    config = SeqClsConfig.model_validate(
+        {
+            "model_id": "synthetic/tiny",
+            "output_dir": str(root / "checkpoints"),
+            "labels": tiny.LABELS,
+            **tiny.TWO_WAY,
+            "max_length": 64,
+            "per_device_batch_size": 8,
+            "max_steps": 2,
+        }
+    )
+    artifact = root / "artifact"
+    SeqClsRunner(config, memory_probe=_MemoryProbe()).run(
+        checkpoint=tiny.encoder(root / "base"),
+        artifact_dir=artifact,
+        train_dataset=datasets.Dataset.from_list(tiny.rows(16)),
+        calibration_dataset=datasets.Dataset.from_list(tiny.rows(8, seed=2)),
+    )
+    return artifact
+
+
+def _score_with_verifier(tmp: Path, artifact: Path, rows: list[dict[str, Any]]) -> Path:
+    """Score ``rows`` with ``artifact: strata_verifier`` through the runner; return its parquet."""
+    from strata_forge.pipelines import inference_runner
+    from strata_forge.pipelines._common import RunSecrets
+
+    spec = inference_runner.RunSpec.model_validate(
+        {
+            "model_id": "synthetic/verifier",
+            "model_revision": _VERIFIER_SHA,
+            "dataset_id": "synthetic/gold",
+            "dataset_commit_sha": _GOLD_SHA,
+            "split": "test",
+            "template": "{premises}",
+            "column_mapping": {"premises": "premises", "hypothesis": "hypothesis"},
+            "hyperparams": {
+                "engine": "hf_classify",
+                "artifact": "strata_verifier",
+                "pair_template": "{hypothesis}",
+                "dtype": "float32",
+                "id_column": "uid",
+            },
+            "run_id": "verifier-scores",
+        }
+    )
+
+    async def commit(_spec: Any, _token: Any) -> str:
+        return _GOLD_SHA
+
+    async def fetch(_spec: Any, _token: Any) -> Path:
+        return artifact
+
+    def load_rows(_spec: Any, _token: Any) -> list[dict[str, Any]]:
+        return rows
+
+    with (
+        _home(tmp),
+        _patched(
+            inference_runner, _dataset_commit=commit, _load_rows=load_rows, _fetch_model=fetch
+        ),
+    ):
+        asyncio.run(inference_runner._execute_scoring(spec, RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
+    return tmp / "strata-inference-results" / "verifier-scores" / "results.parquet"
+
+
+def _evaluate_verifier(
+    tmp: Path, results: Path, calibration: Path, artifact: Path, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Evaluate the verifier's results parquet with its calibration file; return metrics.json."""
+    from strata_forge.pipelines import eval_runner
+    from strata_forge.pipelines._common import RunSecrets
+
+    labels = ["entailment", "contradiction", "neutral"]
+    _LocalHub.files = {
+        ("synthetic/scores", _VERIFIER_SCORES_SHA, "results.parquet"): results,
+        ("synthetic/verifier", _VERIFIER_SHA, "calibration.json"): calibration,
+        ("synthetic/verifier", _VERIFIER_SHA, "strata_verifier.json"): artifact
+        / "strata_verifier.json",
+    }
+    gold = {key: [row[key] for row in rows] for key in ("uid", "label", "base", "premises")}
+
+    def load_gold(_spec: Any, _token: Any) -> dict[str, list[Any]]:
+        return gold
+
+    spec = eval_runner.EvalSpec.model_validate(
+        {
+            "model_id": "synthetic/verifier",
+            "dataset_id": "synthetic/gold",
+            "dataset_commit_sha": _GOLD_SHA,
+            "split": "test",
+            "run_id": "verifier-eval",
+            "evaluation": {
+                "labels": labels,
+                "predictions": {
+                    "name": "verifier",
+                    "repo_id": "synthetic/scores",
+                    "commit_sha": _VERIFIER_SCORES_SHA,
+                    "id_column": "item_id",
+                    "prediction_column": "pred",
+                    "overflow_column": "overflow",
+                    # The trainer's file as written; without its own labels the evaluation
+                    # takes them from the strata_verifier.json beside it at the same commit.
+                    "calibration_ref": {
+                        "repo_id": "synthetic/verifier",
+                        "commit_sha": _VERIFIER_SHA,
+                        "path": "calibration.json",
+                    },
+                },
+                "id_column": "uid",
+                "gold_column": "label",
+                "cluster_column": "base",
+                "premises_column": "premises",
+                "seed": 20261104,
+                "resamples": 200,
+                "min_slice_rows": 1,
+                "calibration": {"apply_calibration": "auto"},
+            },
+        }
+    )
+    with _home(tmp), _patched(eval_runner, HFHubClient=_LocalHub, _load_gold=load_gold):
+        asyncio.run(eval_runner._execute(spec, RunSecrets(), None))  # pyright: ignore[reportPrivateUsage]
+    return json.loads((tmp / "strata-eval-results" / "verifier-eval" / "metrics.json").read_text())
+
+
+def check_eval_consumes_verifier() -> None:
+    """An evaluation reads a trained verifier's scores and calibration file exactly as written.
+
+    The trainer writes ``calibration.json`` (``strata.calibration/v1``) with its labels; the
+    check also evaluates a copy without them, which takes them from ``strata_verifier.json``.
+    Either way the applied read must be the trainer's temperature on the scorer's raw logits.
+    """
+    import pyarrow.parquet as pq
+
+    from strata_forge.metrics.calibration import temperature_scale
+    from strata_forge.metrics.classification import brier
+
+    with _repo_tests():
+        from tests.unit.training import tiny_classifier as tiny
+    labels = list(tiny.LABELS)
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        artifact = _train_tiny_verifier(root / "train", tiny)
+        trained = json.loads((artifact / "calibration.json").read_text())
+        if trained.get("schema") != "strata.calibration/v1" or trained.get("labels") != labels:
+            msg = f"the trainer wrote a calibration file the evaluation does not read: {trained}"
+            raise SmokeError(msg)
+        temperature = trained["fit"]["temperature"]
+        # The evaluation's label space is the three-way one; two-way rows are left out.
+        three_way = [row for row in tiny.rows(24, seed=7) if row["label_space"] == "3way"]
+        rows = [{**row, "uid": f"u{i}", "base": f"b{i // 2}"} for i, row in enumerate(three_way)]
+        results = _score_with_verifier(root / "score", artifact, rows)
+        written = {row["item_id"]: row for row in pq.read_table(str(results)).to_pylist()}
+        logits = [[written[row["uid"]][f"logit_{label}"] for label in labels] for row in rows]
+        expected = brier(
+            [row["label"] for row in rows],
+            temperature_scale(logits, temperature=temperature),
+            labels=labels,
+            probability_kind="class_probabilities",
+        ).value
+        unlabelled = root / "calibration-without-labels.json"
+        unlabelled.write_text(json.dumps({k: v for k, v in trained.items() if k != "labels"}))
+        for calibration, labels_from in (
+            (artifact / "calibration.json", "calibration.json"),
+            (unlabelled, "strata_verifier.json"),
+        ):
+            where = root / f"eval-{labels_from}"
+            report = _evaluate_verifier(where, results, calibration, artifact, rows)
+            counts = report["systems"][0]["counts"]
+            if (counts["scored"], counts["missing"]) != (len(rows), 0):
+                msg = f"the evaluation joined the verifier's scores as {counts}"
+                raise SmokeError(msg)
+            own = report["calibration"]["systems"]["verifier"]["own"]
+            if (own["temperature"], own["labels_from"]) != (temperature, labels_from):
+                msg = f"the calibration file was not read as written: {own}"
+                raise SmokeError(msg)
+            applied = report["slices"][0]["systems"]["verifier"]["applied"]
+            if applied["n"] != len(rows) or abs(applied["brier"]["point"] - expected) > 1e-12:
+                msg = f"the applied read is not the trainer's temperature on raw logits: {applied}"
+                raise SmokeError(msg)
+
+
+def check_benchmark() -> None:
+    """The benchmark's ``hf_classify`` timing on a tiny CPU classifier, through its real loop.
+
+    Covers what the fakes cannot: the timed request runs on the installed torch and
+    transformers with ONE synchronization, its forward_ms sits inside its total_ms, warmups are
+    excluded, the summary validates from its JSON text, and the timings parquet is written.
+    """
+    import asyncio
+    import time
+
+    from strata_forge.pipelines import _benchmark as bench
+    from strata_forge.pipelines import _scoring, benchmark_runner
+
+    identity = {name: name for name in ("entailment", "neutral", "contradiction")}
+    texts = ["all cats are animals", "some dogs bark", "cats are animals", "dogs bark"]
+    pairs = ["cats are animals", "all dogs bark", "all cats", "some dogs"]
+    with tempfile.TemporaryDirectory() as tmp:
+        _tiny_classifier(Path(tmp), with_head=True)
+        classifier = _scoring.load_classifier(
+            Path(tmp), label_alias=identity, max_length=None, dtype="float32"
+        )
+        syncs = 0
+        real_sync = classifier.synchronize
+
+        def _counted() -> None:
+            nonlocal syncs
+            syncs += 1
+            real_sync()
+
+        classifier.synchronize = _counted  # type: ignore[method-assign]
+        start, end, forward = classifier.timed_forward(
+            texts[:2], pairs[:2], clock=time.perf_counter_ns
+        )
+        if not 0 < forward * 1_000_000 <= end - start:
+            msg = f"forward_ms is not inside the request: {forward} ms of {end - start} ns"
+            raise SmokeError(msg)
+        if syncs != 1:
+            msg = f"a timed request synchronized {syncs} times; the protocol allows one"
+            raise SmokeError(msg)
+        step = benchmark_runner._reference_step(  # pyright: ignore[reportPrivateUsage]
+            classifier, texts, pairs
+        )
+        outcome = asyncio.run(
+            bench.measure_configuration(
+                bench.Configuration(index=0, batch_size=2, concurrency=1),
+                sample=[0, 1, 2, 3],
+                passes=2,
+                warmup=1,
+                order_seed=7,
+                warmup_seed=1007,
+                step=step,
+                clock_ns=time.perf_counter_ns,
+                deadline_ns=time.perf_counter_ns() + 60 * 10**9,
+            )
+        )
+        if outcome.status != "measured" or len(outcome.iterations) != 4:
+            msg = (
+                f"the loop did not measure 2 passes of 2 batches: {outcome.status}, {outcome.error}"
+            )
+            raise SmokeError(msg)
+        lengths = classifier.lengths(texts, pairs)
+        tokens = [length or 0 for length in lengths]
+        result = bench.summarize(
+            outcome,
+            boundaries=["model_only", "end_to_end"],
+            tokens=tokens,
+            length_of=lambda _row: None,
+            items_of=lambda _row: None,
+            bootstrap=(7, 20) if importlib.util.find_spec("numpy") else None,
+        )
+        summary = bench.BenchmarkSummary(
+            engine="hf_classify",
+            boundaries=("model_only", "end_to_end"),
+            complete=True,
+            headline_readable=False,
+            model_path="reference_automodel",
+            headline_unreadable_reason="a CPU smoke check is not a T13 read",
+            gpu_idle_check="unavailable",
+            sample={"rows": 4, "eligible": 4, "sampled": 4},
+            excluded={},
+            cold_start={"load_seconds": None, "first_iteration_ms": outcome.first_iteration_ms},
+            gpu={"name": None},
+            configurations=(result,),
+        )
+        parsed = bench.BenchmarkSummary.model_validate_json(summary.model_dump_json())
+        model_p50 = parsed.configurations[0].boundaries[0].latency.pooled["p50"]
+        e2e_p50 = parsed.configurations[0].boundaries[1].latency.pooled["p50"]
+        if model_p50 is None or e2e_p50 is None or model_p50 > e2e_p50:
+            msg = f"model-only p50 {model_p50} is not within end-to-end p50 {e2e_p50}"
+            raise SmokeError(msg)
+        rows = bench.iteration_rows(
+            [outcome],
+            boundaries=["model_only", "end_to_end"],
+            tokens=tokens,
+            items=None,
+            length_of=lambda _row: None,
+            items_of=lambda _row: None,
+        )
+        path = benchmark_runner._write_timings(rows, Path(tmp) / "out")  # pyright: ignore[reportPrivateUsage]
+        if not path.is_file() or path.stat().st_size == 0:
+            msg = f"no timings parquet at {path}"
+            raise SmokeError(msg)
+
+
 def vllm_command() -> list[str]:
     """The serving command line exactly as the inference runner builds it on the VM."""
     from strata_forge.compute.serving import build_vllm_task
@@ -759,6 +1639,7 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
         ("installed distribution", check_install),
         ("top-level module imports", check_module_imports),
         ("cli --help", check_cli),
+        ("guided json validates replies offline", check_guided_json),
     ]
     if "scoring" in extras:
         checks.append(("classification point metrics and temperature", check_scoring))
@@ -769,9 +1650,27 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
                 check_finetune_case(method, fmt, adapter)
 
             checks.append((f"finetune {method} / {fmt} / {adapter}", case))
+    if {"scoring", "storage", "hf"} <= extras:
+        checks.append(("evaluation spec, predictions, bootstrap and items", check_eval_spec))
+    if {"serving", "scoring", "storage", "hf"} <= extras:
+        checks.append(
+            (
+                "evaluation reads an hf_classify scoring output as written",
+                check_eval_consumes_scoring_output,
+            )
+        )
+    if {"finetuning", "serving", "scoring", "storage", "hf"} <= extras:
+        checks.append(
+            (
+                "evaluation reads a trained verifier's scores and calibration",
+                check_eval_consumes_verifier,
+            )
+        )
     if {"serving", "hf"} <= extras:
         checks.append(("inference spec, requests and results", check_inference_spec))
         checks.append(("hf_classify scores a saved classifier exactly", check_hf_classify))
+        checks.append(("hf_label_logits reads a saved causal LM exactly", check_hf_label_logits))
+        checks.append(("benchmark times a saved classifier on its real loop", check_benchmark))
     if "serving" in extras:
         checks.append(("vllm accepts the serving command line", check_vllm_command_line))
     return checks

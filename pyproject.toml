@@ -1,6 +1,6 @@
 [project]
 name = "strata-forge"
-version = "0.6.0"
+version = "0.7.0"
 description = "Typed, async-first baseline for AI/LLM experiments across major foundation-model providers."
 requires-python = ">=3.14"
 readme = "README.md"
@@ -50,6 +50,9 @@ dependencies = [
     "python-dotenv>=1.0,<2",
     "rich>=13.9,<16",
     "jinja2>=3.1.6,<4",
+    # Validates guided-JSON replies on the run's machine and the schema itself at spec load. The
+    # same range litellm already requires, so it adds no install of its own.
+    "jsonschema>=4.23,<5",
 ]
 
 [project.urls]
@@ -167,6 +170,8 @@ dev = [
     # users to install them in production.
     "pillow>=11.0",
     "numpy>=2.4,<3",
+    # The evaluation runner reads and writes parquet; `datasets` brings it on a run's machine.
+    "pyarrow>=21,<25",
 ]
 
 # ----------------------------- ruff -----------------------------

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -61,6 +62,8 @@ from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
+    from strata_forge.storage import HFHubClient
+    from strata_forge.storage.hf_hub import RepoType
     from strata_forge.training.hardware import GpuSampler
     from strata_forge.training.progress import RunStage
 
@@ -87,6 +90,8 @@ __all__ = [
     "MAX_PHASE_CHARS",
     "MAX_SECRETS_FILE_BYTES",
     "PHASE_TICK_SECONDS",
+    "RECEIPT_FILENAME",
+    "RECEIPT_SCHEMA",
     "REPO_ID_RE",
     "REQUIRE_ENGINE_VERSION_ENV",
     "SAFE_NAME_RE",
@@ -94,9 +99,13 @@ __all__ = [
     "PhaseSink",
     "RunError",
     "RunSecrets",
+    "build_receipt",
     "check_engine_version",
+    "commit_oid",
     "emit",
     "engine_version_required",
+    "ensure_private_output",
+    "ensure_private_repo",
     "install_termination_handlers",
     "installed_engine_commit",
     "installed_engine_version",
@@ -107,6 +116,7 @@ __all__ = [
     "model_server_environ",
     "phase_sink",
     "progress_path",
+    "pushed_at",
     "require_commit_sha",
     "results_dir",
     "run_redactor",
@@ -116,6 +126,7 @@ __all__ = [
     "ticking_phase",
     "validate_repo_id",
     "write_manifest",
+    "write_receipt",
 ]
 
 # An HF repo id: ``owner/name`` OR a bare canonical name, each segment alphanumeric-led, no
@@ -225,7 +236,15 @@ _CREDENTIAL_NAME_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL", re.IGN
 
 
 class RunError(Exception):
-    """A runner failure whose message is safe to surface (already token-scrubbed)."""
+    """A runner failure whose message is safe to surface (already token-scrubbed).
+
+    ``metrics`` ride the terminal ``error`` event, so a control plane receives a refused run's
+    measurements (its GPU time, the check's numbers) as it does a finished run's.
+    """
+
+    def __init__(self, *args: object, metrics: Mapping[str, float] | None = None) -> None:
+        super().__init__(*args)
+        self.metrics: dict[str, float] = dict(metrics or {})
 
 
 class RunSecrets(BaseModel):
@@ -749,7 +768,18 @@ async def runner_main(
         return 1
     except Exception as exc:  # top-level runner boundary: report + exit nonzero, never leak
         detail = redactor.redact(str(exc))
-        emit(writer, ProgressEvent(kind="error", message=detail))
+        # A RunError's measurements, or any exception a runner annotated with them on its way out.
+        raw_metrics: Any = getattr(exc, "metrics", None)
+        metrics = (
+            {
+                str(k): float(v)
+                for k, v in cast("dict[Any, Any]", raw_metrics).items()
+                if isinstance(v, int | float) and not isinstance(v, bool)
+            }
+            if isinstance(raw_metrics, dict)
+            else {}
+        )
+        emit(writer, ProgressEvent(kind="error", message=detail, metrics=metrics))
         # Also to stderr, because that is where the control plane reads a failed run's reason
         # from. Catching the exception here means no traceback is printed, so without this the
         # run's own account of why it failed exists only in the progress file, and the record
@@ -830,4 +860,121 @@ def write_manifest(manifest: dict[str, Any], outdir: Path) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
     path = outdir / MANIFEST_FILENAME
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+async def ensure_private_repo(hub: HFHubClient, repo_id: str, *, repo_type: RepoType) -> None:
+    """Create ``repo_id`` private when it is missing, and refuse it when it is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and a
+    run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    try:
+        await hub.create_repo(repo_id, repo_type=repo_type, private=True, exist_ok=True)
+        private = await hub.is_private(repo_id, repo_type=repo_type)
+    except Exception as exc:
+        msg = f"could not prepare the output repo {repo_id}: {exc}"
+        raise RunError(msg) from exc
+    if not private:
+        msg = (
+            f"the output repo {repo_id} is public; a run pushes only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)
+
+
+async def ensure_private_output(hub: HFHubClient, out_repo: str) -> None:
+    """Create the dataset output repo private if it is missing, and refuse one that is public.
+
+    ``create_repo(private=True, exist_ok=True)`` leaves an existing repo's visibility alone, and
+    a run's outputs and manifest name the model and dataset it read, which may be private.
+    """
+    try:
+        await hub.create_repo(out_repo, repo_type="dataset", private=True, exist_ok=True)
+        private = await hub.is_private(out_repo, repo_type="dataset")
+    except Exception as exc:
+        msg = f"could not prepare the output repo {out_repo}: {exc}"
+        raise RunError(msg) from exc
+    if not private:
+        msg = (
+            f"the output repo {out_repo} is public; results are pushed only to a private repo. "
+            "Make it private or choose another output repo"
+        )
+        raise RunError(msg)
+
+
+# ------------------------------ run receipt ------------------------------
+
+#: The execution receipt a runner leaves in its job WORKDIR (its working directory), where the
+#: orchestrator can read it before it removes that directory. The manifest lives beside the
+#: results, outside the workdir, so the receipt carries the manifest's digest and the facts an
+#: orchestrator compares against what it admitted: no row text and no secret.
+RECEIPT_SCHEMA = "strata.run.receipt/v1"
+RECEIPT_FILENAME = "receipt.json"
+
+_COMMIT_AT_END_RE = re.compile(r"([0-9a-f]{40})/?$")
+
+
+def commit_oid(commit: str | None) -> str | None:
+    """The 40-character commit id a Hub commit answer names (an oid or a ``.../commit/<oid>``
+    URL), or None when it names none."""
+    if not commit:
+        return None
+    match = _COMMIT_AT_END_RE.search(commit.strip())
+    return match.group(1) if match else None
+
+
+def build_receipt(
+    kind: str,
+    manifest_path: Path,
+    output: tuple[str, str | None] | None,
+    *,
+    rows: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """The execution receipt of a run of ``kind`` (``chat`` has its own, with its row ids): the
+    digest of the manifest it wrote, the model, dataset and engine that manifest records where it
+    records them, its row counts when it has rows, and the repo and COMMIT its push made (None
+    when nothing was pushed). The commit is what links a run's output to the run that reads it
+    next, exactly; a repo's head can move."""
+    raw = manifest_path.read_bytes()
+    manifest: dict[str, Any] = json.loads(raw)
+
+    def block(key: str) -> dict[str, Any]:
+        value: Any = manifest.get(key)
+        return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+    model, dataset, engine = block("model"), block("dataset"), block("engine")
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "kind": kind,
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "model": {
+            "id": model.get("id"),
+            "requested_revision": model.get("requested_revision"),
+            "commit": model.get("commit"),
+        },
+        "dataset": {
+            "id": dataset.get("id"),
+            "config": dataset.get("config"),
+            "split": dataset.get("split"),
+            "requested_revision": dataset.get("requested_revision"),
+        },
+        "engine_version": engine.get("version"),
+        "rows": rows,
+        "output": None if output is None else {"repo_id": output[0], "commit_sha": output[1]},
+    }
+
+
+def pushed_at(pushed: tuple[str, str | None]) -> str:
+    """Where a push landed as a run's end message names it: ``repo@commit`` when the push made a
+    commit (the orchestrator reads the run's outputs back at that commit, never at a head another
+    run may have moved), else the repo alone."""
+    repo, commit = pushed
+    return f"{repo}@{commit}" if commit else repo
+
+
+def write_receipt(receipt: dict[str, Any], workdir: Path) -> Path:
+    """Write ``receipt`` as ``receipt.json`` in ``workdir`` (the runner's working directory)."""
+    path = workdir / RECEIPT_FILENAME
+    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     return path

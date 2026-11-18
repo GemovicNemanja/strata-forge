@@ -19,6 +19,11 @@ and reports the bootstrap interval and a non-gating user-versus-solver kappa bes
 No annotation resource, rater pooling, model opinion, dataset reading or research acceptance
 is supplied. See the direct-import agreement surface in the reference docs.
 
+`metrics.latency` summarizes latency measurements: `percentile` (type 7, equal to
+`numpy.percentile` with no NumPy), `latency_summary` (per-pass p50/p95/p99, their median across
+passes with min and max, and the pooled percentiles) and the opt-in `latency_bootstrap` interval
+for the pooled percentiles, which needs NumPy from `[scoring]`.
+
 `classification_report` returns accuracy, macro-F1, invalid-output rate, class scores, and a
 confusion matrix. Invalid outputs remain wrong predictions in the denominator and in gold
 support. Every declared class contributes to macro-F1, including absent classes with F1 zero.
@@ -36,5 +41,20 @@ compares paired correctness, records the candidate-minus-baseline effect over al
 and preserves a finite log probability when the floating p-value underflows. `holm_correction`
 adjusts an explicitly named hypothesis family, retaining caller order without choosing alpha.
 These comparisons need no numerical extra; resampling and research thresholds are not inferred.
+
+`cluster_bootstrap` and `paired_cluster_bootstrap` (`metrics.cluster_bootstrap`, NumPy from
+`[scoring]`) give seeded percentile intervals for accuracy, macro-F1 and invalid rate by
+resampling whole caller-declared clusters, and a candidate-minus-baseline delta whose two systems
+share every resample. `cluster_mean_bootstrap` and `paired_cluster_mean_bootstrap` do the same
+for the mean of a per-row score such as a Brier term.
+
+`metrics.calibration_fit` fits one softmax temperature by minimising NLL (`fit_temperature`),
+cross-fits it by cluster so every row is scored with a temperature its own cluster did not
+influence (`cross_fit_temperature`), and computes top-label expected calibration error over
+equal-mass or equal-width bins (`expected_calibration_error`). NumPy from `[scoring]`.
+
+`metrics.judge_agreement` reads an LLM judge's scores against gold scores of the same outputs:
+the contingency table, exact agreement, Cohen's kappa, and for an integer scale the mean absolute
+error and the linearly and quadratically weighted kappas, each null with a reason when undefined.
 
 Reference: [metrics](https://github.com/GemovicNemanja/strata-forge/blob/main/docs/modules/metrics.md).

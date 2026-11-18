@@ -3,8 +3,8 @@
 This pure leaf is shared by training and evaluation. It performs no I/O, reads no datasets,
 calls no models, and imports neither consumer. Functions are synchronous under
 [ADR 0020](../architecture/adr/0020-pure-metric-functions.md). Execution workers own scheduling
-and persistence. NumPy is required only by nonempty temperature application and the agreement
-bootstrap, through `[scoring]`.
+and persistence. NumPy is required only by nonempty temperature application, the agreement and
+cluster bootstraps and the latency bootstrap, through `[scoring]`.
 
 ## Public surface
 
@@ -111,8 +111,53 @@ Omitted `CalibrationScores` measurements are null. `.apply(logits, labels=...)` 
 exact recorded column order and class count. The fit reference is supplied provenance; the
 caller resolves an immutable source and enforces fit/evaluation split separation.
 
-This surface applies a supplied T. It does not fit T, choose thresholds, write artifacts,
-compute ECE, bootstrap intervals, or impose research acceptance gates.
+This surface applies a supplied T. Fitting and ECE live in
+[Temperature fitting, cross-fitting and ECE](#temperature-fitting-cross-fitting-and-ece); nothing
+here chooses thresholds, writes artifacts or imposes research acceptance gates.
+
+## Temperature fitting, cross-fitting and ECE
+
+```python
+from strata_forge.metrics.calibration_fit import (
+    cross_fit_temperature, expected_calibration_error, fit_temperature,
+)
+
+fit = fit_temperature(logits, gold, labels=labels)            # TemperatureFit
+held_out = cross_fit_temperature(logits, gold, labels=labels, clusters=base_ids, seed=20261104)
+ece = expected_calibration_error(gold, held_out.probabilities, labels=labels)  # 15 equal-mass bins
+```
+
+Direct-import only; NumPy from `[scoring]`.
+
+- **`fit_temperature`** (`temperature-nll-bisection-v1`) minimises mean NLL of
+  `softmax(logits / T)`. NLL is convex in beta = 1/T and its gradient `mean(E_p[z] - z_gold)` is
+  nondecreasing, so the gradient is bisected on `[1/20, 1/0.05]` to float precision (at most 200
+  steps). An optimum outside `[MIN_TEMPERATURE, MAX_TEMPERATURE]` = `[0.05, 20]` takes the bound
+  and sets `at_bound` (`"min"` for a population the logits already separate, `"max"` for one
+  they mislead). It records `n`, `nll_before` (T = 1) and `nll_after`. Every row needs finite
+  logits in label order and a declared gold label; a constant added to a row changes nothing.
+- **`cross_fit_temperature`** (`cluster-cross-fit-v1`) sorts the cluster keys, permutes them with
+  `Generator(PCG64(seed))` and deals them into `folds` (default 2) contiguous groups by position
+  (the cluster at permuted position `j` goes to fold `j * folds // C`, so with two folds the
+  first `ceil(C/2)` are fold 0), so a cluster's rows are never on both sides of a fit. Fold k's rows get `softmax(z / T_k)`
+  where `T_k` was fitted on every OTHER fold. The result holds the per-fold fits, the fold row
+  counts and every row's held-out probabilities in input order. Fewer clusters than folds
+  refuses (`calibration_too_few_clusters`).
+- **`expected_calibration_error`** (`top-label-ece-v1`): confidence is the largest probability and
+  the prediction its first argmax. `equal_mass` (default) sorts by confidence, ties broken by the
+  optional `item_ids` (else by input order; stable either way), and splits into `bins` (default
+  15) contiguous groups with `array_split` semantics (the first `n mod bins` hold one row more);
+  `equal_width` uses `[k/bins, (k+1)/bins)` with 1.0 in the last bin. ECE is the
+  bin-count-weighted mean of `|accuracy - mean confidence|`; empty bins contribute nothing.
+  Rows must sum to one within 1e-6.
+- **`reliability_bins`** (same arguments): the bins that ECE weighs, as `ReliabilityBin`s in
+  confidence order, empty ones included: `lo`/`hi` (under `equal_mass` the smallest and largest
+  confidence in the bin, null when empty; under `equal_width` the nominal edges), `n`,
+  `mean_confidence` and `accuracy` (null when empty). `expected_calibration_error` is computed
+  from them, so a reliability diagram drawn from the bins always adds up to the reported ECE.
+
+A fitted temperature is provenance for the calibrated metrics it produced. Nothing here uses one
+to select a model, a reference or a threshold.
 
 ## Explicit-population comparisons
 
@@ -218,14 +263,83 @@ at large near-central counts and exhaustive small paired tables.
 
 ### Resampling boundary
 
-The only bootstrap is the approved agreement interval described under
-[Item-level agreement bootstrap](#item-level-agreement-bootstrap). Any other resampling contract
+Two bootstrap contracts exist: the agreement interval described under
+[Item-level agreement bootstrap](#item-level-agreement-bootstrap), and the classification
+interval described under [Cluster percentile bootstrap](#cluster-percentile-bootstrap). Any other
+resampling contract
 must specify its eligible unit IDs, exact paired population, declared cluster/base-problem
 mapping, preserved config/slice context, and behavior for absent classes or undefined metrics.
 Reproducibility additionally requires an explicit RNG algorithm and seed, canonical unit/cluster
 ordering, replicate count, quantile/interpolation definition, and failure/coverage policy. Those
 choices are not silently made by these three helpers. They supply neither bootstrap intervals
-nor research thresholds, calibration fits, or an evaluation runner.
+nor research thresholds or calibration fits.
+
+### Cluster percentile bootstrap
+
+```python
+from strata_forge.metrics.cluster_bootstrap import cluster_bootstrap, paired_cluster_bootstrap
+
+single = cluster_bootstrap(gold, predictions, labels=labels, clusters=base_ids, seed=20261104)
+paired = paired_cluster_bootstrap(
+    gold, baseline, candidate, labels=labels, clusters=base_ids, seed=20261104
+)
+assert paired.delta.macro_f1.point == (
+    paired.candidate.macro_f1.point - paired.baseline.macro_f1.point
+)
+```
+
+A nonparametric percentile bootstrap over caller-declared **clusters**
+(`bootstrap_version="cluster-percentile-bootstrap-v1"`) for accuracy, macro-F1 and invalid rate.
+It needs NumPy from `[scoring]`, imported only when a function runs.
+
+- **Population.** `gold`, every system's predictions and `clusters` are aligned row lists of one
+  length. A cluster key is a nonempty string per row (for example a base problem id); a row-level
+  bootstrap is a cluster per row. Invalid and missing predictions follow `classification_report`:
+  wrong, and in the gold class's support. An empty population refuses with
+  `cluster_bootstrap_empty`, a length mismatch with `cluster_bootstrap_population_mismatch`.
+- **Order.** Clusters are ordered by their sorted string keys, so neither row order nor the
+  order in which clusters first appear changes a result.
+- **Draws.** The stream is that of one C-order draw
+  `numpy.random.Generator(PCG64(seed)).integers(0, C, size=(resamples, C), dtype=int64)` over the
+  `C` canonical clusters, drawn in consecutive row blocks of about 2**20 indices from the same
+  generator. Each drawn cluster contributes all its rows. `seed` is an integer in `[0, 2**53-1]`
+  (bool refused); `resamples` is at least one and at most 1,000,000, default 10,000.
+- **Arithmetic.** Each cluster's confusion cells are counted once; a block of resamples multiplies
+  its cluster multiplicities by that table in float64, exact for integer counts below 2**53 in any
+  summation order. Each resample's metrics use `classification_report`'s definitions in float64,
+  equal to the point arithmetic within `1e-12`, with one exception: a resample whose GOLD
+  has no row of a declared class has NO macro-F1, whatever the predictions. It is counted in the
+  interval's `undefined_resamples`, never dropped silently and never scored as zero, and the
+  quantiles are taken over the defined resamples; when none is defined the bounds are null with
+  `reason="all_resamples_undefined"`. A paired delta is undefined where either side is. Accuracy
+  and invalid rate are always defined (every resample has rows). The point value keeps
+  `classification_report`'s convention; the evaluation runner lists a slice's absent classes.
+- **Absent classes.** When the population's gold has no row of a declared class, macro-F1 has
+  no point value for ANY system, nor does the paired delta: `point`, `lower` and `upper` are null
+  with `reason="absent_gold_class:<labels>"` and `absent_classes` listed. Absence depends on the
+  gold only, never on predictions. `macro_f1_present_classes` is the diagnostic over
+  `present_classes` (the classes the gold has, one set for every system), under the same
+  undefined-resample rule; it is never a gate read.
+- **One-sided bounds.** A one-sided 97.5% bound is the matching end of the two-sided 95% interval.
+- **Pairing.** `paired_cluster_bootstrap` scores both systems on every resample and differences
+  them per resample (candidate minus baseline) before taking quantiles, so the delta interval
+  reflects the pairing. Its per-system intervals equal `cluster_bootstrap`'s for the same seed.
+- **Quantile rule.** Hyndman-Fan type 7 at exact rational positions `p = 1/40` and `p = 39/40`,
+  as for the agreement bootstrap; the confidence level is fixed at 0.95.
+- **Golden values.** A unit test pins exact bounds for a fixed seed and input.
+
+`ClusterBootstrap` holds a `settings` block (the contract fields, `seed`, `resamples`, `n`,
+`clusters`, `numpy_version`) and `intervals` (`accuracy`, `macro_f1`, `invalid_rate`, each a
+`MetricInterval` of `point`, `lower`, `upper`; `point` is the full-sample value).
+`PairedClusterBootstrap` holds `settings`, `baseline`, `candidate` and `delta`.
+`cluster_mean_bootstrap(values, clusters=..., seed=...)` and `paired_cluster_mean_bootstrap`
+apply the same contract to the mean of a finite per-row score (for example each row's Brier
+term): each resample's mean is its cluster sums over its cluster sizes, so 0/1 correctness gives
+exactly the accuracy interval above. The paired form also reports `delta_sd`, the sample SD
+(n - 1) of the per-row differences with its interval over the same resamples (from weighted sums
+of x and x squared); it needs at least two rows (`cluster_bootstrap_too_few_rows`). One call covers
+one slice: a slice's interval resamples whole clusters within that slice. Both are direct-import
+only. 10,000 paired resamples over 12,000 clusters take a few seconds.
 
 Module rules: [`src/strata_forge/metrics/CLAUDE.md`](../../src/strata_forge/metrics/CLAUDE.md).
 
@@ -432,6 +546,35 @@ direct-import only and are not re-exported by `strata_forge.metrics` or
 `evals.classification`. One call covers one slice; the caller supplies each slice's population.
 The rater contract is unchanged: both rater declarations are `rater_kind="human"`.
 
+## Judge agreement with gold scores
+
+`metrics.judge_agreement.judge_agreement(gold, judged, *, values, scale)`
+(`judge-gold-agreement-v1`) reads how far an LLM judge's scores of some outputs agree with gold
+(human) scores of the same outputs, one criterion at a time, over the cases that have both. The
+scores are integers, each one of `values` in scale order: `[0, 1]` (fail, pass) for a
+`pass_fail` scale, `[min, ..., max]` for an `ordinal` one.
+
+```python
+from strata_forge.metrics.judge_agreement import judge_agreement
+
+read = judge_agreement([1, 1, 0, 0], [1, 0, 0, 0], values=[0, 1], scale="pass_fail")
+assert read.counts == ((2, 0), (1, 1))      # gold rows x judge columns
+assert (read.percent_agreement, read.cohen_kappa) == (0.75, 0.5)
+```
+
+It reports the contingency table, the exact-agreement share and Cohen's kappa, and for an
+ordinal scale the mean absolute error and the linearly and quadratically weighted kappas
+(weights `|g - j| / (k - 1)` and `(g - j)^2 / (k - 1)^2`). Every value is computed exactly and
+reported as a float, or as null with its reason in `<name>_undefined`: `empty` (no cases),
+`chance_agreement_one` (the expected agreement is one, so a kappa divides by zero) or
+`not_an_integer_scale` (the absolute error and the weighted kappas on a pass/fail scale). These are point values: an interval over the agreement share
+or the absolute error is a cluster bootstrap of the per-case value
+(`cluster_mean_bootstrap`), which the caller computes because only it knows the clusters. It
+refuses mismatched lengths (`judge_agreement_population_mismatch`), a score outside `values` or
+a non-integer one, a `bool` included (`judge_agreement_score_invalid`), and fewer than two or
+repeated `values` (`judge_agreement_values_invalid`). Nothing here decides a gate, and the
+judge is not a human rater: the two-rater statistics above stay separate.
+
 ## One human against one model rater
 
 `human_model_agreement` is a separate statistic, `statistic_version="nominal-human-vs-model-v1"`,
@@ -534,3 +677,25 @@ It supports strict JSON round trips. Input errors use fixed Forge `ValidationErr
   non-number;
 - `agreement_reference_invalid` for a blank `source_ref` or `version_ref`, as
   `reference_prevalence` refuses.
+
+## Latency percentiles
+
+`strata_forge.metrics.latency` summarizes timed passes of a latency measurement in milliseconds.
+`percentile(values, q)` is Hyndman-Fan type 7, computed with the same float operations as
+`numpy.percentile`'s default `linear` method, so the two agree exactly; it needs no NumPy.
+`latency_summary(passes)` takes each timed pass's measured latencies and returns a frozen
+`LatencySummary` (`latency-pass-percentiles-v1`): per-pass `n`, p50, p95 and p99; for each of
+those percentiles the median of the per-pass values with their min and max (`across_passes`, the
+protocol's headline form); the pooled percentiles over every iteration; and the pooled mean, min
+and max. A pass with no measurement is kept with `n=0` and no percentiles and is not counted in a
+median. Values must be finite, non-negative numbers; a boolean is refused.
+
+`latency_bootstrap(values, seed=..., resamples=...)` (`latency-iteration-percentile-bootstrap-v1`)
+is an opt-in interval for the pooled percentiles. It resamples measured iterations, pooled across
+passes: one C-order `(resamples, n)` index draw from `Generator(PCG64(seed))` over the measurement
+order, drawn in row blocks that reproduce it; type-7 percentiles per resample; the interval ends
+are the type-7 2.5th and 97.5th percentiles of the resampled values (confidence 0.95). Its
+population is a declared assumption: iterations of one pass are not independent draws. Resamples
+are bounded to 1,000,000 and resamples times iterations to 2,000,000,000. NumPy from `[scoring]`
+is imported only here. The result records the population, RNG, quantile rule, seed, resample
+count, `n` and the NumPy version.

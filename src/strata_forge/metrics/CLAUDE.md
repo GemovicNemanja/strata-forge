@@ -18,7 +18,21 @@ This is a pure deterministic numerical leaf. Read
 - Keep point definitions and serialized fields consistent with the synthetic conformance
   fixture in `tests/unit/metrics/fixtures/classification_point_v1.json`.
 - `TemperatureCalibration` is a draft component, not the full training calibration-file
-  schema. Do not introduce fitting, thresholds, other interval definitions, or pooling implicitly.
+  schema. Fitting lives only in `calibration_fit.py`: `fit_temperature`
+  (`temperature-nll-bisection-v1`: NLL bisected on beta = 1/T within [0.05, 20], the bound taken
+  and reported when the optimum lies outside), `cross_fit_temperature` (`cluster-cross-fit-v1`:
+  sorted cluster keys permuted by `Generator(PCG64(seed))`, dealt into contiguous folds, each
+  fold scored with the temperature fitted on the others) and `expected_calibration_error`
+  (`top-label-ece-v1`, 15 bins, equal-mass by stable confidence sort with ties by item id and
+  `array_split` sizes, or equal-width), computed from `reliability_bins` so the reported bins and
+  the ECE never disagree. Two folds put the first ceil(C/2) permuted clusters in
+  fold 0. A fitted
+  temperature is never used to select a model, threshold or reference. Do not introduce
+  thresholds, other interval definitions, or pooling implicitly.
+- `judge_agreement.py` (`judge-gold-agreement-v1`) owns an LLM judge's agreement with gold
+  scores: exact Fractions, null with a reason when undefined, point values only. It draws no
+  resamples (intervals are the caller's `cluster_mean_bootstrap` of a per-case value) and is
+  kept apart from the two-human-rater statistics: a judge is not a human rater.
 - `comparison.py` owns Wilson binomial intervals, exact conditional McNemar, and explicit
   named-family Holm adjustment. Keep all-pair effect denominators distinct from discordant
   test denominators, preserve finite log-p/underflow provenance, and never hide an alpha or
@@ -31,8 +45,27 @@ This is a pure deterministic numerical leaf. Read
   consecutive row blocks that reproduce it bit for bit), caller-supplied count (default 10,000),
   coefficient fixed by the full-sample reference selection, undefined resamples counted and
   reported, Hyndman-Fan type 7 quantiles at exact rational positions, confidence fixed at 0.95.
-  Changing any of these is a new version and needs a new approval. No other bootstrap, and no
-  inference of independence from cluster-repeated rows, is exported.
+  Changing any of these is a new version and needs a new approval. The second contract is
+  `cluster_bootstrap` / `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`, from the
+  research pre-registration's metric engine, relayed by the platform coordinator on 2026-11-18):
+  whole caller-declared clusters resampled with replacement, clusters ordered by sorted string key,
+  `Generator(PCG64(seed))` with the stream of one C-order `(resamples, C)` draw in consecutive row
+  blocks, caller-supplied count (default 10,000), classification_report definitions per resample
+  (a resample with a declared class absent from gold and predictions has no macro-F1: counted in
+  `undefined_resamples`, never dropped silently or zeroed),
+  paired systems scored on the same resample and differenced before the quantiles, Hyndman-Fan
+  type 7 quantiles at exact rational positions, confidence fixed at 0.95.
+  `cluster_mean_bootstrap` / `paired_cluster_mean_bootstrap` apply the same contract to the mean
+  of a finite per-row score (a Brier term): cluster sums over cluster sizes per resample. The same versioning
+  rule applies. The third is `latency_bootstrap` (`latency-iteration-percentile-bootstrap-v1`), for
+  the latency benchmark (research ruling of 2026-11-18: opt-in, off by default, diagnostic only,
+  never the headline and never a pass/fail input): it reuses the RNG, stream order, type 7
+  quantiles and 0.95 confidence above and resamples measured latency iterations pooled across
+  passes, and records its population in its result.
+  No other bootstrap, and no inference of independence from cluster-repeated rows, is exported.
+- `latency.py` point statistics (`latency-pass-percentiles-v1`) are the latency protocol's: type 7
+  percentiles equal to `numpy.percentile`'s default without NumPy, per pass, then their median
+  across passes with min and max. Keep the float operations equal to NumPy's `linear` method.
 - Update this file, module README, reference docs, and tests with any public API change.
 - The two-human statistic (`nominal-two-human-raters-v1`) supports only two complete
   caller-declared human raters with distinct identities, identical unique ordered item IDs and an

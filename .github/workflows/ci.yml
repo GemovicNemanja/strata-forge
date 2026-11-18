@@ -70,3 +70,39 @@ jobs:
           else
             echo "No cassettes yet — skipping VCR replay."
           fi
+
+  # The default `uv sync` installs no torch, so every test that needs it is skipped by
+  # `importorskip` in the job above. This job installs the locked torch stack on the CPU wheel and
+  # runs exactly those tests: scoring parity, seq_cls, the trained-verifier path, label logits.
+  torch-tests:
+    name: Unit tests (torch, CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: Install the locked torch stack, torch from the CPU index
+        # The lock resolves torch to its CUDA build on Linux, with ~3 GB of nvidia wheels a CPU
+        # runner cannot use. Every other package of the [finetuning] and [hf] extras installs at
+        # its locked version; torch installs at its locked version from the CPU index; the CUDA
+        # libraries and bitsandbytes (a CUDA kernel) are left out.
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes --extra finetuning --extra hf \
+            > locked.txt
+          torch_version=$(grep -E '^torch==' locked.txt | cut -d= -f3 | cut -d' ' -f1)
+          grep -vE '^(torch|triton|bitsandbytes|nvidia-|cuda-)' locked.txt > torch-stack.txt
+          uv pip install --no-deps -r torch-stack.txt
+          uv pip install --no-deps "torch==${torch_version}+cpu" \
+            --index-url https://download.pytorch.org/whl/cpu
+          uv run --no-sync python -c "import torch, transformers; print('torch', torch.__version__, 'transformers', transformers.__version__)"
+      - name: Run the torch-dependent unit tests
+        # Every test module that skips without torch, transformers, datasets or safetensors.torch.
+        # `-rs` lists any skip that is left, so a test still skipping here is visible.
+        run: |
+          mapfile -t files < <(grep -rlE 'importorskip\("(torch|transformers|datasets|safetensors\.torch)' tests/unit | sort)
+          printf '%s\n' "${files[@]}"
+          uv run --no-sync pytest -rs "${files[@]}"

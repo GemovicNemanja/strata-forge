@@ -4394,11 +4394,12 @@ wheels = [
 
 [[package]]
 name = "strata-forge"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "litellm" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -4502,6 +4503,7 @@ dev = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "pre-commit" },
+    { name = "pyarrow" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -4528,6 +4530,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'storage'", specifier = ">=1.0,<2" },
     { name = "inspect-ai", marker = "extra == 'inspect'", specifier = ">=0.3,<0.4" },
     { name = "jinja2", specifier = ">=3.1.6,<4" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=4.0,<5" },
     { name = "litellm", specifier = ">=1.83,<2" },
     { name = "nltk", marker = "extra == 'evals'", specifier = ">=3.9,<4" },
@@ -4565,6 +4568,7 @@ dev = [
     { name = "numpy", specifier = ">=2.4,<3" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pyarrow", specifier = ">=21,<25" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },

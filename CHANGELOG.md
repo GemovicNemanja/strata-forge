@@ -8,6 +8,224 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+
+### Added
+
+- `seq_cls` monitors its eval split during training, for monitoring only: every
+  `ceil(steps_per_epoch / 4)` steps and on the final checkpoint, macro-F1, accuracy and per-class
+  F1 over three-way rows and accuracy and F1 for `entailed` over two-way rows (`monitor/...` keys,
+  argmax, uncalibrated) beside `eval_loss`, as `eval` events labelled
+  `monitoring (ID dev, final checkpoint is the model)` and in the manifest. The final checkpoint is
+  the model: best-model selection, early stopping and `eval_steps` are refused, and the eval split
+  must share no row with the training split (overlapping or undecidable split specs, such as
+  `train[:80%]` with `train[70%:]`, are refused).
+- `strata_forge.metrics.judge_agreement.judge_agreement` (`judge-gold-agreement-v1`): an LLM
+  judge's scores against gold scores of the same outputs, per criterion (contingency table, exact
+  agreement, Cohen's kappa, and for an integer scale the mean absolute error and the
+  linearly and quadratically weighted kappas).
+- `strata_forge.pipelines.grade_runner`: the LLM grader. A pinned judge model (the `vllm_chat`
+  engine with the rubric's guided-JSON answer schema) grades each system's pinned outputs on a
+  pinned gold split; per-case statuses and scores go to `items.parquet`, the judge's capped
+  rationales to `rationales.parquet`, and cluster-bootstrap means, paired deltas, transitions and
+  judge agreement to `metrics.json` (`strata.eval.grades/v1`). The inference runner's chat path
+  takes prepared rows for it.
+- `strata_forge.pipelines._grading`: the LLM grader's rubric (`Rubric`, `Criterion`: pass/fail
+  or a bounded integer scale), the judge's guided-JSON answer schema (`rubric_schema`, rationale
+  first), its digest and `parse_grade`, which reads a reply as unscored unless it is complete.
+  A criterion id that would collide with the run's headline keys is refused: `cases`, `graded`,
+  `coverage`, a `delta_` or `agreement_` prefix, a `_lower`, `_upper` or `_unresolved` suffix, or
+  `__`.
+- `strata_forge.metrics.calibration_fit.reliability_bins` returns the bins the top-label ECE
+  weighs (`ReliabilityBin`: `lo`, `hi`, `n`, `mean_confidence`, `accuracy`), and the evaluation
+  report carries them as `reliability_bins` in every raw, cross-fit and applied probability read.
+- `strata_forge.metrics.cluster_bootstrap` adds `cluster_bootstrap` and
+  `paired_cluster_bootstrap` (`cluster-percentile-bootstrap-v1`): seeded percentile intervals
+  for accuracy, macro-F1 and invalid rate that resample whole caller-declared clusters with
+  `numpy.random.Generator(PCG64(seed))` (default 10,000 resamples), score paired systems on the
+  same resamples and difference them before the Hyndman-Fan type 7 quantiles.
+- `strata_forge.pipelines.eval_runner` is an evaluation run kind: it joins pinned prediction
+  parquet files to a pinned gold split on a stable item id, computes the candidate's and each
+  baseline's metrics overall and per declared slice with cluster bootstrap intervals and paired
+  deltas, marks slices under `min_slice_rows` diagnostic, and pushes `items.parquet`,
+  `metrics.json`, `manifest.json` and a dataset card to a private repo in one commit (or keeps
+  them on the machine). `EvalSpec` / `EvalSettings` / `PredictionSource` are its spec models.
+  Every row has a status (`ok` / `tier_refused` / `excluded` / `overflow` / `missing`): a
+  declared `tier_rule` refuses rows for every system, the primary read is over the rows no system
+  overflowed with each system's full-tier read beside it, missing rows are always invalid,
+  comparisons report the paired discordance rate `p_d`, rows without a cluster cluster on the
+  SHA-256 of their normalised premises, and the manifest records the bootstrap contract.
+  Resamples where macro-F1 is undefined are counted, never zeroed. An interval with more than
+  `unstable_threshold` (default 0.01) of its resamples undefined is flagged `unstable`, and a
+  delta's `excludes_zero` gate read is then `unresolved`. A tier's token-count method is
+  recorded and must not mix, a declared premise count must match the platform's, and rows keyed
+  on the premise-hash fallback are counted per slice.
+- The clean-install job gains the evaluation machine's `scoring,storage,hf` leg.
+- The clean-install smoke proves the run kinds compose end to end on a fresh install: an
+  `hf_classify` scoring run's results parquet feeds an evaluation unchanged (its `item_id`,
+  `pred`, `overflow` and raw `logit_<label>` columns, the last read by calibration), and on the
+  `all` leg a tiny `seq_cls` verifier is trained with a calibration split, scored through
+  `artifact: strata_verifier`, and evaluated with its `calibration.json`.
+- `strata_forge.metrics.calibration_fit`: `fit_temperature` (NLL bisection on 1/T within
+  [0.05, 20], the bound reported when taken), `cross_fit_temperature` (the seeded permutation of
+  sorted cluster keys dealt into folds, the first ceil(C/2) in fold 0 for two, each fold scored
+  with the temperature fitted on the others) and `expected_calibration_error` (top-label, 15
+  equal-mass bins with ties by item id, or equal-width).
+- `cluster_mean_bootstrap` / `paired_cluster_mean_bootstrap` bound the mean of a per-row score
+  (a Brier term) under the cluster bootstrap contract; the paired form adds the SD of the per-row
+  differences with its interval.
+- The evaluation runner's optional `calibration` settings report three probability reads apart
+  (raw, a temperature cross-fitted by cluster over the split or a named slice of it, and the
+  system's own pinned `calibration.json` temperature) with sum-form Brier and its interval, NLL and
+  ECE, plus a paired Brier delta and the SD of the per-item Brier differences per baseline.
+- A latency benchmark runner, `strata_forge.pipelines.benchmark_runner`, measuring one pinned
+  model (`model_revision` required) on every row of one pinned workload split
+  (`dataset_commit_sha` required; a split past `item_cap` is refused) over a grid of batch sizes
+  and concurrent request streams. The headline path is `hf_classify` with
+  `artifact: strata_verifier`: `total_ms` runs from the raw cells through the verifier's own
+  rendering, the forward pass and heads, the 3-way softmax, `p_inconsistent` and
+  `support_scores` to ONE `torch.cuda.synchronize()`; `forward_ms` is CUDA events around the
+  forward pass in the same request, a diagnostic. The plain AutoModel path is recorded as a
+  third-party reference model. `vllm_chat` times each chat request end to end, with no client
+  cache, one attempt and the server's prefix cache off unless declared. Three recorded seeds
+  (`sample_seed`, `order_seed + pass`, `warmup_seed + pass`); warmup before every pass; lengths
+  and L/P buckets measured with each model's own tokenizer and template; exclusions counted by
+  reason. A GPU another process holds refuses the run at the start and stops it as incomplete
+  (`gpu_busy`) before a pass; clocks, power and temperature are recorded around every pass. Only
+  completed passes are summarized, and the headline is the median of the per-pass p95 with min
+  and max, readable only for a complete run on a GPU checked idle. `timings.parquet`,
+  `summary.json` (`BenchmarkSummary`, finite numbers only) and `manifest.json` (`kind`
+  `benchmark`) are pushed in one commit to a private output repo of the run's own, also when the
+  model server dies mid-run (the run then fails as incomplete). The `end` event carries
+  `gpu_count` and `gpu_seconds` over the GPUs `CUDA_VISIBLE_DEVICES` exposes.
+- `strata_forge.metrics.latency`: `percentile` (type 7, equal to `numpy.percentile` without
+  NumPy), `latency_summary` (per-pass p50/p95/p99, their median across passes with min and max,
+  and the pooled percentiles) and the opt-in, diagnostic-only `latency_bootstrap` interval.
+- `Classifier.timed_forward`, `Classifier.forward_timer` (`ForwardTimer`: CUDA events, no added
+  synchronization), `Classifier.synchronize`, `Classifier.attention` and
+  `timed_verifier_request` on the scoring engine.
+- The clean-install matrix gains the benchmark machine's extras, `serving,storage,hf,scoring`,
+  and the smoke script a `check_benchmark` on the tiny classifier.
+- The batch-inference runner names rows by a declared column: `RunSpec.id_column` makes each
+  results row's `custom_id` that column's value (present, at most 512 characters and unique, else
+  the run is refused naming the row position, never the value); unset, rows keep their position
+  `row-<i>`. `RunSpec.row_ids` (1-100,000 distinct ids) runs only those rows, selected from the
+  whole split whatever `row_limit` says, and refuses a run whose ids are not all found. Both are
+  chat-only. The manifest records `id_column` and `row_ids` as `{count, sha256}`.
+- Results rows gain `latency_ms` (the client's per-request measure, `None` without a response) and
+  `error_kind` (`timeout`, `rate_limited`, `model_error`, `invalid_output` or `other`, from the
+  exception's type; `None` on success).
+- A chat run writes `receipt.json` (`strata.run.receipt/v1`) into its working directory, where the
+  orchestrator reads it before the workdir is removed: the manifest's SHA-256, the model and
+  dataset pins requested and served, the template digest, the engine version, `id_column`,
+  `row_ids`, row counts and the output repo with the commit the push made. `_push_results` returns
+  that commit id beside the repo (`commit_oid`).
+- A chat run records its failed rows in `failed_rows.json` beside its receipt (`failed_rows_record`:
+  the distinct failed ids when rows are named by `id_column`, bounded by count and size, with
+  `complete`), the commit it read its split at (`dataset.commit`, resolved before the load when the
+  run is unpinned), and checks one id rule shared with the control plane (`valid_row_id`: 1-512
+  printable characters, not blank). `row_ids` are selected from the rows the run reads, so
+  `row_limit` bounds a retry's window, and its id uniqueness check, as it bounded its source run.
+- A pushing chat, scoring or fine-tuning run ends with `repo@commit` (`_common.pushed_at`), as an
+  evaluation run already did, so the orchestrator records the commit the output landed in
+  (`output_commit_sha`) rather than a repo whose head can move; a push the Hub named no commit for
+  ends with the repo alone.
+- The chat receipt names a prompt-build run's builds: `prompt` and `system_prompt`, each
+  `{build_id, build_hash}` from the manifest's prompt blocks (null for a template run).
+- Every pushing run kind writes a receipt, with a `kind` (`chat`, `scoring`, `training`, `eval`):
+  scoring (`hf_classify`, `hf_label_logits`, verifier artifacts), fine-tuning (incl. `seq_cls`) and
+  evaluation runs write `_common.build_receipt`'s shape (manifest digest, the model, dataset and
+  engine their manifest records, row counts where they have rows, and `output` `{repo_id,
+  commit_sha}` of the commit the push made). The commit is what links one run's output to the run
+  that reads it next. `finetune_runner._push_artifact` and `eval_runner._push` return
+  `(repo_id, commit_sha)`; a push failure still leaves the receipt before the run fails.
+- `hf_classify` scores a verifier trained by `seq_cls` as it was trained
+  (`hyperparams.artifact: strata_verifier`): rendering, labels, pooling and
+  auxiliary heads come only from its `strata_verifier.json`, through the one
+  render module the trainer uses (`training/verifier_render.py`). Results add
+  `p_inconsistent` and per-premise `support_scores` when those heads exist;
+  `apply_calibration: auto` applies the artifact's `calibration.json` to `p_*`
+  with the logits kept raw. Training checks its own artifact through this path
+  before the push.
+- `Hyperparams.n` (1-16) draws `n` samples per chat row, one request each; a seeded run seeds sample
+  `k` with `seed + k`, the seed vLLM gives the `k`-th of `n` parallel samples. A run that declares
+  `n` keys its rows by `(custom_id, sample_index)` and records each sample's `seed`; the manifest
+  records `sampling` and the distinct prompt count. `n > 1` below temperature 1e-5 (vLLM's greedy threshold) is refused, and a chunk holds
+  `progress_chunk` requests, so cancel checks and progress keep their spacing at any `n`.
+- `Hyperparams.chat_template_kwargs` also applies to chat runs, fixed for the run and sent as vLLM's
+  `chat_template_kwargs` (`enable_thinking` passes only this way, as a boolean). A kwarg the
+  snapshot's chat template never reads, a model without a template and a gpt-oss model (rendered
+  with harmony, not the template) are refused before the model server starts; the manifest records
+  the template's and the kwargs' sha256.
+- `Hyperparams.guided_json`: one JSON Schema per chat run, sent with every request as vLLM's
+  `structured_outputs.json` constraint and checked against every reply. A reply that fails
+  validation gets one repair turn (the invalid reply plus a fixed message naming the error, under
+  the same constraint). Rows gain `json_valid`, `json_retried` and `json_error`; the manifest
+  records the schema's and the repair prompt's sha256 and counts valid, invalid, retried and
+  repaired rows. A schema over 16 KiB, invalid for its draft, or referencing anything outside
+  itself is refused at spec load, and references are never fetched.
+- `Hyperparams.engine` also takes `hf_label_logits`: a causal LM's next-token logits for DECLARED
+  single-token labels, read after the model's chat template, with no model server. Each row's
+  `template` is one user message; `Hyperparams.chat_template_kwargs` passes the template's own
+  variables (per-row `{name}` placeholders allowed in string values; the template's own
+  parameters, the conversation and special tokens refused; a kwarg the template never reads
+  refused at load), and `Hyperparams.assistant_prefill` is appended after the assistant header.
+  `Hyperparams.label_tokens` lists `{label, token}` in order; a token that is not one distinct
+  token, alone and as the continuation of the first prompt, is refused. Rows carry the raw
+  `logit_<label>`, the softmax over the labels, `pred` and `mass_outside` (the full-vocabulary
+  probability on every other token). It shares `hf_classify`'s frame: drop-and-count overflow,
+  `id_column` / `slice_column`, a required `dtype` (TF32 off in float32), the batch plan, the dataset
+  commit read and a `scoring` manifest, which also records the
+  chat template's, the canonical kwargs' and the prefill's sha256, the prefill's token ids and each
+  label's resolved token id.
+- The `seq_cls` fine-tuning method (`SeqClsConfig`, `SeqClsRunner`) and the `nli_pair` dataset
+  format: a premise/hypothesis classifier on `transformers.Trainer` with full weights, bf16
+  autocast over float32 master weights, length-grouped batches and an optional activation
+  checkpointing flag (`use_reentrant=False`, `preserve_rng_state=True`, off by default).
+  Gradient accumulation is refused by name. The objective (`classifier_loss`) is grouped soft
+  cross-entropy plus an optional sum-form Brier term, where a two-way row's negative is the
+  aggregate of the other labels, plus null-masked auxiliary flag and per-premise support heads.
+  Before step 0 a run checks every row's label and length (a row over `max_length` refuses the
+  run; nothing is truncated), loads under a strict guard that allows only the declared head keys
+  of the architecture to be missing, initialises a decoder's classifier from its own LM head
+  (prediction head, verbalizer rows of the output projection and its bias) and verifies that step
+  0 reproduces the base model's zero-shot label logits, and measures one optimizer step at the
+  longest real batch against the device. `head_init="existing"` continues a classifier a previous
+  run saved. Intermediate checkpoints never enter the artifact, which carries the stock
+  checkpoint, `strata_aux_heads.safetensors` and `strata_verifier.json`. Premises are lists of
+  `{pid, text}` with pids `p1..pN`; a two-way row's positive label and its two spellings are
+  declared, with no default. Logit comparisons run in float32 with TF32 off and require the same
+  predicted label on every row. The length receipt carries the per-row length distribution, and
+  the memory preflight also measures the in-run eval pass. After training the saved artifact is
+  reloaded as a scorer would and must match the trained logits (`ArtifactCheckError` otherwise),
+  with zero-held parameters asserted exactly zero at save and reload; a declared
+  `calibration_split` gets a temperature fitted on it and written to `calibration.json`.
+- `FinetuneSpec.model_revision`: a full commit id pins the base model for every load of a
+  fine-tuning run; `seq_cls` requires it and `dataset_commit_sha`.
+- Every fine-tuning run writes a `strata.run.manifest/v1` manifest of kind `finetune`, with each
+  check's receipt for `seq_cls` and the measured `gpu_seconds`, pushed with the artifact in one
+  commit to a private model repo (refused when public, before any GPU time and again at push).
+  The terminal `end` event carries `gpu_seconds`.
+- `finetune_runner.check_spec`, the spec checks that need neither the machine nor the network,
+  for a control plane to run at submit.
+- `build_trainer(..., revision=...)` on `SFTRunner` and `PreferenceRunner`, and `revision` on
+  `model_load_kwargs` / `tokenizer_load_kwargs`.
+
+### Changed
+
+- `pipelines._common.ensure_private_output` is the one private-output-repo check, shared by the
+  inference and evaluation runners.
+- `jsonschema` (`>=4.23,<5`, the range litellm already requires) is a direct dependency: guided
+  JSON validates schemas and replies with it.
+- A fine-tuning push no longer uploads `checkpoint-*` directories.
+- Only the `unpaired_preference` format coerces `label` to a boolean.
+
+### Fixed
+
+- `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a
+  `list<struct>` premises column, a nested list, a boolean, a null), naming the column and asking for
+  a `list<string>` column, instead of scoring each element's Python text.
+
 ## [0.6.0] - 2026-11-18
 
 ### Added
@@ -443,7 +661,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 The first release this changelog records. Earlier history is in the git log.
 
-[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.3.0...v0.4.0
