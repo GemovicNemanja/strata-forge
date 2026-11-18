@@ -20,10 +20,17 @@ from strata_forge.prompts.variables import (
     validate_template_variables,
 )
 
+# Names Jinja does not read as a variable: the literals `none` / `true` / `false`, `self` (the
+# template's own reference) and the operator `not`. `{{ none }}` renders None, so it is correctly
+# absent from `extract_variables`; a strategy that generates it would demand otherwise.
+_NOT_VARIABLES = frozenset({"none", "true", "false", "self", "not"})
+
 # A reusable strategy for Jinja-safe identifier names: lowercase, underscore,
 # digits, starts with a letter or underscore. Length is small to keep
 # templates readable when Hypothesis shrinks failures.
-_identifier = st.from_regex(r"[a-z_][a-z0-9_]{0,7}", fullmatch=True)
+_identifier = st.from_regex(r"[a-z_][a-z0-9_]{0,7}", fullmatch=True).filter(
+    lambda name: name not in _NOT_VARIABLES
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +49,10 @@ class TestExtractVariablesProperties:
         # missing identifiers indicate a parser regression.
         body = " ".join(f"{{{{ {name} }}}}" for name in identifiers)
         assert extract_variables(body) == frozenset(identifiers)
+
+    @pytest.mark.parametrize("name", sorted(_NOT_VARIABLES - {"not"}))
+    def test_jinja_literals_and_self_are_not_variables(self, name: str) -> None:
+        assert extract_variables(f"{{{{ {name} }}}}") == frozenset()
 
     @given(
         constant=st.text(
