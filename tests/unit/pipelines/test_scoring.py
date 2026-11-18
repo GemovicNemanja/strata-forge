@@ -134,6 +134,30 @@ def test_an_unusable_id2label_is_refused(id2label: dict[Any, Any], match: str) -
         sc.resolve_labels(id2label, {"a": "a", "b": "b"})
 
 
+@pytest.mark.parametrize(
+    ("element", "kind"),
+    [
+        ({"text": "All cats purr."}, "dict"),
+        (["nested"], "list"),
+        (True, "bool"),
+        (None, "NoneType"),
+    ],
+)
+def test_a_list_of_non_scalars_is_refused_not_rendered_as_python_text(
+    element: object, kind: str
+) -> None:
+    row = {"premises": ["Tom is a cat.", element]}
+    with pytest.raises(
+        RunError, match=f"column 'premises' is a list of {kind} values.*list<string>"
+    ):
+        sc.render_scoring_text("{p}", row, {"p": "premises"}, separator="\n")
+
+
+def test_a_list_of_numbers_joins_as_text() -> None:
+    row = {"premises": ["a", 2, 1.5]}
+    assert sc.render_scoring_text("{p}", row, {"p": "premises"}, separator=" ") == "a 2 1.5"
+
+
 def test_a_list_column_is_joined_and_nothing_is_truncated() -> None:
     row = {"premises": ["All cats purr.", "Tom is a cat."], "hypothesis": "Tom purrs."}
     mapping = {"p": "premises", "h": "hypothesis", "x": "absent"}

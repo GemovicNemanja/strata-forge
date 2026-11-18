@@ -115,8 +115,10 @@ def render_scoring_text(
 ) -> str:
     """Render ``template`` like a chat prompt, joining a list-valued column with ``separator``.
 
-    No length cap here: scoring never truncates, so an over-long rendering is dropped and
-    counted by the caller rather than cut.
+    A list's elements must be scalars (a string or a number): a ``list<struct>`` column would
+    otherwise render as Python dict text, and the model would score that text as the premises.
+    A boolean is refused too, since ``True`` is not a premise either. No length cap here: scoring
+    never truncates, so an over-long rendering is dropped and counted by the caller rather than cut.
     """
 
     def _sub(match: re.Match[str]) -> str:
@@ -125,7 +127,16 @@ def render_scoring_text(
             return match.group(0)
         value: object = row[column]
         if isinstance(value, list | tuple):
-            return separator.join(str(item) for item in cast("Sequence[object]", value))
+            items = cast("Sequence[object]", value)
+            for item in items:
+                if isinstance(item, bool) or not isinstance(item, str | int | float):
+                    msg = (
+                        f"column {column!r} is a list of {type(item).__name__} values, which would "
+                        "be scored as their Python text; stage a list<string> column holding the "
+                        "text to score"
+                    )
+                    raise RunError(msg)
+            return separator.join(str(item) for item in items)
         return str(value)
 
     return _PLACEHOLDER_RE.sub(_sub, template)

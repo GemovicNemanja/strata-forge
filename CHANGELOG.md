@@ -8,6 +8,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Fixed
+
+- `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a
+  `list<struct>` premises column, a nested list, a boolean, a null), naming the column and asking for
+  a `list<string>` column, instead of scoring each element's Python text.
+
+## [0.6.0] - 2026-11-18
+
 ### Added
 
 - The batch-inference runner serves reasoning models with their reasoning kept apart from the
@@ -475,7 +483,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 The first release this changelog records. Earlier history is in the git log.
 
-[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.2.0...v0.3.0
