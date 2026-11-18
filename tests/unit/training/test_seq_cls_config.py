@@ -174,3 +174,12 @@ class TestNliPairFormat:
             {"prompt": "p", "completion": "c", "label": "y"},
         )
         assert rows[0]["label"] is True
+
+
+@pytest.mark.parametrize("key", ["step0_rows", "step0_tolerance"])
+def test_the_check_sample_and_tolerance_cannot_be_set(key: str) -> None:
+    from strata_forge.training.seq_cls import CHECK_ROWS, CHECK_TOLERANCE
+
+    with pytest.raises(ValidationError, match=f"{key} cannot be set for seq_cls"):
+        _config(**{key: 1.0 if key.endswith("tolerance") else 1})
+    assert (CHECK_ROWS, CHECK_TOLERANCE) == (8, 1e-4)
