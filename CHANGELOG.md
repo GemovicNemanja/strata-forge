@@ -48,6 +48,20 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   state, the batch plan, the overflow policy, counts per slice, and the dataset commit actually
   read (an unpinned dataset is resolved once and loaded at that commit). A scoring run pushes only
   to an output repo of its own.
+- `Hyperparams.engine` also takes `hf_label_logits`: a causal LM's next-token logits for DECLARED
+  single-token labels, read after the model's chat template, with no model server. Each row's
+  `template` is one user message; `Hyperparams.chat_template_kwargs` passes the template's own
+  variables (per-row `{name}` placeholders allowed in string values; the template's own
+  parameters, the conversation and special tokens refused; a kwarg the template never reads
+  refused at load), and `Hyperparams.assistant_prefill` is appended after the assistant header.
+  `Hyperparams.label_tokens` lists `{label, token}` in order; a token that is not one distinct
+  token, alone and as the continuation of the first prompt, is refused. Rows carry the raw
+  `logit_<label>`, the softmax over the labels, `pred` and `mass_outside` (the full-vocabulary
+  probability on every other token). It shares `hf_classify`'s frame: drop-and-count overflow,
+  `id_column` / `slice_column`, a required `dtype` (TF32 off in float32), the batch plan, the dataset
+  commit read and a `scoring` manifest, which also records the
+  chat template's, the canonical kwargs' and the prefill's sha256, the prefill's token ids and each
+  label's resolved token id.
 - `strata_forge.training.loading.check_loading_info` refuses a model load that left weights
   uninitialised, mismatched a shape, reported an error or ignored a head tensor, and returns the
   other ignored checkpoint keys for the record.

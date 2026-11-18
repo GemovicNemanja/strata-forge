@@ -12,9 +12,13 @@ progress is appended to the file named by ``FORGE_PROGRESS_PATH`` (the orchestra
 
 ``hyperparams.engine = "hf_classify"`` swaps the middle of that for exact classifier scoring: each
 row renders into a text pair, a sequence-classification head is read with no model server, and
-the raw logits are persisted (see :mod:`strata_forge.pipelines._scoring`). The frame around it —
-the spec, the filtered model download, the private output repo and the one-commit push — is the
-same.
+the raw logits are persisted (see :mod:`strata_forge.pipelines._scoring`).
+``hyperparams.engine = "hf_label_logits"`` reads a causal LM instead: each row renders into a user
+message, the model's chat template (with the run's declared kwargs) and an optional assistant
+prefill make the prompt, and the logits of declared single-token labels at its last position are
+persisted (see :mod:`strata_forge.pipelines._label_logits`). The frame around both — the spec, the
+filtered model download, the private output repo, the drop-and-count overflow and the one-commit
+push — is the same.
 
 Security boundary (the VM is where untrusted-but-allow-listed config meets real
 credentials + the network):
@@ -76,12 +80,13 @@ import time
 from collections import Counter, deque
 from pathlib import Path
 from statistics import median
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     SecretStr,
     StrictFloat,
     StrictInt,
@@ -98,6 +103,7 @@ from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
     OpenAICompatProvider,
 )
+from strata_forge.pipelines._chat_template import kwargs_placeholders, kwargs_problem
 from strata_forge.pipelines._common import (
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA,
@@ -117,14 +123,14 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
+from strata_forge.pipelines._label_logits import load_label_reader
 from strata_forge.pipelines._scoring import (
     LABEL_RE,
     SCORING_DTYPES,
+    ClassifierScorer,
     build_inputs,
-    build_manifest,
     load_classifier,
     plan_batches,
-    result_rows,
     tally,
 )
 from strata_forge.storage import HFHubClient
@@ -132,12 +138,21 @@ from strata_forge.training.hardware import GpuSampler
 from strata_forge.training.progress import JsonlProgressWriter, ProgressEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from strata_forge.core.redact import Redactor
     from strata_forge.llm.registry import ProviderName
+    from strata_forge.pipelines._scoring import ScoringInputs
 
-__all__ = ["SNAPSHOT_IGNORED", "SNAPSHOT_PATTERNS", "RunSpec", "main", "render_template"]
+__all__ = [
+    "SNAPSHOT_IGNORED",
+    "SNAPSHOT_PATTERNS",
+    "LabelToken",
+    "RunSpec",
+    "main",
+    "render_template",
+    "template_placeholders",
+]
 
 # vLLM serves on loopback only — the runner talks to it via localhost, and a multi-tenant
 # / network-reachable VM must not expose the model server.
@@ -222,18 +237,42 @@ _HARMONY_DATE_ENV = "VLLM_SYSTEM_START_DATE"
 _ISO_DATE_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 # The pair template is bounded like the prompt template the control plane accepts.
 _MAX_PAIR_TEMPLATE = 8_192
-# Knobs only a scoring engine reads, and the ones both engines read.
-_SCORING_FIELDS = frozenset(
-    {
-        "pair_template",
-        "label_alias",
-        "id_column",
-        "slice_column",
-        "list_separator",
-        "scoring_batch_size",
-    }
+# An assistant prefill is a short declared string (a judge's "<score>"), not a second prompt.
+_MAX_PREFILL = 1_024
+_MAX_LABEL_TOKEN = 64
+# The knobs each scoring engine reads on top of the ones every scoring engine reads, and the ones
+# every engine reads. A knob outside an engine's set is refused rather than ignored.
+_CLASSIFY_FIELDS = frozenset({"pair_template", "label_alias"})
+_LABEL_LOGITS_FIELDS = frozenset({"label_tokens", "assistant_prefill", "chat_template_kwargs"})
+_SCORING_COMMON_FIELDS = frozenset(
+    {"id_column", "slice_column", "list_separator", "scoring_batch_size"}
 )
 _SHARED_FIELDS = frozenset({"row_limit", "max_model_len", "dtype"})
+_ENGINE_FIELDS: dict[str, frozenset[str]] = {
+    "hf_classify": _CLASSIFY_FIELDS | _SCORING_COMMON_FIELDS | _SHARED_FIELDS,
+    "hf_label_logits": _LABEL_LOGITS_FIELDS | _SCORING_COMMON_FIELDS | _SHARED_FIELDS,
+}
+# Knobs only a scoring engine reads: a chat run refuses them.
+_SCORING_FIELDS = _CLASSIFY_FIELDS | _LABEL_LOGITS_FIELDS | _SCORING_COMMON_FIELDS
+
+
+class LabelToken(BaseModel):
+    """One declared label of a label-logits run and the single token that stands for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The results column suffix (``logit_<label>``): the classifier engine's label grammar.
+    label: str
+    # The token's TEXT, leading space included where the vocabulary has one (``" True"``).
+    token: str = Field(min_length=1, max_length=_MAX_LABEL_TOKEN)
+
+    @field_validator("label")
+    @classmethod
+    def _label_names_a_column(cls, value: str) -> str:
+        if not LABEL_RE.fullmatch(value):
+            msg = "a label is 1-64 of A-Z a-z 0-9 _ . - and starts with a letter or digit"
+            raise ValueError(msg)
+        return value
 
 
 class Hyperparams(BaseModel):
@@ -275,9 +314,11 @@ class Hyperparams(BaseModel):
     harmony_date: str | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
     # What the run does with each rendered row: generate a reply through the model server
-    # (`vllm_chat`), or read a sequence-classification head's logits for the pair
-    # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`).
-    engine: Literal["vllm_chat", "hf_classify"] = "vllm_chat"
+    # (`vllm_chat`), read a sequence-classification head's logits for the pair
+    # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`), or read
+    # a causal LM's next-token logits for declared label tokens after its chat template
+    # (`hf_label_logits`, see `_label_logits`).
+    engine: Literal["vllm_chat", "hf_classify", "hf_label_logits"] = "vllm_chat"
     pair_template: str | None = Field(default=None, min_length=1, max_length=_MAX_PAIR_TEMPLATE)
     # Required for scoring: every model class -> its output label, or null to exclude it.
     label_alias: dict[str, str | None] | None = Field(default=None, min_length=2, max_length=64)
@@ -285,6 +326,14 @@ class Hyperparams(BaseModel):
     slice_column: str | None = Field(default=None, min_length=1, max_length=255)
     list_separator: str = Field(default="\n", max_length=16)
     scoring_batch_size: int = Field(default=16, ge=1, le=1024)
+    # `hf_label_logits`: the labels, in order, each with the one token whose logit it reads.
+    label_tokens: list[LabelToken] | None = Field(default=None, min_length=2, max_length=64)
+    # Text appended after the chat template's assistant header, before the label position. Not a
+    # template: no placeholder in it is substituted.
+    assistant_prefill: str | None = Field(default=None, min_length=1, max_length=_MAX_PREFILL)
+    # Variables the model's chat template reads (`enable_thinking`, `documents`, a judge's
+    # config). A string anywhere in a value may hold `{name}` placeholders, rendered per row.
+    chat_template_kwargs: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def _fields_match_the_engine(self) -> Hyperparams:
@@ -293,18 +342,25 @@ class Hyperparams(BaseModel):
         if self.engine == "vllm_chat":
             stray = sorted(given & _SCORING_FIELDS)
             if stray:
-                msg = f"{', '.join(stray)} apply only to engine 'hf_classify'"
-                raise ValueError(msg)
+                raise ValueError(_owners(stray))
             return self
-        stray = sorted(given - _SCORING_FIELDS - _SHARED_FIELDS)
-        if stray:
-            msg = f"engine 'hf_classify' generates no text and takes no {', '.join(stray)}"
+        accepted = _ENGINE_FIELDS[self.engine]
+        foreign = sorted(given & (_SCORING_FIELDS - accepted))
+        if foreign:
+            msg = f"engine {self.engine!r} takes no {', '.join(foreign)}: " + _owners(foreign)
             raise ValueError(msg)
-        if self.pair_template is None:
-            msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
+        stray = sorted(given - accepted - _SCORING_FIELDS)
+        if stray:
+            msg = f"engine {self.engine!r} generates no text and takes no {', '.join(stray)}"
             raise ValueError(msg)
         if self.dtype not in SCORING_DTYPES:
-            msg = f"engine 'hf_classify' needs dtype, one of {', '.join(SCORING_DTYPES)}"
+            msg = f"engine {self.engine!r} needs dtype, one of {', '.join(SCORING_DTYPES)}"
+            raise ValueError(msg)
+        if self.engine == "hf_label_logits":
+            self._check_label_logits()
+            return self
+        if self.pair_template is None:
+            msg = "engine 'hf_classify' needs pair_template, the second text of each pair"
             raise ValueError(msg)
         if self.label_alias is None:
             msg = (
@@ -326,6 +382,20 @@ class Hyperparams(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+    def _check_label_logits(self) -> None:
+        if self.label_tokens is None:
+            msg = "engine 'hf_label_logits' needs label_tokens, the labels and the token of each"
+            raise ValueError(msg)
+        labels = [entry.label for entry in self.label_tokens]
+        tokens = [entry.token for entry in self.label_tokens]
+        if len(set(labels)) != len(labels) or len(set(tokens)) != len(tokens):
+            msg = "label_tokens needs a distinct label and a distinct token for every entry"
+            raise ValueError(msg)
+        if self.chat_template_kwargs is not None:
+            problem = kwargs_problem(self.chat_template_kwargs)
+            if problem:
+                raise ValueError(problem)
 
     @field_validator("harmony_date")
     @classmethod
@@ -357,6 +427,18 @@ class Hyperparams(BaseModel):
                     )
                     raise ValueError(msg)
         return self
+
+
+def _owners(fields: list[str]) -> str:
+    """Which engines read each of ``fields``, as one sentence per group of fields."""
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for field in fields:
+        engines = tuple(e for e, accepted in _ENGINE_FIELDS.items() if field in accepted)
+        groups.setdefault(engines, []).append(field)
+    return "; ".join(
+        f"{', '.join(names)} apply only to engine {' or '.join(repr(e) for e in engines)}"
+        for engines, names in groups.items()
+    )
 
 
 class RunSpec(BaseModel):
@@ -421,9 +503,9 @@ def _validate_template_coverage(spec: RunSpec) -> None:
     The trade-off is deliberate: a template can no longer carry a LITERAL ``{word}`` that is meant
     to survive to the model. That reading is rare, and it is not worth the run this protects.
     """
-    templates = (spec.template, spec.hyperparams.pair_template or "")
-    placeholders = {m.group(1) for t in templates for m in _PLACEHOLDER_RE.finditer(t)}
-    unmapped = sorted(placeholders - set(spec.column_mapping))
+    unmapped = sorted(
+        template_placeholders(spec.template, spec.hyperparams) - set(spec.column_mapping)
+    )
     if not unmapped:
         return
     known = sorted(spec.column_mapping) or ["(none)"]
@@ -435,6 +517,15 @@ def _validate_template_coverage(spec: RunSpec) -> None:
         "an unmapped one would be sent to the model literally, identically for every row."
     )
     raise RunError(msg)
+
+
+def template_placeholders(template: str, hyperparams: Hyperparams) -> set[str]:
+    """Every ``{name}`` a run renders per row: in the template, the pair template and the string
+    values of the chat-template kwargs. A control plane checks the mapping covers them with this.
+    """
+    texts = (template, hyperparams.pair_template or "")
+    found = {m.group(1) for text in texts for m in _PLACEHOLDER_RE.finditer(text)}
+    return found | kwargs_placeholders(hyperparams.chat_template_kwargs)
 
 
 def render_template(template: str, row: dict[str, Any], column_mapping: dict[str, str]) -> str:
@@ -1007,7 +1098,7 @@ async def _push_results(spec: RunSpec, results_path: Path, hf_token: str) -> str
 
 
 async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None) -> str:
-    if spec.hyperparams.engine == "hf_classify":
+    if spec.hyperparams.engine != "vllm_chat":
         return await _execute_scoring(spec, secrets, writer)
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
@@ -1235,12 +1326,14 @@ async def _require_fresh_output(spec: RunSpec, hf_token: str) -> None:
 async def _execute_scoring(
     spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWriter | None
 ) -> str:
-    """Score every row with the model's classification head; no model server is started.
+    """Score every row with a scoring engine; no model server is started.
 
     The same frame as a chat run: the output repo is checked before any download, the model comes
     from the same filtered snapshot, and the results and manifest are written outside the workdir
     and pushed in one commit. What differs is the middle: rows over the model's length limit are
     dropped and counted before the first forward pass, and the rest run in length-sorted batches.
+    The engine (a classification head, or a causal LM's label tokens) only measures, scores and
+    describes rows; everything around it is shared.
     """
     hf_token = secrets.hf_token_value()
     hub_token = secrets.hub_credential()
@@ -1269,29 +1362,19 @@ async def _execute_scoring(
     async with ticking_phase(phase, "Downloading the model", stage="load_model"):
         snapshot = await _fetch_model(spec, hub_token)
     model_commit = spec.model_revision or snapshot_commit(snapshot)
-    async with ticking_phase(phase, "Loading the classifier", stage="load_model"):
-        classifier = await asyncio.to_thread(
-            load_classifier,
-            snapshot,
-            label_alias=cast("dict[str, str | None]", hp.label_alias),
-            max_length=hp.max_model_len,
-            dtype=cast("str", hp.dtype),
-        )
+    async with ticking_phase(phase, _LOADING_PHASE[hp.engine], stage="load_model"):
+        scorer = await asyncio.to_thread(_load_scorer, snapshot, hp)
     async with ticking_phase(phase, "Measuring rows", stage="run"):
-        lengths = await asyncio.to_thread(classifier.lengths, inputs.texts, inputs.pairs)
+        lengths = await asyncio.to_thread(scorer.lengths, inputs)
     batches, overflow = plan_batches(
-        lengths, max_length=classifier.max_length, batch_size=hp.scoring_batch_size
+        lengths, max_length=scorer.max_length, batch_size=hp.scoring_batch_size
     )
 
     logits: dict[int, list[float]] = {}
     started = time.monotonic()
     async with ticking_phase(phase, "Scoring rows", stage="run"):
         for batch in batches:
-            values = await asyncio.to_thread(
-                classifier.logits,
-                [inputs.texts[i] for i in batch],
-                [inputs.pairs[i] for i in batch],
-            )
+            values = await asyncio.to_thread(scorer.score, inputs, batch)
             logits.update(zip(batch, values, strict=True))
             elapsed = time.monotonic() - started
             emit(
@@ -1311,14 +1394,13 @@ async def _execute_scoring(
                 ),
             )
 
-    out = result_rows(lengths, logits, classifier.labels, inputs)
+    out = scorer.result_rows(lengths, logits, inputs)
     async with ticking_phase(phase, "Writing results", stage="push"):
         results_path = await asyncio.to_thread(_write_results, out, _local_results_dir(spec.run_id))
         await asyncio.to_thread(
             write_manifest,
-            build_manifest(
+            scorer.manifest(
                 requested,
-                classifier,
                 out,
                 model_commit=model_commit,
                 dataset_commit=dataset_commit,
@@ -1355,11 +1437,61 @@ async def _execute_scoring(
     )
     if not counts["scored"]:
         msg = (
-            f"all {len(out)} rows exceed the model's limit of {classifier.max_length} tokens, so "
+            f"all {len(out)} rows exceed the model's limit of {scorer.max_length} tokens, so "
             "none was scored (nothing is truncated)"
         )
         raise RunError(msg)
     return destination
+
+
+_LOADING_PHASE = {"hf_classify": "Loading the classifier", "hf_label_logits": "Loading the model"}
+
+
+class _Scorer(Protocol):
+    """What the scoring frame drives: measure rows, score a batch, describe the results."""
+
+    max_length: int
+
+    def lengths(self, inputs: ScoringInputs) -> list[int | None]: ...
+
+    def score(self, inputs: ScoringInputs, batch: Sequence[int]) -> list[list[float]]: ...
+
+    def result_rows(
+        self,
+        lengths: Sequence[int | None],
+        values: Mapping[int, Sequence[float]],
+        inputs: ScoringInputs,
+    ) -> list[dict[str, Any]]: ...
+
+    def manifest(
+        self,
+        spec: RunSpec,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        model_commit: str | None,
+        dataset_commit: str | None,
+        batches: Sequence[Sequence[int]],
+    ) -> dict[str, Any]: ...
+
+
+def _load_scorer(snapshot: Path, hp: Hyperparams) -> _Scorer:
+    """The run's scoring engine, loaded from the local snapshot."""
+    if hp.engine == "hf_label_logits":
+        return load_label_reader(
+            snapshot,
+            label_tokens=hp.label_tokens or [],
+            prefill=hp.assistant_prefill,
+            chat_template_kwargs=hp.chat_template_kwargs,
+            max_length=hp.max_model_len,
+            dtype=cast("str", hp.dtype),
+        )
+    classifier = load_classifier(
+        snapshot,
+        label_alias=cast("dict[str, str | None]", hp.label_alias),
+        max_length=hp.max_model_len,
+        dtype=cast("str", hp.dtype),
+    )
+    return ClassifierScorer(classifier)
 
 
 async def main() -> int:

@@ -201,18 +201,18 @@ def test_a_padding_offset_model_loses_the_offset_positions() -> None:
     # RoBERTa-style: 514 position slots, ids start after pad_token_id=1, so 512 tokens fit.
     config = _Cfg(model_type="roberta", max_position_embeddings=514, pad_token_id=1)
     no_tokenizer_limit = _Cfg(model_max_length=int(1e30))
-    assert sc._length_limit(config, no_tokenizer_limit, None) == (512, "model")  # pyright: ignore[reportPrivateUsage]
+    assert sc.length_limit(config, no_tokenizer_limit, None) == (512, "model")  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(RunError, match="own limit of 512"):
-        sc._length_limit(config, no_tokenizer_limit, 514)  # pyright: ignore[reportPrivateUsage]
+        sc.length_limit(config, no_tokenizer_limit, 514)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_other_models_keep_their_position_table() -> None:
     bert = _Cfg(model_type="bert", max_position_embeddings=512, pad_token_id=0)
-    assert sc._length_limit(bert, _Cfg(), None) == (512, "model")  # pyright: ignore[reportPrivateUsage]
+    assert sc.length_limit(bert, _Cfg(), None) == (512, "model")  # pyright: ignore[reportPrivateUsage]
     # The tokenizer's declared limit wins when it is smaller.
-    assert sc._length_limit(bert, _Cfg(model_max_length=256), None) == (256, "model")  # pyright: ignore[reportPrivateUsage]
+    assert sc.length_limit(bert, _Cfg(model_max_length=256), None) == (256, "model")  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(RunError, match=r"set hyperparams\.max_model_len"):
-        sc._length_limit(_Cfg(), _Cfg(), None)  # pyright: ignore[reportPrivateUsage]
+        sc.length_limit(_Cfg(), _Cfg(), None)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_the_batch_plan_record_is_deterministic() -> None:
