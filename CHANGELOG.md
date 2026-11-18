@@ -8,6 +8,12 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Fixed
+
+- `hf_classify` refuses a list-valued column whose elements are not strings or numbers (a
+  `list<struct>` premises column, a nested list, a boolean, a null), naming the column and asking for
+  a `list<string>` column, instead of scoring each element's Python text.
+
 ## [0.6.0] - 2026-11-18
 
 ### Added

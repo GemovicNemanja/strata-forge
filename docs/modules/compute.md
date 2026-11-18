@@ -377,7 +377,7 @@ schema of its own:
 | Field | Meaning |
 |---|---|
 | ``pair_template`` | Required. The second text of each pair (the hypothesis); ``template`` renders the first (the premises). Its placeholders need ``column_mapping`` entries like the template's. |
-| ``list_separator`` | Joins a list-valued column (a row's premises) when it fills a placeholder. Default ``"\n"``. |
+| ``list_separator`` | Joins a list-valued column (a row's premises) when it fills a placeholder. Default ``"\n"``. The list's elements must be strings or numbers; a ``list<struct>``, nested-list, boolean or null element is refused, naming the column (stage a ``list<string>`` column instead). |
 | ``label_alias`` | Required. Names every ``id2label`` class exactly, no missing and no extra key: each maps to its output label, or to ``null`` to EXCLUDE it (no columns; the softmax and argmax run over the included classes). Two classes mapping to one label are refused (no combine rule exists); at least two classes stay included. |
 | ``id_column`` | Optional. A column whose value becomes each row's ``item_id``: a string or an integer, unique, at most 256 characters. |
 | ``slice_column`` | Optional. A column (at most 256 distinct values) the counts are kept per value of, for per-tier receipts. A missing value counts under ``(null)``; a value spelled ``(null)``, one over 64 characters, or one spelling held by two types (``1`` and ``"1"``) is refused rather than merged. |
