@@ -173,6 +173,26 @@ class TestRepoLifecycle:
             ("add", {"path_in_repo": "manifest.json", "path_or_fileobj": "/r/manifest.json"}),
         ]
 
+    async def test_upload_files_returns_the_commit_oid_when_the_hub_reports_one(
+        self, fake_hf: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _Info(str):
+            oid = "f" * 40
+
+        def _commit_info(self: object, **kwargs: object) -> _Info:
+            del self, kwargs
+            return _Info("https://huggingface.co/me/out/commit/fff")
+
+        client = HFHubClient()
+        # The first upload builds the fake api; its create_commit then reports a CommitInfo.
+        assert "/commit/" in await client.upload_files({"a.json": "/a.json"}, "me/out")
+        monkeypatch.setattr(
+            type(fake_hf["last_api"]),
+            "create_commit",
+            _commit_info,
+        )
+        assert await client.upload_files({"a.json": "/a.json"}, "me/out") == "f" * 40
+
     async def test_upload_files_refuses_an_empty_commit(self, fake_hf: dict[str, Any]) -> None:
         del fake_hf
         with pytest.raises(ValueError, match="at least one file"):

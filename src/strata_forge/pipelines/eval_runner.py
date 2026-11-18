@@ -109,6 +109,7 @@ _MAX_SLICE_VALUES = 64
 _MAX_ALIASES = 256
 _MAX_ROWS = 2_000_000
 _MAX_TEXT = 128
+_MAX_IDENTIFIER_CHARS = 256
 # A parquet path inside a dataset repo: relative segments of safe characters, ending .parquet.
 _PATH_RE = re.compile(
     r"\A[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.parquet\Z"
@@ -502,14 +503,41 @@ def _label(value: object, aliases: Mapping[str, str], labels: tuple[str, ...]) -
 
 
 def _slice_values(value: object) -> list[str]:
+    """A row's slice values, each once (a repeated list value would count the row twice)."""
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(item) for item in cast("list[object]", value) if item is not None]
+        items = [str(item) for item in cast("list[object]", value) if item is not None]
+        return list(dict.fromkeys(items))
     return [str(value)]
 
 
+def _check_identifiers(values: list[Any], column: str) -> None:
+    """Refuse an id, cluster or slice column that mixes value types (``1`` and ``"1"``, ``True``
+    and ``"True"`` would otherwise become one value) or holds text rather than short identifiers:
+    these values are written to ``items.parquet``, and a text column there would publish it."""
+    kinds: set[str] = set()
+    for value in values:
+        items = cast("list[object]", value) if isinstance(value, list) else [value]
+        for item in items:
+            if item is None:
+                continue
+            kinds.add(type(item).__name__)
+            if len(str(item)) > _MAX_IDENTIFIER_CHARS:
+                msg = (
+                    f"column {column!r} holds a value over {_MAX_IDENTIFIER_CHARS} characters; "
+                    "id, cluster and slice columns must be short identifiers, not text"
+                )
+                raise RunError(msg)
+    if len(kinds) > 1:
+        msg = f"column {column!r} mixes value types; use one type for every row"
+        raise RunError(msg)
+
+
 def _prepare_gold(columns: dict[str, list[Any]], settings: EvalSettings) -> _Gold:
+    for column in (settings.id_column, settings.cluster_column, *settings.slice_columns):
+        if column is not None:
+            _check_identifiers(columns[column], column)
     ids: list[str] = []
     for value in columns[settings.id_column]:
         item = _item_id(value)
@@ -605,11 +633,15 @@ def _align(
     gold: _Gold, columns: dict[str, list[Any]], source: PredictionSource, labels: tuple[str, ...]
 ) -> _System:
     by_id: dict[str, tuple[object, bool]] = {}
+    _check_identifiers(columns[source.id_column], source.id_column)
     overflow_flags = (
         columns[source.overflow_column]
         if source.overflow_column is not None
         else [False] * len(columns[source.id_column])
     )
+    if any(not isinstance(flag, bool) for flag in overflow_flags):
+        msg = f"{source.name}'s overflow column {source.overflow_column!r} must be boolean"
+        raise RunError(msg)
     for raw_id, value, overflow in zip(
         columns[source.id_column], columns[source.prediction_column], overflow_flags, strict=True
     ):
@@ -957,13 +989,15 @@ async def _push(spec: EvalSpec, files: dict[str, Path], hf_token: str) -> str:
     out_repo = validate_repo_id(spec.output_repo_id, "output repo")
     hub = HFHubClient(token=hf_token)  # EXPLICIT write token, never the ambient HF_TOKEN
     await ensure_private_output(hub, out_repo)
-    await hub.upload_files(
+    commit = await hub.upload_files(
         dict(files),
         out_repo,
         repo_type="dataset",
         commit_message="evaluation report",
     )
-    return out_repo
+    # ``repo@commit``, so the report is read back at the commit this run made, never at a head
+    # another run may have moved since.
+    return f"{out_repo}@{commit}" if COMMIT_SHA_RE.fullmatch(commit) else out_repo
 
 
 # ------------------------------------------------------------------ run

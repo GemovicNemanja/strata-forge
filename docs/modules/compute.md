@@ -635,6 +635,14 @@ Each system also gets a ``full_tier`` secondary read over every non-refused row,
 its own overflow counted as invalid. A slice lists ``absent_classes`` (declared
 labels with no gold row and no prediction in it).
 
+Id, cluster and slice columns must be short identifiers, never text: their
+values are written to ``items.parquet``, so a value over 256 characters refuses,
+as does a column that mixes value types (``1`` and ``"1"``, ``True`` and
+``"True"``). A list slice value names each slice once per row. An
+``overflow_column`` must be boolean, like ``exclude_column``. A pushed run's
+``end`` message is ``<repo>@<commit>``, the commit it made, so the report is read
+back at that commit rather than at a head another run may have moved.
+
 The cluster is ``cluster_column``. A row without one (or every row, when only
 ``premises_column`` is declared) clusters on ``premise_cluster_key`` of its
 premises: each premise text (a string, or the ``text`` of a ``{pid, text}``

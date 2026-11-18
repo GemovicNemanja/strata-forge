@@ -93,7 +93,7 @@ class _Hub:
 
     async def upload_files(self, files: Any, repo_id: str, **kwargs: Any) -> str:
         _Hub.calls.append(("upload_files", (dict(files), repo_id, kwargs)))
-        return "commit"
+        return "e" * 40
 
 
 @pytest.fixture
@@ -433,7 +433,8 @@ async def test_push_is_one_private_commit(
     assert repo == "u/report"
     assert set(files) == {"items.parquet", "metrics.json", "manifest.json", "README.md"}
     assert kwargs["repo_type"] == "dataset"
-    assert events[-1]["message"] == "u/report"
+    # The commit this run made, so the report is read back there and never at a moved head.
+    assert events[-1]["message"] == "u/report@" + "e" * 40
     assert all(_TOKEN not in json.dumps(event) for event in events)
     manifest = json.loads((_outdir(env) / "manifest.json").read_text())
     assert manifest["kind"] == "evaluation"
@@ -531,3 +532,58 @@ async def test_comparisons_report_the_paired_discordance_rate(
     assert bootstrap["numpy_version"]
     macro = report["slices"][0]["systems"]["candidate"]["macro_f1"]
     assert "undefined_resamples" in macro
+
+
+@pytest.mark.parametrize("flag", [1, "true", None])
+async def test_a_non_boolean_overflow_flag_refuses(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any], flag: object
+) -> None:
+    # Parquet holds one type per column, so the whole column is the non-boolean type (or null).
+    env["cand"]["overflow"] = [flag] * len(env["cand"]["item_id"])
+    cand = {
+        "name": "candidate",
+        "repo_id": "u/cand",
+        "commit_sha": SHA_CAND,
+        "overflow_column": "overflow",
+    }
+    code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(predictions=cand)))
+    assert code == 1
+    assert "must be boolean" in events[-1]["message"]
+
+
+async def test_a_repeated_list_slice_value_counts_the_row_once(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["tags"] = [["a", "a"] if i < 10 else ["b"] for i in range(60)]
+    spec = _spec(evaluation=_settings(slice_columns=["tags"]))
+    code, _ = await _run(monkeypatch, env, spec)
+    assert code == 0
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    tagged = next(s for s in report["slices"] if s["value"] == "a")
+    assert tagged["n"] == 10
+
+
+@pytest.mark.parametrize(
+    ("column", "values"),
+    [
+        ("item_id", [1, "2"]),
+        ("tier", [True, "True"]),
+        ("base_problem_id", ["p", 7]),
+    ],
+)
+async def test_an_identifier_column_mixing_types_refuses(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any], column: str, values: list[object]
+) -> None:
+    env["gold"][column] = [*values, *env["gold"][column][2:]]
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 1
+    assert "mixes value types" in events[-1]["message"]
+
+
+async def test_an_identifier_column_holding_text_refuses(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    env["gold"]["tier"] = ["x" * 257, *env["gold"]["tier"][1:]]
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 1
+    assert "short identifiers" in events[-1]["message"]
