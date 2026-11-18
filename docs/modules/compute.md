@@ -267,12 +267,13 @@ every error event, the failure reason printed to stderr, and the per-row
 the Hub. A token too short to redact safely fails the run before it starts.
 See [Redacting the console](#redacting-the-console) for the half a relay owns.
 
-The package ships three runners over that plumbing:
+The package ships these runners over that plumbing:
 ``inference_runner`` (serve a model with vLLM, run a batch over a dataset),
 ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
-adapter or merged model to the Hub) and ``plugin_runner`` (run an
+adapter or merged model to the Hub), ``plugin_runner`` (run an
 operator-allow-listed plugin build in a credential-free child process; see
-[plugins.md](plugins.md)). All read an inert JSON spec from
+[plugins.md](plugins.md)) and ``recipe_runner`` (execute a dataset recipe
+revision and push the dataset it makes). All read an inert JSON spec from
 ``STRATA_RUN_CONFIG``, take the Hugging Face token only from the private
 secrets file the backend wrote beside the job, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
@@ -736,6 +737,55 @@ length limit and its source, the overflow policy, the padding side, dtype,
 the TF32 switches, the batch plan, device and the ignored checkpoint keys. Like the pair
 template, the prefill and the kwargs are left out of the manifest's
 ``hyperparams`` dump: only their digests are pushed.
+### Dataset recipe runner (`recipe_runner`)
+
+``python -m strata_forge.pipelines.recipe_runner`` executes one revision of a
+[dataset recipe](datasets.md#dataset-recipes). ``RecipeRunSpec`` carries the
+recipe itself, its ``recipe_revision`` and ``recipe_sha256`` (a recipe that does
+not hash to the declared revision is refused before anything is read), a
+``mode``, ``output_repo_id`` (a private dataset repo, created private when
+missing and refused when public, checked again at push), ``row_cap`` (a source
+or table past it is refused, never truncated; default 1,000,000), and
+``serving`` (how a ``synthesize`` step's model is served: tensor parallelism,
+``max_model_len``, dtype, GPU memory fraction, start timeout, requests in
+flight). The run needs the account's write token.
+
+- **``preview``** bounds every ``synthesize`` step to ``preview_rows`` seed rows
+  (default 200) and writes at most ``preview_rows`` rows per split, to the
+  branch ``preview-<run_id>`` of the output repo: review candidates, never the
+  default branch.
+- **``materialize``** runs the recipe in full and makes the result the default
+  branch's content in ONE commit: the recipe's files (``data/``,
+  ``exclusions.parquet``, ``recipe.json``, ``manifest.json``, ``README.md``)
+  replace the previous version's, and nothing else in the repo is touched
+  (``HFHubClient.replace_files``). That commit is the new dataset version.
+
+Every source is read at its pinned commit with the run's Hub credential. A
+``synthesize`` step's model is downloaded at its pinned revision (refused when
+the snapshot is another commit) and served on loopback with vLLM, as a batch
+run serves a chat model, offline and without the token. Each request carries
+the step's JSON schema as guided JSON (``structured_outputs``) and its own seed;
+every reply is validated against the schema, and an invalid one is excluded
+(``invalid_output``), a failed request too (``generation_failed``); neither is
+repaired or retried. Generated rows are marked ``_synthetic``; generation from
+a held-out split is refused by the engine.
+
+**Outputs**, all in the one commit: ``data/<split>-00000-of-00001.parquet`` per
+non-empty split (an empty split has no file and no card entry, since the Hub's
+loaders refuse a split with no rows), ``exclusions.parquet`` (row id, step,
+reason), ``recipe.json`` (revision, hash and recipe), ``manifest.json``
+(``kind`` ``dataset_recipe``: every source pin, per ``synthesize`` step the
+model pin, seed, ``n``, temperature, token limit, seed-row bound, the prompt
+template's and schema's SHA-256 and the valid / invalid / failed counts, the
+per-step counts and the exclusion reasons) and ``README.md`` (the card's split
+layout, tagged ``synthetic`` when any row was generated). The workdir keeps
+``recipe-summary.json`` (``strata.recipe.summary/v1``) for the control plane:
+the commit, per split its rows, rows written, synthetic rows, path and column
+names, the per-step counts, the exclusion reasons, a per-column profile of
+counts (rows, nulls, distinct) and the generation counts; never a value. The
+``end`` event carries ``rows``, ``synthetic_rows``, ``excluded`` and ``splits``,
+and its message is ``<repo>@<commit>``.
+
 ### Evaluation runner
 
 ``strata_forge.pipelines.eval_runner`` scores pinned prediction files against a
