@@ -8,6 +8,45 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+### Added
+
+- Trusted plugins (`strata_forge.plugins`, ADR 0021). A plugin repository declares its entry
+  points in `strata-plugin.json` (`strata.plugin/v1`): each one's type (`runner` or
+  `step_scorer`), read-only dataset and model inputs, one output and closed typed configuration.
+  An operator allow-list pins exact builds (distribution, version, a git source at a full commit
+  with the digest of its built files, or a Hugging Face wheel at a full commit with its SHA-256),
+  plus per-plugin limits; `preflight` checks a request against
+  the declared interface as data, with no plugin code run. `pipelines/plugin_runner.py` runs an
+  allowed entry point on the target: it refuses a build not in the orchestrator's
+  `STRATA_ALLOWED_PLUGINS`, installs the pinned build into a dedicated per-build directory
+  (`plugins/environment.py`: keyed by the pin, the engine and the interpreter, no credential in
+  the install, and no plugin code outside the sandbox at any step: hash-locked dependency wheels
+  and an hf wheel checked against its SHA-256 are only unpacked, a git source is built inside the
+  sandbox from its locked build requirements, and the directory is read from its files, never
+  run, with an executable `.pth` refused; every pin carries its installed files' digest, checked
+  after the build and on every reuse), downloads the inputs itself (no pickle-format weights or
+  other files that run code when loaded), refuses a token delivered in the environment, and runs
+  the plugin on the engine's interpreter with `-I` in the strongest sandbox the machine has
+  (`plugins/sandbox.py`: bubblewrap as `nobody`, else bubblewrap; no unsandboxed mode; the engine
+  bound read-only, bind parents made 0755; recorded with the ptrace scope), with no credential,
+  an offline and empty Hub cache, time and resource limits, an end to any process that stays
+  stopped, and progress relayed through a validated pipe, while it samples the GPU itself. Its
+  whole process group is killed and confirmed gone however it ends; its output is copied without
+  following links (links, hard links and special files refused) and only that copy is checked,
+  recorded with every file's hash in a `kind: "plugin"` manifest and pushed to a private
+  repository in one commit, reported as `<repo>@<commit>`. Plugin-reported metrics are keyed
+  `plugin.<name>`. The host re-verifies the build, appends the plugin's directory after the
+  engine's on its path (never as a site directory) and imports only modules that are the pinned
+  distribution's own files, a module already in `sys.modules` included.
+- The step-scoring (PRM) contract: a `step_scorer` reads `steps` (`item_id`, `step_index`,
+  `context` as a string or `{pid, text}` segments passed unchanged, `step`, and `step_type` when
+  present), declares a `score_kind` (`probability` refused outside [0, 1] and never clipped;
+  `logit` and `unconstrained` passed through; NaN and infinity always refused), returns one
+  number or a declared `Unscored` reason per step, and forge writes `scores.parquet` with one row
+  per input step and the declared pass-through columns, re-checked against the input before the
+  push. The manifest records the counts by reason. `min`, `mean`, `last` and `product`
+  reductions are opt-in only and go to `aggregates.diagnostic.parquet`, never the scores.
+
 ### Changed
 
 - The shared receipt (`build_receipt`) records `dataset.commit` and `template_sha256` where the

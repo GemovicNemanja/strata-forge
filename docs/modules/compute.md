@@ -267,10 +267,12 @@ every error event, the failure reason printed to stderr, and the per-row
 the Hub. A token too short to redact safely fails the run before it starts.
 See [Redacting the console](#redacting-the-console) for the half a relay owns.
 
-The package ships two runners over that plumbing:
-``inference_runner`` (serve a model with vLLM, run a batch over a dataset)
-and ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
-adapter or merged model to the Hub). Both read an inert JSON spec from
+The package ships three runners over that plumbing:
+``inference_runner`` (serve a model with vLLM, run a batch over a dataset),
+``finetune_runner`` (train with :mod:`strata_forge.training`, push the
+adapter or merged model to the Hub) and ``plugin_runner`` (run an
+operator-allow-listed plugin build in a credential-free child process; see
+[plugins.md](plugins.md)). All read an inert JSON spec from
 ``STRATA_RUN_CONFIG``, take the Hugging Face token only from the private
 secrets file the backend wrote beside the job, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless

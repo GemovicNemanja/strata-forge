@@ -19,6 +19,7 @@ Authoritative rules for what each `strata_forge.*` module owns, what it imports,
 | `strata_forge.agents` | `core`, `config`, `llm`, `prompts`, `tracing`, `rag`, `storage` | `evals`, `training`, `compute` |
 | `strata_forge.compute` | `core`, `config`, `llm`, `storage`, `tracing` | `evals`, `agents`, `training` (other way around) |
 | `strata_forge.training` | `core`, `metrics`, `config`, `llm` (typing only), `datasets`, `storage`, `tracing`, `compute` | `evals`, `agents`, `rag` |
+| `strata_forge.plugins` | `core`, `training` (the progress channel only) | `pipelines`, `evals`, `agents`, `llm`, `rag` |
 | `strata_forge.cli` | any module | (no inverse rule — cli is a sink) |
 | `strata_forge.sync` | any async public surface | provider SDKs directly |
 
@@ -54,6 +55,11 @@ this leaf without introducing a training-to-evaluation dependency.
 **Owns:** Langfuse client setup, `@traced` decorator, `traced_span` context manager, custom metric/score helpers, structlog → Langfuse correlation.
 
 **Does NOT:** Auto-instrument application code beyond LLM calls — explicit `@traced` is the contract for non-LLM spans.
+
+### `strata_forge.plugins`
+**Owns:** The `strata.plugin/v1` manifest, the operator allow-list and exact build pins, the pure preflight of a request against a declared interface, the step-scoring contract, and the child process plugin code runs in.
+
+**Does NOT:** Import plugin code by path, download or push anything (the runner in `pipelines` does), or read an allow-list from a spec. See [ADR 0021](adr/0021-trusted-plugins.md).
 
 ### `strata_forge.storage`
 **Owns:** `fsspec` gateway with auth wiring for S3, GCS, Azure Blob, HF Hub. Hugging Face Hub model push/pull. Dataset upload/download.
