@@ -47,7 +47,8 @@ credentials + the network):
     third-party code, and it has no use for the spec, the secrets file's path or a token.
   - Progress + result rows carry no secret: events hold step counts + float metrics + a
     repo id; result rows are ``{custom_id, output, reasoning, error, finish_reason, input_tokens,
-    output_tokens}`` (model text and its accounting only), and the ``manifest.json`` beside them
+    output_tokens}`` (model text and its accounting only; a guided-JSON run adds its validity
+    columns, see :mod:`strata_forge.pipelines._guided`), and the ``manifest.json`` beside them
     records the resolved model commit, the engine version and counts, never row text. The ``error``
     column, phase messages and the run's own error all go through the one run redactor: the
     column is pushed to the Hub with the results, an exception's text is not under this
@@ -95,9 +96,9 @@ from pydantic import (
 )
 
 from strata_forge.compute import LocalBackend
-from strata_forge.compute.batch import BatchInferenceRunner
+from strata_forge.compute.batch import BatchInferenceResult, BatchInferenceRunner
 from strata_forge.compute.serving import build_vllm_task, serving_endpoint
-from strata_forge.llm import LLMClient, UserMessage
+from strata_forge.llm import AssistantMessage, LLMClient, UserMessage
 from strata_forge.llm.providers.config import OpenAICompatConfig
 from strata_forge.llm.providers.openai_compat import (
     UNAUTHENTICATED_API_KEY,
@@ -123,6 +124,13 @@ from strata_forge.pipelines._common import (
     validate_repo_id,
     write_manifest,
 )
+from strata_forge.pipelines._guided import (
+    OutputValidator,
+    repair_message,
+    repair_prompt_digest,
+    schema_digest,
+    schema_problem,
+)
 from strata_forge.pipelines._label_logits import load_label_reader
 from strata_forge.pipelines._scoring import (
     LABEL_RE,
@@ -141,6 +149,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from strata_forge.core.redact import Redactor
+    from strata_forge.llm import LLMResponse
+    from strata_forge.llm.messages import AnyMessage
     from strata_forge.llm.registry import ProviderName
     from strata_forge.pipelines._scoring import ScoringInputs
 
@@ -313,6 +323,9 @@ class Hyperparams(BaseModel):
     # serving machine's date at start-up. Either way the manifest records the date used.
     harmony_date: str | None = None
     wait_timeout_s: float = Field(default=1800.0, gt=0)
+    # One JSON Schema for every reply: sent as the model server's structured-output constraint,
+    # and every reply is validated against it, with one repair turn for a reply that fails.
+    guided_json: dict[str, JsonValue] | None = None
     # What the run does with each rendered row: generate a reply through the model server
     # (`vllm_chat`), read a sequence-classification head's logits for the pair
     # (`template`, `pair_template`) with no model server (`hf_classify`, see `_scoring`), or read
@@ -396,6 +409,17 @@ class Hyperparams(BaseModel):
             problem = kwargs_problem(self.chat_template_kwargs)
             if problem:
                 raise ValueError(problem)
+
+    @field_validator("guided_json")
+    @classmethod
+    def _guided_json_is_a_schema(
+        cls, value: dict[str, JsonValue] | None
+    ) -> dict[str, JsonValue] | None:
+        if value is not None:
+            problem = schema_problem(value)
+            if problem:
+                raise ValueError(problem)
+        return value
 
     @field_validator("harmony_date")
     @classmethod
@@ -613,6 +637,7 @@ async def _run_batches(
     """
     hp = spec.hyperparams
     runner = BatchInferenceRunner(client, concurrency=hp.concurrency, on_error="collect")
+    validator = OutputValidator(hp.guided_json) if hp.guided_json is not None else None
     total = len(prompts)
     out: list[dict[str, Any]] = []
     ok = failed = 0
@@ -627,6 +652,7 @@ async def _run_batches(
     # also the more useful number: it tracks how the run is behaving NOW.
     latencies_ms: deque[float] = deque(maxlen=_LATENCY_WINDOW)
     output_tokens = 0
+    invalid = retried = 0
     for start in range(0, total, hp.progress_chunk):
         # Between chunks, not between rows: the check costs a remote status probe, and a chunk is
         # the granularity the run already reports at. It bounds the waste at one chunk rather than
@@ -639,14 +665,22 @@ async def _run_batches(
             raise RunError(msg)
         chunk = prompts[start : start + hp.progress_chunk]
         ids = custom_ids[start : start + hp.progress_chunk]
-        results = await runner.run(
-            chunk,
-            temperature=hp.temperature,
-            max_tokens=hp.max_tokens,
-            top_p=hp.top_p,
-            provider_extras=_sampling_extras(hp),
+        results = list(
+            await runner.run(
+                chunk,
+                temperature=hp.temperature,
+                max_tokens=hp.max_tokens,
+                top_p=hp.top_p,
+                provider_extras=_sampling_extras(hp),
+            )
         )
-        for cid, result in zip(ids, results, strict=True):
+        guided = (
+            await _guide(runner, hp, validator, chunk, results, redactor)
+            if validator is not None
+            else None
+        )
+        for index, (cid, result) in enumerate(zip(ids, results, strict=True)):
+            columns = guided[index] if guided is not None else {}
             if result.succeeded and result.response is not None:
                 response = result.response
                 out.append(
@@ -660,9 +694,12 @@ async def _run_batches(
                         "finish_reason": response.finish_reason,
                         "input_tokens": response.usage.input_tokens,
                         "output_tokens": response.usage.output_tokens,
+                        **columns,
                     }
                 )
                 ok += 1
+                invalid += columns.get("json_valid") is False
+                retried += bool(columns.get("json_retried"))
                 # Both already measured per request by the client — a true per-row latency and a
                 # real token count, not an average reconstructed from the chunk's wall time.
                 latencies_ms.append(result.response.latency_ms)
@@ -678,6 +715,7 @@ async def _run_batches(
                         "finish_reason": None,
                         "input_tokens": None,
                         "output_tokens": None,
+                        **columns,
                     }
                 )
                 failed += 1
@@ -691,12 +729,88 @@ async def _run_batches(
                 metrics={
                     "succeeded": float(ok),
                     "failed": float(failed),
+                    **(
+                        {"json_invalid": float(invalid), "json_retried": float(retried)}
+                        if validator is not None
+                        else {}
+                    ),
                     **_throughput(started, len(out), output_tokens, latencies_ms),
                     **(gpu.sample() if gpu is not None else {}),
                 },
             ),
         )
     return out
+
+
+_UNGUIDED: dict[str, Any] = {"json_valid": None, "json_retried": False, "json_error": None}
+
+
+def _with_usage_of(first: LLMResponse, final: LLMResponse) -> LLMResponse:
+    """``final`` accounted as both attempts: tokens and latency are what the row cost."""
+    usage = final.usage.model_copy(
+        update={
+            "input_tokens": first.usage.input_tokens + final.usage.input_tokens,
+            "output_tokens": first.usage.output_tokens + final.usage.output_tokens,
+        }
+    )
+    return final.model_copy(
+        update={"usage": usage, "latency_ms": first.latency_ms + final.latency_ms}
+    )
+
+
+async def _guide(
+    runner: BatchInferenceRunner,
+    hp: Hyperparams,
+    validator: OutputValidator,
+    chunk: Sequence[Sequence[AnyMessage]],
+    results: list[BatchInferenceResult],
+    redactor: Redactor,
+) -> list[dict[str, Any]]:
+    """Validate each reply; give every invalid one its one repair turn, under the same constraint.
+
+    ``results`` is updated in place to each row's FINAL attempt, accounted as both attempts.
+    Returns each row's guided columns: ``json_valid`` (``None`` for a row with no reply),
+    ``json_retried`` and ``json_error`` (the final validation error, redacted like ``error``).
+    """
+    columns = [dict(_UNGUIDED) for _ in results]
+    first_errors: dict[int, str] = {}
+    for index, result in enumerate(results):
+        if result.succeeded and result.response is not None:
+            problem = validator.error(result.response.text)
+            if problem is None:
+                columns[index]["json_valid"] = True
+            else:
+                first_errors[index] = problem
+    if not first_errors:
+        return columns
+    order = sorted(first_errors)
+    replies = [cast("LLMResponse", results[index].response) for index in order]
+    conversations: list[list[AnyMessage]] = [
+        [
+            *chunk[index],
+            AssistantMessage(content=reply.text),
+            UserMessage(content=repair_message(first_errors[index])),
+        ]
+        for index, reply in zip(order, replies, strict=True)
+    ]
+    repaired = await runner.run(
+        conversations,
+        temperature=hp.temperature,
+        max_tokens=hp.max_tokens,
+        top_p=hp.top_p,
+        provider_extras=_sampling_extras(hp),
+    )
+    for index, first, second in zip(order, replies, repaired, strict=True):
+        columns[index]["json_retried"] = True
+        if second.succeeded and second.response is not None:
+            problem = validator.error(second.response.text)
+            results[index] = BatchInferenceResult(response=_with_usage_of(first, second.response))
+        else:
+            # The first reply stays the row's output; the record says the repair never answered.
+            problem = f"{first_errors[index]}; the repair request failed: {second.error!r}"
+        columns[index]["json_valid"] = problem is None
+        columns[index]["json_error"] = None if problem is None else redactor.redact(problem)
+    return columns
 
 
 def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | None:
@@ -706,7 +820,10 @@ def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | No
     rides in ``extra_body``, the transport's explicit channel for server-specific body fields,
     rather than depending on how the transport treats an unrecognised keyword. So does
     ``reasoning_effort``: the transport would otherwise decide per model id whether it supports
-    the field, and an operator's model id is one it has never seen.
+    the field, and an operator's model id is one it has never seen. So does the guided-JSON
+    schema, as vLLM's ``structured_outputs: {"json": schema}`` request field (the shape vLLM has
+    accepted since its ``guided_json`` field was removed in 0.12; see ``vllm/entrypoints/openai/
+    chat_completion/protocol.py`` and ``vllm/sampling_params.py`` ``StructuredOutputsParams``).
     """
     extras: dict[str, Any] = {}
     if hp.seed is not None:
@@ -716,6 +833,8 @@ def _sampling_extras(hp: Hyperparams) -> dict[ProviderName, dict[str, Any]] | No
         body["top_k"] = hp.top_k
     if hp.reasoning_effort is not None:
         body["reasoning_effort"] = hp.reasoning_effort
+    if hp.guided_json is not None:
+        body["structured_outputs"] = {"json": hp.guided_json}
     if body:
         extras["extra_body"] = body
     return {"openai_compat": extras} if extras else None
@@ -1002,6 +1121,25 @@ def _build_manifest(
     """
     finish = Counter(str(r["finish_reason"]) for r in rows if r["error"] is None)
     ok = sum(1 for r in rows if r["error"] is None)
+    hp = spec.hyperparams
+    guided: dict[str, Any] | None = None
+    guided_counts: dict[str, int] = {}
+    if hp.guided_json is not None:
+        guided = {
+            "kind": "json",
+            "schema_sha256": schema_digest(hp.guided_json),
+            "constraint": "structured_outputs.json",
+            "validator": OutputValidator(hp.guided_json).draft,
+            "max_repairs": 1,
+            "repair_prompt_sha256": repair_prompt_digest(),
+        }
+        answered = [r for r in rows if r["error"] is None]
+        guided_counts = {
+            "json_valid": sum(1 for r in answered if r["json_valid"] is True),
+            "json_invalid": sum(1 for r in answered if r["json_valid"] is False),
+            "json_retried": sum(1 for r in answered if r["json_retried"]),
+            "json_repaired": sum(1 for r in answered if r["json_retried"] and r["json_valid"]),
+        }
     return {
         "schema": MANIFEST_SCHEMA,
         "kind": _MANIFEST_KIND,
@@ -1027,6 +1165,7 @@ def _build_manifest(
             "harmony_date": None,
         },
         "template_sha256": hashlib.sha256(spec.template.encode()).hexdigest(),
+        "guided": guided,
         "column_mapping": spec.column_mapping,
         "hyperparams": spec.hyperparams.model_dump(),
         "counts": {
@@ -1036,6 +1175,7 @@ def _build_manifest(
             "finish_reasons": dict(sorted(finish.items())),
             "input_tokens": sum(int(r["input_tokens"] or 0) for r in rows),
             "output_tokens": sum(int(r["output_tokens"] or 0) for r in rows),
+            **guided_counts,
         },
     }
 
@@ -1262,6 +1402,14 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
         destination = str(results_path)
 
     ok = sum(1 for r in out if r["error"] is None)
+    guided_metrics = (
+        {
+            "json_invalid": float(sum(1 for r in out if r.get("json_valid") is False)),
+            "json_retried": float(sum(1 for r in out if r.get("json_retried"))),
+        }
+        if spec.hyperparams.guided_json is not None
+        else {}
+    )
     emit(
         writer,
         ProgressEvent(
@@ -1269,7 +1417,7 @@ async def _execute(spec: RunSpec, secrets: RunSecrets, writer: JsonlProgressWrit
             stage="push",
             step=len(out),
             total_steps=len(out),
-            metrics={"succeeded": float(ok), "failed": float(len(out) - ok)},
+            metrics={"succeeded": float(ok), "failed": float(len(out) - ok), **guided_metrics},
             message=destination,  # WHERE results landed: a repo id (pushed) or a VM path (local)
         ),
     )

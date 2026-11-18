@@ -48,6 +48,13 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   state, the batch plan, the overflow policy, counts per slice, and the dataset commit actually
   read (an unpinned dataset is resolved once and loaded at that commit). A scoring run pushes only
   to an output repo of its own.
+- `Hyperparams.guided_json`: one JSON Schema per chat run, sent with every request as vLLM's
+  `structured_outputs.json` constraint and checked against every reply. A reply that fails
+  validation gets one repair turn (the invalid reply plus a fixed message naming the error, under
+  the same constraint). Rows gain `json_valid`, `json_retried` and `json_error`; the manifest
+  records the schema's and the repair prompt's sha256 and counts valid, invalid, retried and
+  repaired rows. A schema over 16 KiB, invalid for its draft, or referencing anything outside
+  itself is refused at spec load, and references are never fetched.
 - `Hyperparams.engine` also takes `hf_label_logits`: a causal LM's next-token logits for DECLARED
   single-token labels, read after the model's chat template, with no model server. Each row's
   `template` is one user message; `Hyperparams.chat_template_kwargs` passes the template's own
@@ -68,6 +75,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ### Changed
 
+- `jsonschema` (`>=4.23,<5`, the range litellm already requires) is a direct dependency: guided
+  JSON validates schemas and replies with it.
 - A model whose response LiteLLM already split into `<think>` reasoning and content (Qwen3 with
   no parser) now has that reasoning in the `reasoning` column instead of losing it.
 - The `[serving]` extra declares `torch` and `transformers` directly (the same ranges as
