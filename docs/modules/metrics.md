@@ -546,6 +546,35 @@ direct-import only and are not re-exported by `strata_forge.metrics` or
 `evals.classification`. One call covers one slice; the caller supplies each slice's population.
 The rater contract is unchanged: both rater declarations are `rater_kind="human"`.
 
+## Judge agreement with gold scores
+
+`metrics.judge_agreement.judge_agreement(gold, judged, *, values, scale)`
+(`judge-gold-agreement-v1`) reads how far an LLM judge's scores of some outputs agree with gold
+(human) scores of the same outputs, one criterion at a time, over the cases that have both. The
+scores are integers, each one of `values` in scale order: `[0, 1]` (fail, pass) for a
+`pass_fail` scale, `[min, ..., max]` for an `ordinal` one.
+
+```python
+from strata_forge.metrics.judge_agreement import judge_agreement
+
+read = judge_agreement([1, 1, 0, 0], [1, 0, 0, 0], values=[0, 1], scale="pass_fail")
+assert read.counts == ((2, 0), (1, 1))      # gold rows x judge columns
+assert (read.percent_agreement, read.cohen_kappa) == (0.75, 0.5)
+```
+
+It reports the contingency table, the exact-agreement share and Cohen's kappa, and for an
+ordinal scale the mean absolute error and the linearly and quadratically weighted kappas
+(weights `|g - j| / (k - 1)` and `(g - j)^2 / (k - 1)^2`). Every value is computed exactly and
+reported as a float, or as null with its reason in `<name>_undefined`: `empty` (no cases),
+`chance_agreement_one` (the expected agreement is one, so a kappa divides by zero) or
+`not_an_integer_scale` (the absolute error and the weighted kappas on a pass/fail scale). These are point values: an interval over the agreement share
+or the absolute error is a cluster bootstrap of the per-case value
+(`cluster_mean_bootstrap`), which the caller computes because only it knows the clusters. It
+refuses mismatched lengths (`judge_agreement_population_mismatch`), a score outside `values` or
+a non-integer one, a `bool` included (`judge_agreement_score_invalid`), and fewer than two or
+repeated `values` (`judge_agreement_values_invalid`). Nothing here decides a gate, and the
+judge is not a human rater: the two-rater statistics above stay separate.
+
 ## One human against one model rater
 
 `human_model_agreement` is a separate statistic, `statistic_version="nominal-human-vs-model-v1"`,
