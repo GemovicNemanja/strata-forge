@@ -431,6 +431,82 @@ A scoring run pushes only to an output repo of its own: one holding any
 file but ``.gitattributes`` is refused before the dataset loads and again at
 push time, so a repo never mixes two runs' rows.
 
+### Label-token logits after a chat template (`hf_label_logits`)
+
+``engine="hf_label_logits"`` reads a generative model's next-token logits
+for a few declared label tokens instead of sampling an answer, with no
+model server. Each row's ``template`` renders into one user message; the
+model's own chat template turns it into a prompt with the assistant's
+generation header (``add_generation_prompt=True``) and the run's
+``chat_template_kwargs``; ``assistant_prefill`` is appended after the
+header; one forward pass reads the logits at the prompt's last position.
+It shares the scoring frame above (the snapshot, the private fresh output
+repo, ``id_column`` / ``slice_column`` / ``list_separator`` /
+``scoring_batch_size`` / ``max_model_len`` / ``dtype`` / ``row_limit``,
+drop-and-count overflow and the one-commit push) and adds:
+
+| Field | Meaning |
+|---|---|
+| ``label_tokens`` | Required. 2-64 ``{label, token}`` entries in order: the output label (the classifier's label grammar) and the token's TEXT, leading space included where the vocabulary has one (``" True"``). Labels and tokens are distinct. |
+| ``assistant_prefill`` | Optional, at most 1,024 characters. Text appended after the assistant header and read past (a judge's ``"<score>"``). Literal: no placeholder in it is substituted. |
+| ``chat_template_kwargs`` | Optional. Variables the chat template reads (``enable_thinking``, ``documents``, ``guardian_config`` …), at most 16 identifier keys and 16 KiB of JSON, nested at most 6 deep. Any string inside a value may hold ``{name}`` placeholders, rendered per row like the template (a list column is joined), and covered by the same mapping check. |
+
+``pair_template`` and ``label_alias`` belong to ``hf_classify`` and are
+refused here, as every generation knob is.
+
+**What is refused, and when.** At spec load: a key that names one of
+``apply_chat_template``'s own parameters (``chat_template``, ``tokenize``,
+``add_generation_prompt``, ``tools`` …), the conversation (``messages``)
+or a special token (``bos_token`` …), because those change how the
+template is chosen or rendered rather than what it says; ``documents`` is
+allowed, since templates read it as data. At model load, before any GPU
+work: a model without a chat template; a declared kwarg the template never
+reads (both transformers and vLLM drop such a kwarg silently, so it would
+record a setting the model never saw; the template's variables are found
+by parsing it in transformers' own Jinja environment, the way vLLM's
+``_resolve_chat_template_kwargs`` does); a label token that is not exactly
+one token on its own, or two labels with one token id; an id outside the
+model's output layer; a model whose ``forward`` cannot project selected
+positions (``logits_to_keep``); and any load that left a weight
+uninitialised. While measuring: a prefill that merges with the end of the
+rendered prompt when tokenized (the prompt's own tokens must be a prefix of
+prompt + prefill), or that tokenizes differently on different rows; and a
+label token that is not the single next token after the first row's prompt
+and prefill. A chat template that raises (``raise_exception``) stops the
+run.
+
+The prompt and the prefill are tokenized together, with
+``add_special_tokens=False`` as ``apply_chat_template`` itself does, since
+the template places its own special tokens. Rows run right-padded in
+length-sorted batches; only each row's last real position is projected
+onto the vocabulary (``logits_to_keep``), and padding after a row never
+changes it. The model loads with ``AutoModelForCausalLM``,
+``trust_remote_code=False``, safetensors only, in the run's required
+``dtype`` (``float32`` or ``bfloat16``, as for ``hf_classify``; ``float32``
+switches the TF32 matmul and cuDNN paths off first).
+
+Each results row is ``{custom_id, item_id?, slice?, input_tokens, overflow,
+pred, logit_<label>..., p_<label>..., mass_outside}``: the RAW logit of
+each declared token, their softmax over the declared tokens only
+(temperature 1, no calibration), the argmax label (the first declared on a
+tie), and ``mass_outside``, the probability the full output distribution
+puts on every other token, computed in float64 as
+``-expm1(logsumexp(declared) - logsumexp(all))``. An overflowed row has
+``None`` in every score column.
+
+The ``kind`` ``scoring`` manifest's ``scoring`` block records
+``head: causal_lm_next_token``, the labels, each label's token text,
+resolved ``token_id`` and vocabulary ``piece``, ``add_generation_prompt``,
+``chat_template_sha256`` (the template text the tokenizer used),
+``chat_template_kwargs_sha256`` (over canonical JSON, keys sorted at every
+depth, which is also the order they are rendered in, so a stored and
+re-read spec renders the same prompt), ``assistant_prefill_sha256`` and
+``assistant_prefill_token_ids``, the output layer's ``vocab_size``, the
+length limit and its source, the overflow policy, the padding side, dtype,
+the TF32 switches, the batch plan, device and the ignored checkpoint keys. Like the pair
+template, the prefill and the kwargs are left out of the manifest's
+``hyperparams`` dump: only their digests are pushed.
+
 ### The runner contract
 
 An orchestrator that launches a ``strata_forge.pipelines`` runner on a
