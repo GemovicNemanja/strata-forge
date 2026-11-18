@@ -418,6 +418,10 @@ async def test_malformed_inputs_refuse(
             {"evaluation": _settings(tier_rule={"default": {"max_tokens": 9}})},
             "needs a token_column",
         ),
+        (
+            {"evaluation": _settings(tier_rule={"token_column": "n_tokens"})},
+            "declared together",
+        ),
         ({"evaluation": {**_settings(), "sealed": True}}, "sealed"),
     ],
 )
@@ -477,11 +481,13 @@ async def test_a_tier_rule_refuses_rows_for_every_system(
         [{"pid": f"p{k}", "text": "p"} for k in range(25 if i < 5 else 3)] for i in range(60)
     ]
     env["gold"]["tokens"] = [3000 if i == 10 else 100 for i in range(60)]
+    env["gold"]["tokens_method"] = ["tokenizer:org/tok@abc"] * 60
     rule = {
         "tier_column": "tier",
         "limits": {"hard": {"max_premises": 20}},
         "default": {"max_premises": 20, "max_tokens": 2048},
         "token_column": "tokens",
+        "token_method_column": "tokens_method",
     }
     spec = _spec(evaluation=_settings(premises_column="premises", tier_rule=rule))
     code, events = await _run(monkeypatch, env, spec)
@@ -633,9 +639,11 @@ async def test_an_undefined_macro_f1_leaves_its_bounds_out_of_the_end_event(
     macro = overall["systems"]["candidate"]["macro_f1"]
     assert (macro["point"], macro["reason"], macro["absent_classes"]) == (
         None,
-        "absent_classes",
+        "absent_gold_class:neutral",
         ["neutral"],
     )
+    assert overall["systems"]["baseline"]["macro_f1"]["reason"] == "absent_gold_class:neutral"
+    assert overall["systems"]["candidate"]["absent_class_predictions"] == {"neutral": 0}
     assert overall["comparisons"][0]["delta"]["macro_f1"]["excludes_zero"] == "unresolved"
     present = overall["systems"]["candidate"]["macro_f1_present_classes"]
     assert present["classes"] == ["entailment", "contradiction"]
@@ -740,9 +748,10 @@ async def test_a_two_way_tier_declares_its_own_label_space(
             "contradiction" if v == "neutral" and by_id.get(i, False) else v
             for v, i in zip(table[column], ids, strict=True)
         ]
-    settings = _settings(
-        label_space_column="tier", label_spaces={"hard": ["entailment", "contradiction"]}
-    )
+    spaces = dict.fromkeys(set(env["gold"]["tier"]), LABELS) | {
+        "hard": ["entailment", "contradiction"]
+    }
+    settings = _settings(label_space_column="tier", label_spaces=spaces)
     code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
     assert code == 0, events[-1]
     report = json.loads((_outdir(env) / "metrics.json").read_text())
@@ -756,13 +765,27 @@ async def test_a_two_way_tier_declares_its_own_label_space(
     code, events = await _run(monkeypatch, env, _spec(evaluation=settings))
     assert code == 1
     assert "outside its label space" in events[-1]["message"]
+    # A label-space value the settings do not name refuses, naming the row; no fallback.
+    unnamed = _settings(
+        label_space_column="tier", label_spaces={"hard": ["entailment", "contradiction"]}
+    )
+    env["gold"]["label"][next(i for i, h in enumerate(hard) if h)] = "entailment"
+    code, events = await _run(monkeypatch, env, _spec(evaluation=unnamed))
+    assert code == 1
+    assert "names no declared label space" in events[-1]["message"]
+    assert "row " in events[-1]["message"]
 
 
 async def test_each_slice_reports_its_tier_refused_rows(
     monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
 ) -> None:
     env["gold"]["n_tokens"] = [5000 if i % 10 == 0 else 10 for i in range(60)]
-    rule = {"default": {"max_tokens": 2048}, "token_column": "n_tokens"}
+    env["gold"]["n_tokens_method"] = ["tokenizer:org/tok@abc"] * 60
+    rule = {
+        "default": {"max_tokens": 2048},
+        "token_column": "n_tokens",
+        "token_method_column": "n_tokens_method",
+    }
     code, events = await _run(monkeypatch, env, _spec(evaluation=_settings(tier_rule=rule)))
     assert code == 0, events[-1]
     report = json.loads((_outdir(env) / "metrics.json").read_text())
@@ -772,3 +795,36 @@ async def test_each_slice_reports_its_tier_refused_rows(
     for i in range(0, 60, 10):
         expected[env["gold"]["tier"][i]] = expected.get(env["gold"]["tier"][i], 0) + 1
     assert {k: v for k, v in by_tier.items() if v} == expected
+
+
+async def test_absence_is_the_gold_s_whatever_a_system_predicts(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
+) -> None:
+    # The gold has no neutral row; the candidate still predicts neutral twice. Every system's
+    # macro-F1 and the delta are null by rule, the slice and the systems agree on the absent
+    # classes, and the stray predictions are counted as a diagnostic.
+    env["gold"]["label"] = ["entailment" if v == "neutral" else v for v in env["gold"]["label"]]
+    env["base"]["pred"] = ["entailment" if v == "neutral" else v for v in env["base"]["pred"]]
+    preds = ["entailment" if v == "neutral" else v for v in env["cand"]["pred"]]
+    preds[5], preds[6] = "neutral", "neutral"
+    env["cand"]["pred"] = preds
+    code, events = await _run(monkeypatch, env, _spec())
+    assert code == 0, events[-1]
+    report = json.loads((_outdir(env) / "metrics.json").read_text())
+    for slice_ in report["slices"]:
+        if not slice_["n"]:
+            continue
+        absent = slice_["absent_classes"]
+        for name in ("candidate", "baseline"):
+            macro = slice_["systems"][name]["macro_f1"]
+            assert macro["absent_classes"] == absent
+            assert (macro["point"] is None) == bool(absent)
+        for comparison in slice_["comparisons"]:
+            assert comparison["delta"]["macro_f1"]["absent_classes"] == absent
+    overall = report["slices"][0]
+    assert overall["absent_classes"] == ["neutral"]
+    assert overall["systems"]["candidate"]["absent_class_predictions"] == {"neutral": 2}
+    assert overall["systems"]["baseline"]["absent_class_predictions"] == {"neutral": 0}
+    cand_present = overall["systems"]["candidate"]["macro_f1_present_classes"]["classes"]
+    base_present = overall["systems"]["baseline"]["macro_f1_present_classes"]["classes"]
+    assert cand_present == base_present == ["entailment", "contradiction"]

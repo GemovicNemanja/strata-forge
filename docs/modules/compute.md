@@ -649,16 +649,24 @@ population declares the union of its rows' spaces (``labels`` on each slice), so
 a 2-way slice is never missing the 3-way classes; a gold label outside its row's
 space refuses, and a prediction outside the population's labels is invalid.
 
-When a declared class has neither gold rows nor predictions in a population,
-that system's macro-F1 has NO value: ``point``, ``lower`` and ``upper`` are null
-with ``reason: "absent_classes"`` and the classes listed (never a mean with a
-zero in it), and a delta is null where either side is. The ``end`` event then
-carries ``macro_f1_undefined: 1`` (and ``delta_macro_f1_undefined__<baseline>``)
-in place of the value. Beside it, ``macro_f1_present_classes`` averages the
-classes present (gold rows or predictions from any compared system, listed in
-``classes``) under the same undefined-resample rule; it is a diagnostic with
-``gate_read: false`` and decides nothing. Each slice also reports its
-``tier_refused`` rows.
+**Absent classes are the gold's.** A class is absent from a population when its
+GOLD has no row of it, whatever any system predicted. Then every system's
+macro-F1 and every paired macro-F1 delta have NO value: ``point``, ``lower`` and
+``upper`` are null with ``reason: "absent_gold_class:<label>[,<label>…]"`` and
+``absent_classes`` (null by rule, not unstable; never a mean with a zero in it).
+The slice's ``absent_classes`` and every system's are the same list, both read
+from the shared rows' gold. The ``end`` event carries ``macro_f1_undefined: 1``
+(and ``delta_macro_f1_undefined__<baseline>``) in place of the value. Beside it,
+``macro_f1_present_classes`` averages the classes the gold has (listed in
+``classes``, the same set for every system); it is a diagnostic with
+``gate_read: false`` and decides nothing. ``absent_class_predictions`` counts,
+per system, its predictions of each gold-absent class (a diagnostic, never
+gated). Within the bootstrap a resample whose own gold lacks a declared class is
+undefined and counts toward the ``unstable`` threshold. Label spaces are per row
+(below), so a 2-way tier is never missing the 3-way classes. Each slice also
+reports its ``tier_refused`` rows. ``tier_rule.token_column`` and
+``token_method_column`` are declared together, and a ``label_space_column``
+value with no entry in ``label_spaces`` refuses, naming the row.
 
 ``population.fallback_keyed`` and each slice's ``fallback_keyed`` count the rows
 clustered on the premise-hash fallback (0 on a suite tier, whose rows all carry a

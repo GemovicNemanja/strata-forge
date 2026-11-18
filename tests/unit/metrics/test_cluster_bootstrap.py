@@ -218,40 +218,22 @@ def test_identical_systems_have_a_zero_delta() -> None:
         assert (interval.point, interval.lower, interval.upper) == (0.0, 0.0, 0.0)
 
 
-def test_a_class_absent_from_both_sides_leaves_macro_f1_undefined() -> None:
-    gold = ["E", "E", "C", "C"]
-    pred = ["E", "E", "C", "C"]
-    result = cluster_bootstrap(
-        gold, pred, labels=LABELS, clusters=["a", "a", "b", "b"], seed=1, resamples=50
-    )
-    # U is declared but absent from the whole population: macro-F1 has no value at all (never one
-    # averaged with a zero), and no resample has one either.
-    macro = result.intervals.macro_f1
-    assert (macro.point, macro.lower, macro.upper) == (None, None, None)
-    assert (macro.reason, macro.absent_classes) == ("absent_classes", ("U",))
-    assert macro.undefined_resamples == 50
-    assert result.intervals.accuracy.undefined_resamples == 0
-    # The diagnostic averages the classes present (E and C), under the same undefined rule.
-    present = result.intervals.macro_f1_present_classes
-    assert result.intervals.present_classes == ("E", "C")
-    assert present.point == 1.0
-    assert present.reason is None
-
-
-def test_a_delta_is_undefined_where_either_side_lacks_a_class() -> None:
+def test_a_class_the_gold_lacks_leaves_macro_f1_null_for_every_system() -> None:
     gold = ["E", "E", "C", "C"]
     base = ["E", "E", "C", "C"]
-    cand = ["E", "U", "C", "C"]
+    cand = ["E", "U", "C", "C"]  # predicting U does not make U present
     paired = paired_cluster_bootstrap(
         gold, base, cand, labels=LABELS, clusters=["a", "b", "c", "d"], seed=1, resamples=50
     )
-    assert paired.baseline.macro_f1.absent_classes == ("U",)
-    assert paired.candidate.macro_f1.point is not None
-    delta = paired.delta.macro_f1
-    assert (delta.point, delta.reason, delta.absent_classes) == (None, "absent_classes", ("U",))
-    # Present classes are those seen in gold or ANY compared system: E, C and U here.
-    assert paired.delta.present_classes == ("E", "C", "U")
-    assert paired.delta.macro_f1_present_classes.point is None
+    for side in (paired.baseline, paired.candidate, paired.delta):
+        macro = side.macro_f1
+        assert (macro.point, macro.lower, macro.upper) == (None, None, None)
+        assert (macro.reason, macro.absent_classes) == ("absent_gold_class:U", ("U",))
+        # The present-class diagnostic averages the classes the GOLD has, the same for all.
+        assert side.present_classes == ("E", "C")
+    assert paired.baseline.macro_f1_present_classes.point == 1.0
+    assert paired.candidate.macro_f1_present_classes.point is not None
+    assert paired.baseline.accuracy.undefined_resamples == 0
 
 
 def test_undefined_resamples_are_counted_not_zeroed() -> None:
@@ -268,7 +250,7 @@ def test_undefined_resamples_are_counted_not_zeroed() -> None:
     for row in draws:
         g = [gold[i] for i in row]
         p = [pred[i] for i in row]
-        if any(label not in g and label not in p for label in LABELS):
+        if any(label not in g for label in LABELS):
             expected_undefined += 1
         else:
             defined.append(classification_report(g, p, labels=LABELS).macro_f1.value or 0.0)
@@ -321,11 +303,12 @@ def test_golden_bounds_pin_the_numpy_stream() -> None:
     result = paired_cluster_bootstrap(
         gold, base, cand, labels=LABELS, clusters=keys, seed=SEED, resamples=1000
     )
-    assert result.baseline.macro_f1.lower == 0.42735042735042733
-    assert result.baseline.macro_f1.upper == 0.8690740740740741
-    assert result.baseline.macro_f1.undefined_resamples == 2
-    assert result.delta.macro_f1.lower == -0.1662037037037037
-    assert result.delta.macro_f1.upper == 0.4453703703703704
-    assert result.delta.macro_f1.undefined_resamples == 4
+    # A resample is undefined when ITS gold lacks a declared class (16 of 1,000 here).
+    assert result.baseline.macro_f1.lower == 0.42866096866096864
+    assert result.baseline.macro_f1.upper == 0.8753703703703704
+    assert result.baseline.macro_f1.undefined_resamples == 16
+    assert result.delta.macro_f1.lower == -0.16636243386243385
+    assert result.delta.macro_f1.upper == 0.44759259259259265
+    assert result.delta.macro_f1.undefined_resamples == 16
     assert result.delta.accuracy.lower == -0.16666666666666674
     assert result.delta.accuracy.upper == 0.41666666666666663

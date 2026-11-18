@@ -47,6 +47,8 @@ __all__ = [
     "paired_cluster_bootstrap",
 ]
 
+ABSENT_GOLD_CLASS = "absent_gold_class:"
+
 # Per system: accuracy, macro-F1, invalid rate and present-class macro-F1 per resample.
 type _Values = tuple[list[float], list[float], list[float], list[float]]
 # Per system: the point values (macro-F1 None when a declared class is absent) and absent classes.
@@ -80,8 +82,8 @@ class ClusterBootstrapSettings(_Frozen):
 class MetricInterval(_Frozen):
     """A full-sample point value and its percentile bounds over the defined resamples.
 
-    A resample whose metric is undefined (macro-F1 when a declared class has neither gold rows
-    nor predictions in it) is counted in ``undefined_resamples`` and left out of the quantiles;
+    A resample whose metric is undefined (macro-F1 when its gold has no row of a declared
+    class) is counted in ``undefined_resamples`` and left out of the quantiles;
     it is never dropped silently or scored as zero. When every resample is undefined the bounds
     are null with a reason. A one-sided 97.5% bound is the matching end of this interval.
     """
@@ -90,23 +92,24 @@ class MetricInterval(_Frozen):
     lower: float | None = Field(allow_inf_nan=False)
     upper: float | None = Field(allow_inf_nan=False)
     undefined_resamples: int = Field(default=0, ge=0)
-    reason: Literal["all_resamples_undefined", "absent_classes"] | None = None
-    # With reason "absent_classes": the declared classes with neither gold rows nor predictions in
-    # the whole population, so the metric has no value at all (never one averaged with a zero).
+    # ``all_resamples_undefined``, or ``absent_gold_class:<label>[,<label>…]`` when the population's
+    # GOLD has no row of a declared class: the metric then has no value for any system (never one
+    # averaged with a zero), whatever the predictions were.
+    reason: str | None = Field(default=None, max_length=1024)
+    # With an ``absent_gold_class`` reason: those classes, in declared order.
     absent_classes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _ordered(self) -> MetricInterval:
+        if self.reason not in (None, "all_resamples_undefined") and self.reason != (
+            ABSENT_GOLD_CLASS + ",".join(self.absent_classes)
+        ):
+            raise ValueError("cluster_bootstrap_invalid")
         if self.point is None:
-            if (
-                self.lower is not None
-                or self.upper is not None
-                or self.reason != "absent_classes"
-                or not self.absent_classes
-            ):
+            if self.lower is not None or self.upper is not None or not self.absent_classes:
                 raise ValueError("cluster_bootstrap_invalid")
             return self
-        if self.absent_classes or self.reason == "absent_classes":
+        if self.absent_classes:
             raise ValueError("cluster_bootstrap_invalid")
         if self.lower is None or self.upper is None:
             if self.lower is not None or self.upper is not None or self.reason is None:
@@ -120,8 +123,8 @@ class SystemIntervals(_Frozen):
     """Accuracy, macro-F1 and invalid rate for one system, or a candidate-minus-baseline delta.
 
     ``macro_f1_present_classes`` is a DIAGNOSTIC: macro-F1 averaged over ``present_classes`` only
-    (the declared classes with gold rows or predictions from any compared system in the whole
-    population), under the same undefined-resample rule. It is never a gate read.
+    (the declared classes the population's GOLD has, one set for every system), under the same
+    undefined-resample rule. It is never a gate read.
     """
 
     accuracy: MetricInterval
@@ -225,8 +228,10 @@ def _metrics(
     """Accuracy, macro-F1 and invalid rate per resample, from ``(R, K*K + K)`` cell counts.
 
     The definitions of ``classification_report`` (invalid outputs stay in gold support), except
-    that a resample in which a declared class has neither support nor predictions has no
-    macro-F1: it is NaN here and counted as undefined, never scored as zero.
+    that a resample whose GOLD has no row of a declared class has no macro-F1 (whatever the
+    predictions): it is NaN here and counted as undefined, never scored as zero. The
+    present-class macro-F1 averages the ``present`` classes and is undefined when the resample's
+    gold lacks one of them.
     """
     import numpy as np
 
@@ -236,11 +241,11 @@ def _metrics(
     tp = np.diagonal(matrix, axis1=1, axis2=2)
     denominator = matrix.sum(axis=2) + invalid + matrix.sum(axis=1)
     f1 = np.divide(2 * tp, denominator, out=np.zeros_like(tp), where=denominator > 0)
-    defined = denominator > 0
-    macro = np.where(defined.all(axis=1), f1.sum(axis=1) / size, np.nan)
+    in_gold = (matrix.sum(axis=2) + invalid) > 0
+    macro = np.where(in_gold.all(axis=1), f1.sum(axis=1) / size, np.nan)
     subset = f1[:, present]
     macro_present = np.where(
-        defined[:, present].all(axis=1), subset.sum(axis=1) / max(int(present.sum()), 1), np.nan
+        in_gold[:, present].all(axis=1), subset.sum(axis=1) / max(int(present.sum()), 1), np.nan
     )
     return tp.sum(axis=1) / n, macro, invalid.sum(axis=1) / n, macro_present
 
@@ -285,13 +290,13 @@ def _interval(
     point: float | None, values: list[float], absent: tuple[str, ...] = ()
 ) -> MetricInterval:
     if point is None:
-        # A class absent from the whole population is absent from every resample of it.
+        # Null by rule, not unstable: a class the population's gold lacks is in no resample of it.
         return MetricInterval(
             point=None,
             lower=None,
             upper=None,
             undefined_resamples=len(values),
-            reason="absent_classes",
+            reason=ABSENT_GOLD_CLASS + ",".join(absent),
             absent_classes=absent,
         )
     ordered = sorted(value for value in values if not math.isnan(value))
@@ -314,29 +319,24 @@ def _interval(
 
 
 def _points(report: ClassificationReport, present: tuple[str, ...]) -> _Point:
+    """Point values; ``present`` are the classes the GOLD has, the same for every system."""
     values = (report.accuracy.value, report.invalid_rate.value)
     if any(value is None for value in values):  # unreachable: the population is nonempty
         raise ValidationError("cluster_bootstrap_empty")
     scores = {score.label: score for score in report.per_class}
-    absent = tuple(
-        score.label for score in report.per_class if score.support == 0 and score.predicted == 0
-    )
+    absent = tuple(label for label in scores if label not in present)
     macro = None if absent else float(report.macro_f1.value or 0)
-    unseen = [label for label in present if scores[label].support + scores[label].predicted == 0]
-    macro_present = (
-        None if unseen else math.fsum(scores[label].f1 for label in present) / len(present)
-    )
+    macro_present = math.fsum(scores[label].f1 for label in present) / len(present)
     return (float(values[0] or 0), macro, float(values[1] or 0), macro_present, absent)
 
 
 def _system(point: _Point, values: _Values, present: tuple[str, ...]) -> SystemIntervals:
     accuracy, macro, invalid, macro_present, absent = point
-    unseen = tuple(label for label in present if label in absent)
     return SystemIntervals(
         accuracy=_interval(accuracy, values[0]),
         macro_f1=_interval(macro, values[1], absent),
         invalid_rate=_interval(invalid, values[2]),
-        macro_f1_present_classes=_interval(macro_present, values[3], unseen),
+        macro_f1_present_classes=_interval(macro_present, values[3]),
         present_classes=present,
     )
 
@@ -377,12 +377,8 @@ def _run(
         _cluster_cells(actual, system, codes, cluster_count, labels=names, index_map=index_map)
         for system in rows
     ]
-    seen = {
-        score.label
-        for report in reports
-        for score in report.per_class
-        if score.support > 0 or score.predicted > 0
-    }
+    # The classes the population's GOLD has: one set for every system, whatever it predicted.
+    seen = {score.label for score in reports[0].per_class if score.support > 0}
     present = tuple(label for label in names if label in seen)
     values = _resampled(
         per_system,
@@ -454,8 +450,8 @@ def paired_cluster_bootstrap(
         resamples=resamples,
     )
     (base_point, cand_point), (base_values, cand_values) = points, values
-    # A delta has no value where either side has none; its absent classes are both sides'.
-    absent = tuple(dict.fromkeys(base_point[4] + cand_point[4]))
+    # Absence is decided by the shared gold, so both sides and the delta agree on it.
+    absent = base_point[4]
     delta_point: _Point = (
         cand_point[0] - base_point[0],
         _difference(cand_point[1], base_point[1]),

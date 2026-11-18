@@ -238,8 +238,9 @@ class TierRule(BaseModel):
         if any(tokens) and self.token_column is None:
             msg = "a max_tokens limit needs a token_column"
             raise ValueError(msg)
-        if self.token_method_column is not None and self.token_column is None:
-            msg = "a token_method_column needs a token_column"
+        if (self.token_method_column is None) != (self.token_column is None):
+            # A token count means nothing without how it was counted, and vice versa.
+            msg = "token_column and token_method_column are declared together"
             raise ValueError(msg)
         return self
 
@@ -643,11 +644,13 @@ def _spaces(
     for row, (value, gold) in enumerate(
         zip(columns[settings.label_space_column], labels, strict=True)
     ):
-        space = (
-            settings.label_spaces.get(str(value), settings.labels)
-            if value is not None
-            else settings.labels
-        )
+        space = settings.label_spaces.get(str(value)) if value is not None else None
+        if space is None:
+            msg = (
+                f"row {row}: {settings.label_space_column!r} value {value!r} names no declared "
+                "label space"
+            )
+            raise RunError(msg)
         if gold not in space:
             msg = f"row {row}: gold label {gold!r} is outside its label space {list(space)}"
             raise RunError(msg)
@@ -935,9 +938,9 @@ def _score_population(
     shared = [i for i in rows if all(s.status[i] != "overflow" for s in systems.values())]
     declared = _declared(rows, gold, settings)
     clusters = [gold.clusters[i] for i in shared]
-    present = {gold.labels[i] for i in shared} | {
-        s.predictions[i] for s in systems.values() for i in shared
-    }
+    # Absence is the GOLD's alone: the same classes for every system, whatever it predicted.
+    present = {gold.labels[i] for i in shared}
+    absent = [label for label in declared if label not in present]
     out: dict[str, Any] = {
         "n": len(shared),
         "n_tier": len(rows),
@@ -948,7 +951,7 @@ def _score_population(
         "fallback_keyed": sum(1 for i in rows if gold.fallback[i]),
         "diagnostic": len(shared) < settings.min_slice_rows,
         "labels": list(declared),
-        "absent_classes": [label for label in declared if label not in present],
+        "absent_classes": absent,
         "systems": {},
         "comparisons": [],
     }
@@ -963,7 +966,14 @@ def _score_population(
             full_tier, _ = _system_read(
                 rows, gold, system, settings, detail=False, declared=declared
             )
-        out["systems"][name] = {**entry, "full_tier": _metric_only(full_tier)}
+        out["systems"][name] = {
+            **entry,
+            "full_tier": _metric_only(full_tier),
+            # A diagnostic, never gated: how often this system predicted a class the gold lacks.
+            "absent_class_predictions": {
+                label: sum(1 for i in shared if system.predictions[i] == label) for label in absent
+            },
+        }
     candidate = settings.predictions.name
     for baseline in settings.compare_to if shared else ():
         paired = paired_cluster_bootstrap(

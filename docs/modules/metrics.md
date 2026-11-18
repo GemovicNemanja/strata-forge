@@ -262,19 +262,19 @@ It needs NumPy from `[scoring]`, imported only when a function runs.
 - **Arithmetic.** Each cluster's confusion cells are counted once; a block of resamples multiplies
   its cluster multiplicities by that table in float64, exact for integer counts below 2**53 in any
   summation order. Each resample's metrics use `classification_report`'s definitions in float64,
-  equal to the point arithmetic within `1e-12`, with one exception: a resample in which a
-  declared class has neither gold rows nor predictions has NO macro-F1. It is counted in the
+  equal to the point arithmetic within `1e-12`, with one exception: a resample whose GOLD
+  has no row of a declared class has NO macro-F1, whatever the predictions. It is counted in the
   interval's `undefined_resamples`, never dropped silently and never scored as zero, and the
   quantiles are taken over the defined resamples; when none is defined the bounds are null with
   `reason="all_resamples_undefined"`. A paired delta is undefined where either side is. Accuracy
   and invalid rate are always defined (every resample has rows). The point value keeps
   `classification_report`'s convention; the evaluation runner lists a slice's absent classes.
-- **Absent classes.** When a declared class has neither gold rows nor predictions in the whole
-  population, macro-F1 has no point value either: `point`, `lower` and `upper` are null with
-  `reason="absent_classes"` and `absent_classes` listed, and a paired delta is null where either
-  side is. `macro_f1_present_classes` is the diagnostic over `present_classes` (the classes with
-  gold rows or predictions from any system in the run), under the same undefined-resample rule; it
-  is never a gate read.
+- **Absent classes.** When the population's gold has no row of a declared class, macro-F1 has
+  no point value for ANY system, nor does the paired delta: `point`, `lower` and `upper` are null
+  with `reason="absent_gold_class:<labels>"` and `absent_classes` listed. Absence depends on the
+  gold only, never on predictions. `macro_f1_present_classes` is the diagnostic over
+  `present_classes` (the classes the gold has, one set for every system), under the same
+  undefined-resample rule; it is never a gate read.
 - **One-sided bounds.** A one-sided 97.5% bound is the matching end of the two-sided 95% interval.
 - **Pairing.** `paired_cluster_bootstrap` scores both systems on every resample and differences
   them per resample (candidate minus baseline) before taking quantiles, so the delta interval
