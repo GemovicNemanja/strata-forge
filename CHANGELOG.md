@@ -29,6 +29,15 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 - `RunSpec.system_prompt` (a `PromptSpec`, chat engine only) renders a system message per row from
   its own pinned build, sent before the user message from `template` or `prompt`; checked and
   recorded in the manifest (`system_prompt`) the same way.
+- Dataset recipes, `strata_forge.datasets.recipe`: a declarative, versioned record (`Recipe`,
+  `strata.dataset_recipe/v1`) of pinned sources and ordered steps (load, concat, join, filter,
+  map_columns, dedupe, split, synthesize), executed by a pure engine with stable row ids, recorded
+  exclusions and per-step counts; generation is injected and marks every generated row synthetic.
+  A source reads one split (a name and at most a `[start:end]` row slice, no `+`), classified by
+  normalized tokens (`split_class`: train, held-out or ambiguous). A generating recipe reads
+  training splits only, and a recipe that reads any other split must name every output split as
+  held out. Row and byte caps hold while sources load and joins grow, and the document's text is
+  size-bounded. `profile_table`, `diff_tables` and `recipe_sha256` for review and revisions.
 
 ## [0.8.0] - 2026-11-18
 
