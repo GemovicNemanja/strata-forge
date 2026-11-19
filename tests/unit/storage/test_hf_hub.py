@@ -46,6 +46,9 @@ class _FakeApi:
         self.calls.append(("create_commit", kwargs))
         return f"https://huggingface.co/{kwargs['repo_id']}/commit/ghi"
 
+    def create_branch(self, **kwargs: Any) -> None:
+        self.calls.append(("create_branch", kwargs))
+
 
 @pytest.fixture
 def fake_hf(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -76,6 +79,7 @@ def fake_hf(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     fake.snapshot_download = _snapshot_download  # type: ignore[attr-defined]
     fake.HfApi = _make_api  # type: ignore[attr-defined]
     fake.CommitOperationAdd = lambda **kw: ("add", kw)  # type: ignore[attr-defined]
+    fake.CommitOperationDelete = lambda **kw: ("delete", kw)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
     return state
 
@@ -192,6 +196,41 @@ class TestRepoLifecycle:
             _commit_info,
         )
         assert await client.upload_files({"a.json": "/a.json"}, "me/out") == "f" * 40
+
+    async def test_replace_files_deletes_what_the_new_content_replaces_in_the_same_commit(
+        self, fake_hf: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = HFHubClient()
+        await client.create_repo("me/ds")
+        api = fake_hf["last_api"]
+
+        def _listing(**_kw: object) -> list[str]:
+            return [".gitattributes", "data/train-0.parquet", "data/old-0.parquet", "notes.md"]
+
+        monkeypatch.setattr(api, "list_repo_files", _listing)
+        await client.replace_files(
+            {"data/train-0.parquet": "/o/t.parquet", "manifest.json": "/o/m.json"},
+            "me/ds",
+            managed=["data/", "manifest.json"],
+            commit_message="materialize",
+            branch="preview-run1",
+        )
+        assert api.calls[1] == (
+            "create_branch",
+            {
+                "repo_id": "me/ds",
+                "branch": "preview-run1",
+                "repo_type": "dataset",
+                "exist_ok": True,
+            },
+        )
+        (_, commit) = api.calls[-1]
+        assert commit["revision"] == "preview-run1"
+        assert commit["operations"] == [
+            ("add", {"path_in_repo": "data/train-0.parquet", "path_or_fileobj": "/o/t.parquet"}),
+            ("add", {"path_in_repo": "manifest.json", "path_or_fileobj": "/o/m.json"}),
+            ("delete", {"path_in_repo": "data/old-0.parquet"}),
+        ]
 
     async def test_upload_files_refuses_an_empty_commit(self, fake_hf: dict[str, Any]) -> None:
         del fake_hf

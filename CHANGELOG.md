@@ -38,6 +38,14 @@ to `dev`; cutting a release renames that heading to the version and its date (se
   training splits only, and a recipe that reads any other split must name every output split as
   held out. Row and byte caps hold while sources load and joins grow, and the document's text is
   size-bounded. `profile_table`, `diff_tables` and `recipe_sha256` for review and revisions.
+- A dataset recipe runner, `strata_forge.pipelines.recipe_runner`: executes a recipe revision
+  (checked against its declared hash) on the user's machine, as a bounded `preview` that writes
+  nothing to the Hub (its summary carries the counts and a capped sample) or a full `materialize`
+  that makes the result the default branch's content in one commit, recorded in `receipt.json`.
+  Sources are streamed and bounded by rows and bytes; only the sources a step reads are read. Synthesis serves each pinned model with vLLM, seeds every request and
+  validates every reply against the step's guided-JSON schema. `HFHubClient.replace_files`
+  commits a set of files and deletes the managed files they replace. The clean-install matrix
+  gains `storage,hf` and the smoke script `check_recipe`.
 
 ## [0.8.0] - 2026-11-18
 
