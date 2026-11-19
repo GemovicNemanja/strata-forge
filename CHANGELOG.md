@@ -8,6 +8,47 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-19
+
+### Added
+
+- `strata_forge.prompts.compiled`: the authoritative compile and render for versioned prompts.
+  `compile_prompt` turns an ordered composition of parts (modules, other prompts, the prompt's own
+  instructions; `strata` `{{ name }}` or legacy `braces` `{name}` dialect) plus typed variable
+  declarations into a `PromptBuild` with a SHA-256 content hash, a source map and compiler errors
+  (unsupported expressions, unclosed or block tags, undeclared or duplicate variables); a build
+  re-checks its hash (and that its source map describes it) when constructed. `render_build` and
+  `bind_row` render a build with typed, host-independent value text (integers beyond 2^53 are
+  refused). A `braces` build is the legacy runner template byte for byte and renders through
+  `render_braces`, which the runner's `render_template` now calls too. Shared vectors for ports
+  live in `tests/fixtures/prompt_build_vectors.json`.
+- `RunSpec.prompt` (`PromptSpec`: a pinned `PromptBuild`, its `build_id` and per-variable
+  `bindings` to a column or a fixed value) renders a chat run's row prompt from a compiled build
+  with the same renderer a control plane previews with; `template` becomes optional and exactly
+  one of the two is set. An altered build, an unbound required variable, a binding to an unknown
+  variable or a missing column, and any row that cannot render fail the run before a request is
+  sent. The manifest records the build id, hash, compiler version and bindings as `prompt`.
+- `RunSpec.system_prompt` (a `PromptSpec`, chat engine only) renders a system message per row from
+  its own pinned build, sent before the user message from `template` or `prompt`; checked and
+  recorded in the manifest (`system_prompt`) the same way.
+- Dataset recipes, `strata_forge.datasets.recipe`: a declarative, versioned record (`Recipe`,
+  `strata.dataset_recipe/v1`) of pinned sources and ordered steps (load, concat, join, filter,
+  map_columns, dedupe, split, synthesize), executed by a pure engine with stable row ids, recorded
+  exclusions and per-step counts; generation is injected and marks every generated row synthetic.
+  A source reads one split (a name and at most a `[start:end]` row slice, no `+`), classified by
+  normalized tokens (`split_class`: train, held-out or ambiguous). A generating recipe reads
+  training splits only, and a recipe that reads any other split must name every output split as
+  held out. Row and byte caps hold while sources load and joins grow, and the document's text is
+  size-bounded. `profile_table`, `diff_tables` and `recipe_sha256` for review and revisions.
+- A dataset recipe runner, `strata_forge.pipelines.recipe_runner`: executes a recipe revision
+  (checked against its declared hash) on the user's machine, as a bounded `preview` that writes
+  nothing to the Hub (its summary carries the counts and a capped sample) or a full `materialize`
+  that makes the result the default branch's content in one commit, recorded in `receipt.json`.
+  Sources are streamed and bounded by rows and bytes; only the sources a step reads are read. Synthesis serves each pinned model with vLLM, seeds every request and
+  validates every reply against the step's guided-JSON schema. `HFHubClient.replace_files`
+  commits a set of files and deletes the managed files they replace. The clean-install matrix
+  gains `storage,hf` and the smoke script `check_recipe`.
+
 ## [0.8.0] - 2026-11-18
 
 ### Added
@@ -728,7 +769,8 @@ to `dev`; cutting a release renames that heading to the version and its date (se
 
 The first release this changelog records. Earlier history is in the git log.
 
-[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/GemovicNemanja/strata-forge/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/GemovicNemanja/strata-forge/compare/v0.5.0...v0.6.0

@@ -267,12 +267,13 @@ every error event, the failure reason printed to stderr, and the per-row
 the Hub. A token too short to redact safely fails the run before it starts.
 See [Redacting the console](#redacting-the-console) for the half a relay owns.
 
-The package ships three runners over that plumbing:
+The package ships these runners over that plumbing:
 ``inference_runner`` (serve a model with vLLM, run a batch over a dataset),
 ``finetune_runner`` (train with :mod:`strata_forge.training`, push the
-adapter or merged model to the Hub) and ``plugin_runner`` (run an
+adapter or merged model to the Hub), ``plugin_runner`` (run an
 operator-allow-listed plugin build in a credential-free child process; see
-[plugins.md](plugins.md)). All read an inert JSON spec from
+[plugins.md](plugins.md)) and ``recipe_runner`` (execute a dataset recipe
+revision and push the dataset it makes). All read an inert JSON spec from
 ``STRATA_RUN_CONFIG``, take the Hugging Face token only from the private
 secrets file the backend wrote beside the job, and append the same ``ProgressEvent`` stream to
 ``FORGE_PROGRESS_PATH`` — so an orchestrator reads one protocol regardless
@@ -377,7 +378,10 @@ the machine. It records:
   and the local snapshot path are left out), and the ``harmony_date`` a
   gpt-oss system message stated;
 - a SHA-256 of the template (never its text), the column mapping and the
-  hyperparameters;
+  hyperparameters; for a run that renders a compiled prompt build, ``prompt``
+  records the build's id, hash and compiler version and how each variable was
+  bound (a column name, or only that a fixed value was bound: a digest of a short value would be guessable) and
+  ``template_sha256`` is ``None``;
 - the ``id_column`` the rows were named by (``None`` for positions) and,
   for a run given ``row_ids``, their ``count`` and a ``sha256`` of the ids
   sorted and joined by newlines (never the ids themselves), else ``None``;
@@ -441,6 +445,29 @@ the manifest go up in one Hub commit of exactly those two files, so a repo
 never holds one run's results beside another run's manifest. The check
 creates a missing repo private, so a run that fails afterwards can leave an
 empty private repo behind.
+
+### Compiled prompt builds (`RunSpec.prompt`)
+
+A chat run's row prompt is either the legacy ``template`` (bare ``{name}``
+placeholders mapped by ``column_mapping``) or ``prompt``: a
+``PromptSpec`` holding a pinned :class:`strata_forge.prompts.PromptBuild`
+(see [`prompts.md`](prompts.md#compiled-builds)), the control plane's
+``build_id`` for it, and ``bindings`` (variable name -> ``{"column": ...}`` or
+``{"value": ...}``). Exactly one of the two is set, and a build renders the
+``vllm_chat`` prompt only (the scoring engines keep their ``{name}``
+templates). The build re-checks its own hash while the spec is parsed, so an
+altered build is refused before anything is downloaded. Every required
+variable must be bound and every binding must name a declared variable, and
+bound columns must exist in the split. Each row renders with
+``render_build``, the same function a control plane previews with; a row
+that cannot render (a missing required value, a value of the wrong type, a
+render over 200,000 characters, which is refused rather than cut) fails the
+run before any request is sent, naming how many rows failed and the first.
+
+``system_prompt`` (also a ``PromptSpec``, chat engine only) adds a system
+message before each row's user message, rendered per row from its own pinned
+build and bindings with the same checks; it pairs with either a ``template``
+or a ``prompt``. The manifest records it as ``system_prompt``, like ``prompt``.
 
 ### Samples per row (`n`) and chat-template kwargs
 
@@ -710,6 +737,73 @@ length limit and its source, the overflow policy, the padding side, dtype,
 the TF32 switches, the batch plan, device and the ignored checkpoint keys. Like the pair
 template, the prefill and the kwargs are left out of the manifest's
 ``hyperparams`` dump: only their digests are pushed.
+### Dataset recipe runner (`recipe_runner`)
+
+``python -m strata_forge.pipelines.recipe_runner`` executes one revision of a
+[dataset recipe](datasets.md#dataset-recipes). ``RecipeRunSpec`` carries the
+recipe itself, its ``recipe_revision`` and ``recipe_sha256`` (a recipe that does
+not hash to the declared revision is refused before anything is read), a
+``mode``, ``output_repo_id`` (a materialization's private dataset repo,
+created private when missing and refused when public, checked again at push; a
+preview takes none), ``row_cap`` and ``byte_cap`` (a source, join or table past
+either is refused, never truncated; default 1,000,000 rows and 2 GiB of
+estimated memory, ONE cap for every source read and the engine's tables
+together), ``preview_source_rows`` (default 10,000), and
+``serving`` (how a ``synthesize`` step's model is served: tensor parallelism,
+``max_model_len``, dtype, GPU memory fraction, start timeout, requests in
+flight). A materialization needs the account's write token; a preview needs
+none.
+
+- **``preview``** writes nothing to the Hub: no file, branch or commit. It
+  reads at most ``preview_source_rows`` rows of each source (the summary names
+  any it cut in ``truncated_sources``), bounds every ``synthesize`` step to
+  ``preview_rows`` seed rows (default 200), and leaves only the summary, with
+  the counts and a capped ``sample``: at most ``SAMPLE_ROWS`` (50) rows per
+  split, each text value cut to ``SAMPLE_CELL_CHARS`` (1,000), the whole sample
+  under ``SAMPLE_BYTES`` (96 KiB). Review candidates, never a version.
+- **``materialize``** runs the recipe in full and makes the result the default
+  branch's content in ONE commit: the recipe's files (``data/``,
+  ``exclusions.parquet``, ``recipe.json``, ``manifest.json``, ``README.md``)
+  replace the previous version's, and nothing else in the repo is touched
+  (``HFHubClient.replace_files``). That commit, as the exact 40-character id
+the Hub reports (``commit_oid``; none when the Hub reports only a URL, and
+then no version is recorded), is the new dataset version, recorded in ``receipt.json`` (``kind`` ``dataset_recipe``, the output
+repo and commit, rows per split, and the recipe revision, hash,
+``holdout_sources`` and ``held_out_splits``).
+
+Only the sources a step reads are read, each at its pinned commit with the
+run's Hub credential, streamed (``load_dataset(streaming=True)``) with the
+split's row slice applied while reading and the read stopped at its limit and
+at ``byte_cap``. A
+``synthesize`` step's model is downloaded at its pinned revision (refused when
+the snapshot is another commit) and served on loopback with vLLM, as a batch
+run serves a chat model, offline and without the token. Each request carries
+the step's JSON schema as guided JSON (``structured_outputs``) and its own seed;
+every reply is validated against the schema, and an invalid one is excluded
+(``invalid_output``), a failed request too (``generation_failed``); neither is
+repaired or retried. Generated rows are marked ``_synthetic``. The engine
+refuses generation from any split not classified as training and requires a
+recipe reading one to name its outputs as held out
+([Dataset recipes](datasets.md#dataset-recipes)).
+
+**Outputs**, all in the one commit: ``data/<split>-00000-of-00001.parquet`` per
+non-empty split (an empty split has no file and no card entry, since the Hub's
+loaders refuse a split with no rows), ``exclusions.parquet`` (row id, step,
+reason), ``recipe.json`` (revision, hash and recipe), ``manifest.json``
+(``kind`` ``dataset_recipe``: every source pin, per ``synthesize`` step the
+model pin, seed, ``n``, temperature, token limit, seed-row bound, the prompt
+template's and schema's SHA-256 and the valid / invalid / failed counts, the
+per-step counts and the exclusion reasons) and ``README.md`` (the card's split
+layout, tagged ``synthetic`` when any row was generated). The workdir keeps
+``recipe-summary.json`` (``strata.recipe.summary/v1``) for the control plane:
+the commit, ``holdout_sources``, per split its rows, rows written, synthetic
+rows, whether it is held out, path and column names, the per-step counts, the
+exclusion reasons, a per-column profile of counts (rows, nulls, distinct) and
+the generation counts, plus a preview's capped ``sample``; a materialization's
+summary holds no value. The ``end`` event carries ``rows``,
+``synthetic_rows``, ``excluded`` and ``splits``; its message is
+``<repo>@<commit>`` (``preview`` for a preview).
+
 ### Evaluation runner
 
 ``strata_forge.pipelines.eval_runner`` scores pinned prediction files against a

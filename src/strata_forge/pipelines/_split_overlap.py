@@ -8,6 +8,10 @@ name with an optional slice in rows or percent (``train``, ``train[:80%]``, ``tr
 alone: an unparseable spec, a slice in rows against one in percent of the same split, a negative row
 index, or two percent slices with different roundings. Callers that must keep two splits apart refuse
 on ``True``. Pure, so it is checked before anything is loaded.
+
+:func:`parse_single_split` is the strict subset a dataset recipe accepts: exactly one part, a split
+name with at most a ``[start:end]`` slice in non-negative rows, no ``+``, no percent and no
+rounding, so what a recipe reads is one named split and nothing a name could hide.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ import math
 import re
 from dataclasses import dataclass
 
-__all__ = ["may_overlap"]
+__all__ = ["SplitSlice", "may_overlap", "parse_single_split"]
 
 _PART = re.compile(
     r"^(?P<name>[\w.-]+)"
@@ -87,3 +91,42 @@ def may_overlap(first: str, second: str) -> bool:
     if a is None or b is None:
         return True
     return any(_parts_overlap(x, y) for x in a for y in b)
+
+
+@dataclass(frozen=True)
+class SplitSlice:
+    """One split read by name, optionally sliced to rows ``[start, end)``."""
+
+    name: str
+    start: int | None
+    end: int | None
+
+
+def parse_single_split(spec: str) -> SplitSlice | None:
+    """``spec`` as one split and an optional row slice, or ``None`` when it is anything else.
+
+    Parsed with the same read-instruction grammar as :func:`may_overlap`, then held to one part:
+    ``train`` and ``train[100:200]`` parse; ``train+test``, ``train[:10%]``, ``train[-5:]`` and
+    ``train(closest)`` do not.
+    """
+    if spec != spec.strip() or "+" in spec:
+        return None
+    parts = _parse(spec)
+    if parts is None or len(parts) != 1:
+        return None
+    found = _PART.match(spec)
+    if (
+        found is None
+        or found.group("rounding")
+        or found.group("start_pct")
+        or found.group("end_pct")
+    ):
+        return None
+    start, end = found.group("start"), found.group("end")
+    if (start or "").startswith("-") or (end or "").startswith("-"):
+        return None
+    lo = int(start) if start is not None else None
+    hi = int(end) if end is not None else None
+    if lo is not None and hi is not None and hi < lo:
+        return None
+    return SplitSlice(found.group("name"), lo, hi)

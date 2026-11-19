@@ -8,6 +8,7 @@ SDKs so :mod:`strata_forge.datasets` is importable without the
 """
 
 from strata_forge.datasets.hf_bridge import from_hf_dataset, to_hf_dataset
+from strata_forge.datasets.recipe import Recipe, RecipeError, execute, recipe_sha256
 from strata_forge.datasets.schema import Dataset, DatasetItem
 from strata_forge.datasets.store import DatasetNotFoundError, DatasetStore
 from strata_forge.datasets.stores import InMemoryDatasetStore, LangfuseDatasetStore
@@ -22,10 +23,14 @@ __all__ = [
     "DatasetStore",
     "InMemoryDatasetStore",
     "LangfuseDatasetStore",
+    "Recipe",
+    "RecipeError",
     "dataset_version",
     "diff",
     "distill",
+    "execute",
     "from_hf_dataset",
+    "recipe_sha256",
     "self_instruct",
     "to_hf_dataset",
 ]

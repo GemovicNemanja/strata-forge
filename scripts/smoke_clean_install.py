@@ -1634,6 +1634,61 @@ def selected_extras(arg: str) -> set[str]:
     return extras
 
 
+def check_recipe() -> None:
+    """A deterministic recipe, executed and written as the recipe runner writes it, read back.
+
+    Covers what the runner tests fake: the installed ``datasets`` writes each split and the
+    exclusions as Parquet, mixed-null columns and the three engine columns included, and an empty
+    split still carries its columns.
+    """
+    import pyarrow.parquet as pq
+
+    from strata_forge.datasets.recipe import Recipe, execute, recipe_sha256
+    from strata_forge.pipelines import recipe_runner
+
+    sha = "0" * 40
+    recipe = Recipe.model_validate(
+        {
+            "name": "smoke",
+            "sources": [{"name": "a", "hf_repo_id": "org/a", "revision": sha, "split": "train"}],
+            "steps": [
+                {"kind": "load", "source": "a"},
+                {"kind": "dedupe", "keys": ["text"]},
+                {"kind": "split", "ratios": {"train": 0.5, "test": 0.5}, "seed": 3},
+            ],
+        }
+    )
+    rows = [{"text": t, "n": n} for t, n in (("x", 1), ("y", None), ("x", 3), ("z", 4))]
+    output = execute(recipe, lambda _source: rows)
+    spec = recipe_runner.RecipeRunSpec.model_validate(
+        {
+            "recipe": recipe.canonical(),
+            "recipe_revision": 1,
+            "recipe_sha256": recipe_sha256(recipe),
+            "mode": "materialize",
+            "output_repo_id": "me/smoke",
+        }
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        files, written = recipe_runner._write_outputs(spec, output, Path(tmp))  # pyright: ignore[reportPrivateUsage]
+        for split, count in written.items():
+            back: Any = pq.read_table(str(files[f"data/{split}-00000-of-00001.parquet"]))
+            if back.num_rows != count or "_synthetic" not in back.column_names:
+                msg = (
+                    f"split {split} read back as {back.num_rows} rows, columns {back.column_names}"
+                )
+                raise SmokeError(msg)
+        excluded: Any = pq.read_table(str(files["exclusions.parquet"]))
+        if excluded.column("reason").to_pylist() != ["duplicate_of:a:0"]:
+            msg = f"exclusions read back as {excluded.column('reason').to_pylist()}"
+            raise SmokeError(msg)
+        empty = Path(tmp) / "empty.parquet"
+        recipe_runner._write_parquet([], ["row_id", "reason"], empty)  # pyright: ignore[reportPrivateUsage]
+        if pq.read_table(str(empty)).column_names != ["row_id", "reason"]:
+            msg = "an empty exclusions file lost its columns"
+            raise SmokeError(msg)
+
+
 def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
     checks: list[tuple[str, Callable[[], None]]] = [
         ("installed distribution", check_install),
@@ -1650,6 +1705,8 @@ def plan(extras: set[str]) -> list[tuple[str, Callable[[], None]]]:
                 check_finetune_case(method, fmt, adapter)
 
             checks.append((f"finetune {method} / {fmt} / {adapter}", case))
+    if {"storage", "hf"} <= extras:
+        checks.append(("a dataset recipe writes and reads back its Parquet", check_recipe))
     if {"scoring", "storage", "hf"} <= extras:
         checks.append(("evaluation spec, predictions, bootstrap and items", check_eval_spec))
     if {"serving", "scoring", "storage", "hf"} <= extras:

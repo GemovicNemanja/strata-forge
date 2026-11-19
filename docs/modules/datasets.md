@@ -37,6 +37,7 @@ Source: [`src/strata_forge/datasets/`](../../src/strata_forge/datasets/).
 - [Stores](#stores)
 - [The Hugging Face bridge](#the-hugging-face-bridge)
 - [Synthetic-data primitives](#synthetic-data-primitives)
+- [Dataset recipes](#dataset-recipes)
 - [Lazy-import contract](#lazy-import-contract)
 - [Troubleshooting](#troubleshooting)
 
@@ -314,6 +315,74 @@ labeled = await distill(
 ```
 
 ---
+
+## Dataset recipes
+
+`strata_forge.datasets.recipe` is a declarative, versioned record that turns pinned source
+datasets into a new one (`schema` `strata.dataset_recipe/v1`). A `Recipe` names its `sources`
+(each a Hub dataset repo at a full 40-character `revision`, one `config` and one `split`, an
+optional column list, and optionally the id of the project dataset version it came from). A
+`split` is one split name with at most a `[start:end]` row slice (`train`, `train[0:5000]`),
+parsed with the split-syntax parser in `pipelines/_split_overlap.py` (`parse_single_split`); `+`
+combinations, percent and negative slices and roundings are refused and an ordered list
+of `steps` over one working table:
+
+| Step | What it does |
+|---|---|
+| `load` | Starts the table from a source. Always the first step, and only the first. |
+| `concat` | Appends another source's rows; columns are the union, a missing one is null. |
+| `join` | Matches another source's rows on key columns (`inner` or `left`, SQL semantics: a null key matches nothing, one row per match). Right-side columns that clash take `suffix`. |
+| `filter` | Keeps rows meeting `all` or `any` of its conditions (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `in`, `not_in`, `contains`, `is_null`, `not_null`). A null meets only `is_null`; a boolean equals only a boolean. |
+| `map_columns` | Derives columns (`templates` filling `{column}` from the same row, `constants`), then `select`s, then `rename`s. |
+| `dedupe` | Keeps the first row of each key (`exact`, or `casefold_whitespace` for text). |
+| `split` | Assigns output splits: a `seed`ed shuffle cut by `ratios` (largest-remainder, so the counts are exact), per stratum when `stratify_by` names a column. The last step when present; otherwise the output is one split, `default_split` (`train`). |
+| `synthesize` | Generates candidates from the first `max_seed_rows` rows with a pinned model (`model_id` + 40-character `model_revision`): `n` requests per row, request `j` of row `i` seeded `seed + i*n + j`, the `prompt_template` filled from the row, and the output held to `output_schema` (sent as guided JSON). `output_columns` maps its keys to columns and `keep_columns` copies seed columns; `replace` (default) or `append`. |
+
+**Row ids and exclusions.** A source row's id is `<source>:<index>` in its pinned split, a joined
+row's `<left>+<right>`, a generated row's `gen:<seed row id>:<sample>`. Every row a step drops is an
+`Exclusion` (`filtered`, `no_join_match`, `duplicate_of:<kept row id>`, `generation_failed`,
+`invalid_output`) and every step a `StepCount` (rows in and out, excluded, generated), so a
+materialized version states what it left out. Output records carry the recipe's columns and three
+engine columns: `_row_id`, `_synthetic` (true for every generated row) and `_seed_row_id`.
+
+**Rules the engine enforces.** Held-out data never reaches generation and is never relabelled as
+training data. `split_class(name)` classifies a split's name by normalized tokens (NFKC-normalized,
+case-folded, cut at non-word characters, case changes and letter/digit boundaries): `held_out` when
+any token signals
+test, validation, dev, eval or held-out (`private_test`, `public_test`, `held_out`, `hold-out`,
+`devSet`, `testset`, even `train_test`, and full-width or superscript spellings, which NFKC reads
+as ASCII), then `ambiguous` when any token is still not ASCII (another script's word for test, a
+non-ASCII digit), `train` when a training token is accompanied only by ASCII version numbers
+(`train`, `train_v2`), and `ambiguous` otherwise. Only the sources a step reads
+count (`Recipe.used_sources`):
+
+- a recipe that generates reads `train` sources only; an ambiguous name is refused like a held-out
+  one, and each `synthesize` step re-checks every seed row's origin;
+- a recipe that reads any source not classified `train` must name every output split
+  (`Recipe.output_splits`) as held out, so a later recipe cannot read its output as training data.
+  `Recipe.holdout_sources` lists those sources for the run's records.
+
+A table past `row_cap` rows, or whose rows would take more than `byte_cap` bytes of memory (the
+values' estimated size times `MEMORY_FACTOR`, 7, set above the 1.5x to 6.3x measured with
+`tracemalloc`), is refused, never truncated, and both are checked while a source loads and while a join grows, so a
+many-to-many join stops at the cap rather than after it. A recipe's text is bounded: templates
+20,000 characters, string constants and condition values 10,000, condition lists 1,000 values,
+the whole canonical document `MAX_RECIPE_BYTES` (256 KiB), and a `synthesize` step's
+`output_schema` must pass the guided-JSON schema check. Column errors name the step, never row
+content.
+
+**Execution.** `execute(recipe, read, generate=None, row_cap=1_000_000, byte_cap=2 GiB)`: `read(source)` returns
+the pinned split's rows (the caller reads the commit), and `generate(step, requests)` runs a
+synthesize step's `GenerationRequest`s in order, one `GenerationResult` each. The module loads no
+model and opens no file.
+
+**Review.** `profile_table` (per column rows, nulls, distinct, numeric min / mean / max, top values)
+and `diff_tables` (rows added, removed and changed by row id, columns added and removed).
+
+**Revisions.** `recipe_sha256(recipe)` hashes the canonical JSON (`recipe.canonical()`), so a
+control plane can record exactly which recipe produced a version. The golden fixture
+`tests/unit/datasets/recipe_golden.json` is the contract the app's browser preview is tested
+against: a semantic change regenerates it (`STRATA_WRITE_GOLDEN=1`) in the same change.
 
 ## Lazy-import contract
 

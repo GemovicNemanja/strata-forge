@@ -1,0 +1,328 @@
+{
+  "expected": {
+    "columns": {
+      "test": [
+        "ticket",
+        "text",
+        "lang",
+        "priority",
+        "label",
+        "prompt",
+        "v"
+      ],
+      "train": [
+        "ticket",
+        "text",
+        "lang",
+        "priority",
+        "label",
+        "prompt",
+        "v"
+      ]
+    },
+    "counts": [
+      [
+        1,
+        "load",
+        0,
+        6,
+        0
+      ],
+      [
+        2,
+        "concat",
+        6,
+        7,
+        0
+      ],
+      [
+        3,
+        "filter",
+        7,
+        6,
+        1
+      ],
+      [
+        4,
+        "join",
+        6,
+        7,
+        0
+      ],
+      [
+        5,
+        "map_columns",
+        7,
+        7,
+        0
+      ],
+      [
+        6,
+        "dedupe",
+        7,
+        5,
+        2
+      ],
+      [
+        7,
+        "split",
+        5,
+        5,
+        0
+      ]
+    ],
+    "exclusions": [
+      [
+        "tickets:5",
+        3,
+        "filtered"
+      ],
+      [
+        "tickets:1",
+        6,
+        "duplicate_of:tickets:0+labels:0"
+      ],
+      [
+        "tickets:3+labels:2",
+        6,
+        "duplicate_of:tickets:3+labels:1"
+      ]
+    ],
+    "splits": {
+      "test": [
+        {
+          "_row_id": "tickets:3+labels:1",
+          "_seed_row_id": null,
+          "_synthetic": false,
+          "label": "account",
+          "lang": "en",
+          "priority": 5,
+          "prompt": "Login loop after reset (account)",
+          "text": "Login loop after reset",
+          "ticket": 4,
+          "v": 2
+        },
+        {
+          "_row_id": "tickets:4+labels:3",
+          "_seed_row_id": null,
+          "_synthetic": false,
+          "label": "warranty",
+          "lang": "en",
+          "priority": 1,
+          "prompt": "Warranty outside the window (warranty)",
+          "text": "Warranty outside the window",
+          "ticket": 5,
+          "v": 2
+        }
+      ],
+      "train": [
+        {
+          "_row_id": "tickets:0+labels:0",
+          "_seed_row_id": null,
+          "_synthetic": false,
+          "label": "billing",
+          "lang": "en",
+          "priority": 3,
+          "prompt": "Refund for a double charge (billing)",
+          "text": "Refund for a double charge",
+          "ticket": 1,
+          "v": 2
+        },
+        {
+          "_row_id": "tickets:2",
+          "_seed_row_id": null,
+          "_synthetic": false,
+          "label": null,
+          "lang": "es",
+          "priority": null,
+          "prompt": "Cambio de dirección (null)",
+          "text": "Cambio de dirección",
+          "ticket": 3,
+          "v": 2
+        },
+        {
+          "_row_id": "extra:0",
+          "_seed_row_id": null,
+          "_synthetic": false,
+          "label": null,
+          "lang": "en",
+          "priority": 2,
+          "prompt": "Change my plan (null)",
+          "text": "Change my plan",
+          "ticket": 7,
+          "v": 2
+        }
+      ]
+    }
+  },
+  "recipe": {
+    "default_split": "train",
+    "name": "support-edge-cases",
+    "schema": "strata.dataset_recipe/v1",
+    "sources": [
+      {
+        "columns": null,
+        "config": null,
+        "dataset_version": null,
+        "hf_repo_id": "org/tickets",
+        "name": "tickets",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "split": "train"
+      },
+      {
+        "columns": null,
+        "config": null,
+        "dataset_version": null,
+        "hf_repo_id": "org/labels",
+        "name": "labels",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "split": "train"
+      },
+      {
+        "columns": null,
+        "config": null,
+        "dataset_version": null,
+        "hf_repo_id": "org/extra",
+        "name": "extra",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "split": "train"
+      },
+      {
+        "columns": null,
+        "config": null,
+        "dataset_version": null,
+        "hf_repo_id": "org/held",
+        "name": "held",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "split": "validation"
+      }
+    ],
+    "steps": [
+      {
+        "kind": "load",
+        "source": "tickets"
+      },
+      {
+        "kind": "concat",
+        "source": "extra"
+      },
+      {
+        "conditions": [
+          {
+            "column": "lang",
+            "op": "in",
+            "value": [
+              "en",
+              "es"
+            ]
+          }
+        ],
+        "kind": "filter",
+        "match": "any"
+      },
+      {
+        "how": "left",
+        "kind": "join",
+        "on": [
+          "ticket"
+        ],
+        "right_columns": null,
+        "source": "labels",
+        "suffix": "_right"
+      },
+      {
+        "constants": {
+          "v": 2
+        },
+        "kind": "map_columns",
+        "rename": {},
+        "select": null,
+        "templates": {
+          "prompt": "{text} ({label})"
+        }
+      },
+      {
+        "keys": [
+          "text"
+        ],
+        "kind": "dedupe",
+        "normalize": "casefold_whitespace"
+      },
+      {
+        "kind": "split",
+        "ratios": {
+          "test": 0.4,
+          "train": 0.6
+        },
+        "seed": 11,
+        "stratify_by": "lang"
+      }
+    ]
+  },
+  "rows": {
+    "extra": [
+      {
+        "lang": "en",
+        "priority": 2,
+        "text": "Change my plan",
+        "ticket": 7
+      }
+    ],
+    "labels": [
+      {
+        "label": "billing",
+        "ticket": 1
+      },
+      {
+        "label": "account",
+        "ticket": 4
+      },
+      {
+        "label": "security",
+        "ticket": 4
+      },
+      {
+        "label": "warranty",
+        "ticket": 5
+      }
+    ],
+    "tickets": [
+      {
+        "lang": "en",
+        "priority": 3,
+        "text": "Refund for a double charge",
+        "ticket": 1
+      },
+      {
+        "lang": "en",
+        "priority": 2,
+        "text": "refund for a  double charge",
+        "ticket": 2
+      },
+      {
+        "lang": "es",
+        "priority": null,
+        "text": "Cambio de dirección",
+        "ticket": 3
+      },
+      {
+        "lang": "en",
+        "priority": 5,
+        "text": "Login loop after reset",
+        "ticket": 4
+      },
+      {
+        "lang": "en",
+        "priority": 1,
+        "text": "Warranty outside the window",
+        "ticket": 5
+      },
+      {
+        "lang": "de",
+        "priority": 4,
+        "text": "Remove my card",
+        "ticket": 6
+      }
+    ]
+  }
+}

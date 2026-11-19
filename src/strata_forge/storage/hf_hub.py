@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 __all__ = ["HFHubClient", "RepoType"]
 
@@ -348,6 +348,61 @@ class HFHubClient:
             "operations": operations,
             "commit_message": commit_message or f"upload {len(operations)} files",
         }
+        result: Any = await asyncio.to_thread(api.create_commit, **kwargs)
+        oid: Any = getattr(result, "oid", None)
+        return str(oid) if isinstance(oid, str) and oid else str(result)
+
+    async def replace_files(
+        self,
+        files: Mapping[str, str | Path],
+        repo_id: str,
+        *,
+        managed: Sequence[str],
+        repo_type: RepoType = "dataset",
+        commit_message: str | None = None,
+        branch: str | None = None,
+    ) -> str:
+        """Make ``files`` the repo's managed content in ONE commit, deleting what they replace.
+
+        Every existing file whose path equals or starts with one of ``managed`` and is not in
+        ``files`` is deleted in the same commit, so the commit holds exactly this content under
+        those paths (a split that no longer exists leaves no stale file behind); other files are
+        untouched. ``branch`` commits to that branch, creating it from the default branch if
+        missing. Returns the new commit's id when the Hub reports one, else the commit URL.
+        """
+        if not files:
+            msg = "replace_files needs at least one file"
+            raise ValueError(msg)
+        hf_mod = self._import_hf()
+        api = self._api()
+        if branch is not None:
+            await asyncio.to_thread(
+                lambda: api.create_branch(
+                    repo_id=repo_id, branch=branch, repo_type=repo_type, exist_ok=True
+                )
+            )
+        listing: dict[str, Any] = {"repo_id": repo_id, "repo_type": repo_type}
+        if branch is not None:
+            listing["revision"] = branch
+        existing: Any = await asyncio.to_thread(lambda: api.list_repo_files(**listing))
+        stale = [
+            path
+            for path in cast("list[str]", list(existing))
+            if path not in files and any(path == m or path.startswith(m) for m in managed)
+        ]
+        operations: list[Any] = [
+            hf_mod.CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(local))
+            for name, local in files.items()
+        ]
+        operations += [hf_mod.CommitOperationDelete(path_in_repo=path) for path in stale]
+        kwargs: dict[str, Any] = {
+            "repo_id": repo_id,
+            "repo_type": repo_type,
+            "operations": operations,
+            "commit_message": commit_message or f"replace {len(files)} files",
+        }
+        if branch is not None:
+            kwargs["revision"] = branch
         result: Any = await asyncio.to_thread(api.create_commit, **kwargs)
         oid: Any = getattr(result, "oid", None)
         return str(oid) if isinstance(oid, str) and oid else str(result)
